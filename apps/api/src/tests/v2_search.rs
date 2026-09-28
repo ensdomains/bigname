@@ -1,7 +1,5 @@
 const V2_SEARCH_REGISTRY_OWNER: &str = "0x0000000000000000000000000000000000000d01";
-const V2_SEARCH_CONTROL_OWNER: &str = "0x0000000000000000000000000000000000000d02";
 const V2_SEARCH_REGISTRATION_REGISTRANT: &str = "0x0000000000000000000000000000000000000d03";
-const V2_SEARCH_CONTROL_REGISTRANT: &str = "0x0000000000000000000000000000000000000d04";
 
 #[tokio::test]
 async fn v2_search_preserves_stored_ensip15_normalized_name_bytes() -> Result<()> {
@@ -22,18 +20,15 @@ async fn v2_search_preserves_stored_ensip15_normalized_name_bytes() -> Result<()
         43,
     )
     .await?;
-    let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
-    )
-    .bind(NORMALIZED_NAME)
-    .fetch_one(&database.pool)
-    .await?;
+    let stored_raw_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1")
+            .bind(NORMALIZED_NAME)
+            .fetch_one(&database.pool)
+            .await?;
 
-    let prefix = v2_search_payload_for_database(
-        &database,
-        "/v1/search?q=%E1%8F%A3%E1%8E%B3&namespace=ens",
-    )
-    .await?;
+    let prefix =
+        v2_search_payload_for_database(&database, "/v1/search?q=%E1%8F%A3%E1%8E%B3&namespace=ens")
+            .await?;
     assert_eq!(prefix["data"][0]["name"], json!(stored_raw_name));
 
     let contains = v2_search_payload_for_database(
@@ -74,8 +69,8 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
         json!("0x00000000000000000000000000000000000000a2")
     );
     assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00Z"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00Z"));
+    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00+00:00"));
+    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00+00:00"));
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
     assert!(data[0].get("relations").is_none());
     assert!(data[0].get("is_primary").is_none());
@@ -87,14 +82,14 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_search_uses_dictionary_owner_and_registrant_precedence() -> Result<()> {
+async fn v2_search_serves_the_registry_owner_and_distinct_registrant() -> Result<()> {
     let (database, payload) = v2_search_payload("/v1/search?q=precedence&namespace=ens").await?;
 
     let data = payload["data"]
         .as_array()
         .expect("search data must be an array");
     assert_eq!(v2_search_names(data), vec!["precedence.eth"]);
-    assert_eq!(data[0]["owner"], json!(V2_SEARCH_CONTROL_OWNER));
+    assert_eq!(data[0]["owner"], json!(V2_SEARCH_REGISTRY_OWNER));
     assert_eq!(
         data[0]["registrant"],
         json!(V2_SEARCH_REGISTRATION_REGISTRANT)
@@ -346,44 +341,7 @@ async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Res
 async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    database
-        .insert_manifest(
-            "ens",
-            "ens_v1_registry_l1",
-            "ethereum-mainnet",
-            "ens_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .insert_manifest(
-            "basenames",
-            "basenames_base_registry",
-            "base-mainnet",
-            "basenames_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 208,
-                "block_hash": "0xsearch-coherence-ethereum",
-                "timestamp": "2026-08-10T00:03:28Z"
-            },
-            "base": {
-                "chain_id": "base-mainnet",
-                "block_number": 209,
-                "block_hash": "0xsearch-coherence-base",
-                "timestamp": "2026-08-10T00:03:29Z"
-            }
-        }))
-        .await?;
+    seed_v2_search_public_authority(&database).await?;
     let (_guard, control) =
         crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
     let state = AppState::new_with_rpc_urls(
@@ -401,7 +359,12 @@ async fn v2_search_rejects_manifest_change_between_derivation_and_row_read() -> 
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     sqlx::query(
         "UPDATE bigname_phase.manifest_versions
          SET rollout_status = 'deprecated'
@@ -446,7 +409,12 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     database
         .insert_manifest(
             "ens",
@@ -467,7 +435,10 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("conflict"));
-    assert!(payload.get("data").is_none(), "no partial page may be served");
+    assert!(
+        payload.get("data").is_none(),
+        "no partial page may be served"
+    );
 
     database.cleanup().await
 }
@@ -532,7 +503,6 @@ async fn v2_search_validates_cursor_before_deployment_readiness() -> Result<()> 
 async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpoints() -> Result<()>
 {
     let sepolia = TestDatabase::new_migrated().await?;
-    seed_v2_search_fixture(&sepolia).await?;
     sepolia
         .insert_manifest(
             "ens",
@@ -554,6 +524,38 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
             }
         }))
         .await?;
+    let resource = Uuid::from_u128(0x5e901);
+    let logical = seed_family_identity_inputs(
+        &sepolia.pool,
+        "ens",
+        "alpha.eth",
+        "ethereum-sepolia",
+        107,
+        "0xnamespace-sepolia",
+        resource,
+        Uuid::from_u128(0x5e902),
+        Uuid::from_u128(0x5e903),
+        "ens_v2",
+    )
+    .await?;
+    let mut events = Vec::new();
+    for (index, (kind, after)) in [
+        ("RegistrationGranted", json!({"source_event":"LabelRegistered", "authority_kind":"ens_v2_registry", "registrant":V2_SEARCH_REGISTRY_OWNER, "expiry":u64::MAX})),
+        ("TokenControlTransferred", json!({"source_event":"Transfer", "to":V2_SEARCH_REGISTRY_OWNER})),
+    ].into_iter().enumerate() {
+        let mut event = history_event(&format!("search-sepolia-{kind}"), Some(&logical), Some(resource),
+            Some("ethereum-sepolia"), Some(107), Some("0xnamespace-sepolia"), Some("0xsepolia"), Some(index as i64), CanonicalityState::Canonical);
+        event.event_kind = kind.into(); event.source_family = "ens_v2_registry_l1".into();
+        event.before_state = json!({}); event.after_state = after; events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&sepolia.pool, &events).await?;
+    rebuild_fixture_families(
+        &sepolia.pool,
+        "ethereum-sepolia",
+        107,
+        "0xnamespace-sepolia",
+    )
+    .await?;
     let sepolia_state = AppState::new_with_rpc_urls(
         sepolia.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -584,44 +586,8 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
     sepolia.cleanup().await?;
 
     let codeployed = TestDatabase::new_migrated().await?;
-    codeployed
-        .insert_manifest(
-            "ens",
-            "ens_v1_registry_l1",
-            "ethereum-mainnet",
-            "ens_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    codeployed
-        .insert_manifest(
-            "basenames",
-            "basenames_base_registry",
-            "base-mainnet",
-            "basenames_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    codeployed
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 108,
-                "block_hash": "0xnamespace-mainnet",
-                "timestamp": "2026-08-10T00:01:48Z"
-            },
-            "base": {
-                "chain_id": "base-mainnet",
-                "block_number": 109,
-                "block_hash": "0xnamespace-base",
-                "timestamp": "2026-08-10T00:01:49Z"
-            }
-        }))
-        .await?;
+    seed_v2_search_fixture(&codeployed).await?;
+    seed_v2_search_public_authority(&codeployed).await?;
     let codeployed_state = AppState::new_with_rpc_urls(
         codeployed.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -634,13 +600,7 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
         ["basenames", "ens"]
     );
 
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = 'manifest-authority:test'
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&codeployed.lookup_pool)
-    .await?;
+    begin_search_family_rebuild(&codeployed, "base-mainnet", 211, "0xsearch-public-base").await?;
     assert_eq!(
         crate::v2::support::derive_public_namespace_set(&codeployed_state)
             .await
@@ -657,13 +617,7 @@ async fn v2_search_bare_request_narrows_when_a_publication_is_not_ready() -> Res
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
     seed_v2_search_public_authority(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = 'manifest-authority:test'
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    begin_search_family_rebuild(&database, "base-mainnet", 211, "0xsearch-public-base").await?;
 
     let response = app_router(AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
@@ -752,13 +706,7 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
     seed_v2_search_public_authority(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = 'manifest-authority:test'
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    begin_search_family_rebuild(&database, "base-mainnet", 211, "0xsearch-public-base").await?;
 
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
@@ -782,14 +730,7 @@ async fn v2_search_bare_request_recovers_when_publication_becomes_ready() -> Res
         vec!["alpha.eth"]
     );
 
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = $1
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .execute(&database.lookup_pool)
-    .await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 211, "0xsearch-public-base").await?;
 
     let recovered = app_router(state)
         .oneshot(
@@ -949,44 +890,7 @@ async fn v2_search_paginates_without_overlap_or_gap() -> Result<()> {
 async fn v2_search_rejects_project_republication_during_public_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    database
-        .insert_manifest(
-            "ens",
-            "ens_v1_registry_l1",
-            "ethereum-mainnet",
-            "ens_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .insert_manifest(
-            "basenames",
-            "basenames_base_registry",
-            "base-mainnet",
-            "basenames_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 208,
-                "block_hash": "0xsearch-generation-ethereum",
-                "timestamp": "2026-08-10T00:03:28Z"
-            },
-            "base": {
-                "chain_id": "base-mainnet",
-                "block_number": 209,
-                "block_hash": "0xsearch-generation-base",
-                "timestamp": "2026-08-10T00:03:29Z"
-            }
-        }))
-        .await?;
+    seed_v2_search_public_authority(&database).await?;
     let (_guard, control) =
         crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
     let state = AppState::new_with_rpc_urls(
@@ -1004,14 +908,13 @@ async fn v2_search_rejects_project_republication_during_public_read() -> Result<
             .await
     });
 
-    control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET updated_at = updated_at
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
     )
-    .execute(&database.lookup_pool)
-    .await?;
+    .await
+    .context("search read hook was not reached")?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 211, "0xsearch-public-base").await?;
     control.resume().await;
 
     let response = request_task
@@ -1046,7 +949,12 @@ async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_r
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
             "ethereum": {
@@ -1073,97 +981,73 @@ async fn v2_search_explicit_namespace_rejects_a_position_change_after_the_page_r
 }
 
 #[tokio::test]
-async fn v2_search_explicit_unpublished_scope_rejects_completed_redo_during_read() -> Result<()> {
+async fn v2_search_explicit_unpublished_scope_stays_unavailable_until_rebuilt() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state SET current_block_number = current_block_number - 1
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    begin_search_family_rebuild(
+        &database,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
     )
-    .execute(&database.lookup_pool)
     .await?;
-    let (_guard, control) =
-        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/search?q=alpha&namespace=ens")
-                    .body(Body::empty())
-                    .expect("explicit search request must build"),
-            )
-            .await
-    });
-    control.wait_until_reached().await;
-    database.simulate_interpret_redo_begin("ethereum-mainnet", "redo").await?;
-    database.simulate_interpret_redo_finish("ethereum-mainnet").await?;
-    control.resume().await;
-    let response = request_task.await.context("search request task panicked")??;
-    let status = response.status();
-    let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "payload: {payload}");
-    assert_eq!(payload["error"]["code"], json!("stale"));
+    let uri = "/v1/search?q=alpha&namespace=ens";
+    let response = v2_search_response_for_database(&database, uri).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        "stale"
+    );
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+        .await?;
+    database
+        .simulate_interpret_redo_finish("ethereum-mainnet")
+        .await?;
+    let response = v2_search_response_for_database(&database, uri).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        read_json::<Value>(response).await?["error"]["code"],
+        "stale"
+    );
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
+    .await?;
+    let body = v2_search_payload_for_database(&database, uri).await?;
+    assert_eq!(
+        v2_search_names(body["data"].as_array().context("search data")?),
+        vec!["alpha.eth"]
+    );
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_search_explicit_namespace_rejects_a_head_change_while_suppressed() -> Result<()> {
+async fn v2_search_explicit_namespace_refuses_an_unpublished_new_head() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET current_block_number = current_block_number - 1,
-             current_block_hash = '0xsearch-explicit-lagging-a'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    begin_search_family_rebuild(
+        &database,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
     )
-    .execute(&database.lookup_pool)
     .await?;
-    let (_guard, control) =
-        crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/search?q=alpha&namespace=ens")
-                    .body(Body::empty())
-                    .expect("explicit search request must build"),
-            )
-            .await
-    });
-
-    control.wait_until_reached().await;
     database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 999,
-                "block_hash": "0xsearch-explicit-suppressed-later",
-                "timestamp": "2026-08-26T00:16:39Z"
-            }
-        }))
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":"ethereum-mainnet", "block_number":999,
+            "block_hash":"0xsearch-explicit-suppressed-later", "timestamp":"2026-08-26T00:16:39Z"
+        }}))
         .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET current_block_number = current_block_number - 1,
-             current_block_hash = '0xsearch-explicit-lagging-b'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    control.resume().await;
-
-    let response = request_task
-        .await
-        .context("suppressed explicit search request task panicked")?
-        .context("suppressed explicit search request failed")?;
+    let response =
+        v2_search_response_for_database(&database, "/v1/search?q=alpha&namespace=ens").await?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("conflict")
-    );
-
+    let body = read_json::<Value>(response).await?;
+    assert_eq!(body["error"]["code"], "stale");
+    assert!(body.get("data").is_none());
     database.cleanup().await
 }
 
@@ -1196,27 +1080,32 @@ async fn v2_search_explicit_namespace_reports_publication_readiness_change_as_co
             .await
     });
 
-    selection_control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET current_block_number = current_block_number - 1,
-             current_block_hash = '0xsearch-explicit-unpublished'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        selection_control.wait_until_reached(),
     )
-    .execute(&database.lookup_pool)
+    .await
+    .context("search read hook was not reached")?;
+    begin_search_family_rebuild(
+        &database,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
     .await?;
     selection_control.resume().await;
-    fallback_control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state project
-         SET current_block_number = head.latest_block_number,
-             current_block_hash = head.latest_block_hash
-         FROM bigname_phase.chain_heads head
-         WHERE project.chain_id = head.chain_id
-           AND project.chain_id = 'ethereum-mainnet'
-           AND project.phase_name = 'project'",
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        fallback_control.wait_until_reached(),
     )
-    .execute(&database.lookup_pool)
+    .await
+    .context("search read hook was not reached")?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
     .await?;
     fallback_control.resume().await;
 
@@ -1251,13 +1140,18 @@ async fn v2_search_explicit_namespace_rejects_project_republication_after_the_pa
             .await
     });
 
-    control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET updated_at = updated_at
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
     )
-    .execute(&database.lookup_pool)
+    .await
+    .context("search read hook was not reached")?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
     .await?;
     control.resume().await;
 
@@ -1300,7 +1194,12 @@ async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_du
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     database
         .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
         .await?;
@@ -1327,7 +1226,10 @@ async fn v2_search_bare_namespace_returns_conflict_when_interpret_redo_begins_du
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("conflict"));
-    assert!(payload.get("data").is_none(), "no partial page may be served");
+    assert!(
+        payload.get("data").is_none(),
+        "no partial page may be served"
+    );
 
     database.cleanup().await
 }
@@ -1358,7 +1260,12 @@ async fn v2_search_explicit_namespace_returns_stale_when_interpret_redo_begins_d
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     database
         .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
         .await?;
@@ -1385,7 +1292,10 @@ async fn v2_search_explicit_namespace_returns_stale_when_interpret_redo_begins_d
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("stale"));
-    assert!(payload.get("data").is_none(), "no partial page may be served");
+    assert!(
+        payload.get("data").is_none(),
+        "no partial page may be served"
+    );
 
     database.cleanup().await
 }
@@ -1415,7 +1325,12 @@ async fn v2_search_allows_interpret_live_progress_during_public_read() -> Result
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     database
         .touch_interpret_phase_state("ethereum-mainnet")
         .await?;
@@ -1445,44 +1360,7 @@ async fn v2_search_allows_interpret_live_progress_during_public_read() -> Result
 async fn v2_search_allows_manifest_freshness_change_without_authority_change() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    database
-        .insert_manifest(
-            "ens",
-            "ens_v1_registry_l1",
-            "ethereum-mainnet",
-            "ens_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .insert_manifest(
-            "basenames",
-            "basenames_base_registry",
-            "base-mainnet",
-            "basenames_v1",
-            1,
-            "active",
-            "ensip15@ens-normalize-0.1.1",
-        )
-        .await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 208,
-                "block_hash": "0xsearch-refresh-ethereum",
-                "timestamp": "2026-08-10T00:03:28Z"
-            },
-            "base": {
-                "chain_id": "base-mainnet",
-                "block_number": 209,
-                "block_hash": "0xsearch-refresh-base",
-                "timestamp": "2026-08-10T00:03:29Z"
-            }
-        }))
-        .await?;
+    seed_v2_search_public_authority(&database).await?;
     let (_guard, control) =
         crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
     let state = AppState::new_with_rpc_urls(
@@ -1500,7 +1378,12 @@ async fn v2_search_allows_manifest_freshness_change_without_authority_change() -
             .await
     });
 
-    control.wait_until_reached().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("search read hook was not reached")?;
     sqlx::query(
         "UPDATE bigname_phase.manifest_versions
          SET loaded_at = loaded_at + INTERVAL '1 second'",
@@ -1685,77 +1568,44 @@ async fn v2_search_response_for_database_with_public_namespaces(
 // authority is unsupported is omitted whatever the reason rather than served from a registration
 // no selected authority backs. Callers read name detail or batch lookup for the reason.
 #[tokio::test]
-async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
-    for reason in [
-        "conflicting_current_ens_authority",
-        "independent_ens_deployments_overlap",
-        "a_reason_this_build_has_never_seen",
-        "current_authority_not_projected",
-    ] {
-        let database = TestDatabase::new_migrated().await?;
-        seed_v2_search_fixture(&database).await?;
-
-        // Anti-vacuity: both names are served while the projection still supports them.
-        let before =
-            v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
-        assert_eq!(
-            v2_search_names(before["data"].as_array().expect("search data must be an array")),
-            vec!["alpha.eth", "alpine.eth"]
-        );
-
-        sqlx::query(
-            "UPDATE bigname_phase.name_current
-             SET support_status = 'unsupported', unsupported_reason = $1
-             WHERE raw_name = 'alpha.eth'",
-        )
-        .bind(reason)
-        .execute(&database.pool)
-        .await?;
-
-        let payload =
-            v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
-        assert_eq!(
-            v2_search_names(payload["data"].as_array().expect("search data must be an array")),
-            vec!["alpine.eth"],
-            "{reason} was not omitted from search"
-        );
-        database.cleanup().await?;
-    }
-    Ok(())
+async fn v2_search_omits_a_name_without_current_authority() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    seed_unbound_name_inputs(&database, "almost.eth", false).await?;
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/almost.eth").await?;
+    assert_eq!(name["data"]["status"], "ok", "{name}");
+    assert_eq!(name["data"]["registration_status"], "unregistered");
+    assert!(name["data"].get("authority").is_none());
+    let page = v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
+    assert_eq!(
+        v2_search_names(page["data"].as_array().context("search data")?),
+        vec!["alpha.eth", "alpine.eth"]
+    );
+    database.cleanup().await
 }
 
 // The Sepolia root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
-// timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown, as
-// does a negative one.
+// timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown.
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_search_fixture(&database).await?;
-    // Project writes no formatted `control.expiry` for an out-of-range value, so none is left
-    // for the read to fall back to.
-    for (name, expiry) in [("alpha.eth", "18446744073709551615"), ("alpine.eth", "-300000000000")] {
-        sqlx::query(
-            "UPDATE bigname_phase.name_current
-             SET declared_summary = jsonb_set(jsonb_set(
-                 declared_summary, '{registration,expiry}', $2::jsonb, true),
-                 '{control,expiry}', 'null'::jsonb, true)
-             WHERE raw_name = $1",
-        )
-        .bind(name)
-        .bind(expiry)
-        .execute(&database.pool)
-        .await?;
-    }
+    seed_v2_search_fixture_with_extreme_expiry(&database, true).await?;
 
     let payload =
         v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
-    let rows = payload["data"].as_array().expect("search data must be an array");
+    let rows = payload["data"]
+        .as_array()
+        .expect("search data must be an array");
     assert_eq!(v2_search_names(rows), vec!["alpha.eth", "alpine.eth"]);
     for row in rows {
-        assert_eq!(row.get("expires_at"), None, "an unknown expiry leaves the key out: {row}");
+        assert_eq!(
+            row.get("expires_at"),
+            None,
+            "an unknown expiry leaves the key out: {row}"
+        );
     }
     database.cleanup().await?;
     Ok(())
@@ -1845,103 +1695,118 @@ async fn seed_v2_search_public_authority(database: &TestDatabase) -> Result<()> 
 }
 
 async fn seed_v2_search_fixture(database: &TestDatabase) -> Result<()> {
-    let specs = v2_search_specs();
+    seed_v2_search_fixture_with_extreme_expiry(database, false).await
+}
 
-    let raw_blocks = specs
-        .iter()
-        .map(|spec| {
-            raw_block(
-                spec.chain_id(),
-                &spec.block_hash(),
-                None,
-                spec.block_number,
-                1_717_190_000 + spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-    upsert_phase_raw_blocks(&database.pool, &raw_blocks).await?;
-
-    let surfaces = specs
-        .iter()
-        .map(|spec| {
-            collection_name_surface(
-                &spec.logical_name_id(),
-                spec.name,
-                &spec.namehash(),
-                spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-    upsert_test_name_surfaces(&database.pool, &surfaces).await?;
-
-    let token_lineages = specs
-        .iter()
-        .map(|spec| TokenLineage {
-            token_lineage_id: spec.token_lineage_id(),
-            chain_id: spec.chain_id().to_owned(),
-            block_hash: spec.block_hash(),
-            block_number: spec.block_number,
-            provenance: json!({"seed": "v2_search"}),
-            canonicality_state: CanonicalityState::Finalized,
-        })
-        .collect::<Vec<_>>();
-    upsert_test_token_lineages(&database.pool, &token_lineages).await?;
-
-    let resources = specs
-        .iter()
-        .map(|spec| Resource {
-            resource_id: spec.resource_id(),
-            token_lineage_id: Some(spec.token_lineage_id()),
-            chain_id: spec.chain_id().to_owned(),
-            block_hash: spec.block_hash(),
-            block_number: spec.block_number,
-            provenance: json!({"seed": "v2_search"}),
-            canonicality_state: CanonicalityState::Finalized,
-        })
-        .collect::<Vec<_>>();
-    upsert_test_resources(&database.pool, &resources).await?;
-
-    let bindings = specs
-        .iter()
-        .map(|spec| SurfaceBinding {
-            surface_binding_id: spec.surface_binding_id(),
-            logical_name_id: spec.logical_name_id(),
-            resource_id: spec.resource_id(),
-            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-            authority_arm: if spec.namespace == "basenames" {
+async fn seed_v2_search_fixture_with_extreme_expiry(
+    database: &TestDatabase,
+    extreme: bool,
+) -> Result<()> {
+    for (index, spec) in v2_search_specs().into_iter().enumerate() {
+        let created_block = 100 + index as i64;
+        let grant_block = 150 + index as i64;
+        let created_hash = format!("0xsearch-created-{index}");
+        let grant_hash = format!("0xsearch-grant-{index}");
+        let created = parse_rfc3339_utc_timestamp(spec.created_at)
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .unix_timestamp();
+        let granted = parse_rfc3339_utc_timestamp(spec.registered_at)
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .unix_timestamp();
+        upsert_phase_raw_blocks(
+            &database.pool,
+            &[
+                raw_block(spec.chain_id(), &created_hash, None, created_block, created),
+                raw_block(spec.chain_id(), &grant_hash, None, grant_block, granted),
+            ],
+        )
+        .await?;
+        let logical = seed_family_identity_inputs(
+            &database.pool,
+            spec.namespace,
+            spec.name,
+            spec.chain_id(),
+            created_block,
+            &created_hash,
+            spec.resource_id(),
+            spec.token_lineage_id(),
+            spec.surface_binding_id(),
+            if spec.namespace == "basenames" {
                 "basenames"
             } else {
                 "ens_v1"
-            }
-            .to_owned(),
-            active_from: timestamp(1_717_190_000 + spec.block_number),
-            active_to: None,
-            chain_id: spec.chain_id().to_owned(),
-            block_hash: spec.block_hash(),
-            block_number: spec.block_number,
-            provenance: json!({"seed": "v2_search"}),
-            canonicality_state: CanonicalityState::Finalized,
-        })
-        .collect::<Vec<_>>();
-    upsert_test_surface_bindings(&database.pool, &bindings).await?;
-
-    for spec in &specs {
-        database
-            .insert_name_current_row(address_name_name_current_row(
-                &spec.logical_name_id(),
-                spec.name,
-                spec.name,
-                &spec.namehash(),
-                spec.surface_binding_id(),
-                spec.resource_id(),
-                Some(spec.token_lineage_id()),
-                spec.block_number,
-                spec.declared_summary(),
-            ))
-            .await?;
+            },
+        )
+        .await?;
+        if spec.namespace == "internal" {
+            continue;
+        }
+        let registry = if spec.namespace == "basenames" {
+            "basenames_base_registry"
+        } else {
+            "ens_v1_registry_l1"
+        };
+        let registrar = if spec.namespace == "basenames" {
+            "basenames_base_registrar"
+        } else {
+            "ens_v1_registrar_l1"
+        };
+        let expiry = if extreme && matches!(spec.name, "alpha.eth" | "alpine.eth") {
+            u64::MAX
+        } else {
+            parse_rfc3339_utc_timestamp(spec.expires_at)
+                .map_err(|error| anyhow::anyhow!("{error}"))?
+                .unix_timestamp() as u64
+        };
+        let mut events = Vec::new();
+        for (kind, family, block, hash, after) in [
+            (
+                "AuthorityTransferred",
+                registry,
+                created_block,
+                created_hash,
+                json!({"source_event":"Transfer","node":bigname_lookup::ens_namehash_hex(spec.name)?,"owner":spec.owner}),
+            ),
+            (
+                "RegistrationGranted",
+                registrar,
+                grant_block,
+                grant_hash,
+                json!({"source_event":"NameRegistered","authority_kind":"registrar","registrant":spec.registrant,"expiry":expiry}),
+            ),
+        ] {
+            let mut event = history_event(
+                &format!("search-{}-{kind}", spec.name),
+                Some(&logical),
+                Some(spec.resource_id()),
+                Some(spec.chain_id()),
+                Some(block),
+                Some(&hash),
+                Some("0xsearch"),
+                Some(0),
+                CanonicalityState::Canonical,
+            );
+            event.namespace = spec.namespace.into();
+            event.event_kind = kind.into();
+            event.source_family = family.into();
+            event.before_state = json!({});
+            event.after_state = after;
+            events.push(event);
+        }
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     }
-
-    Ok(())
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "ethereum":{"chain_id":"ethereum-mainnet","block_number":210,"block_hash":"0xsearch-public-ethereum","timestamp":"2026-08-10T00:03:30Z"},
+        "base":{"chain_id":"base-mainnet","block_number":211,"block_hash":"0xsearch-public-base","timestamp":"2026-08-10T00:03:31Z"}
+    })).await?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-mainnet",
+        210,
+        "0xsearch-public-ethereum",
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 211, "0xsearch-public-base").await
 }
 
 #[derive(Default)]
@@ -1949,31 +1814,16 @@ struct V2SearchSpec {
     namespace: &'static str,
     name: &'static str,
     id: u128,
-    block_number: i64,
     owner: &'static str,
-    control_owner: Option<&'static str>,
     registrant: &'static str,
-    control_registrant: Option<&'static str>,
     registered_at: &'static str,
     created_at: &'static str,
     expires_at: &'static str,
 }
 
 impl V2SearchSpec {
-    fn logical_name_id(&self) -> String {
-        format!("{}:{}", self.namespace, self.name)
-    }
-
-    fn namehash(&self) -> String {
-        format!("node:{}", self.name)
-    }
-
     fn chain_id(&self) -> &'static str {
         chain_id_for_namespace(self.namespace)
-    }
-
-    fn block_hash(&self) -> String {
-        format!("0xsearch{:04x}", self.block_number)
     }
 
     fn resource_id(&self) -> Uuid {
@@ -1988,26 +1838,7 @@ impl V2SearchSpec {
         Uuid::from_u128(self.id + 2)
     }
 
-    fn declared_summary(&self) -> Value {
-        let mut control = json!({ "registry_owner": self.owner, "expiry": self.expires_at });
-        if let Some(control_owner) = self.control_owner {
-            control["owner"] = json!(control_owner);
-        }
-        if let Some(control_registrant) = self.control_registrant {
-            control["registrant"] = json!(control_registrant);
-        }
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar",
-                "registrant": self.registrant,
-                "registered_at": self.registered_at,
-                "created_at": self.created_at,
-                "expiry": self.expires_at
-            },
-            "control": control
-        })
-    }
+
 }
 
 fn v2_search_specs() -> Vec<V2SearchSpec> {
@@ -2016,7 +1847,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "alpha.eth",
             id: 0xa100,
-            block_number: 201,
             owner: "0x00000000000000000000000000000000000000a1",
             registrant: "0x00000000000000000000000000000000000000a2",
             registered_at: "2024-01-02T00:00:00Z",
@@ -2028,7 +1858,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "alpine.eth",
             id: 0xa200,
-            block_number: 202,
             owner: "0x0000000000000000000000000000000000000a21",
             registrant: "0x0000000000000000000000000000000000000a22",
             registered_at: "2024-02-02T00:00:00Z",
@@ -2040,7 +1869,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "gamma.eth",
             id: 0xa300,
-            block_number: 203,
             owner: "0x0000000000000000000000000000000000000a31",
             registrant: "0x0000000000000000000000000000000000000a32",
             registered_at: "2024-03-02T00:00:00Z",
@@ -2053,7 +1881,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "_under.eth",
             id: 0xa400,
-            block_number: 204,
             owner: "0x0000000000000000000000000000000000000a41",
             registrant: "0x0000000000000000000000000000000000000a42",
             registered_at: "2024-04-02T00:00:00Z",
@@ -2065,7 +1892,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "bunder.eth",
             id: 0xa500,
-            block_number: 205,
             owner: "0x0000000000000000000000000000000000000a51",
             registrant: "0x0000000000000000000000000000000000000a52",
             registered_at: "2024-05-02T00:00:00Z",
@@ -2077,11 +1903,8 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "ens",
             name: "precedence.eth",
             id: 0xd100,
-            block_number: 206,
             owner: V2_SEARCH_REGISTRY_OWNER,
-            control_owner: Some(V2_SEARCH_CONTROL_OWNER),
             registrant: V2_SEARCH_REGISTRATION_REGISTRANT,
-            control_registrant: Some(V2_SEARCH_CONTROL_REGISTRANT),
             registered_at: "2024-07-03T00:00:00Z",
             created_at: "2023-07-03T00:00:00Z",
             expires_at: "2027-07-03T00:00:00Z",
@@ -2090,7 +1913,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "basenames",
             name: "alpha.base.eth",
             id: 0xb100,
-            block_number: 207,
             owner: "0x0000000000000000000000000000000000000b11",
             registrant: "0x0000000000000000000000000000000000000b12",
             registered_at: "2024-08-02T00:00:00Z",
@@ -2102,7 +1924,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "basenames",
             name: "alpine.base.eth",
             id: 0xb200,
-            block_number: 208,
             owner: "0x0000000000000000000000000000000000000b21",
             registrant: "0x0000000000000000000000000000000000000b22",
             registered_at: "2024-08-03T00:00:00Z",
@@ -2115,7 +1936,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             namespace: "internal",
             name: "alpha.internal",
             id: 0xc100,
-            block_number: 209,
             owner: "0x0000000000000000000000000000000000000c11",
             registrant: "0x0000000000000000000000000000000000000c12",
             registered_at: "2024-09-02T00:00:00Z",
@@ -2124,4 +1944,34 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             ..V2SearchSpec::default()
         },
     ]
+}
+
+async fn begin_search_family_rebuild(
+    database: &TestDatabase,
+    chain: &str,
+    block: i64,
+    hash: &str,
+) -> Result<()> {
+    let token = bigname_project::families::input_token(&database.pool, chain).await?;
+    let outcome = bigname_project::families::apply(
+        &database.pool,
+        chain,
+        &bigname_project::Marker {
+            number: block,
+            hash: hash.into(),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &token,
+        &bigname_project::families::FamilyOptions::new(
+            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        )
+        .with_max_blocks_per_run(1),
+    )
+    .await?;
+    assert!(outcome.reset);
+    assert_ne!(
+        outcome.marker.as_ref().map(|marker| marker.number),
+        Some(block)
+    );
+    Ok(())
 }

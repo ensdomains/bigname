@@ -483,14 +483,7 @@ async fn v2_success_responses_omit_banned_v1_dictionary_fields_family_wide() -> 
 async fn v2_single_resource_as_of_token_replays_without_enabling_collection_replay() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row_with_writer_alias(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let minted = v2_conformance_get_json(&database, "/v1/names/alpha.eth").await?;
     let token = minted["meta"]["as_of_token"]
@@ -498,10 +491,7 @@ async fn v2_single_resource_as_of_token_replays_without_enabling_collection_repl
         .expect("name response must include meta.as_of_token");
 
     for (label, uri) in [
-        (
-            "records",
-            format!("/v1/names/alpha.eth/records?at={token}"),
-        ),
+        ("records", format!("/v1/names/alpha.eth/records?at={token}")),
         (
             "resolver",
             format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
@@ -634,106 +624,21 @@ fn assert_permission_additive_vocabulary(value: &Value) -> std::result::Result<(
 #[tokio::test]
 async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let address = "0x0000000000000000000000000000000000000abc";
-    let token_holder_address = "0x0000000000000000000000000000000000000def";
-    let logical_name_id = "ens:case.eth";
-    let resource_id = Uuid::from_u128(0x5a0101);
-    let token_lineage_id = Uuid::from_u128(0x5a0102);
-    let surface_binding_id = Uuid::from_u128(0x5a0103);
-    let namehash = bigname_lookup::ens_namehash_hex("case.eth")?;
-    let record_boundary = json!({
-        "logical_name_id": logical_name_id,
-        "resource_id": resource_id.to_string(),
-        "normalized_event_id": null,
-        "event_kind": null,
-        "chain_position": {
-            "chain_id": "ethereum-mainnet",
-            "block_number": 38,
-            "block_hash": "0xname26",
-            "timestamp": "2026-04-17T00:00:38Z"
-        }
-    });
-
-    seed_identity_name(
-        &database,
-        logical_name_id,
-        "case.eth",
-        "case.eth",
-        &namehash,
-        resource_id,
-        token_lineage_id,
-        surface_binding_id,
-        address,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        38,
-    )
-    .await?;
-    upsert_phase_address_names_current_rows(
-        &database.pool,
-        &[address_name_current_row(
-            token_holder_address,
-            logical_name_id,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            "case.eth",
-            "case.eth",
-            &namehash,
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            38,
-        )],
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE name_current
-        SET declared_summary = jsonb_set(
-            declared_summary,
-            '{topology}',
-            $2::jsonb
-        )
-        WHERE logical_name_id = $1
-        "#,
-    )
-    .bind(logical_name_id)
-    .bind(json!({
-        "version_boundaries": {
-            "topology_version_boundary": record_boundary.clone(),
-            "record_version_boundary": record_boundary.clone(),
-        }
-    }))
-    .execute(&database.pool)
-    .await?;
-    let mut record_inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
-    record_inventory.record_version_boundary = record_boundary;
-    record_inventory.selectors = json!([]);
-    record_inventory.explicit_gaps = json!([]);
-    record_inventory.entries = json!([]);
-    record_inventory.unsupported_families = json!([]);
-    record_inventory.chain_positions = json!({
-        "ethereum": {
-            "chain_id": "ethereum-mainnet",
-            "block_number": 38,
-            "block_hash": "0xname26",
-            "timestamp": "2026-04-17T00:00:38Z"
-        }
-    });
-    database
-        .insert_record_inventory_current_row(record_inventory)
-        .await?;
-    let profile = v2_conformance_get_json(&database, "/v1/names/Case.eth").await?;
+    let address = "0x00000000000000000000000000000000000000bb";
+    let token_holder_address = "0x00000000000000000000000000000000000000aa";
+    seed_alice_name_inputs_with_writes(&database, &[]).await?;
+    let profile = v2_conformance_get_json(&database, "/v1/names/Alice.eth").await?;
     let lookup = v2_lookup_json(
         &database,
         json!({
-            "profile": "detail",
-            "namespace": "public",
-            "inputs": [{"name": "Case.eth"}]
+            "profile":"detail", "namespace":"public", "inputs":[{"name":"Alice.eth"}]
         }),
     )
     .await?;
     assert_eq!(lookup["data"][0]["record"], profile["data"]);
-    assert_eq!(profile["data"]["owner"], json!(address));
-    assert_ne!(profile["data"]["owner"], json!(token_holder_address));
+    assert_eq!(profile["data"]["owner"], address);
+    assert_eq!(profile["data"]["registrant"], token_holder_address);
+    assert_ne!(profile["data"]["owner"], token_holder_address);
     assert!(
         lookup["data"][0]["record"].get("manager").is_none(),
         "forward relation context must not synthesize the flat manager field"
@@ -741,94 +646,59 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     assert!(profile["data"].get("unsupported_fields").is_none());
     assert_eq!(profile["data"]["addresses"], json!({}));
     assert_eq!(profile["data"]["text_records"], json!({}));
-
-    let unbacked_resource_id = Uuid::from_u128(0x5a0111);
-    seed_identity_name(
-        &database,
-        "ens:unbacked.eth",
-        "Unbacked.eth",
-        "unbacked.eth",
-        "namehash:unbacked.eth",
-        unbacked_resource_id,
-        Uuid::from_u128(0x5a0112),
-        Uuid::from_u128(0x5a0113),
-        address,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        39,
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        DELETE FROM record_inventory_current
-        WHERE resource_id = $1
-        "#,
-    )
-    .bind(unbacked_resource_id)
-    .execute(&database.pool)
-    .await?;
-    sqlx::query("DELETE FROM record_inventory_current WHERE resource_id = $1")
-        .bind(unbacked_resource_id)
-        .execute(&database.lookup_pool)
-        .await?;
-    let unbacked_profile = v2_conformance_get_json(&database, "/v1/names/Unbacked.eth").await?;
-    let unbacked_lookup = v2_lookup_json(
-        &database,
-        json!({
-            "profile": "detail",
-            "namespace": "public",
-            "inputs": [{"name": "Unbacked.eth"}]
-        }),
-    )
-    .await?;
-    assert!(unbacked_profile["data"].get("addresses").is_none());
-    assert!(unbacked_profile["data"].get("text_records").is_none());
-    assert!(
-        unbacked_lookup["data"][0]["record"]
-            .get("addresses")
-            .is_none()
-    );
-    assert!(
-        unbacked_lookup["data"][0]["record"]
-            .get("text_records")
-            .is_none()
-    );
-
-    let profile_record = &profile["data"];
-    let search = v2_conformance_get_json(&database, "/v1/search?q=case&namespace=ens").await?;
+    let search = v2_conformance_get_json(&database, "/v1/search?q=alice&namespace=ens").await?;
     assert_shared_record_subset(
-        profile_record,
-        data_row_named(&search, "case.eth", "search"),
+        &profile["data"],
+        data_row_named(&search, "alice.eth", "search"),
         SHARED_LIST_RECORD_FIELDS,
         "search",
     );
-
     let address_names = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{address}/names?namespace=ens"),
     )
     .await?;
-    let address_name_row = data_row_named(&address_names, "case.eth", "address-names");
-    assert_eq!(address_name_row["relations"], json!(["manager"]));
+    let row = data_row_named(&address_names, "alice.eth", "address-names");
+    assert_eq!(row["relations"], json!(["manager"]));
     assert_shared_record_subset(
-        profile_record,
-        address_name_row,
+        &profile["data"],
+        row,
         SHARED_LIST_RECORD_FIELDS,
         "address-names",
     );
 
-    seed_v2_subnames_fixture(&database).await?;
-    let subname_at = v2_at_token(
-        "ethereum",
-        "ethereum-mainnet",
-        81,
-        "0xname51",
-        "2026-04-17T00:00:21Z",
-    )?;
-    let subname_profile = v2_conformance_get_json(
+    // An actual zero resolver pointer withdraws inventory; all readers omit unbacked fields.
+    append_alice_name_input(
         &database,
-        &format!("/v1/names/Alpha.Parent.eth?at={subname_at}"),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        json!({
+            "node":bigname_lookup::ens_namehash_hex("alice.eth")?,
+            "resolver":"0x0000000000000000000000000000000000000000"
+        }),
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let unbacked_profile = v2_conformance_get_json(&database, "/v1/names/Alice.eth").await?;
+    let unbacked_lookup = v2_lookup_json(
+        &database,
+        json!({
+            "profile":"detail", "namespace":"public", "inputs":[{"name":"Alice.eth"}]
+        }),
+    )
+    .await?;
+    for record in [
+        &unbacked_profile["data"],
+        &unbacked_lookup["data"][0]["record"],
+    ] {
+        assert!(record.get("addresses").is_none());
+        assert!(record.get("text_records").is_none());
+    }
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    let subname_profile = v2_conformance_get_json(&database, "/v1/names/Alpha.Parent.eth").await?;
     let subnames =
         v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=3")
             .await?;
@@ -838,10 +708,9 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         SHARED_LIST_RECORD_FIELDS,
         "subnames",
     );
-
-    database.cleanup().await?;
-    Ok(())
+    database.cleanup().await
 }
+
 
 async fn assert_v2_as_of_token_fixpoint(
     database: &TestDatabase,
@@ -907,30 +776,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 38,
             )
             .await?;
-            seed_identity_name(
-                &database,
-                "ens:unsupported.eth",
-                "Unsupported.eth",
-                "unsupported.eth",
-                "namehash:unsupported.eth",
-                Uuid::from_u128(0x5a0121),
-                Uuid::from_u128(0x5a0122),
-                Uuid::from_u128(0x5a0123),
-                "0x0000000000000000000000000000000000000abc",
-                bigname_storage::AddressNameRelation::TokenHolder,
-                39,
-            )
-            .await?;
-            sqlx::query(
-                r#"
-                UPDATE bigname_phase.name_current
-                SET support_status = 'unsupported', unsupported_reason = $1
-                WHERE lower(raw_name) = 'unsupported.eth'
-                "#,
-            )
-            .bind("conflicting_current_ens_authority")
-            .execute(&database.pool)
-            .await?;
+            seed_unbound_name_inputs(&database, "unsupported.eth", false).await?;
             let payload = v2_lookup_json(
                 &database,
                 json!({
@@ -955,7 +801,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Name => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
             let uri = "/v1/names/Alice.eth";
-            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
+            seed_alice_name_inputs(&database).await?;
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
@@ -964,21 +810,12 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::NameRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
             let uri = "/v1/names/Alice.eth/records?keys=addr:60&include=inventory";
-            seed_v2_alice_name_records_fixture(
+            seed_alice_name_inputs_with_writes(
                 &database,
-                |_, _, inventory| {
-                    let entries = inventory
-                        .entries
-                        .as_array_mut()
-                        .expect("record inventory entries must be an array");
-                    entries[0] = json!({
-                        "record_key": "addr:60",
-                        "record_family": "addr",
-                        "selector_key": "60",
-                        "status": "unsupported",
-                        "unsupported_reason": "value_not_retained_in_normalized_events"
-                    });
-                },
+                &[
+                    family_fixture_record_write("addr:60", None),
+                    family_fixture_record_write("text:description", Some(json!("Alice profile"))),
+                ],
             )
             .await?;
             let payload = v2_conformance_get_json(&database, uri).await?;
@@ -988,8 +825,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::Subnames => {
             let uri = "/v1/names/Parent.eth/subnames?include=counts&page_size=3";
-            let (database, payload) =
-                v2_subnames_payload(uri).await?;
+            let (database, payload) = v2_subnames_payload(uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
             database.cleanup().await?;
             Ok(payload)
@@ -1002,8 +838,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             Ok(payload)
         }
         V2SuccessFixture::Permissions => {
-            let uri =
-                format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10");
+            let uri = format!(
+                "/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&include=lineage&page_size=10"
+            );
             let database = seed_v2_registry_operator_fixture().await?;
             let payload = v2_permissions_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
@@ -1022,7 +859,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::PrimaryName => {
             let database = TestDatabase::new_migrated().await?;
-            database.seed_default_ens_snapshot_selector_position().await?;
+            database
+                .seed_default_ens_snapshot_selector_position()
+                .await?;
             database
                 .insert_primary_name_current_claim_row(
                     V2_PRIMARY_NAME_ADDRESS,
@@ -1043,9 +882,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 .await?;
             let payload = v2_primary_name_payload_for_database(
                 &database,
-                &format!(
-                    "/v1/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
-                ),
+                &format!("/v1/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"),
             )
             .await?;
             database.cleanup().await?;
@@ -1062,7 +899,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::Search => {
             let database = TestDatabase::new_migrated().await?;
-            seed_v2_address_names_fixture(&database).await?;
+            seed_v2_search_fixture(&database).await?;
             let uri = "/v1/search?q=alpha&namespace=ens";
             let payload = v2_conformance_get_json(&database, uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
@@ -1081,9 +918,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Resolver => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_resolver_bound_names_fixture(&database).await?;
-            let resolver_row =
-                resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-            upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
+            seed_v2_resolver_overview(&database, true).await?;
             let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=5");
             let payload = v2_resolver_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
@@ -1116,7 +951,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         }
         V2SuccessFixture::DiagnosticsRecords => {
             let database = TestDatabase::new_with_schemas(false, true).await?;
-            seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
+            seed_alice_name_inputs(&database).await?;
             let uri = "/v1/diagnostics/names/Alice.eth/records";
             let payload = request_v2_diagnostics_json(&database, uri, StatusCode::OK).await?;
             assert_v2_as_of_token_fixpoint(&database, route, uri, &payload).await?;
@@ -1126,11 +961,9 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::DiagnosticsNamespaceManifests => {
             let database = TestDatabase::new(true).await?;
             seed_v2_conformance_namespace_manifests(&database).await?;
-            let payload = v2_conformance_get_json(
-                &database,
-                "/v1/diagnostics/namespaces/ens/manifests",
-            )
-            .await?;
+            let payload =
+                v2_conformance_get_json(&database, "/v1/diagnostics/namespaces/ens/manifests")
+                    .await?;
             database.cleanup().await?;
             Ok(payload)
         }
@@ -1148,16 +981,14 @@ async fn collect_v2_stale_and_conflict_error_violations(
     violations: &mut Vec<String>,
 ) -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
-    let alice_stale_at = seed_v2_conformance_snapshot_position(
-        &database,
+    seed_alice_name_inputs(&database).await?;
+    let alice_stale_at = v2_at_token(
         "ethereum",
         "ethereum-mainnet",
         21_000_002,
-        "0xbinding-old",
-        "2026-04-17T00:00:02Z",
-    )
-    .await?;
+        "0xalice-granted",
+        "2024-01-02T03:04:05Z",
+    )?;
     let conflict_at = v2_at_token(
         "ethereum",
         "ethereum-mainnet",
@@ -1211,26 +1042,12 @@ async fn collect_v2_stale_and_conflict_error_violations(
         38,
     )
     .await?;
-    sqlx::query(
-        r#"
-        UPDATE name_current
-        SET chain_positions = jsonb_set(
-            chain_positions,
-            '{ethereum,block_number}',
-            '39'::jsonb
-        )
-        WHERE raw_name = 'alice.eth'
-        "#,
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+        .await?;
     let route = v2_conformance_route(V2SuccessFixture::Lookup);
-    let response = v2_conformance_response(
-        &database,
-        V2StrictQueryMethod::PostLookup,
-        "/v1/lookup",
-    )
-    .await?;
+    let response =
+        v2_conformance_response(&database, V2StrictQueryMethod::PostLookup, "/v1/lookup").await?;
     assert_eq!(response.status(), StatusCode::CONFLICT, "{}", route.label);
     let payload: Value = read_json(response).await?;
     assert_v2_error_envelope(route.label, &payload, "stale");
@@ -1245,12 +1062,7 @@ async fn collect_v2_stale_and_conflict_error_violations(
         "0xmissing-conflict",
         "2026-04-17T00:00:01Z",
     )?;
-    let resolver_row =
-        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver_row.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
+    seed_v2_resolver_overview(&database, true).await?;
     for (route, uri, expected_code) in [(
         v2_conformance_route(V2SuccessFixture::Resolver),
         format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
@@ -1268,21 +1080,9 @@ async fn collect_v2_stale_and_conflict_error_violations(
         collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
     }
 
-    sqlx::query(
-        r#"
-        UPDATE resolver_current
-        SET chain_positions = jsonb_set(
-            chain_positions,
-            '{target_block_number}',
-            '204'::jsonb
-        )
-        WHERE chain_id = 'ethereum-mainnet'
-          AND resolver_address = $1
-        "#,
-    )
-    .bind(V2_RESOLVER_ADDRESS)
-    .execute(&database.lookup_pool)
-    .await?;
+    database
+        .simulate_interpret_redo_begin("ethereum-mainnet", "redo")
+        .await?;
     let route = v2_conformance_route(V2SuccessFixture::Resolver);
     let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}");
     let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
@@ -1306,6 +1106,8 @@ async fn collect_v2_not_found_error_violations(violations: &mut Vec<String>) -> 
         "2026-04-17T00:00:03Z",
     )
     .await?;
+
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     for (route, uri) in [
         (
@@ -1333,8 +1135,7 @@ async fn collect_v2_not_found_error_violations(violations: &mut Vec<String>) -> 
             "/v1/namespaces/unknown",
         ),
     ] {
-        let response =
-            v2_conformance_response(&database, V2StrictQueryMethod::Get, uri).await?;
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, uri).await?;
         assert_eq!(
             response.status(),
             StatusCode::NOT_FOUND,
@@ -1487,11 +1288,7 @@ fn v2_conformance_request(method: V2StrictQueryMethod, uri: &str) -> Request<Bod
 }
 
 async fn v2_conformance_name_records_verified_unsupported_payload() -> Result<Value> {
-    v2_name_records_payload_with_setup(
-        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
-        |_, _, _| {},
-    )
-    .await
+    v2_name_records_payload("/v1/names/Alice.eth/records?source=verified&keys=addr:60").await
 }
 
 async fn v2_conformance_get_json(database: &TestDatabase, uri: &str) -> Result<Value> {
