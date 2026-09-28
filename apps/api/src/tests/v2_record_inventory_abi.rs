@@ -366,11 +366,13 @@ async fn abi_content_types_are_withheld_without_an_inventory() -> Result<()> {
     database.cleanup().await
 }
 
-#[tokio::test]
-async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Result<()> {
-    const NAMES: usize = 1_000;
-    let database = TestDatabase::new_migrated().await?;
-    let specs = (0..NAMES)
+/// `count` registered names, each pointing at the ABI resolver with one ABI write, and the
+/// normalized event ids of those writes.
+async fn seed_abi_batch(
+    database: &TestDatabase,
+    count: usize,
+) -> Result<(Vec<String>, Vec<i64>)> {
+    let specs = (0..count)
         .map(|index| V2AddressNameSpec {
             logical_name_id: Box::leak(format!("ens:abi-batch-{index}.eth").into_boxed_str()),
             name: Box::leak(format!("abi-batch-{index}.eth").into_boxed_str()),
@@ -387,11 +389,9 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
             relations: &[],
         })
         .collect::<Vec<_>>();
-    seed_v2_address_name_identities(&database, &specs).await?;
-    publish_v2_address_name_inputs(&database, &specs).await?;
-    let names = specs.iter().map(|spec| spec.name.to_owned()).collect::<Vec<_>>();
-    let content_type = |index: usize| (1_u128 << (index % 100)).to_string();
-    let (block, hash) = address_fixture_head(&database).await?;
+    seed_v2_address_name_identities(database, &specs).await?;
+    publish_v2_address_name_inputs(database, &specs).await?;
+    let (block, hash) = address_fixture_head(database).await?;
     let manifest = declare_family_fixture_resolver(
         &database.pool,
         "ens",
@@ -415,7 +415,7 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
             NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
             json!({"source_event":"NewResolver", "node":node, "resolver":ABI_RESOLVER}),
         ));
-        let selector = content_type(index);
+        let selector = abi_batch_content_type(index);
         let write = abi_write_events(
             spec.name,
             ABI_RESOLVER,
@@ -427,19 +427,89 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
         events.extend(write);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    rebuild_address_fixture(&database).await?;
+    rebuild_address_fixture(database).await?;
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT normalized_event_id FROM normalized_events WHERE event_identity = ANY($1)",
     )
     .bind(&identities)
     .fetch_all(&database.pool)
     .await?;
+    Ok((
+        specs.iter().map(|spec| spec.name.to_owned()).collect(),
+        ids,
+    ))
+}
+
+fn abi_batch_content_type(index: usize) -> String {
+    (1_u128 << (index % 100)).to_string()
+}
+
+/// The response of one lookup request and the resource count of each record inventory read it
+/// made.
+async fn lookup_inventory_reads(
+    database: &TestDatabase,
+    body: Value,
+) -> Result<(Value, Vec<usize>)> {
+    let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let payload = bigname_storage::families::records::seams::with_inventory_read_counter(
+        reads.clone(),
+        v2_lookup_json(database, body),
+    )
+    .await?;
+    let reads = reads.lock().expect("inventory reads").clone();
+    Ok((payload, reads))
+}
+
+#[tokio::test]
+async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
+    const NAMES: usize = 25;
+    let database = TestDatabase::new_migrated().await?;
+    let (names, _) = seed_abi_batch(&database, NAMES).await?;
+    let inputs = names
+        .iter()
+        .map(|name| json!({"name": name}))
+        .collect::<Vec<_>>();
+
+    // The composed rows read the inventories their topology needs in one read for the batch,
+    // never one per name. Each read runs a fixed number of statements.
+    let (payload, reads) = lookup_inventory_reads(
+        &database,
+        json!({"profile": "feed", "inputs": inputs.clone()}),
+    )
+    .await?;
+    assert_eq!(payload["data"].as_array().map(Vec::len), Some(NAMES));
+    assert_eq!(reads, [NAMES]);
+
+    // The detail profile adds one more read for the batch, with the attributed events.
+    let (payload, reads) = lookup_inventory_reads(
+        &database,
+        json!({"profile": "detail", "include": "inventory", "inputs": inputs}),
+    )
+    .await?;
+    let results = payload["data"].as_array().context("lookup results")?;
+    assert_eq!(results.len(), NAMES);
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(
+            result["record"]["inventory"]["abi_content_types"],
+            json!([abi_batch_content_type(index)]),
+            "{index}: {result}"
+        );
+    }
+    assert_eq!(reads, [NAMES, NAMES]);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Result<()> {
+    const NAMES: usize = 1_000;
+    let database = TestDatabase::new_migrated().await?;
+    let (names, ids) = seed_abi_batch(&database, NAMES).await?;
 
     let (_guard, calls) = crate::v2::abi_content_types_test_hooks::install(
         &database.lookup_pool,
     )
     .await?;
-    let payload = v2_lookup_json(
+    let (payload, reads) = lookup_inventory_reads(
         &database,
         json!({
             "profile": "detail",
@@ -453,12 +523,14 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
             result["record"]["inventory"]["abi_content_types"],
-            json!([content_type(index)]),
+            json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );
     }
     // One batched read for the whole request, never one per name.
     assert_eq!(calls.lock().expect("calls").as_slice(), &[NAMES]);
+    // So are the record inventories: one read for the composed rows, one for the inventories.
+    assert_eq!(reads, [NAMES, NAMES]);
 
     let plan = bigname_storage::explain_record_inventory_abi_evidence_for_test(
         &database.lookup_pool,

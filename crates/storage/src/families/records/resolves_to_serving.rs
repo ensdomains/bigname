@@ -22,7 +22,7 @@ use uuid::Uuid;
 use super::{
     address_names::{name_row, publication_stamps},
     candidates::candidate_resources_from,
-    inventory::{FamilyAttribution, load_family_record_inventory_detail_on},
+    inventory::{FamilyAttribution, load_family_record_inventories_on},
     resolves_to::{RecordRow, may_fall_back, record_rows},
 };
 use crate::{
@@ -161,17 +161,14 @@ async fn compose_address_record_rows(
         }
         let publication = servable_publication(conn, &chain_id).await?;
         let mut records: BTreeMap<Uuid, Vec<RecordRow>> = BTreeMap::new();
-        for resource_id in resources {
-            let Some(inventory) = load_family_record_inventory_detail_on(
-                conn,
-                &chain_id,
-                resource_id,
-                FamilyAttribution::Given(BTreeSet::new()),
-            )
-            .await?
-            else {
-                continue;
-            };
+        let inventories = load_family_record_inventories_on(
+            conn,
+            &chain_id,
+            &resources,
+            FamilyAttribution::Given(BTreeSet::new()),
+        )
+        .await?;
+        for (resource_id, inventory) in inventories {
             let found = record_rows(&chain_id, &inventory, &address);
             if !found.is_empty() {
                 records.insert(resource_id, found);

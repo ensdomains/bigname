@@ -114,30 +114,59 @@ fn row(
     ))
 }
 
-pub(crate) async fn assemble(
-    conn: &mut PgConnection,
-    input: Assembly<'_>,
-) -> Result<(RecordInventoryCurrentRow, String)> {
+/// The facts an assembly reads from the database, read once for many assemblies: the readable
+/// block stamps and the database collation order of every text the assemblies sort.
+pub(crate) struct AssemblyReads {
+    pub(crate) stamps: BTreeMap<i64, BlockStamp>,
+    /// Every text an assembly sorts, in the database collation.
+    pub(crate) collation: Vec<String>,
+}
+
+impl AssemblyReads {
+    /// The stamps of `blocks` and the collation order of `texts` on `chain_id`, in at most two
+    /// statements.
+    pub(crate) async fn load(
+        conn: &mut PgConnection,
+        chain_id: &str,
+        blocks: BTreeSet<i64>,
+        texts: BTreeSet<String>,
+    ) -> Result<Self> {
+        let blocks: Vec<i64> = blocks.into_iter().collect();
+        Ok(Self {
+            stamps: block_stamps(conn, chain_id, &blocks).await?,
+            collation: collation_order(conn, texts.into_iter().collect()).await?,
+        })
+    }
+
+    /// `texts` in the database collation. An `ORDER BY` of a subset keeps the subset's order in
+    /// the sort of the whole set.
+    fn ordered(&self, texts: &BTreeSet<String>) -> Vec<String> {
+        self.collation
+            .iter()
+            .filter(|text| texts.contains(*text))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The latest link-arm event, the latest served record, the boundary block and the latest block
+/// of an assembly.
+struct Positions<'a> {
+    latest_link: Option<(&'a FamilyPosition, Option<i64>, &'static str)>,
+    latest_record: Option<&'a ServedRecord>,
+    boundary_block: i64,
+    latest_block: i64,
+}
+
+fn positions<'a>(input: &'a Assembly<'_>, contributing: &[&'a super::FamilyLink]) -> Positions<'a> {
     let Assembly {
-        chain_id,
         pointer,
-        classification,
-        eligibility: (supported, reason),
         boundary,
         served,
         links,
         linked,
-        attributed,
+        ..
     } = input;
-
-    // The link arm's contributing events: every write of the selected record id and the links.
-    let contributing: Vec<_> = links
-        .map(|links| links.contributing_links().collect())
-        .unwrap_or_default();
-    let link_ids: BTreeSet<i64> = contributing
-        .iter()
-        .filter_map(|link| link.normalized_event_id)
-        .collect();
     let latest_link = links.and_then(|_| {
         let writes = linked
             .iter()
@@ -169,20 +198,98 @@ pub(crate) async fn assemble(
     .flatten()
     .max()
     .unwrap_or(pointer.block_number);
-    let mut blocks = vec![pointer.block_number, boundary_block, latest_block];
-    blocks.extend(latest_link.map(|(position, _, _)| position.block_number));
-    blocks.extend(latest_record.map(|record| record.position.block_number));
-    let stamps = block_stamps(conn, chain_id, &blocks).await?;
+    Positions {
+        latest_link,
+        latest_record,
+        boundary_block,
+        latest_block,
+    }
+}
 
-    // Entries, selectors and families per record key, in the database collation.
-    let order = collation_order(
-        conn,
-        served
+impl Assembly<'_> {
+    /// The blocks whose stamps [`assemble`] reads.
+    pub(crate) fn blocks(&self) -> Vec<i64> {
+        let contributing: Vec<_> = self
+            .links
+            .map(|links| links.contributing_links().collect())
+            .unwrap_or_default();
+        let positions = positions(self, &contributing);
+        let mut blocks = vec![
+            self.pointer.block_number,
+            positions.boundary_block,
+            positions.latest_block,
+        ];
+        blocks.extend(
+            positions
+                .latest_link
+                .map(|(position, _, _)| position.block_number),
+        );
+        blocks.extend(
+            positions
+                .latest_record
+                .map(|record| record.position.block_number),
+        );
+        blocks
+    }
+
+    /// The texts [`assemble`] sorts in the database collation: the served record keys and the
+    /// unsupported record families.
+    pub(crate) fn texts(&self) -> impl Iterator<Item = String> + '_ {
+        let (keys, families) = self.sorted_sets();
+        keys.into_iter().chain(families)
+    }
+
+    fn sorted_sets(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let keys = self
+            .served
             .iter()
             .map(|record| record.record_key.clone())
-            .collect(),
-    )
-    .await?;
+            .collect();
+        let families = self
+            .served
+            .iter()
+            .filter_map(|record| payload::unsupported_family(&record.payload))
+            .collect();
+        (keys, families)
+    }
+}
+
+pub(crate) fn assemble(
+    input: Assembly<'_>,
+    reads: &AssemblyReads,
+) -> Result<(RecordInventoryCurrentRow, String)> {
+    let (record_keys, families) = input.sorted_sets();
+    // The link arm's contributing events: every write of the selected record id and the links.
+    let contributing: Vec<_> = input
+        .links
+        .map(|links| links.contributing_links().collect())
+        .unwrap_or_default();
+    let link_ids: BTreeSet<i64> = contributing
+        .iter()
+        .filter_map(|link| link.normalized_event_id)
+        .collect();
+    let Positions {
+        latest_link,
+        latest_record,
+        boundary_block,
+        latest_block,
+    } = positions(&input, &contributing);
+    let Assembly {
+        chain_id,
+        pointer,
+        classification,
+        eligibility: (supported, reason),
+        boundary,
+        served,
+        ..
+    } = &input;
+    let (chain_id, pointer, classification, supported) =
+        (*chain_id, *pointer, *classification, *supported);
+    let attributed = &input.attributed;
+    let stamps = &reads.stamps;
+
+    // Entries, selectors and families per record key, in the database collation.
+    let order = reads.ordered(&record_keys);
     let by_key: BTreeMap<&str, &ServedRecord> = served
         .iter()
         .map(|record| (record.record_key.as_str(), record))
@@ -207,19 +314,14 @@ pub(crate) async fn assemble(
         ));
         selectors.extend(payload::selector(&record.payload));
     }
-    let families: BTreeSet<String> = served
-        .iter()
-        .filter_map(|record| payload::unsupported_family(&record.payload))
-        .collect();
-    let mut unsupported_families: Vec<Value> =
-        collation_order(conn, families.into_iter().collect())
-            .await?
-            .into_iter()
-            .map(|family| {
-                json!({"record_family": family,
+    let mut unsupported_families: Vec<Value> = reads
+        .ordered(&families)
+        .into_iter()
+        .map(|family| {
+            json!({"record_family": family,
                    "unsupported_reason": "record_family_not_supported_in_phase6_projection"})
-            })
-            .collect();
+        })
+        .collect();
     if !supported {
         unsupported_families.push(json!({"record_family": "resolver_classification",
                                          "unsupported_reason": reason}));
@@ -235,16 +337,16 @@ pub(crate) async fn assemble(
         "normalized_event_id": boundary.as_ref().and_then(|b| b.normalized_event_id),
         "event_kind": boundary.as_ref()
             .and_then(|b| b.normalized_event_id.map(|_| b.kind)),
-        "chain_position": chain_position(&stamps, chain_id, boundary_block),
+        "chain_position": chain_position(stamps, chain_id, boundary_block),
     });
     let last_change = match (latest_link, latest_record) {
         (Some((position, id, kind)), _) => {
-            change(id, kind, &stamps, chain_id, position.block_number)
+            change(id, kind, stamps, chain_id, position.block_number)
         }
         (None, Some(record)) => change(
             record.normalized_event_id,
             "RecordChanged",
-            &stamps,
+            stamps,
             chain_id,
             record.position.block_number,
         ),
@@ -252,14 +354,14 @@ pub(crate) async fn assemble(
             Some(boundary) if boundary.normalized_event_id.is_some() => change(
                 boundary.normalized_event_id,
                 boundary.kind,
-                &stamps,
+                stamps,
                 chain_id,
                 boundary_block,
             ),
             _ => change(
                 pointer.pointer_event_id,
                 "ResolverChanged",
-                &stamps,
+                stamps,
                 chain_id,
                 boundary_block,
             ),

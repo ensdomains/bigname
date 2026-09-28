@@ -1,5 +1,7 @@
 //! Declared resolution topology on the same snapshot as the composed name and inventory.
 //! The five arms are read in a fixed order. No provider result is used or retained.
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use bigname_domain::resolution_topology::ResolutionTopology;
 use serde_json::{Value, json};
@@ -9,33 +11,66 @@ use uuid::Uuid;
 use crate::{
     NameCurrentRow,
     families::{
-        records::{FamilyAttribution, load_family_record_inventory_detail_on},
+        records::{FamilyAttribution, FamilyRecordInventory, load_family_record_inventories_on},
         topology::{load_family_wildcard_source_on, load_name_topology_on},
     },
 };
 
-pub(super) async fn enrich(conn: &mut PgConnection, row: &mut NameCurrentRow) -> Result<()> {
+/// Enrich every composed row with its declared topology. The record inventories the topology
+/// reads are read for all rows at once, one read per chain.
+pub(super) async fn enrich_all(
+    conn: &mut PgConnection,
+    rows: &mut BTreeMap<String, NameCurrentRow>,
+) -> Result<()> {
+    let mut wanted: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+    for row in rows.values() {
+        if let Some(resource) = row.serving_resource_id.or(row.resource_id) {
+            wanted.entry(chain_of(row)?).or_default().push(resource);
+        }
+    }
+    let mut inventories = BTreeMap::new();
+    for (chain_id, resources) in wanted {
+        for (resource, inventory) in load_family_record_inventories_on(
+            conn,
+            &chain_id,
+            &resources,
+            FamilyAttribution::Given(Default::default()),
+        )
+        .await?
+        {
+            inventories.insert((chain_id.clone(), resource), inventory);
+        }
+    }
+    for row in rows.values_mut() {
+        enrich(conn, row, &inventories).await?;
+    }
+    Ok(())
+}
+
+fn chain_of(row: &NameCurrentRow) -> Result<String> {
+    Ok(row.provenance["chain_id"]
+        .as_str()
+        .context("composed name has no chain")?
+        .to_owned())
+}
+
+async fn enrich(
+    conn: &mut PgConnection,
+    row: &mut NameCurrentRow,
+    inventories: &BTreeMap<(String, Uuid), FamilyRecordInventory>,
+) -> Result<()> {
     let mut topology = match row.binding_kind.map(|kind| kind.as_str()) {
         Some("resolver_alias_path" | "observed_wildcard_path") => {
             load_name_topology_on(conn, &row.logical_name_id).await?
         }
         _ => None,
     };
-    let chain_id = row.provenance["chain_id"]
-        .as_str()
-        .context("composed name has no chain")?
-        .to_owned();
+    let chain_id = chain_of(row)?;
     let resource = row.serving_resource_id.or(row.resource_id);
     if let Some(resource) = resource {
-        let inventory = load_family_record_inventory_detail_on(
-            conn,
-            &chain_id,
-            resource,
-            FamilyAttribution::Given(Default::default()),
-        )
-        .await?;
+        let inventory = inventories.get(&(chain_id.clone(), resource));
         if row.namespace == "ens"
-            && let Some(inventory) = &inventory
+            && let Some(inventory) = inventory
         {
             let resolver = &row.declared_summary["resolver"];
             let ownerless = row.serving_resource_id.is_some();
@@ -79,9 +114,7 @@ pub(super) async fn enrich(conn: &mut PgConnection, row: &mut NameCurrentRow) ->
                 conn,
                 row,
                 resource,
-                inventory
-                    .as_ref()
-                    .map(|inventory| &inventory.row.record_version_boundary),
+                inventory.map(|inventory| &inventory.row.record_version_boundary),
             )
             .await?;
         }

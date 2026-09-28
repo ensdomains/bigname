@@ -24,6 +24,7 @@ mod resolves_to_serving;
 mod reverse;
 mod reverse_page;
 mod rows;
+pub mod seams;
 mod serving;
 
 use std::cmp::Ordering;
@@ -39,9 +40,9 @@ pub use facts::{
 };
 pub use inventory::{
     FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
-    load_family_record_inventory, load_family_record_inventory_detail,
-    load_family_record_inventory_detail_on, load_family_record_inventory_for_snapshot,
-    load_family_supported_record_inventory_for_snapshot,
+    load_family_record_inventories_on, load_family_record_inventory,
+    load_family_record_inventory_detail, load_family_record_inventory_detail_on,
+    load_family_record_inventory_for_snapshot, load_family_supported_record_inventory_for_snapshot,
 };
 pub use links::{
     DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,

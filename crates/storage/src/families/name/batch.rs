@@ -249,9 +249,7 @@ pub(crate) async fn load(
     shape: CoverageShape,
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
     let mut rows = load_base(conn, logical_name_ids, shape).await?;
-    for row in rows.values_mut() {
-        super::topology::enrich(conn, row).await?;
-    }
+    super::topology::enrich_all(conn, &mut rows).await?;
     Ok(rows)
 }
 

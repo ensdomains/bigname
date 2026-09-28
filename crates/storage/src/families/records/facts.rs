@@ -169,16 +169,48 @@ pub(crate) async fn load_classification_on(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
+    let address = resolver_address.to_ascii_lowercase();
+    Ok(
+        load_classifications_on(conn, chain_id, std::slice::from_ref(&address))
+            .await
+            .with_context(|| {
+                format!("failed to load the classification of resolver {resolver_address}")
+            })?
+            .remove(&address),
+    )
+}
+
+/// The classifications of `resolver_addresses` on `chain_id` in one statement, keyed by the
+/// lower-cased address; a resolver with no classification has no entry.
+pub(crate) async fn load_classifications_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resolver_addresses: &[String],
+) -> Result<HashMap<String, ResolverClassification>> {
+    let addresses: Vec<String> = resolver_addresses
+        .iter()
+        .map(|address| address.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if addresses.is_empty() {
+        return Ok(HashMap::new());
+    }
     // Classification and its admission are read at the family publication.
-    let row = sqlx::query(
+    let rows = sqlx::query(
         "WITH source AS (
-             SELECT classification, support_status, unsupported_reason, manifest_id
-             FROM bigname_phase.project_resolver_classification
-             WHERE chain_id = $1 AND resolver_address = $2
-               AND unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
+             SELECT classification.resolver_address, classification.classification,
+                    classification.support_status, classification.unsupported_reason,
+                    classification.manifest_id
+             FROM bigname_phase.project_resolver_classification classification
+             JOIN unnest($2::text[]) requested (resolver_address)
+               ON requested.resolver_address = classification.resolver_address
+             WHERE classification.chain_id = $1
+               AND classification.unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
          )
-         SELECT source.classification, source.support_status, source.unsupported_reason,
-                source.manifest_id, declaration.namespace AS declaration_namespace
+         SELECT source.resolver_address, source.classification, source.support_status,
+                source.unsupported_reason, source.manifest_id,
+                declaration.namespace AS declaration_namespace
          FROM source
          LEFT JOIN (
              SELECT current_block_number AS block FROM bigname_phase.project_family_marker
@@ -209,22 +241,26 @@ pub(crate) async fn load_classification_on(
          ) declaration ON declaration.active",
     )
     .bind(chain_id)
-    .bind(resolver_address.to_ascii_lowercase())
-    .fetch_optional(&mut *conn)
+    .bind(&addresses)
+    .fetch_all(&mut *conn)
     .await
-    .with_context(|| format!("failed to load the classification of resolver {resolver_address}"))?;
-    row.map(|row| {
-        Ok(ResolverClassification {
-            classification: row
-                .try_get::<Option<Value>, _>("classification")?
-                .unwrap_or(Value::Null),
-            support_status: row.try_get("support_status")?,
-            unsupported_reason: row.try_get("unsupported_reason")?,
-            manifest_id: row.try_get("manifest_id")?,
-            declaration_namespace: row.try_get("declaration_namespace")?,
+    .context("failed to load resolver classifications")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("resolver_address")?,
+                ResolverClassification {
+                    classification: row
+                        .try_get::<Option<Value>, _>("classification")?
+                        .unwrap_or(Value::Null),
+                    support_status: row.try_get("support_status")?,
+                    unsupported_reason: row.try_get("unsupported_reason")?,
+                    manifest_id: row.try_get("manifest_id")?,
+                    declaration_namespace: row.try_get("declaration_namespace")?,
+                },
+            ))
         })
-    })
-    .transpose()
+        .collect()
 }
 
 /// `texts` in the order `ORDER BY` gives them in the database collation, which the served rows

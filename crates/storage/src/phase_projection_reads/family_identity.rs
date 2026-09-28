@@ -3,12 +3,13 @@ use crate::{
     IdentityNameCurrentRow, IdentityNameRecordRow, IdentityRecordInventoryRow,
     families::{
         name::{CoverageShape, load_composed},
-        records::{FamilyAttribution, load_family_record_inventory_detail_on, name_relations_on},
+        records::{FamilyAttribution, load_family_record_inventories_on, name_relations_on},
     },
 };
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 pub(super) async fn load(
     pool: &PgPool,
@@ -28,56 +29,74 @@ pub(crate) async fn load_on(
 ) -> Result<Vec<IdentityNameRecordRow>> {
     let names = load_composed(&mut *conn, ids, CoverageShape::Plain).await?;
     let mut relations = name_relations_on(&mut *conn, &names).await?;
-    let mut inventories = BTreeMap::new();
+    // Every inventory the rows serve, read once per chain for all of them. A resource shared by
+    // several rows is read on the chain of, and stamped with the positions of, the first.
+    let mut first: BTreeMap<Uuid, (String, serde_json::Value)> = BTreeMap::new();
+    if include_inventory {
+        for row in names.values() {
+            let chain = row.provenance["chain_id"]
+                .as_str()
+                .context("composed name has no chain")?;
+            if let Some(resource) = row.serving_resource_id.or(row.resource_id) {
+                first
+                    .entry(resource)
+                    .or_insert_with(|| (chain.to_owned(), row.chain_positions.clone()));
+            }
+        }
+    }
+    let mut by_chain: BTreeMap<&str, Vec<Uuid>> = BTreeMap::new();
+    for (resource, (chain, _)) in &first {
+        by_chain.entry(chain.as_str()).or_default().push(*resource);
+    }
+    let mut inventories: BTreeMap<Uuid, IdentityRecordInventoryRow> = BTreeMap::new();
+    for (chain, resources) in by_chain {
+        let loaded = load_family_record_inventories_on(
+            &mut *conn,
+            chain,
+            &resources,
+            FamilyAttribution::Load,
+        )
+        .await?;
+        for (resource, inventory) in loaded {
+            let publication_positions = first[&resource].1.clone();
+            let row = inventory.row;
+            inventories.insert(
+                resource,
+                IdentityRecordInventoryRow {
+                    resource_id: resource,
+                    record_version_boundary_key: inventory.record_version_boundary_key,
+                    support_status: if row.coverage["status"] == "projected" {
+                        "supported"
+                    } else {
+                        "unsupported"
+                    }
+                    .to_owned(),
+                    unsupported_reason: row.coverage["unsupported_reason"]
+                        .as_str()
+                        .map(str::to_owned),
+                    selectors: row.selectors,
+                    entries: row.entries,
+                    provenance: row.provenance,
+                    unsupported_families: row.unsupported_families,
+                    chain_positions: publication_positions,
+                    last_recomputed_at: row.last_recomputed_at,
+                },
+            );
+        }
+    }
     let mut out = Vec::new();
     for (id, row) in names {
         let normalized = super::names::normalize_phase_name(&id, &row.normalized_name)?;
         let labelhash = super::names::phase_labelhash(&normalized);
         let labelhash_count = i32::try_from(normalized.normalized_labels.len()).ok();
-        let chain = row.provenance["chain_id"]
+        row.provenance["chain_id"]
             .as_str()
             .context("composed name has no chain")?;
-        let inventory = if let Some(resource) = row
+        let inventory = row
             .serving_resource_id
             .or(row.resource_id)
             .filter(|_| include_inventory)
-        {
-            if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(resource) {
-                let inventory = load_family_record_inventory_detail_on(
-                    &mut *conn,
-                    chain,
-                    resource,
-                    FamilyAttribution::Load,
-                )
-                .await?;
-                entry.insert(inventory.map(|inventory| {
-                    let publication_positions = row.chain_positions.clone();
-                    let row = inventory.row;
-                    IdentityRecordInventoryRow {
-                        resource_id: resource,
-                        record_version_boundary_key: inventory.record_version_boundary_key,
-                        support_status: if row.coverage["status"] == "projected" {
-                            "supported"
-                        } else {
-                            "unsupported"
-                        }
-                        .to_owned(),
-                        unsupported_reason: row.coverage["unsupported_reason"]
-                            .as_str()
-                            .map(str::to_owned),
-                        selectors: row.selectors,
-                        entries: row.entries,
-                        provenance: row.provenance,
-                        unsupported_families: row.unsupported_families,
-                        chain_positions: publication_positions,
-                        last_recomputed_at: row.last_recomputed_at,
-                    }
-                }));
-            }
-            inventories.get(&resource).cloned().flatten()
-        } else {
-            None
-        };
+            .and_then(|resource| inventories.get(&resource).cloned());
         out.push(IdentityNameRecordRow {
             row: IdentityNameCurrentRow {
                 logical_name_id: id.clone(),

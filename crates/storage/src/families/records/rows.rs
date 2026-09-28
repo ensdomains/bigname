@@ -1,5 +1,7 @@
 //! The F6 and F7 rows one serving pointer admits (record_inventory.rs, `attributed_events`), read
 //! as record candidates, and the partition version events that are boundary candidates.
+use std::collections::{BTreeSet, HashMap};
+
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row, postgres::PgRow};
@@ -138,48 +140,98 @@ const VALUE_COLUMNS: &str =
     normalized_event_id, source_family, status, value, record_family, selector_key,
     contenthash_hex, address_bytes_hex, source_event";
 
-/// The admitted partitions' version events and their retained writes.
+/// One admitted F6 partition of a resolver: (resolver address, arm, arm identity).
+pub(crate) type PartitionKey = (String, &'static str, String);
+
+/// The partitions' version events and retained writes read for many serving pointers at once.
+#[derive(Default)]
+pub(crate) struct PartitionRows {
+    versions: HashMap<(String, String, String), Vec<FamilyPosition>>,
+    values: HashMap<(String, String, String), Vec<RecordCandidate>>,
+}
+
+impl PartitionRows {
+    /// The version events and retained writes of `partitions`, as one read of just those
+    /// partitions returns them: the version events distinct, one write per partition row.
+    pub(crate) fn of(
+        &self,
+        partitions: &[PartitionKey],
+    ) -> (Vec<FamilyPosition>, Vec<RecordCandidate>) {
+        let mut versions: Vec<FamilyPosition> = Vec::new();
+        let mut values = Vec::new();
+        for (resolver, arm, identity) in partitions {
+            let key = (resolver.clone(), (*arm).to_owned(), identity.clone());
+            for version in self.versions.get(&key).into_iter().flatten() {
+                if !versions.contains(version) {
+                    versions.push(version.clone());
+                }
+            }
+            values.extend(self.values.get(&key).into_iter().flatten().cloned());
+        }
+        (versions, values)
+    }
+}
+
+/// The version events and retained writes of every partition in `partitions` on `chain_id`, in
+/// two statements.
 pub(crate) async fn load_partitions(
     conn: &mut PgConnection,
     chain_id: &str,
-    resolver_address: &str,
-    partitions: &[(&'static str, String)],
-) -> Result<(Vec<FamilyPosition>, Vec<RecordCandidate>)> {
-    let arms: Vec<&str> = partitions.iter().map(|(arm, _)| *arm).collect();
-    let identities: Vec<&str> = partitions.iter().map(|(_, id)| id.as_str()).collect();
+    partitions: &[PartitionKey],
+) -> Result<PartitionRows> {
+    let unique: BTreeSet<&PartitionKey> = partitions.iter().collect();
+    if unique.is_empty() {
+        return Ok(PartitionRows::default());
+    }
+    let resolvers: Vec<&str> = unique
+        .iter()
+        .map(|(resolver, _, _)| resolver.as_str())
+        .collect();
+    let arms: Vec<&str> = unique.iter().map(|(_, arm, _)| *arm).collect();
+    let identities: Vec<&str> = unique.iter().map(|(_, _, id)| id.as_str()).collect();
+    let mut rows = PartitionRows::default();
     let versions = sqlx::query(
-        "SELECT DISTINCT partition.version_position
+        "SELECT DISTINCT partition.resolver_address, partition.arm, partition.arm_identity,
+                partition.version_position
          FROM bigname_phase.project_node_record_partition partition
-         JOIN unnest($3::text[], $4::text[]) admitted (arm, arm_identity)
-           ON admitted.arm = partition.arm AND admitted.arm_identity = partition.arm_identity
-         WHERE partition.chain_id = $1 AND partition.resolver_address = $2
-           AND partition.version_position IS NOT NULL",
+         JOIN unnest($2::text[], $3::text[], $4::text[]) admitted (resolver_address, arm, arm_identity)
+           ON admitted.resolver_address = partition.resolver_address
+          AND admitted.arm = partition.arm AND admitted.arm_identity = partition.arm_identity
+         WHERE partition.chain_id = $1 AND partition.version_position IS NOT NULL",
     )
     .bind(chain_id)
-    .bind(resolver_address)
+    .bind(&resolvers)
     .bind(&arms)
     .bind(&identities)
     .fetch_all(&mut *conn)
     .await
-    .context("failed to load the admitted record partitions")?
-    .into_iter()
-    .filter_map(|row| {
-        row.try_get::<Value, _>("version_position")
+    .context("failed to load the admitted record partitions")?;
+    for row in versions {
+        let Some(position) = row
+            .try_get::<Value, _>("version_position")
             .ok()
             .as_ref()
             .and_then(FamilyPosition::from_json)
-    })
-    .collect();
+        else {
+            continue;
+        };
+        rows.versions
+            .entry(partition_key(&row)?)
+            .or_default()
+            .push(position);
+    }
     let columns = VALUE_COLUMNS
         .split(',')
         .map(|column| format!("value.{}", column.trim()))
         .collect::<Vec<_>>()
         .join(", ");
     let values = sqlx::query(&format!(
-        "SELECT {columns}, value.sibling_position, {}
+        "SELECT {columns}, value.resolver_address, value.arm, value.arm_identity,
+                value.sibling_position, {}
          FROM bigname_phase.project_node_record_value value
-         JOIN unnest($3::text[], $4::text[]) admitted (arm, arm_identity)
-           ON admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity
+         JOIN unnest($2::text[], $3::text[], $4::text[]) admitted (resolver_address, arm, arm_identity)
+           ON admitted.resolver_address = value.resolver_address
+          AND admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity
          LEFT JOIN bigname_phase.project_node_record_partition partition
            ON (partition.chain_id, partition.resolver_address, partition.arm, partition.arm_identity) =
               (value.chain_id, value.resolver_address, value.arm, value.arm_identity)
@@ -188,41 +240,68 @@ pub(crate) async fn load_partitions(
           AND classification.resolver_address = value.resolver_address
          LEFT JOIN bigname_phase.name_surfaces surface
            ON surface.logical_name_id = value.logical_name_id
-         WHERE value.chain_id = $1 AND value.resolver_address = $2",
+         WHERE value.chain_id = $1",
         text_hydration::COLUMNS
     ))
     .bind(chain_id)
-    .bind(resolver_address)
+    .bind(&resolvers)
     .bind(&arms)
     .bind(&identities)
     .fetch_all(&mut *conn)
     .await
-    .context("failed to load the admitted record values")?
-    .iter()
-    .map(|row| RecordCandidate::from_row(row, true))
-    .collect::<Result<Vec<_>>>()?;
-    Ok((versions, values))
+    .context("failed to load the admitted record values")?;
+    for row in &values {
+        rows.values
+            .entry(partition_key(row)?)
+            .or_default()
+            .push(RecordCandidate::from_row(row, true)?);
+    }
+    Ok(rows)
 }
 
-/// The retained writes of one record id at a resolver.
+fn partition_key(row: &PgRow) -> Result<(String, String, String)> {
+    Ok((
+        row.try_get("resolver_address")?,
+        row.try_get("arm")?,
+        row.try_get("arm_identity")?,
+    ))
+}
+
+/// The retained writes of each (resolver address, record id) in `record_ids` on `chain_id`, in
+/// one statement.
 pub(crate) async fn load_record_id_values(
     conn: &mut PgConnection,
     chain_id: &str,
-    resolver_address: &str,
-    record_id: &str,
-) -> Result<Vec<RecordCandidate>> {
-    sqlx::query(&format!(
-        "SELECT {VALUE_COLUMNS}
+    record_ids: &[(String, String)],
+) -> Result<HashMap<(String, String), Vec<RecordCandidate>>> {
+    let unique: BTreeSet<&(String, String)> = record_ids.iter().collect();
+    let mut out: HashMap<(String, String), Vec<RecordCandidate>> = HashMap::new();
+    if unique.is_empty() {
+        return Ok(out);
+    }
+    let resolvers: Vec<&str> = unique
+        .iter()
+        .map(|(resolver, _)| resolver.as_str())
+        .collect();
+    let ids: Vec<&str> = unique.iter().map(|(_, id)| id.as_str()).collect();
+    let rows = sqlx::query(&format!(
+        "SELECT {VALUE_COLUMNS}, resolver_address, record_id
          FROM bigname_phase.project_record_id_value
-         WHERE chain_id = $1 AND resolver_address = $2 AND record_id = $3"
+         WHERE chain_id = $1
+           AND (resolver_address, record_id) IN (
+               SELECT requested.resolver_address, requested.record_id
+               FROM unnest($2::text[], $3::text[]) requested (resolver_address, record_id))"
     ))
     .bind(chain_id)
-    .bind(resolver_address)
-    .bind(record_id)
+    .bind(&resolvers)
+    .bind(&ids)
     .fetch_all(&mut *conn)
     .await
-    .context("failed to load the linked record values")?
-    .iter()
-    .map(|row| RecordCandidate::from_row(row, false))
-    .collect()
+    .context("failed to load the linked record values")?;
+    for row in &rows {
+        out.entry((row.try_get("resolver_address")?, row.try_get("record_id")?))
+            .or_default()
+            .push(RecordCandidate::from_row(row, false)?);
+    }
+    Ok(out)
 }

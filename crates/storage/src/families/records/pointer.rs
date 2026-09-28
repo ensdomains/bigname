@@ -1,9 +1,11 @@
 //! F5, the resource resolver pointer (`project_resource_pointer`): one row per resource with three
 //! column groups, the current pointer with clears, the latest non-zero pointer and the record
 //! version boundary (docs/projections.md, "Owned key families").
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::FamilyPosition;
@@ -64,32 +66,54 @@ pub(crate) async fn load_family_resource_pointer_on(
     chain_id: &str,
     resource_id: Uuid,
 ) -> Result<Option<FamilyResourcePointer>> {
-    let row = sqlx::query(
+    Ok(
+        load_family_resource_pointers_on(conn, chain_id, &[resource_id])
+            .await?
+            .remove(&resource_id),
+    )
+}
+
+/// The F5 rows of `resource_ids` on `chain_id`, keyed by resource, in one statement.
+pub(crate) async fn load_family_resource_pointers_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, FamilyResourcePointer>> {
+    if resource_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows = sqlx::query(
         "SELECT chain_id, resource_id, block_number, transaction_index, log_index,
                 event_identity, normalized_event_id, resolver_address, pointer_position,
                 namespace, source_family, namehash, nonzero_resolver_address, nonzero_position,
                 boundary_kind, boundary_position, boundary_block_timestamp
          FROM bigname_phase.project_resource_pointer
-         WHERE chain_id = $1 AND resource_id = $2",
+         WHERE chain_id = $1 AND resource_id = ANY($2::uuid[])",
     )
     .bind(chain_id)
-    .bind(resource_id)
-    .fetch_optional(&mut *conn)
+    .bind(resource_ids)
+    .fetch_all(&mut *conn)
     .await
-    .with_context(|| format!("failed to load the family resource pointer of {resource_id}"))?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
+    .context("failed to load the family resource pointers")?;
+    rows.iter()
+        .map(|row| {
+            let pointer = from_row(row)?;
+            Ok((pointer.resource_id, pointer))
+        })
+        .collect()
+}
+
+fn from_row(row: &PgRow) -> Result<FamilyResourcePointer> {
     let position = |column: &str| -> Result<Option<FamilyPosition>> {
         Ok(row
             .try_get::<Option<Value>, _>(column)?
             .as_ref()
             .and_then(FamilyPosition::from_json))
     };
-    Ok(Some(FamilyResourcePointer {
+    Ok(FamilyResourcePointer {
         chain_id: row.try_get("chain_id")?,
         resource_id: row.try_get("resource_id")?,
-        position: FamilyPosition::from_row(&row)?,
+        position: FamilyPosition::from_row(row)?,
         normalized_event_id: row.try_get("normalized_event_id")?,
         resolver_address: row.try_get("resolver_address")?,
         pointer_position: position("pointer_position")?,
@@ -101,5 +125,5 @@ pub(crate) async fn load_family_resource_pointer_on(
         boundary_kind: row.try_get("boundary_kind")?,
         boundary_position: position("boundary_position")?,
         boundary_block_timestamp: row.try_get("boundary_block_timestamp")?,
-    }))
+    })
 }
