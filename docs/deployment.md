@@ -237,6 +237,31 @@ docker compose --env-file .env.server -f docker-compose.server.yml up -d --force
 `docker compose restart` does not reload changed environment configuration, so
 a restart alone keeps the old value.
 
+The switch is transitional: step 7c of TYR-36 deletes it together with the
+served tables. Until then, turning it on is not reversible by flipping it back.
+With the switch on, Project skips the served engine and the Project row
+follows the [family marker](glossary.md#family-marker), so the served tables
+stop at the block they held when the switch came on while the Project row
+moves past it. Turned off again, the phase runner would resume the served
+engine after the Project row, never applying the blocks in between, and the API
+would present the stale tables as current at the Project row.
+
+So once the switch has been on for any block, turning it off needs a full
+Project redo before the API serves the served tables again. With the switch
+off in `.env.server`, stop the `api` and `phase-runner` services, run the redo
+over each chain's full retained range, then recreate both:
+
+```sh
+phase-runner redo --chain <chain-id> \
+  --source '<chain-id>:<key>:<kind>:<seed-basis>:<start>[:<role>]=<endpoint-env>' \
+  --phase project --from-block <first retained block> --to-block <Project block>
+```
+
+Repeat `--source` with the complete intake-capable descriptor set recorded by
+that chain's Ingest cursors. `<Project block>` is the chain's Project row
+`current_block_number`. Nothing enforces this step: the phase runner and the
+API start with the switch off either way.
+
 The direct `docker run` selectors under [Container contents](#container-contents)
 do not forward the variable: anyone running the binaries that way must pass
 `-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
