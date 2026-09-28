@@ -23,14 +23,14 @@ async fn hkw_seed(database: &TestDatabase) -> Result<()> {
             loose,
             v2_history_event(
                 "hk-child-1",
-                Some("ens:c1.history.eth"),
+                Some(&bigname_storage::logical_name_id_for_name("ens", "c1.history.eth")),
                 None,
                 "RegistrationGranted",
                 105,
             ),
             v2_history_event(
                 "hk-child-2",
-                Some("ens:c2.history.eth"),
+                Some(&bigname_storage::logical_name_id_for_name("ens", "c2.history.eth")),
                 None,
                 "RegistrationGranted",
                 108,
@@ -38,8 +38,8 @@ async fn hkw_seed(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    seed_child_registration_memberships(database, "history.eth", &["hk-child-1", "hk-child-2"])
-        .await
+    // Project places both grants under `history.eth` from their surfaces' label hashes.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 /// The unpaged collection: every row id in order, and its `total_count`.
@@ -110,19 +110,8 @@ async fn hkw_move_event(
     .await?
     .rows_affected();
     anyhow::ensure!(moved == 1, "{event_identity} must exist");
-    sqlx::query(
-        "UPDATE bigname_phase.child_registration_events
-         SET block_number = $2, block_hash = $3, transaction_order_key = 0, log_order_key = $4,
-             target_block_number = $2, target_block_hash = $3
-         WHERE event_identity = $1",
-    )
-    .bind(event_identity)
-    .bind(block)
-    .bind(&hash)
-    .bind(log_index)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    // A rebuild derives the moved row's child membership at its new position.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 fn hkw_id(identity: &str) -> String {

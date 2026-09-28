@@ -1072,7 +1072,7 @@ async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_regist
 #[tokio::test]
 async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Result<()> {
     const NAME: &str = "born-wrapped-history.eth";
-    const LOGICAL: &str = "ens:born-wrapped-history.eth";
+    let logical = bigname_storage::logical_name_id_for_name("ens", NAME);
     let database = TestDatabase::new_migrated().await?;
     let wrapper = Uuid::from_u128(0x7140);
     let registrar = Uuid::from_u128(0x7141);
@@ -1081,7 +1081,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     seed_registration_history_name(
         &database,
-        LOGICAL,
+        &logical,
         NAME,
         80,
         wrapper,
@@ -1109,7 +1109,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     .execute(&database.pool)
     .await?;
     let wrapper_event = |identity: &str, resource: Uuid, kind: &str, block: i64| {
-        let mut event = v2_history_event(identity, Some(LOGICAL), Some(resource), kind, block);
+        let mut event = v2_history_event(identity, Some(logical.as_str()), Some(resource), kind, block);
         event.source_family = "ens_v1_wrapper_l1".to_owned();
         if kind == "SurfaceBound" {
             event.after_state = json!({
@@ -1147,7 +1147,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     });
     let unwrapped_transfer = v2_history_event(
         "born-wrap-unwrapped-transfer",
-        Some(LOGICAL),
+        Some(logical.as_str()),
         Some(registrar),
         "TokenControlTransferred",
         132,
@@ -1159,6 +1159,12 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
             setup,
             wrapper_event("born-wrap-binding", wrapper, "SurfaceBound", 130),
             registration_history_wrapper_epoch(&wrapper_event(
+                "born-wrap-binding",
+                wrapper,
+                "SurfaceBound",
+                130,
+            )),
+            registration_history_wrapper_scope(&wrapper_event(
                 "born-wrap-binding",
                 wrapper,
                 "SurfaceBound",
@@ -1197,8 +1203,9 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
             "transfer",
             "transfer",
             "authority",
-            "authority",
-            "registration"
+            "registration",
+            "permission",
+            "authority"
         ]
     );
 
@@ -1211,7 +1218,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     );
     let mut record = v2_history_event(
         "born-wrap-resource-less-record",
-        Some(LOGICAL),
+        Some(logical.as_str()),
         None,
         "RecordChanged",
         135,
@@ -1248,8 +1255,9 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
         "transfer",
         "transfer",
         "authority",
-        "authority",
         "registration",
+        "permission",
+        "authority",
     ];
     assert_eq!(
         history_types(direct_rows),
@@ -1289,7 +1297,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     let plan = bigname_storage::explain_registration_history_filter_for_test(
         &database.pool,
         registrar,
-        LOGICAL,
+        &logical,
         "ethereum-mainnet",
         "ens",
         &namehash,
@@ -1459,6 +1467,7 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
             older_registration,
             registration,
             registration_history_wrapper_epoch(&wrapper_binding),
+            registration_history_wrapper_scope(&wrapper_binding),
             wrapper_binding,
             wrapper_transfer,
             wrapped_controller_renewal,
@@ -3161,6 +3170,15 @@ async fn seed_registration_history_name(
     Ok(())
 }
 
+
+/// The NameWrapper scope a NameWrapped emits beside its binding: the wrapper state and fuses.
+fn registration_history_wrapper_scope(binding: &NormalizedEvent) -> NormalizedEvent {
+    let mut scope = binding.clone();
+    scope.event_identity = format!("{}:scope", binding.event_identity);
+    scope.event_kind = "PermissionScopeChanged".into();
+    scope.after_state = json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0});
+    scope
+}
 
 fn registration_history_wrapper_epoch(binding: &NormalizedEvent) -> NormalizedEvent {
     let mut epoch = binding.clone();

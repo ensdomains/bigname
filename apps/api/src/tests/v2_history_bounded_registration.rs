@@ -14,14 +14,7 @@ async fn name_history_continuation_does_not_look_the_name_up_again() -> Result<(
     const NAME: &str = "continued.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_4000,
-        "0x00000000000000000000000000000000000b0a04",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_4000)
     .await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
@@ -102,14 +95,7 @@ async fn registration_selected_above_the_bound_adds_no_lease_history() -> Result
     const NAME: &str = "selected-later.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_5000,
-        "0x00000000000000000000000000000000000b0a05",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_5000)
     .await?;
     let lease = Uuid::from_u128(0xb0a_5100);
     upsert_test_resources(

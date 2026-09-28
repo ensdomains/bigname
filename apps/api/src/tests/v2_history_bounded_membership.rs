@@ -56,36 +56,24 @@ fn bounded_page_options(block: i64) -> bigname_storage::HistoryPageOptions {
     }
 }
 
-/// A name bound to its own resource and token lineage, with one current address relation whose
-/// cited event lies at `relation_block`.
-#[allow(clippy::too_many_arguments)]
-async fn seed_bounded_name(
-    database: &TestDatabase,
-    name: &str,
-    seed: u128,
-    address: &str,
-    relation: bigname_storage::AddressNameRelation,
-    relation_block: i64,
-) -> Result<(String, Uuid)> {
+/// A name bound to its own resource and token lineage from block 200. The identity carries no
+/// events: each test adds the events that create its relations and history.
+async fn seed_bounded_name(database: &TestDatabase, name: &str, seed: u128) -> Result<(String, Uuid)> {
     let resource = Uuid::from_u128(seed);
-    seed_identity_name(
-        database,
-        &format!("ens:{name}"),
+    let logical_name_id = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
         name,
-        name,
-        &format!("node:{name}"),
+        BOUNDED_CHAIN,
+        200,
+        "0xhistory200",
         resource,
         Uuid::from_u128(seed + 1),
         Uuid::from_u128(seed + 2),
-        address,
-        relation,
-        relation_block,
+        "ens_v1",
     )
     .await?;
-    Ok((
-        bigname_storage::logical_name_id_for_name("ens", name),
-        resource,
-    ))
+    Ok((logical_name_id, resource))
 }
 
 async fn bounded_address_history_hashes(
@@ -128,23 +116,9 @@ fn bounded_route_hashes(payload: &Value) -> Vec<String> {
 async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (held, held_resource) = seed_bounded_name(
-        &database,
-        "held-before.eth",
-        0xb0a_1000,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::Registrant,
-        210,
-    )
+    let (held, held_resource) = seed_bounded_name(&database, "held-before.eth", 0xb0a_1000)
     .await?;
-    let (later, later_resource) = seed_bounded_name(
-        &database,
-        "held-later.eth",
-        0xb0a_2000,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        241,
-    )
+    let (later, later_resource) = seed_bounded_name(&database, "held-later.eth", 0xb0a_2000)
     .await?;
     let mut grant = v2_history_event(
         "bounded-held-grant",
@@ -154,6 +128,15 @@ async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Resu
         210,
     );
     grant.after_state["registrant"] = json!(BOUNDED_ADDRESS);
+    // The later name's token moves to the address at 241.
+    let mut later_holder = v2_history_event(
+        "bounded-later-holder",
+        Some(&later),
+        Some(later_resource),
+        "TokenControlTransferred",
+        241,
+    );
+    later_holder.after_state["to"] = json!(BOUNDED_ADDRESS);
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -180,13 +163,13 @@ async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Resu
                 "RegistrationRenewed",
                 238,
             ),
+            later_holder,
         ],
     )
     .await?;
 
     // Project has published 240: the relation cited at 241 is not part of that publication.
-    publish_bounded_membership_at(&database, 240).await?;
-    rebuild_fixture_families(&database.pool, BOUNDED_CHAIN, 240, "0xhistory240").await?;
+    publish_test_families(&database, 240).await?;
     let payload = v2_history_payload_for_database(
         &database,
         &format!("/v1/addresses/{BOUNDED_ADDRESS}/history?page_size=20&include=total_count"),
@@ -241,7 +224,7 @@ async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Resu
     .await?;
     assert_eq!(
         bounded_route_hashes(&published),
-        vec!["0xtx238", "0xtx230", "0xtx215", "0xtx210"],
+        vec!["0xtx241", "0xtx238", "0xtx230", "0xtx215", "0xtx210"],
         "{published}"
     );
     database.cleanup().await
@@ -340,14 +323,7 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
     const NAME: &str = "pointed-later.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_3000,
-        "0x00000000000000000000000000000000000b0a03",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_3000)
     .await?;
     // The resolver the registration points at from 241 is a declared ENSv1 resolver.
     let manifest = declare_family_fixture_resolver(
@@ -451,14 +427,7 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
     const RESOLVER_V2: &str = "0x00000000000000000000000000000000000b0a2c";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_7000,
-        "0x00000000000000000000000000000000000b0a07",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_7000)
     .await?;
     // The ENSv2 registry admitted the resolver, and the resolver manifest declares it as a
     // public_resolver_v2.

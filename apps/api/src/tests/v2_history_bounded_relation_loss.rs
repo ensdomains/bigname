@@ -17,14 +17,13 @@ const LOST_OTHER: &str = "0x00000000000000000000000000000000000b0aff";
 async fn lost_relation_history(
     name: &str,
     seed: u128,
-    relation: bigname_storage::AddressNameRelation,
     filter: Option<bigname_storage::AddressNameRelation>,
     created: impl FnOnce(&str, Uuid) -> NormalizedEvent,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
     let (logical_name_id, resource) =
-        seed_bounded_name(&database, name, seed, BOUNDED_ADDRESS, relation, 205).await?;
+        seed_bounded_name(&database, name, seed).await?;
     let mut later = v2_history_event(
         &format!("{name}-renewed"),
         Some(&logical_name_id),
@@ -120,7 +119,6 @@ async fn lost_registrant_from_a_grant_keeps_its_bounded_history() -> Result<()> 
     let (held, lost) = lost_relation_history(
         "lost-grant-registrant.eth",
         0xb0a_6000,
-        bigname_storage::AddressNameRelation::Registrant,
         Some(bigname_storage::AddressNameRelation::Registrant),
         relation_event(
             "RegistrationGranted",
@@ -138,7 +136,6 @@ async fn lost_token_holder_from_a_transfer_keeps_its_bounded_history() -> Result
     let (held, lost) = lost_relation_history(
         "lost-transfer-holder.eth",
         0xb0a_6100,
-        bigname_storage::AddressNameRelation::TokenHolder,
         Some(bigname_storage::AddressNameRelation::TokenHolder),
         relation_event(
             "TokenControlTransferred",
@@ -157,7 +154,6 @@ async fn lost_ens_v2_controller_from_an_authority_transfer_keeps_its_bounded_his
     let (held, lost) = lost_relation_history(
         "lost-v2-controller.eth",
         0xb0a_6200,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "AuthorityTransferred",
@@ -177,7 +173,6 @@ async fn lost_ens_v1_controller_of_a_token_backed_name_keeps_its_bounded_history
     let (held, lost) = lost_relation_history(
         "lost-v1-token-controller.eth",
         0xb0a_6300,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "AuthorityTransferred",
@@ -197,7 +192,6 @@ async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()
     let (held, lost) = lost_relation_history(
         "lost-grant-holder.eth",
         0xb0a_6400,
-        bigname_storage::AddressNameRelation::TokenHolder,
         Some(bigname_storage::AddressNameRelation::TokenHolder),
         relation_event(
             "RegistrationGranted",
@@ -217,7 +211,6 @@ async fn lost_controller_from_the_token_holder_fallback_keeps_its_bounded_histor
     let (held, lost) = lost_relation_history(
         "lost-fallback-controller.eth",
         0xb0a_6600,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "TokenControlTransferred",
@@ -298,17 +291,9 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
     const NAME: &str = "lost-wrapper-controller.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_6700,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_6700)
     .await?;
-    // The fixture's binding opens at the identity blocks' 2024 timestamps; open it before the
-    // events' 2023 timestamps so the lease's events fall inside it.
+    // Open the binding before every event of the lease, so they all fall inside it.
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings SET active_from = '2023-11-14T00:00:00Z'
          WHERE logical_name_id = $1",
@@ -408,14 +393,7 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
     const NAME: &str = "self-transfer-holder.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_6800,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_6800)
     .await?;
     let mut grant = v2_history_event(
         "self-transfer-grant",
@@ -501,14 +479,7 @@ async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events
         ("granted-then-self.eth", 0xb0a_6b00_u128, "RegistrationGranted"),
         ("reserved-then-self.eth", 0xb0a_6c00_u128, "RegistrationReserved"),
     ] {
-        let (logical_name_id, resource) = seed_bounded_name(
-            &database,
-            name,
-            seed,
-            BOUNDED_ADDRESS,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            205,
-        )
+        let (logical_name_id, resource) = seed_bounded_name(&database, name, seed)
         .await?;
         // Older history on the resource that names no relation of the address.
         let mut older = v2_history_event(
@@ -576,14 +547,7 @@ async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Res
         ("acquired-then-self.eth", 0xb0a_6900_u128, "transfer"),
         ("acquired-by-transfer.eth", 0xb0a_6a00_u128, "cited"),
     ] {
-        let (logical_name_id, resource) = seed_bounded_name(
-            &database,
-            name,
-            seed,
-            BOUNDED_ADDRESS,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            205,
-        )
+        let (logical_name_id, resource) = seed_bounded_name(&database, name, seed)
         .await?;
         // The name's history at the bound names another holder.
         let mut grant = v2_history_event(

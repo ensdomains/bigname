@@ -8,10 +8,8 @@
 async fn registration_witness_above_the_published_block_does_not_reclassify_older_rows()
 -> Result<()> {
     const NAME: &str = "reserved-then-granted.eth";
-    const SEED: &str = "ens:reserved-then-granted.eth";
     const CHAIN: &str = "ethereum-mainnet";
     let database = TestDatabase::new_migrated().await?;
-    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let registration = Uuid::from_u128(0x71b0);
     let blocks = (120..=125)
         .map(|number| {
@@ -27,18 +25,17 @@ async fn registration_witness_above_the_published_block_does_not_reclassify_olde
         })
         .collect::<Vec<_>>();
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
-    seed_identity_name(
-        &database,
-        SEED,
+    let logical_name_id = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
         NAME,
-        NAME,
-        "node:reserved-then-granted.eth",
+        CHAIN,
+        120,
+        "0xhistory120",
         registration,
         Uuid::from_u128(0x81b0),
         Uuid::from_u128(0x91b1),
-        "0x00000000000000000000000000000000000071b1",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        120,
+        "ens_v2",
     )
     .await?;
     upsert_test_token_lineages(
@@ -72,9 +69,6 @@ async fn registration_witness_above_the_published_block_does_not_reclassify_olde
     .bind(registration)
     .execute(&database.pool)
     .await?;
-    // Project has published block 122.
-    seed_schema_v2_ens_lookup_head(&database.pool, 122, "0xhistory122", "2023-11-14T22:15:22Z")
-        .await?;
 
     let registry_row = |identity: &str, kind: &str, source_event: &str, number: i64| {
         let mut event =
@@ -117,6 +111,8 @@ async fn registration_witness_above_the_published_block_does_not_reclassify_olde
     )
     .await?;
 
+    // Project has published block 122.
+    publish_test_families(&database, 122).await?;
     let route = format!("/v1/events?registration_id={registration}&page_size=20&include=total_count");
     for canonical_only in [true, false] {
         let rows =
@@ -180,8 +176,7 @@ async fn registration_witness_above_the_published_block_does_not_reclassify_olde
         assert_eq!(rows[1].registration_id, Some(registration));
         assert_eq!(rows[2].registration_id, None);
     }
-    seed_schema_v2_ens_lookup_head(&database.pool, 125, "0xhistory125", "2023-11-14T22:15:25Z")
-        .await?;
+    publish_test_families(&database, 125).await?;
     let published = v2_history_payload_for_database(&database, &route).await?;
     let block_numbers = published["data"]
         .as_array()

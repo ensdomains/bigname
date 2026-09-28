@@ -2132,7 +2132,7 @@ async fn resolver_roles_use_the_wrapped_registration_lease_handle() -> Result<()
         seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
     let payload = v2_resolver_payload_for_database(
         &database,
-        &"/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles".to_owned(),
+        "/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles",
     )
     .await?;
     let wrapper_roles = payload["data"].as_array().unwrap().iter()
