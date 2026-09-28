@@ -23,7 +23,7 @@ use tokio::{
 use crate::{
     BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
     LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
-    abi::{dns_encode_name, hex_string, namehash},
+    abi::{hex_string, namehash},
     admitted_verified_authority_arms,
     ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test},
 };
@@ -426,7 +426,7 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
     });
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
 
-    for (case_name, record_key, entries, provenance, coverage, support_status) in
+    for (case_name, record_key, entries, provenance, coverage, _support_status) in
         cases.chain(marker_cases)
     {
         let selector = RecordSelector::parse(&record_key)?;
@@ -439,41 +439,38 @@ async fn rust_and_sql_indexed_answer_derivations_are_equivalent() -> AnyResult<(
             selector.selector_key.as_deref(),
         )
         .comparison_value();
-        sqlx::query(
-            "UPDATE record_inventory_current
-             SET entries = $1,
-                 provenance = $2,
-                 support_status = $3,
-                 unsupported_reason = CASE WHEN $3 = 'unsupported'
-                     THEN 'coverage_incomplete'
-                     ELSE NULL
-                 END",
-        )
-        .bind(&entries)
-        .bind(&provenance)
-        .bind(support_status)
-        .execute(fixture.pool())
-        .await?;
-        let snapshot = crate::store::load_snapshot(
+        // Unit-level parity uses the captured comparison payload consumed by the SQL writer.
+        // The held publication and authority still come from actual family inputs.
+        let mut snapshot = crate::store::load_snapshot(
             fixture.pool(),
             &LookupRequest::new(&fixture.logical_name_id, [&record_key])?,
         )
         .await?;
-        let (resource_id, boundary_key, row_xmin): (String, String, String) = sqlx::query_as(
-            "SELECT resource_id::text, record_version_boundary_key, xmin::text
-             FROM record_inventory_current",
-        )
-        .fetch_one(fixture.pool())
-        .await?;
+        let comparison = &mut snapshot.execution_authority["family_comparison"];
+        let resource_id = comparison["resource_id"]
+            .as_str()
+            .context("comparison resource")?
+            .to_owned();
+        let boundary_key = comparison["boundary_key"]
+            .as_str()
+            .context("comparison boundary")?
+            .to_owned();
+        let row_xmin = comparison["publication_sequence"]
+            .as_str()
+            .context("comparison sequence")?
+            .to_owned();
+        comparison["entries"] = entries.clone();
+        comparison["provenance"] = provenance.clone();
+        comparison["coverage"] = coverage.clone();
         let live_probe = json!({ "status": "derivation_probe", "case": case_name });
         let write_status: String = sqlx::query_scalar(
             "SELECT write_resolution_divergence(
                  $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false
              )",
         )
-        .bind(&resource_id)
-        .bind(&boundary_key)
-        .bind(&row_xmin)
+        .bind(resource_id)
+        .bind(boundary_key)
+        .bind(row_xmin)
         .bind(&snapshot.authoritative_position.chain_id)
         .bind(snapshot.authoritative_position.block_number)
         .bind(&snapshot.authoritative_position.block_hash)
@@ -532,27 +529,7 @@ async fn empty_ensip19_default_agrees_with_live_miss_without_divergence() -> Any
     )?)])
     .await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET selectors = $1, entries = $2, provenance = $3",
-    )
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648"
-    }]))
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648",
-        "status":"not_found"
-    }]))
-    .bind(json!({"read_rules":[{
-        "kind":"ensip19_default_address",
-        "source_record_key":"addr:2147483648"
-    }]}))
-    .execute(fixture.pool())
-    .await?;
+    fixture::seed_ensip19_default(&fixture, "0x").await?;
 
     let outcome = lookup_engine(fixture.pool(), &rpc_url)?
         .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
@@ -577,28 +554,7 @@ async fn zero20_ensip19_default_agrees_with_legacy_live_miss_without_divergence(
     )?)])
     .await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET selectors = $1, entries = $2, provenance = $3",
-    )
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648"
-    }]))
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648",
-        "status":"success",
-        "value":{"encoding":"hex","bytes":"0x0000000000000000000000000000000000000000"}
-    }]))
-    .bind(json!({"read_rules":[{
-        "kind":"ensip19_default_address",
-        "source_record_key":"addr:2147483648"
-    }]}))
-    .execute(fixture.pool())
-    .await?;
+    fixture::seed_ensip19_default(&fixture, "0x0000000000000000000000000000000000000000").await?;
 
     let outcome = lookup_engine(fixture.pool(), &rpc_url)?
         .lookup(LookupRequest::new(&fixture.logical_name_id, ["addr:60"])?)
@@ -675,28 +631,7 @@ async fn ensip19_derived_indexed_agreement_clears_a_prior_divergence() -> AnyRes
     ])
     .await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET selectors = $1, entries = $2, provenance = $3",
-    )
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648"
-    }]))
-    .bind(json!([{
-        "record_key":"addr:2147483648",
-        "record_family":"addr",
-        "selector_key":"2147483648",
-        "status":"success",
-        "value":default_address
-    }]))
-    .bind(json!({"read_rules":[{
-        "kind":"ensip19_default_address",
-        "source_record_key":"addr:2147483648"
-    }]}))
-    .execute(fixture.pool())
-    .await?;
+    fixture::seed_ensip19_default(&fixture, default_address).await?;
     let request = || LookupRequest::new(&fixture.logical_name_id, ["addr:60"]);
 
     let disagreement = lookup_engine(fixture.pool(), &rpc_url)?
@@ -807,18 +742,12 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
          GRANT TEMPORARY ON DATABASE {} TO {role};
          GRANT USAGE ON SCHEMA bigname_phase TO {role};
          GRANT SELECT ON TABLE
-             bigname_phase.chain_heads,
-             bigname_phase.chain_lineage,
-             bigname_phase.chain_phase_state,
-             bigname_phase.name_current,
-             bigname_phase.name_surfaces,
-             bigname_phase.resources,
-             bigname_phase.surface_bindings,
-             bigname_phase.token_lineages,
-             bigname_phase.record_inventory_current,
-             bigname_phase.manifest_versions,
-             bigname_phase.manifest_contract_instances
-         TO {role};
+             bigname_phase.chain_heads, bigname_phase.chain_lineage,
+             bigname_phase.chain_phase_state, bigname_phase.name_surfaces,
+             bigname_phase.resources, bigname_phase.surface_bindings,
+             bigname_phase.token_lineages, bigname_phase.normalized_events,
+             bigname_phase.manifest_versions, bigname_phase.manifest_contract_instances,
+             bigname_phase.label_preimages TO {role};
          GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
              text, bigint, text, jsonb, jsonb, uuid, text, text
          ) TO {role};
@@ -831,6 +760,15 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .execute(fixture.pool())
     .await?;
 
+    let family_tables: Vec<String> = sqlx::query_scalar("SELECT tablename FROM pg_tables WHERE schemaname='bigname_phase' AND starts_with(tablename, 'project_')").fetch_all(fixture.pool()).await?;
+    for table in family_tables {
+        raw_sql(&format!(
+            "GRANT SELECT ON TABLE bigname_phase.{} TO {role}",
+            quote_identifier(&table)
+        ))
+        .execute(fixture.pool())
+        .await?;
+    }
     let connect_options = fixture
         .pool()
         .connect_options()
@@ -846,16 +784,20 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     let snapshot = crate::store::load_snapshot(&api_pool, &request).await?;
 
     let mut api_connection = api_pool.acquire().await?;
-    let (resource_id, boundary_key, row_xmin): (String, String, String) = sqlx::query_as(
-        "SELECT resource_id::text, record_version_boundary_key, xmin::text
-         FROM record_inventory_current",
-    )
-    .fetch_one(&mut *api_connection)
-    .await?;
+    let comparison = &snapshot.execution_authority["family_comparison"];
+    let resource_id = comparison["resource_id"]
+        .as_str()
+        .context("comparison resource")?;
+    let boundary_key = comparison["boundary_key"]
+        .as_str()
+        .context("comparison boundary")?;
+    let row_xmin = comparison["publication_sequence"]
+        .as_str()
+        .context("comparison sequence")?;
     raw_sql(
         "CREATE TEMP TABLE chain_heads (shadow text);
          CREATE TEMP TABLE chain_lineage (shadow text);
-         CREATE TEMP TABLE record_inventory_current (shadow text);
+         CREATE TEMP TABLE project_family_marker (shadow text);
          CREATE TEMP TABLE resolution_divergences (shadow text);",
     )
     .execute(&mut *api_connection)
@@ -870,9 +812,9 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .bind(ETHEREUM_HASH)
     .bind(&positions)
     .bind(&snapshot.execution_authority)
-    .bind(&resource_id)
-    .bind(&boundary_key)
-    .bind(&row_xmin)
+    .bind(resource_id)
+    .bind(boundary_key)
+    .bind(row_xmin)
     .fetch_one(&mut *api_connection)
     .await?;
     assert_eq!(guard_status, "unchanged");
@@ -882,9 +824,9 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
              $1::uuid, $2, $3, $4, 10, $5, $6, $7, $4, $8, $9, $10, $11, false
          )",
     )
-    .bind(&resource_id)
-    .bind(&boundary_key)
-    .bind(&row_xmin)
+    .bind(resource_id)
+    .bind(boundary_key)
+    .bind(row_xmin)
     .bind(ETHEREUM)
     .bind(ETHEREUM_HASH)
     .bind(&snapshot.execution_authority)
@@ -902,9 +844,9 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
              $8, $9, false
          )",
     )
-    .bind(&resource_id)
-    .bind(&boundary_key)
-    .bind(&row_xmin)
+    .bind(resource_id)
+    .bind(boundary_key)
+    .bind(row_xmin)
     .bind(ETHEREUM)
     .bind(ETHEREUM_HASH)
     .bind(&snapshot.execution_authority)
@@ -917,7 +859,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     raw_sql(
         "DROP TABLE pg_temp.chain_heads;
          DROP TABLE pg_temp.chain_lineage;
-         DROP TABLE pg_temp.record_inventory_current;
+         DROP TABLE pg_temp.project_family_marker;
          DROP TABLE pg_temp.resolution_divergences;",
     )
     .execute(&mut *api_connection)
@@ -925,9 +867,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     drop(api_connection);
 
     let direct_write_error = sqlx::query(
-        "UPDATE record_inventory_current
-         SET entries = entries
-         WHERE false",
+        "UPDATE project_family_marker SET input_content_hash = input_content_hash WHERE false",
     )
     .execute(&api_pool)
     .await
@@ -977,7 +917,7 @@ async fn stable_projection_row_executes_at_caught_up_head() -> AnyResult<()> {
     ))])
     .await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    advance_head_and_project(fixture.pool()).await?;
+    advance_head(fixture.pool()).await?;
 
     let response = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(response.records[0].ledger_action, LedgerAction::None);
@@ -996,7 +936,7 @@ async fn stable_projection_divergence_tracks_live_reorg_dependency() -> AnyResul
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    advance_head_and_project(fixture.pool()).await?;
+    advance_head(fixture.pool()).await?;
 
     let response = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
@@ -1089,11 +1029,21 @@ async fn lookup_rejects_a_republished_lagging_generation() -> AnyResult<()> {
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_with_before_persist(lookup_request(&fixture.logical_name_id)?, move || async move {
-            // Even the same height and content hash must retain its publication generation.
-            sqlx::query("UPDATE chain_phase_state SET current_block_number = current_block_number WHERE phase_name = 'project'")
-                .execute(&update_pool).await.expect("republish the same position");
-        }).await;
+        .lookup_with_before_persist(
+            lookup_request(&fixture.logical_name_id)?,
+            move || async move {
+                // Even the same height and content hash must retain its publication generation.
+                publish_lookup_families(
+                    &update_pool,
+                    ETHEREUM,
+                    10,
+                    bigname_project::families::FamilyMode::Rebuild,
+                )
+                .await
+                .expect("republish the same family position");
+            },
+        )
+        .await;
     assert_eq!(
         result.expect_err("new generation must be refused").kind(),
         ErrorKind::ConcurrentState
@@ -1116,6 +1066,7 @@ async fn lookup_publication_migration_preserves_guard_writer_and_privileges() ->
         include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
         include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
         include_str!("../../../migrations/20260929130000_lookup_family_inputs.sql"),
+        include_str!("../../../migrations/20260929160000_remove_served_projections.sql"),
     ] {
         raw_sql(migration).execute(fixture.pool()).await?;
     }
@@ -1220,12 +1171,13 @@ async fn unsupported_resolver_inventory_does_not_block_live_lookup() -> AnyResul
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET support_status = 'unsupported',
-             unsupported_reason = 'resolver_family_unsupported'",
+    sqlx::query("UPDATE normalized_events SET after_state = jsonb_set(after_state,'{resolver}',to_jsonb('0x9000000000000000000000000000000000000009'::text)) WHERE event_identity='lookup-input-2'").execute(fixture.pool()).await?;
+    publish_lookup_families(
+        fixture.pool(),
+        ETHEREUM,
+        10,
+        bigname_project::families::FamilyMode::Rebuild,
     )
-    .execute(fixture.pool())
     .await?;
 
     let response = run_lookup(&fixture, &rpc_url).await?;
@@ -1239,87 +1191,11 @@ async fn unsupported_resolver_inventory_does_not_block_live_lookup() -> AnyResul
 }
 
 #[tokio::test]
-async fn out_of_class_projected_topology_is_not_executed() -> AnyResult<()> {
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             jsonb_set(
-                 declared_summary,
-                 '{topology,subregistry_path}',
-                 '[{\"logical_name_id\":\"ens:ancestor\"}]'::jsonb
-             ),
-             '{topology,resolver_path,0,logical_name_id}',
-             to_jsonb('ens:ancestor'::text)
-         )",
-    )
-    .execute(fixture.pool())
-    .await?;
-
-    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
-        .lookup(lookup_request(&fixture.logical_name_id)?)
-        .await
-        .expect_err("linked-subregistry path must not execute");
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
-    fixture.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn unsupported_basenames_topology_precedes_position_and_manifest_reads() -> AnyResult<()> {
-    let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
-    sqlx::query(
-        r#"UPDATE name_current
-           SET declared_summary = jsonb_set(
-               declared_summary,
-               '{topology,alias}',
-               '{"final_target":{"logical_name_id":"basenames:alias"},
-                 "hops":[{"logical_name_id":"basenames:alias"}]}'::jsonb
-           )"#,
-    )
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query("DELETE FROM chain_heads")
-        .execute(fixture.pool())
-        .await?;
-    sqlx::query("DELETE FROM manifest_versions")
-        .execute(fixture.pool())
-        .await?;
-
-    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
-        .lookup(lookup_request(&fixture.logical_name_id)?)
-        .await
-        .expect_err("unsupported topology must be rejected before snapshot dependencies");
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
-    fixture.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn wildcard_lookup_executes_without_an_indexed_record_row() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             jsonb_set(
-                 declared_summary,
-                 '{topology,wildcard}',
-                 jsonb_build_object(
-                     'source', jsonb_build_object('logical_name_id', 'ens:ancestor'),
-                     'matched_labels', jsonb_build_array('alice')
-                 )
-             ),
-             '{topology,resolver_path,0,logical_name_id}',
-             to_jsonb('ens:ancestor'::text)
-         )",
-    )
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(fixture.pool())
-        .await?;
+    fixture::seed_wildcard_ancestor(&fixture).await?;
 
     let result = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(result.records[0].value, Some(json!(LIVE_VALUE)));
@@ -1750,41 +1626,6 @@ async fn resolver_clear_retires_old_direct_divergence_as_stale_evidence() -> Any
 }
 
 #[tokio::test]
-async fn schema_migration_preserves_and_retires_populated_null_resolver_evidence() -> AnyResult<()>
-{
-    let (rpc_url, rpc_handle) =
-        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    let direct = run_lookup(&fixture, &rpc_url).await?;
-    assert_eq!(direct.records[0].ledger_action, LedgerAction::Written);
-    sqlx::raw_sql(
-        "DROP TRIGGER name_current_retire_null_resolver_divergences ON name_current;
-         DROP FUNCTION retire_direct_divergences_for_null_resolver();",
-    )
-    .execute(fixture.pool())
-    .await?;
-    make_null_resolver_discovery(&fixture).await?;
-    assert_eq!(ledger_count(fixture.pool()).await?, 1);
-
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/20260831120000_retire_direct_divergences_for_null_resolver.sql"
-    ))
-    .execute(fixture.pool())
-    .await?;
-    let (total, active): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE cleared_at IS NULL)
-         FROM resolution_divergences",
-    )
-    .fetch_one(fixture.pool())
-    .await?;
-    assert_eq!((total, active), (1, 0));
-
-    fixture.cleanup().await?;
-    join_rpc(rpc_handle).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn null_exact_resolver_revalidates_name_state_without_a_comparison_row() -> AnyResult<()> {
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(
         encoded_text_result_with_resolver(
@@ -1799,10 +1640,14 @@ async fn null_exact_resolver_revalidates_name_state_without_a_comparison_row() -
     let logical_name_id = fixture.logical_name_id.clone();
     let result = lookup_engine(fixture.pool(), &rpc_url)?
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query("UPDATE name_current SET provenance = provenance || '{\"changed\":true}'")
-                .execute(&update_pool)
-                .await
-                .expect("second session must replace the name row");
+            publish_lookup_families(
+                &update_pool,
+                ETHEREUM,
+                10,
+                bigname_project::families::FamilyMode::Rebuild,
+            )
+            .await
+            .expect("second session must replace the family publication");
         })
         .await;
     assert_eq!(
@@ -1821,36 +1666,21 @@ async fn wildcard_lookup_rejects_a_concurrent_name_projection_change() -> AnyRes
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             jsonb_set(
-                 declared_summary,
-                 '{topology,wildcard}',
-                 jsonb_build_object(
-                     'source', jsonb_build_object('logical_name_id', 'ens:ancestor'),
-                     'matched_labels', jsonb_build_array('alice')
-                 )
-             ),
-             '{topology,resolver_path,0,logical_name_id}',
-             to_jsonb('ens:ancestor'::text)
-         )",
-    )
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(fixture.pool())
-        .await?;
+    fixture::seed_wildcard_ancestor(&fixture).await?;
 
     let pool = fixture.pool().clone();
     let update_pool = pool.clone();
     let logical_name_id = fixture.logical_name_id.clone();
     let result = lookup_engine(&pool, &rpc_url)?
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query("UPDATE name_current SET declared_summary = declared_summary")
-                .execute(&update_pool)
-                .await
-                .expect("second session must replace the wildcard name row");
+            publish_lookup_families(
+                &update_pool,
+                ETHEREUM,
+                10,
+                bigname_project::families::FamilyMode::Rebuild,
+            )
+            .await
+            .expect("second session must replace the wildcard family publication");
         })
         .await;
 
@@ -1867,9 +1697,17 @@ async fn closed_surface_binding_is_not_readable() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     sqlx::query(
         "UPDATE surface_bindings
-         SET active_to = '2026-08-04T00:00:00Z'",
+         SET active_from = '2026-08-02T00:00:00Z', active_to = '2026-08-03T00:00:00Z'",
     )
     .execute(fixture.pool())
+    .await?;
+
+    publish_lookup_families(
+        fixture.pool(),
+        ETHEREUM,
+        10,
+        bigname_project::families::FamilyMode::Rebuild,
+    )
     .await?;
 
     let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
@@ -1927,7 +1765,7 @@ async fn indexed_inventory_requires_readable_resource_lineage() -> AnyResult<()>
     ))])
     .await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    let losing_resource_id = "00000000-0000-0000-0000-000000000109";
+    let losing_resource_id = "00000000-0000-0000-0000-000000000101";
     let losing_hash = "0x9999999999999999999999999999999999999999999999999999999999999999";
 
     let response = run_lookup(&fixture, &rpc_url).await?;
@@ -1942,42 +1780,7 @@ async fn indexed_inventory_requires_readable_resource_lineage() -> AnyResult<()>
     .bind(losing_hash)
     .execute(fixture.pool())
     .await?;
-    sqlx::query(
-        "INSERT INTO resources
-            (resource_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1::uuid, $2, $3, 10, 'canonical')",
-    )
-    .bind(losing_resource_id)
-    .bind(ETHEREUM)
-    .bind(losing_hash)
-    .execute(fixture.pool())
-    .await?;
-
-    let mut boundary: Value =
-        sqlx::query_scalar("SELECT record_version_boundary FROM record_inventory_current LIMIT 1")
-            .fetch_one(fixture.pool())
-            .await?;
-    boundary["resource_id"] = json!(losing_resource_id);
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET resource_id = $1::uuid,
-             record_version_boundary = $2",
-    )
-    .bind(losing_resource_id)
-    .bind(&boundary)
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             declared_summary,
-             '{topology,version_boundaries,record_version_boundary}',
-             $1
-         )",
-    )
-    .bind(&boundary)
-    .execute(fixture.pool())
-    .await?;
+    sqlx::query("UPDATE resources SET block_hash = $1 WHERE resource_id='00000000-0000-0000-0000-000000000101'").bind(losing_hash).execute(fixture.pool()).await?;
     let row_local_state: String = sqlx::query_scalar(
         "SELECT canonicality_state::text FROM resources WHERE resource_id = $1::uuid",
     )
@@ -2030,10 +1833,6 @@ async fn lookup_snapshot_requires_readable_token_lineage_lineage() -> AnyResult<
         .bind(token_lineage_id)
         .execute(fixture.pool())
         .await?;
-    sqlx::query("UPDATE name_current SET token_lineage_id = $1::uuid")
-        .bind(token_lineage_id)
-        .execute(fixture.pool())
-        .await?;
 
     let row_local_state: String = sqlx::query_scalar(
         "SELECT canonicality_state::text
@@ -2051,29 +1850,6 @@ async fn lookup_snapshot_requires_readable_token_lineage_lineage() -> AnyResult<
             .expect_err("orphaned token lineage must hide the lookup snapshot");
     assert_eq!(error.kind(), ErrorKind::Unsupported);
 
-    fixture.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn projected_position_timestamp_must_match_canonical_lineage() -> AnyResult<()> {
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET chain_positions = jsonb_set(
-             chain_positions,
-             '{ethereum,timestamp}',
-             to_jsonb('2026-08-03T00:00:01Z'::text)
-         )",
-    )
-    .execute(fixture.pool())
-    .await?;
-
-    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
-        .lookup(lookup_request(&fixture.logical_name_id)?)
-        .await
-        .expect_err("projected position timestamp must identify canonical lineage");
-    assert_eq!(error.kind(), ErrorKind::Stale);
     fixture.cleanup().await?;
     Ok(())
 }
@@ -2126,11 +1902,12 @@ async fn row_unchanged_guard_rejects_two_session_projection_modification() -> An
     let update_pool = pool.clone();
     let result = engine
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query(
-                "UPDATE record_inventory_current
-                 SET entries = jsonb_set(entries, '{0,value,value}', '\"https://concurrent.example\"')",
+            publish_lookup_families(
+                &update_pool,
+                ETHEREUM,
+                10,
+                bigname_project::families::FamilyMode::Rebuild,
             )
-            .execute(&update_pool)
             .await
             .expect("second session must update the compared projection row");
         })
@@ -2147,14 +1924,7 @@ async fn row_unchanged_guard_rejects_two_session_projection_modification() -> An
 #[tokio::test]
 async fn invalidated_project_generation_is_stale_before_rpc() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
-         WHERE chain_id = $1 AND phase_name = 'project'",
-    )
-    .bind(ETHEREUM)
-    .execute(fixture.pool())
-    .await?;
+    family_marker::reset_lookup_families(fixture.pool()).await?;
 
     let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
         .lookup(lookup_request(&fixture.logical_name_id)?)
@@ -2176,15 +1946,9 @@ async fn project_generation_change_during_rpc_rejects_the_lookup() -> AnyResult<
     let logical_name_id = fixture.logical_name_id.clone();
     let result = lookup_engine(&pool, &rpc_url)?
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query(
-                "UPDATE chain_phase_state
-                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
-                 WHERE chain_id = $1 AND phase_name = 'project'",
-            )
-            .bind(ETHEREUM)
-            .execute(&update_pool)
-            .await
-            .expect("second session must invalidate the project generation");
+            family_marker::reset_lookup_families(&update_pool)
+                .await
+                .expect("second session must invalidate the project generation");
         })
         .await;
 
@@ -2207,15 +1971,9 @@ async fn null_exact_resolver_rejects_project_generation_change_during_rpc() -> A
     let logical_name_id = fixture.logical_name_id.clone();
     let result = lookup_engine(&pool, &rpc_url)?
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query(
-                "UPDATE chain_phase_state
-                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
-                 WHERE chain_id = $1 AND phase_name = 'project'",
-            )
-            .bind(ETHEREUM)
-            .execute(&update_pool)
-            .await
-            .expect("second session must invalidate the project generation");
+            family_marker::reset_lookup_families(&update_pool)
+                .await
+                .expect("second session must invalidate the project generation");
         })
         .await;
 
@@ -2341,52 +2099,6 @@ async fn shadow_manifest_sync_is_serialized_with_lookup_revalidation() -> AnyRes
     assert_eq!(
         error.message(),
         "lookup manifest authority changed while live lookup was running"
-    );
-    assert_eq!(ledger_count(&pool).await?, 0);
-    fixture.cleanup().await?;
-    join_rpc(rpc_handle).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn projection_publication_lock_order_does_not_deadlock_lookup() -> AnyResult<()> {
-    let (rpc_url, rpc_handle) =
-        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    let pool = fixture.pool().clone();
-    let publish_pool = pool.clone();
-    let (name_locked_tx, name_locked_rx) = oneshot::channel();
-    let publisher = tokio::spawn(async move {
-        let mut transaction = publish_pool.begin().await?;
-        sqlx::query("UPDATE name_current SET declared_summary = declared_summary")
-            .execute(&mut *transaction)
-            .await?;
-        let _ = name_locked_tx.send(());
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        sqlx::query("UPDATE record_inventory_current SET entries = entries")
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<(), anyhow::Error>(())
-    });
-
-    let logical_name_id = fixture.logical_name_id.clone();
-    let result = lookup_engine(&pool, &rpc_url)?
-        .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            name_locked_rx
-                .await
-                .expect("publication session must lock name_current");
-        })
-        .await;
-    publisher
-        .await
-        .context("publication task was cancelled")??;
-
-    let error = result.expect_err("same-height publication must replace the name-row token");
-    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
-    assert_eq!(
-        error.message(),
-        "projected name state changed while live lookup was running"
     );
     assert_eq!(ledger_count(&pool).await?, 0);
     fixture.cleanup().await?;
@@ -2945,15 +2657,12 @@ async fn ccip_result_rejects_a_concurrent_inventory_change() -> AnyResult<()> {
     let update_pool = pool.clone();
     let result = engine
         .lookup_with_before_persist(lookup_request(&logical_name_id)?, move || async move {
-            sqlx::query(
-                "UPDATE record_inventory_current
-                 SET entries = jsonb_set(
-                     entries,
-                     '{0,value,value}',
-                     '\"https://concurrent.example\"'
-                 )",
+            publish_lookup_families(
+                &update_pool,
+                BASE,
+                10,
+                bigname_project::families::FamilyMode::Rebuild,
             )
-            .execute(&update_pool)
             .await
             .expect("second session must update the projection row");
         })
@@ -3092,6 +2801,9 @@ async fn basenames_shadow_execution_manifest_is_not_authority() -> AnyResult<()>
 #[tokio::test]
 async fn basenames_v1_execution_manifest_is_not_authority() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Basenames, INDEXED_VALUE).await?;
+    sqlx::query("DELETE FROM normalized_events WHERE source_family='basenames_execution'")
+        .execute(fixture.pool())
+        .await?;
     sqlx::query(
         "UPDATE manifest_versions
          SET manifest_version = 1
@@ -3267,12 +2979,14 @@ async fn ens_v2_arm_direct_route_executes_and_compares_through_an_admitting_entr
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::EnsV2Arm, INDEXED_VALUE).await?;
-    let arm: String = sqlx::query_scalar(
-        "SELECT provenance #>> '{authority_selection,authority_arm}' FROM name_current",
-    )
-    .fetch_one(fixture.pool())
-    .await?;
-    assert_eq!(arm, "ens_v2");
+    let row =
+        bigname_storage::families::name::load_family_name(fixture.pool(), &fixture.logical_name_id)
+            .await?
+            .context("composed ENSv2 name")?;
+    assert_eq!(
+        row.provenance["authority_selection"]["authority_arm"],
+        "ens_v2"
+    );
 
     let response = run_lookup(&fixture, &rpc_url).await?;
     assert_eq!(response.entrypoint_address, UNIVERSAL_RESOLVER);
@@ -3321,16 +3035,9 @@ async fn ens_v2_arm_is_refused_before_rpc_by_an_ens_v1_only_entrypoint() -> AnyR
     }
     assert_eq!(ledger_count(fixture.pool()).await?, 0);
 
-    // The ENSv1 arm stays admitted by the same default declaration.
-    sqlx::query(
-        "UPDATE name_current SET provenance = jsonb_build_object(
-             'authority_selection', jsonb_build_object('authority_arm', 'ens_v1'))",
-    )
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query("UPDATE surface_bindings SET authority_arm = 'ens_v1'")
-        .execute(fixture.pool())
-        .await?;
+    // The same default declaration admits a separately produced ENSv1 name.
+    fixture.cleanup().await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
         INDEXED_VALUE,
     ))])
@@ -3358,17 +3065,19 @@ async fn a_2017_registry_name_executes_through_an_ens_v1_only_entrypoint() -> An
     )
     .execute(fixture.pool())
     .await?;
-    sqlx::query(
-        "UPDATE name_current SET provenance = provenance || jsonb_build_object(
-             'authority_selection',
-             COALESCE(provenance -> 'authority_selection', '{}'::jsonb)
-                 || '{\"authority_arm\": \"ens_v1\", \"registry_generation\": \"old\"}'::jsonb)",
+    sqlx::query("UPDATE normalized_events SET after_state = after_state || '{\"emitter_role\":\"registry_old\"}'::jsonb WHERE event_identity='lookup-input-1'").execute(fixture.pool()).await?;
+    publish_lookup_families(
+        fixture.pool(),
+        ETHEREUM,
+        10,
+        bigname_project::families::FamilyMode::Rebuild,
     )
-    .execute(fixture.pool())
     .await?;
-    let provenance: serde_json::Value = sqlx::query_scalar("SELECT provenance FROM name_current")
-        .fetch_one(fixture.pool())
-        .await?;
+    let provenance =
+        bigname_storage::families::name::load_family_name(fixture.pool(), &fixture.logical_name_id)
+            .await?
+            .context("old-registry name")?
+            .provenance;
     assert_eq!(
         bigname_storage::name_current_public_authority(&provenance),
         Some("ens_v0")
@@ -3581,15 +3290,9 @@ async fn primary_name_rejects_a_project_generation_change_after_live_calls() -> 
     let update_pool = pool.clone();
     let result = lookup_engine(&pool, &rpc_url)?
         .lookup_ens_primary_name_with_before_revalidate(ETHEREUM, target, move || async move {
-            sqlx::query(
-                "UPDATE chain_phase_state
-                 SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:test-invalidation'
-                 WHERE chain_id = $1 AND phase_name = 'project'",
-            )
-            .bind(ETHEREUM)
-            .execute(&update_pool)
-            .await
-            .expect("second session must invalidate primary-name authority");
+            family_marker::reset_lookup_families(&update_pool)
+                .await
+                .expect("second session must invalidate primary-name authority");
         })
         .await;
 
@@ -3791,19 +3494,28 @@ fn lookup_request(logical_name_id: &str) -> crate::Result<LookupRequest> {
 }
 
 async fn make_fixture_ownerless(fixture: &Fixture) -> AnyResult<()> {
-    sqlx::query(
-        "UPDATE name_current
-         SET serving_resource_id = resource_id,
-             surface_binding_id = NULL,
-             resource_id = NULL,
-             token_lineage_id = NULL,
-             binding_kind = NULL",
-    )
-    .execute(fixture.pool())
-    .await?;
+    sqlx::query("DELETE FROM surface_bindings")
+        .execute(fixture.pool())
+        .await?;
+    sqlx::query("DELETE FROM normalized_events WHERE event_kind='RegistrationGranted'")
+        .execute(fixture.pool())
+        .await?;
     sqlx::query("UPDATE resources SET token_lineage_id = NULL")
         .execute(fixture.pool())
         .await?;
+    sqlx::query("UPDATE normalized_events SET after_state = after_state || '{\"source_event\":\"Transfer\",\"owner\":\"0x0000000000000000000000000000000000000000\",\"owner_getter\":\"0x0000000000000000000000000000000000000000\"}'::jsonb WHERE event_identity='lookup-input-1'").execute(fixture.pool()).await?;
+    let chain: String =
+        sqlx::query_scalar("SELECT chain_id FROM name_surfaces WHERE logical_name_id=$1")
+            .bind(&fixture.logical_name_id)
+            .fetch_one(fixture.pool())
+            .await?;
+    publish_lookup_families(
+        fixture.pool(),
+        &chain,
+        10,
+        bigname_project::families::FamilyMode::Rebuild,
+    )
+    .await?;
     Ok(())
 }
 
@@ -3816,171 +3528,23 @@ async fn ledger_count(pool: &PgPool) -> AnyResult<i64> {
 
 async fn make_null_resolver_discovery(fixture: &Fixture) -> AnyResult<()> {
     sqlx::query(
-        r#"
-        UPDATE name_current
-        SET declared_summary = jsonb_set(
-                declared_summary #- '{topology}',
-                '{resolver}',
-                '{"chain_id":null,"address":null,"latest_event_kind":"ResolverChanged"}'::jsonb
-            )
-        WHERE logical_name_id = $1
-        "#,
+        "INSERT INTO normalized_events (event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,raw_fact_ref,derivation_kind,canonicality_state,after_state)
+         SELECT 'lookup-clear-resolver',namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,4,raw_fact_ref,derivation_kind,canonicality_state,
+             jsonb_set(after_state,'{resolver}',to_jsonb('0x0000000000000000000000000000000000000000'::text))
+         FROM normalized_events WHERE event_identity='lookup-input-2'"
+    ).execute(fixture.pool()).await?;
+    publish_lookup_families(
+        fixture.pool(),
+        ETHEREUM,
+        10,
+        bigname_project::families::FamilyMode::Rebuild,
     )
-    .bind(&fixture.logical_name_id)
-    .execute(fixture.pool())
     .await?;
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(fixture.pool())
-        .await?;
     Ok(())
 }
 
-async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixture> {
-    // These fixtures seed the Project row as the served publication, so the lookup tests hold
-    // the switch off whatever the build's default; `family_marker` scopes it where it tests the
-    // family marker.
-    bigname_storage::publication_source::hold_for_test_process(false);
-    let database =
-        TestDatabase::create(TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6))
-            .await?;
-    apply_baseline(database.pool()).await?;
-    let (namespace, name, resolver_chain, resolver_hash, entrypoint, role, source_family) =
-        match kind {
-            FixtureKind::Ens | FixtureKind::EnsV2Arm => (
-                ENS_NAMESPACE,
-                "alice.eth",
-                ETHEREUM,
-                ETHEREUM_HASH,
-                UNIVERSAL_RESOLVER,
-                "universal_resolver",
-                "ens_execution",
-            ),
-            FixtureKind::Basenames => (
-                BASENAMES_NAMESPACE,
-                "alice.base.eth",
-                BASE,
-                BASE_HASH,
-                BASE_L1_RESOLVER,
-                "l1_resolver",
-                "basenames_execution",
-            ),
-        };
-    seed_heads(database.pool(), kind).await?;
-    seed_manifest(
-        database.pool(),
-        namespace,
-        source_family,
-        role,
-        entrypoint,
-        "00000000-0000-0000-0000-000000000103",
-    )
-    .await?;
-    let namehash = hex_string(&namehash(name)?);
-    let logical_name_id = format!("{namespace}:{namehash}");
-    let dns_name = dns_encode_name(name)?;
-    let resource_id = "00000000-0000-0000-0000-000000000101";
-    let binding_id = "00000000-0000-0000-0000-000000000102";
-    let resolver_address = "0x1000000000000000000000000000000000000001";
-    let inventory_positions = json!({
-        "target_block_number": 10,
-        "target_block_hash": resolver_hash,
-    });
-    let resolver_slot = if resolver_chain == ETHEREUM {
-        "ethereum"
-    } else {
-        "base"
-    };
-    let mut name_positions = json!({
-        (resolver_slot): {
-            "chain_id": resolver_chain,
-            "block_number": 10,
-            "block_hash": resolver_hash,
-            "timestamp": "2026-08-03T00:00:00Z",
-        },
-    });
-    if matches!(kind, FixtureKind::Basenames) {
-        name_positions["ethereum"] = json!({
-            "chain_id": ETHEREUM,
-            "block_number": 10,
-            "block_hash": ETHEREUM_HASH,
-            "timestamp": "2026-08-03T00:00:00Z",
-        });
-    }
-    let boundary = json!({
-        "logical_name_id": logical_name_id,
-        "resource_id": resource_id,
-        "normalized_event_id": 1,
-        "event_kind": "ResolverChanged",
-        "chain_position": {
-            "chain_id": resolver_chain,
-            "block_number": 10,
-            "block_hash": resolver_hash,
-            "timestamp": "2026-08-03T00:00:00Z",
-        },
-    });
-    let transport = match kind {
-        FixtureKind::Ens | FixtureKind::EnsV2Arm => json!({
-            "source_chain_id": null,
-            "target_chain_id": null,
-            "contract_address": null,
-            "latest_event_kind": null,
-        }),
-        FixtureKind::Basenames => json!({
-            "source_chain_id": BASE,
-            "target_chain_id": ETHEREUM,
-            "contract_address": entrypoint,
-            "latest_event_kind": "ResolverChanged",
-        }),
-    };
-    let topology = json!({
-        "registry_path": [],
-        "subregistry_path": [],
-        "resolver_path": [{
-            "logical_name_id": logical_name_id,
-            "resource_id": resource_id,
-            "chain_id": resolver_chain,
-            "address": resolver_address,
-        }],
-        "wildcard": { "source": null, "matched_labels": [] },
-        "alias": { "final_target": null, "hops": [] },
-        "version_boundaries": { "record_version_boundary": boundary },
-        "transport": transport,
-    });
-    seed_identity_and_projection(
-        database.pool(),
-        namespace,
-        name,
-        &logical_name_id,
-        &namehash,
-        &dns_name,
-        resolver_chain,
-        resolver_hash,
-        resource_id,
-        binding_id,
-        kind.authority_arm(),
-        &topology,
-        &boundary,
-        &name_positions,
-        &inventory_positions,
-        indexed_value,
-    )
-    .await?;
-    if matches!(kind, FixtureKind::EnsV2Arm) {
-        sqlx::query(
-            "UPDATE manifest_versions
-             SET manifest_payload = manifest_payload
-                 || '{\"verified_authority_arms\": [\"ens_v1\", \"ens_v2\"]}'::jsonb
-             WHERE source_family = 'ens_execution'",
-        )
-        .execute(database.pool())
-        .await?;
-    }
-
-    Ok(Fixture {
-        database,
-        logical_name_id,
-    })
-}
+mod fixture;
+use fixture::{publish_lookup_families, setup_fixture};
 
 async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
     let database_name: String = sqlx::query_scalar("SELECT current_database()")
@@ -4010,6 +3574,10 @@ async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
         include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
         include_str!("../../../schema-v2/baseline/09_divergence.sql"),
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+        include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
+        include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
     ] {
         raw_sql(script).execute(&mut *transaction).await?;
     }
@@ -4122,21 +3690,6 @@ async fn advance_head_to(pool: &PgPool, block_number: i64, block_hash: &str) -> 
     Ok(())
 }
 
-async fn advance_head_and_project(pool: &PgPool) -> AnyResult<()> {
-    advance_head(pool).await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET current_block_number = 11, current_block_hash = $2,
-             target_block_number = 11, target_block_hash = $2
-         WHERE chain_id = $1 AND phase_name = 'project'",
-    )
-    .bind(ETHEREUM)
-    .bind(ETHEREUM_LATER_HASH)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn seed_manifest(
     pool: &PgPool,
     namespace: &str,
@@ -4159,13 +3712,16 @@ async fn seed_manifest(
     .bind(ETHEREUM)
     .execute(pool)
     .await?;
+    let payload = json!({
+        "capability_flags":{"verified_resolution":{"status":"supported"}},
+        "deployment_epoch": if namespace == BASENAMES_NAMESPACE { "basenames_v1" } else { "ens_v1" },
+        "contracts":[{"role":role,"address":address,"proxy_kind":"none","start_block":0}]
+    });
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions
             (manifest_version, namespace, source_family, chain_id, deployment_label,
              rollout_status, normalizer_version, file_path, manifest_payload)
-         VALUES ($5, $1, $2, $3, 'test', 'active', 'test', $4,
-                 jsonb_build_object('capability_flags', jsonb_build_object(
-                     'verified_resolution', jsonb_build_object('status', 'supported'))))
+         VALUES ($5, $1, $2, $3, 'test', 'active', 'test', $4, $6)
          RETURNING manifest_id",
     )
     .bind(namespace)
@@ -4173,6 +3729,7 @@ async fn seed_manifest(
     .bind(ETHEREUM)
     .bind(format!("test/{namespace}/{source_family}.toml"))
     .bind(manifest_version)
+    .bind(&payload)
     .fetch_one(pool)
     .await?;
     sqlx::query(
@@ -4188,120 +3745,11 @@ async fn seed_manifest(
     .bind(address)
     .execute(pool)
     .await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn seed_identity_and_projection(
-    pool: &PgPool,
-    namespace: &str,
-    name: &str,
-    logical_name_id: &str,
-    namehash: &str,
-    dns_name: &[u8],
-    chain_id: &str,
-    block_hash: &str,
-    resource_id: &str,
-    binding_id: &str,
-    authority_arm: &str,
-    topology: &Value,
-    boundary: &Value,
-    name_positions: &Value,
-    inventory_positions: &Value,
-    indexed_value: &str,
-) -> AnyResult<()> {
-    sqlx::query(
-        "INSERT INTO resources
-            (resource_id, chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1::uuid, $2, $3, 10, 'canonical')",
-    )
-    .bind(resource_id)
-    .bind(chain_id)
-    .bind(block_hash)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO name_surfaces
-            (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
-             namehash, labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, $2, $3, ARRAY[$3], $4, $5, ARRAY[$5], 'test', 'active',
-                 $6, $7, 10, 'canonical')",
-    )
-    .bind(logical_name_id)
-    .bind(namespace)
-    .bind(name)
-    .bind(dns_name)
-    .bind(namehash)
-    .bind(chain_id)
-    .bind(block_hash)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO surface_bindings
-            (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from,
-             chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $6,
-                 '2026-08-03T00:00:00Z', $4, $5, 10, 'canonical')",
-    )
-    .bind(binding_id)
-    .bind(logical_name_id)
-    .bind(resource_id)
-    .bind(chain_id)
-    .bind(block_hash)
-    .bind(authority_arm)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO name_current
-            (logical_name_id, namespace, raw_name, namehash, surface_binding_id,
-             resource_id, binding_kind, declared_summary, support_status,
-             provenance, chain_positions, canonicality_summary, manifest_version)
-         VALUES ($1, $2, $3, $4, $5::uuid, $6::uuid, 'declared_registry_path',
-                 jsonb_build_object('topology', $7::jsonb), 'supported',
-                 jsonb_build_object(
-                     'authority_selection', jsonb_build_object('authority_arm', $9::text)
-                 ),
-                 $8, jsonb_build_object('state', 'canonical'), 1)",
-    )
-    .bind(logical_name_id)
-    .bind(namespace)
-    .bind(name)
-    .bind(namehash)
-    .bind(binding_id)
-    .bind(resource_id)
-    .bind(topology)
-    .bind(name_positions)
-    .bind(authority_arm)
-    .execute(pool)
-    .await?;
-    let selectors = json!([{
-        "record_key": "text:url",
-        "record_family": "text",
-        "selector_key": "url",
-    }]);
-    let entries = json!([{
-        "record_key": "text:url",
-        "record_family": "text",
-        "selector_key": "url",
-        "status": "success",
-        "value": { "kind": "text", "value": indexed_value },
-    }]);
-    sqlx::query(
-        "INSERT INTO record_inventory_current
-            (resource_id, record_version_boundary_key, record_version_boundary,
-             selectors, unsupported_families, entries, support_status, provenance,
-             chain_positions, canonicality_summary, manifest_version)
-         VALUES ($1::uuid, 'boundary-1', $2, $3, '[]', $4, 'supported', '{}', $5,
-                 jsonb_build_object('state', 'canonical'), 1)",
-    )
-    .bind(resource_id)
-    .bind(boundary)
-    .bind(selectors)
-    .bind(entries)
-    .bind(inventory_positions)
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,derivation_kind,canonicality_state,after_state) VALUES ($1,$2,'SourceManifestUpdated',$3,$4,$5,$6,'manifest_sync','canonical',$7)")
+        .bind(format!("lookup-execution-declaration-{manifest_id}"))
+        .bind(namespace).bind(source_family).bind(manifest_version).bind(manifest_id).bind(ETHEREUM)
+        .bind(json!({"rollout_status":"active","manifest_payload":payload}))
+        .execute(pool).await?;
     Ok(())
 }
 

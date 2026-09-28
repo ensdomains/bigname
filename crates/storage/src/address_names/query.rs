@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "query_tests.rs"]
+mod tests;
+
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{Postgres, QueryBuilder};
 

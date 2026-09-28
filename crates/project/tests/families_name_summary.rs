@@ -156,6 +156,10 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
     let outcome = fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
         .await?;
+    ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(8),
+        "block 8: {outcome:?}"
+    );
     let renewed = assert_matches_served(&fixture, &name(1)).await?;
     assert_matches_served(&fixture, &name(2)).await?;
     ensure!(renewed != first, "the renewal left {renewed}");
@@ -774,10 +778,11 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
     );
     // Ranges grow 1, 2, 4 blocks: [2], [3, 4] and [5, 6], then the target on its own.
     ensure!(
-        rebuilt.ranges == 3,
-        "the rebuild applied {} blocks in {} ranges",
+        rebuilt.marker.as_ref().map(|marker| marker.number) == Some(7) && rebuilt.ranges == 3,
+        "the rebuild applied {} blocks in {} ranges: {:?}",
         rebuilt.blocks,
-        rebuilt.ranges
+        rebuilt.ranges,
+        rebuilt.marker
     );
     for ((table, was), (_, now)) in followed.iter().zip(&fixture.exact().await?) {
         ensure!(

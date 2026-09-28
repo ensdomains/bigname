@@ -399,27 +399,9 @@ fn label_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
-pub(super) async fn normalize_serving_timestamps(pool: &PgPool) -> Result<()> {
-    for table in ["name_current", "record_inventory_current"] {
-        sqlx::query(&format!(
-            "UPDATE {table}
-             SET chain_positions = jsonb_set(
-                 chain_positions,
-                 '{{ethereum,timestamp}}',
-                 to_jsonb(to_char(
-                     (chain_positions #>> '{{ethereum,timestamp}}')::timestamptz AT TIME ZONE 'UTC',
-                     'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'
-                 ))
-             )
-             WHERE chain_positions #>> '{{ethereum,timestamp}}' IS NOT NULL"
-        ))
-        .execute(pool)
-        .await?;
-    }
-    Ok(())
-}
-
 pub(super) async fn seed_publication_state(pool: &PgPool) -> Result<()> {
+    sqlx::query("INSERT INTO ingest_cursors (chain_id, source_key, source_kind, seed_basis, start_block_number, next_block_number, target_block_number, last_processed_block_number, last_processed_block_hash) VALUES ($1,'benchmark-retained','jsonrpc','new_signature_range',0,$2 + 1,$2,$2,$3)")
+        .bind(CHAIN).bind(HEAD).bind(block_hash(HEAD)).execute(pool).await?;
     sqlx::query(
         "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
          VALUES ($1, $2, $3)",

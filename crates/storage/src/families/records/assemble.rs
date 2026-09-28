@@ -281,6 +281,10 @@ pub(crate) async fn assemble(
         "record_link_event_ids": link_ids,
         "attributed_event_ids": attributed,
         "read_rules": read_rules,
+        // ABI admission must use the classification read in this inventory's snapshot.
+        "abi_observation_classification": classification.map(|row| json!({
+            "source_family": row.field("source_family"), "role": row.field("role"),
+        })),
         "coverage": {"status": "projected", "exhaustiveness": "not_asserted"},
     });
     if !zero_keys.is_empty() {

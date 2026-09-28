@@ -68,10 +68,10 @@ The indexing half measures the existing Interpret and
 database copy because all three operations write derived state:
 
 - one published-head Project re-apply at the selected head must finish within
-  1 second, the live poll interval, including canonical-head record hydration;
+  1 second using the operator redo path and permanent family journal;
 - a full Project rebuild must finish within 6 hours inside an operator-scheduled
   window of at least 8 hours, leaving at least 2 hours of headroom; the measured
-  wall-clock includes canonical-head record hydration;
+  wall-clock includes family reconstruction and retained hydration observation replay;
 - an Interpret redo over a dense-era range must sustain at least 500,000 blocks
   per hour; its wall-clock deadline is the smaller of twice the duration implied
   by the selected block count and that throughput floor, or the checked-in
@@ -87,7 +87,11 @@ database copy because all three operations write derived state:
 The published-head re-apply starts from a copy whose selected head is already
 published under the current
 [interpreter content hash](../glossary.md#interpreter-content-hash), then
-measures Project deleting and rebuilding that head's affected projection rows.
+measures the real Project redo transition, journal undo and replay of that head.
+Every invocation receives a fresh redo attempt, so repeating the measurement cannot
+become a completed-attempt no-op. Rebuild and redo perform no provider calls.
+The existing hydration-updated-row report fields therefore report zero for these
+replay measurements; they do not establish live-follow hydration acceptance.
 It is not a live head-minus-one to head transition. It does not observe
 first-time row insertion, newly affected-row discovery, or publication advancement;
 [issue #467](https://github.com/ensdomains/bigname/issues/467) tracks the missing
@@ -299,8 +303,8 @@ Use two targets:
    rewrites interpreted and projected state. Never point this command at the
    production database, even while traffic is drained. Record the copy's exact
    database name and the selected chain's production JSON-RPC URL; the command
-   requires both so the Project measurement follows the deployed hydration
-   path.
+   retains both inputs for the configured Project phase. Replay does not call
+   the provider; representative live-follow hydration remains a separate acceptance check.
 2. The new API generation while public traffic is drained. Use its real
    production-scale database. The harness forces its own PostgreSQL sessions
    into read-only mode, and a database login with only `CONNECT`, schema
@@ -521,7 +525,7 @@ interval, validated count, and invalid count.
 
 Corpus cardinality and active-namespace shortfalls, seed transport or parsing
 failures, exhausted seed evidence, a reachable `/healthz` response missing
-`database.identity`, and a published-head Project re-apply or hydration timeout
+`database.identity`, and a published-head Project redo timeout
 all produce a named red JSON report. They do not discard the evidence by
 exiting before report construction.
 

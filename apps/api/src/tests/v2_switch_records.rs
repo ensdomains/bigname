@@ -261,28 +261,87 @@ async fn v2_name_detail_and_records_diagnostic_inventories_from_families()
     database.cleanup().await
 }
 
-#[tokio::test]
-async fn v2_family_abi_inventory_uses_resolver_classification() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_switch_routes_events(&database).await?;
+async fn seed_switch_abi_inventory(database: &TestDatabase) -> Result<()> {
+    seed_switch_routes_events(database).await?;
     let manifest: i64 = sqlx::query_scalar(
         "SELECT manifest_id FROM bigname_phase.manifest_versions WHERE file_path = 'fixture/switch-resolver.toml'",
     ).fetch_one(&database.pool).await?;
     let name = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
-    let mut event = switch_event("switch-alpha-abi", None, None, "RecordChanged", "ens_v1_resolver_l1", 212, 0,
+    let mut event = switch_event(
+        "switch-alpha-abi",
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        212,
+        0,
         json!({"source_event": "ABIChanged", "node": name.strip_prefix("ens:").unwrap(),
             "resolver": SWITCH_RESOLVER, "record_key": "abi:4", "record_family": "abi",
-            "selector_key": "4", "value_retained": true, "value": "4"}));
+            "selector_key": "4", "value_retained": true, "value": "4"}),
+    );
     event.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
     event.source_manifest_id = Some(manifest);
     event.manifest_version = 1;
     event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-    publish_test_families(&database, 240).await?;
+    publish_test_families(database, 240).await
+}
+
+#[tokio::test]
+async fn v2_family_abi_inventory_uses_resolver_classification() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_abi_inventory(&database).await?;
     let uri = "/v1/names/alpha.eth/records?include=inventory";
     let (status, body) = read_family_response(&database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert_eq!(body["data"]["inventory"]["abi_content_types"], json!(["4"]), "{body:#}");
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_family_abi_inventory_keeps_classification_across_reset() -> Result<()> {
+    for republished in [false, true] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_switch_abi_inventory(&database).await?;
+        let uri = "/v1/names/alpha.eth/records?include=inventory";
+        let (_, before) = read_family_response(&database, uri).await?;
+        assert_eq!(
+            before["data"]["inventory"]["abi_content_types"],
+            json!(["4"])
+        );
+        let (_guard, control) =
+            crate::v2::abi_content_types_test_hooks::pause(&database.pool).await?;
+        let state = database.app_state();
+        let request = tokio::spawn(async move {
+            app_router(state)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            control.wait_until_reached(),
+        )
+        .await
+        .context("ABI read did not reach captured inventory")?;
+        reset_switch_families(&database).await?;
+        if republished {
+            publish_test_families(&database, 240).await?;
+        }
+        control.resume();
+        let response = request.await??;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = read_json(response).await?;
+        assert_eq!(
+            body["data"]["inventory"]["abi_content_types"],
+            json!(["4"]),
+            "{body:#}"
+        );
+        assert!(
+            body["data"]["inventory"]["abi_unsupported_reason"].is_null(),
+            "{body:#}"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
 }

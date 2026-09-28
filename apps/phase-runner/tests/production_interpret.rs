@@ -17,9 +17,10 @@ use bigname_interpret::{
     BatchRequest, Engine, ErrorKind as InterpretErrorKind, Marker, RunMode as InterpretRunMode,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_project::{
-    BatchRequest as ProjectBatchRequest, Engine as ProjectEngine, RunMode as ProjectRunMode,
-};
+use bigname_project::families::FamilyMode;
+#[path = "production_interpret/families.rs"]
+mod family_reads;
+use family_reads::*;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -559,15 +560,11 @@ async fn assert_prior_owner_revocation_writes_and_projects(
         )
         .await?;
     } else {
-        let reminted_owner_powers: serde_json::Value = sqlx::query_scalar(
-            "SELECT effective_powers FROM permissions_current
-             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
-        )
-        .bind(registry_resource)
-        .bind(REMINTED_REGISTRY_OWNER)
-        .fetch_one(scratch.pool())
-        .await
-        .context("reminted registry owner permission was not projected")?;
+        let reminted_owner_powers =
+            resource_permission(scratch.pool(), registry_resource, REMINTED_REGISTRY_OWNER)
+                .await?
+                .context("reminted permission")?
+                .effective_powers;
         assert_eq!(reminted_owner_powers, json!(["resource_control"]));
     }
 
@@ -580,28 +577,15 @@ async fn assert_wrapped_owner_is_on_registration_epoch(
     registrar_resource: Uuid,
     registry_resource: Uuid,
 ) -> Result<()> {
-    let permission: (serde_json::Value, serde_json::Value) = sqlx::query_as(
-        "SELECT effective_powers, grant_source
-         FROM permissions_current
-         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
-    )
-    .bind(registrar_resource)
-    .bind(WRAPPED_REGISTRY_OWNER)
-    .fetch_one(pool)
-    .await
-    .context("wrapped registry owner permission was not projected on the registrar resource")?;
+    let row = resource_permission(pool, registrar_resource, WRAPPED_REGISTRY_OWNER)
+        .await?
+        .context("wrapped owner permission")?;
+    let permission = (row.effective_powers, row.grant_source);
     assert_eq!(permission.0, json!(["resource_control"]));
     assert_eq!(permission.1["authority_kind"], "registrar");
-    let stale_active_row: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM permissions_current
-             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'
-         )",
-    )
-    .bind(registry_resource)
-    .bind(WRAPPED_REGISTRY_OWNER)
-    .fetch_one(pool)
-    .await?;
+    let stale_active_row = resource_permission(pool, registry_resource, WRAPPED_REGISTRY_OWNER)
+        .await?
+        .is_some();
     assert!(!stale_active_row);
     let wrapper_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events
@@ -627,16 +611,10 @@ async fn assert_wrapped_owner_is_on_registration_epoch(
 }
 
 async fn assert_registrar_epoch_permission(pool: &PgPool, registrar_resource: Uuid) -> Result<()> {
-    let permission: (serde_json::Value, serde_json::Value) = sqlx::query_as(
-        "SELECT effective_powers, grant_source
-         FROM permissions_current
-         WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'",
-    )
-    .bind(registrar_resource)
-    .bind(REGISTRANT)
-    .fetch_one(pool)
-    .await
-    .context("registrar permission was not projected")?;
+    let row = resource_permission(pool, registrar_resource, REGISTRANT)
+        .await?
+        .context("registrar permission")?;
+    let permission = (row.effective_powers, row.grant_source);
     assert_eq!(permission.0, json!(["resource_control"]));
     assert_eq!(permission.1["authority_kind"], "registrar");
     Ok(())
@@ -667,16 +645,9 @@ async fn assert_prior_owner_is_revoked(
     .context("prior owner permission history was not written")?;
     assert_eq!(latest_history.0, json!([]));
     assert_eq!(latest_history.1["authority_kind"], "registry_only");
-    let stale_active_row: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM permissions_current
-             WHERE resource_id = $1 AND subject = lower($2) AND scope = 'resource'
-         )",
-    )
-    .bind(registry_resource)
-    .bind(PRIOR_REGISTRY_OWNER)
-    .fetch_one(pool)
-    .await?;
+    let stale_active_row = resource_permission(pool, registry_resource, PRIOR_REGISTRY_OWNER)
+        .await?
+        .is_some();
     assert!(!stale_active_row);
     Ok(())
 }
@@ -1028,8 +999,8 @@ async fn prior_state_is_loaded_once_and_folded_forward_across_500_block_batches(
 }
 
 #[tokio::test]
-async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_project() -> Result<()>
-{
+async fn restarted_interpret_redo_and_family_replay_match_fresh_after_suffix_retraction()
+-> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_redo_resolver_handoff").await?;
     let chain = "interpret-redo-resolver-handoff";
     seed_discovery_fixture(scratch.pool(), chain).await?;
@@ -1190,29 +1161,7 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
     .execute(scratch.pool())
     .await?;
     run_project(scratch.pool(), chain, 501, 0, 501).await?;
-    let projected_before: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM resolver_current
-             WHERE chain_id = $1 AND resolver_address = lower($2)
-         )",
-    )
-    .bind(chain)
-    .bind(DISCOVERED_RESOLVER)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert!(
-        projected_before,
-        "fixture must publish the suffix-only resolver"
-    );
-    sqlx::query(
-        "UPDATE resolver_current
-         SET declared_summary = declared_summary || '{\"redo_guard\":true}'::jsonb
-         WHERE chain_id = $1 AND resolver_address = lower($2)",
-    )
-    .bind(chain)
-    .bind(DISCOVERED_RESOLVER)
-    .execute(scratch.pool())
-    .await?;
+    project_resolver(scratch.pool(), chain, DISCOVERED_RESOLVER).await?;
 
     let first = Engine::new(scratch.pool().clone())
         .run_batch(BatchRequest {
@@ -1277,43 +1226,6 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         })
         .await?;
     assert!(!restarted.complete);
-    let suffix_evidence_survived: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM project_redo_resolver_evidence
-             WHERE chain_id = $1 AND event_identity = 'retracted-resolver-suffix'
-         )",
-    )
-    .bind(chain)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert!(
-        suffix_evidence_survived,
-        "redo restart replaced the original handoff with the re-derived prefix"
-    );
-    let expiry_name_survived: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM project_redo_expiry_roots
-         WHERE chain_id = $1 AND event_identity = 'retracted-expiry-root-suffix'",
-    )
-    .bind(chain)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        expiry_name_survived,
-        "ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "redo restart replaced the first captured path-expiry name"
-    );
-    let resource_only_survived: Option<Uuid> = sqlx::query_scalar(
-        "SELECT resource_id FROM project_redo_expiry_roots
-         WHERE chain_id = $1 AND event_identity = 'retracted-resource-only-expiry'",
-    )
-    .bind(chain)
-    .fetch_optional(scratch.pool())
-    .await?;
-    assert_eq!(
-        resource_only_survived,
-        Some(resource_only_expiry),
-        "redo omitted a resource-only path-expiry release from the Project handoff"
-    );
     let finished = restarted_engine
         .run_batch(BatchRequest {
             chain_id: chain.into(),
@@ -1324,55 +1236,39 @@ async fn restarted_interpret_redo_preserves_retracted_resolver_evidence_for_proj
         })
         .await?;
     assert!(finished.complete);
-    let child_handoff: Option<String> = sqlx::query_scalar(
-        "SELECT logical_name_id FROM project_redo_child_registration_history WHERE chain_id = $1 AND event_identity = 'retracted-child-history-suffix'",
-    )
-    .bind(chain).fetch_optional(scratch.pool()).await?;
+    let suffix_events: i64 = sqlx::query_scalar("SELECT count(*) FROM normalized_events WHERE chain_id = $1 AND event_identity IN ('retracted-resolver-suffix', 'retracted-expiry-root-suffix', 'retracted-resource-only-expiry', 'retracted-child-history-suffix')")
+        .bind(chain).fetch_one(scratch.pool()).await?;
     assert_eq!(
-        child_handoff.as_deref(),
-        Some("ens:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        suffix_events, 0,
+        "restarted Interpret redo retracts the original suffix"
     );
-    let projected = ProjectEngine::new(scratch.pool().clone())
-        .run_batch(ProjectBatchRequest {
-            chain_id: chain.into(),
-            target_block: 501,
-            affected_from_block: 0,
-            affected_to_block: 501,
-            resume_current: None,
-            mode: ProjectRunMode::Redo,
-        })
-        .await?;
-    assert!(projected.complete);
-    let projected_after: (bool, bool) = sqlx::query_as(
-        "SELECT EXISTS (
-             SELECT 1 FROM resolver_current
-             WHERE chain_id = $1 AND resolver_address = lower($2)
-         ), COALESCE((
-             SELECT declared_summary @> '{\"redo_guard\":true}'::jsonb
-             FROM resolver_current
-             WHERE chain_id = $1 AND resolver_address = lower($2)
-         ), false)",
+    initialize_completed_recompute_extent(scratch.pool(), chain, 501).await?;
+    let phases = PhaseSet::with_ingest_interpret_and_project(
+        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
+        Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
+        Arc::new(ProjectPhase::new(scratch.pool().clone())),
+    )?;
+    PhaseRunner::new(
+        scratch.runner(),
+        phases,
+        CapacityGuard::system(CapacityConfig::default()),
+        "restarted-interpret-family-replay",
+        test_timing(),
+    )?
+    .redo(
+        &chain_config(chain)?,
+        RedoPhase::Phase(PhaseName::Project),
+        BlockRange::new(0, 501)?,
+        CancellationToken::new(),
     )
-    .bind(chain)
-    .bind(DISCOVERED_RESOLVER)
-    .fetch_one(scratch.pool())
     .await?;
+    project_resolver(scratch.pool(), chain, DISCOVERED_RESOLVER).await?;
+    let replayed = family_state(scratch.pool(), chain).await?;
+    publish_families(scratch.pool(), chain, 501, FamilyMode::Rebuild).await?;
     assert_eq!(
-        projected_after,
-        (true, false),
-        "Project did not rebuild the discovered resolver after suffix evidence retracted"
-    );
-    let handoff_rows: i64 = sqlx::query_scalar(
-        "SELECT (SELECT count(*) FROM project_redo_resolver_evidence WHERE chain_id = $1)
-              + (SELECT count(*) FROM project_redo_expiry_roots WHERE chain_id = $1)
-              + (SELECT count(*) FROM project_redo_child_registration_history WHERE chain_id = $1)",
-    )
-    .bind(chain)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        handoff_rows, 0,
-        "Project did not consume both redo handoffs"
+        family_state(scratch.pool(), chain).await?,
+        replayed,
+        "restarted Interpret redo then Project replay matches a clean family rebuild"
     );
 
     scratch.cleanup().await
@@ -1761,21 +1657,34 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
     assert_eq!(fresh_snapshot["pointer_count"], 1);
     assert_eq!(fresh_snapshot["binding_count"], 1);
     run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
-    let projected_control: (Option<String>, Option<String>, Option<String>, bool, bool) =
-        sqlx::query_as(
-            "SELECT declared_summary #>> '{control,registry_owner}',
-                declared_summary #>> '{control,status}',
-                declared_summary #>> '{registration,authority_kind}',
-                declared_summary #>> '{registration,authority_key}' IS NOT NULL,
-                EXISTS (SELECT 1 FROM address_names_current address
-                        WHERE address.logical_name_id = name_current.logical_name_id
-                          AND address.relation = 'effective_controller'
-                          AND address.address = $1)
-         FROM name_current WHERE raw_name = 'pointer.eth'",
-        )
-        .bind(REGISTRANT)
-        .fetch_one(redone.pool())
-        .await?;
+    let name = project_named(redone.pool(), "pointer.eth").await?;
+    let controllers = bigname_storage::load_address_names_current(
+        redone.pool(),
+        REGISTRANT,
+        Some("ens"),
+        Some(bigname_storage::AddressNameRelation::EffectiveController),
+    )
+    .await?;
+    let projected_control = (
+        name.declared_summary
+            .pointer("/control/registry_owner")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        name.declared_summary
+            .pointer("/control/status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        name.declared_summary
+            .pointer("/registration/authority_kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        name.declared_summary
+            .pointer("/registration/authority_key")
+            .is_some_and(|key| !key.is_null()),
+        controllers
+            .iter()
+            .any(|row| row.logical_name_id == name.logical_name_id),
+    );
     assert_eq!(
         projected_control,
         (
@@ -1787,12 +1696,15 @@ async fn pre_surface_resolver_materialization_matches_fresh_resume_and_redo() ->
         ),
         "owned surface materialization must match release-rebound control fields"
     );
-    let projected_binding: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT registry_owner, registry_contract FROM permissions_current_resource_summary
-         JOIN name_current USING (resource_id) WHERE raw_name = 'pointer.eth'",
-    )
-    .fetch_one(redone.pool())
-    .await?;
+    let registry_contract: Option<String> = sqlx::query_scalar("SELECT registry_contract FROM project_registry_node_state WHERE chain_id = 'ethereum-mainnet' AND node = $1")
+        .bind(&name.namehash).fetch_one(redone.pool()).await?;
+    let projected_binding = (
+        name.declared_summary
+            .pointer("/control/registry_owner")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        registry_contract,
+    );
     assert_eq!(
         projected_binding,
         (
@@ -1848,14 +1760,14 @@ async fn pre_surface_registry_fallback_after_registrar_expiry_matches_fresh_resu
     assert_eq!(raw_before, raw_log_digest(redone.pool()).await?);
 
     run_project(redone.pool(), "ethereum-mainnet", 2, 0, 2).await?;
-    let projected: (Option<String>, Option<Uuid>) = sqlx::query_as(
-        "SELECT declared_summary -> 'control' ->> 'registry_owner', resource_id
-         FROM name_current
-         WHERE raw_name = 'pointer.eth'",
-    )
-    .fetch_one(redone.pool())
-    .await
-    .context("load projected pointer.eth registry fallback")?;
+    let name = project_named(redone.pool(), "pointer.eth").await?;
+    let projected = (
+        name.declared_summary
+            .pointer("/control/registry_owner")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        name.resource_id,
+    );
     assert_eq!(projected.0.as_deref(), Some(PRIOR_REGISTRY_OWNER));
     let rebound_resource: Option<Uuid> = sqlx::query_scalar(
         "SELECT resource_id
@@ -1928,20 +1840,24 @@ async fn current_registry_handoff_retracts_surfaced_old_resolver_after_redo_and_
     }));
     assert_ne!(clears[0].3, clears[1].3);
     run_project(scratch.pool(), "ethereum-mainnet", 6, 0, 6).await?;
-    let projected: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT declared_summary #>> '{resolver,address}',
-                declared_summary #>> '{registration,status}',
-                declared_summary #>> '{control,status}'
-         FROM name_current WHERE raw_name = 'pointer.eth'",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
+    let name = project_named(scratch.pool(), "pointer.eth").await?;
+    let projected = (
+        name.declared_summary
+            .pointer("/resolver/address")
+            .and_then(Value::as_str),
+        name.declared_summary
+            .pointer("/registration/status")
+            .and_then(Value::as_str),
+        name.declared_summary
+            .pointer("/control/status")
+            .and_then(Value::as_str),
+    );
     assert_eq!(
         projected.0, None,
         "Project must not serve the retired fallback"
     );
-    assert_eq!(projected.1.as_deref(), Some("unregistered"));
-    assert_eq!(projected.2.as_deref(), Some("unregistered"));
+    assert_eq!(projected.1, Some("unregistered"));
+    assert_eq!(projected.2, Some("unregistered"));
     assert_handoff_product_history(scratch.pool(), &clears).await?;
     scratch.cleanup().await
 }
@@ -1954,11 +1870,7 @@ async fn assert_handoff_product_history(
         EventHistoryAddressFilter, EventHistoryFilter, HistoryScope, HistorySummaryMode,
         load_event_history_page, load_name_history, load_resource_history,
     };
-    let logical_name: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM name_current WHERE raw_name = 'pointer.eth'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let logical_name = project_named(pool, "pointer.eth").await?.logical_name_id;
     let filter = EventHistoryFilter {
         logical_name_id: Some(logical_name.clone()),
         event_kinds: vec!["ResolverChanged".into()],
@@ -3957,18 +3869,23 @@ async fn construction_upgraded_before_the_registry_pointer_admits_and_supports_t
     ));
 
     run_project(scratch.pool(), chain, 2, 0, 2).await?;
-    let resolver: (String, Option<String>, String) = sqlx::query_as(
-        "SELECT support_status, unsupported_reason,
-                declared_summary #>> '{classification,role}'
-         FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = lower($2)",
-    )
-    .bind(chain)
-    .bind(DISCOVERED_RESOLVER)
-    .fetch_one(scratch.pool())
-    .await?;
+    let row = project_resolver(scratch.pool(), chain, DISCOVERED_RESOLVER).await?;
+    let resolver = (
+        row.coverage["status"]
+            .as_str()
+            .context("coverage status")?
+            .to_owned(),
+        row.coverage["unsupported_reason"]
+            .as_str()
+            .map(str::to_owned),
+        row.declared_summary["classification"]["role"]
+            .as_str()
+            .context("resolver role")?
+            .to_owned(),
+    );
     assert_eq!(
         resolver,
-        ("supported".into(), None, "permissioned_resolver".into())
+        ("projected".into(), None, "permissioned_resolver".into())
     );
 
     run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Redo).await?;
@@ -3995,37 +3912,46 @@ async fn assert_root_resolver_projection(
     logical_name_id: &str,
     resource_id: Uuid,
 ) -> Result<()> {
-    let name: (Uuid, String, String) = sqlx::query_as(
-        "SELECT resource_id, raw_name, declared_summary #>> '{resolver,address}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_one(pool)
-    .await?;
+    let row = project_name(pool, logical_name_id).await?;
+    let name = (
+        row.resource_id.context("name resource")?,
+        row.canonical_display_name,
+        row.declared_summary["resolver"]["address"]
+            .as_str()
+            .context("name resolver")?
+            .to_owned(),
+    );
     assert_eq!(
         name,
         (resource_id, "box".into(), DISCOVERED_RESOLVER.into())
     );
 
-    let resolver: (String, String) = sqlx::query_as(
-        "SELECT support_status, declared_summary #>> '{classification,source_family}'
-         FROM resolver_current
-         WHERE chain_id = $1 AND lower(resolver_address) = lower($2)",
-    )
-    .bind(chain_id)
-    .bind(DISCOVERED_RESOLVER)
-    .fetch_one(pool)
-    .await?;
-    assert_eq!(resolver, ("supported".into(), "ens_v2_resolver_l1".into()));
+    let row = project_resolver(pool, chain_id, DISCOVERED_RESOLVER).await?;
+    let resolver = (
+        row.coverage["status"]
+            .as_str()
+            .context("coverage status")?
+            .to_owned(),
+        row.declared_summary["classification"]["source_family"]
+            .as_str()
+            .context("resolver source")?
+            .to_owned(),
+    );
+    assert_eq!(resolver, ("projected".into(), "ens_v2_resolver_l1".into()));
 
-    let inventory: (serde_json::Value, serde_json::Value, String, String) = sqlx::query_as(
-        "SELECT selectors, entries, provenance ->> 'logical_name_id',
-                provenance ->> 'resolver_address'
-         FROM record_inventory_current WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .fetch_one(pool)
-    .await?;
+    let row = project_inventory(pool, chain_id, resource_id).await?;
+    let inventory = (
+        row.selectors,
+        row.entries,
+        row.provenance["logical_name_id"]
+            .as_str()
+            .context("inventory name")?
+            .to_owned(),
+        row.provenance["resolver_address"]
+            .as_str()
+            .context("inventory resolver")?
+            .to_owned(),
+    );
     assert_eq!(inventory.2, logical_name_id);
     assert_eq!(inventory.3, DISCOVERED_RESOLVER);
     assert!(
@@ -4268,41 +4194,39 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
         FIRST_BLOCK + 2,
     )
     .await?;
-    let projected_family: String = sqlx::query_scalar(
-        "SELECT declared_summary #>> '{classification,source_family}'
-         FROM resolver_current
-         WHERE chain_id = $1 AND resolver_address = lower($2)",
-    )
-    .bind(CHAIN)
-    .bind(RESOLVER)
-    .fetch_one(scratch.pool())
-    .await?;
+    let resolver = project_resolver(scratch.pool(), CHAIN, RESOLVER).await?;
+    let projected_family = resolver.declared_summary["classification"]["source_family"]
+        .as_str()
+        .context("resolver family")?;
     assert_eq!(projected_family, "ens_v1_resolver_l1");
-    let projected_resolver: (String, String, String, String, bool, bool) = sqlx::query_as(
-        "SELECT current.support_status,
-                    current.declared_summary #>> '{classification,basis}',
-                    current.declared_summary #>> '{classification,role}',
-                    manifest.source_family,
-                    current.declared_summary #> '{classification,implementation}' IS NULL,
-                    current.provenance -> 'upgrade_event_id' IS NULL
-             FROM resolver_current current
-             JOIN manifest_versions manifest
-               ON manifest.manifest_id = (current.provenance ->> 'manifest_id')::bigint
-             WHERE current.chain_id = $1
-               AND current.resolver_address = lower($2)",
-    )
-    .bind(CHAIN)
-    .bind(RESOLVER)
-    .fetch_one(scratch.pool())
-    .await?;
+    let manifest_family: String =
+        sqlx::query_scalar("SELECT source_family FROM manifest_versions WHERE manifest_id = $1")
+            .bind(resolver.provenance["manifest_id"].as_i64())
+            .fetch_one(scratch.pool())
+            .await?;
+    let projected_resolver = (
+        resolver.coverage["status"]
+            .as_str()
+            .context("resolver coverage")?
+            .to_owned(),
+        resolver.declared_summary["classification"]["basis"]
+            .as_str()
+            .context("classification basis")?
+            .to_owned(),
+        resolver.declared_summary["classification"]["role"]
+            .as_str()
+            .context("classification role")?
+            .to_owned(),
+        manifest_family,
+        resolver.declared_summary["classification"]["implementation"].is_null(),
+    );
     assert_eq!(
         projected_resolver,
         (
-            "supported".into(),
+            "projected".into(),
             "manifest_declared_address".into(),
             "public_resolver".into(),
             "ens_v1_resolver_l1".into(),
-            true,
             true,
         )
     );
@@ -4363,30 +4287,31 @@ async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> 
             pointer_events.2,
         )
     );
-    let candidate_event_ids: Value = sqlx::query_scalar(
-        "SELECT provenance -> 'candidate_event_ids'
-         FROM resolver_current
-         WHERE chain_id = $1 AND resolver_address = lower($2)",
+    let pointer_event: i64 = sqlx::query_scalar("SELECT normalized_event_id FROM project_named_resource_pointer WHERE chain_id = $1 AND logical_name_id = $2")
+        .bind(CHAIN).bind(pointer_events.1.as_deref()).fetch_one(scratch.pool()).await?;
+    assert_eq!(
+        pointer_event, pointer_events.2,
+        "the family retains the real registry pointer event"
+    );
+    let name = project_name(
+        scratch.pool(),
+        pointer_events.1.as_deref().context("pointer name")?,
     )
-    .bind(CHAIN)
-    .bind(RESOLVER)
-    .fetch_one(scratch.pool())
     .await?;
-    assert!(candidate_event_ids.as_array().is_some_and(|event_ids| {
-        event_ids
-            .iter()
-            .any(|event_id| event_id == pointer_events.2)
-    }));
-    let inventory: (String, Value) = sqlx::query_as(
-        "SELECT inventory.support_status, inventory.entries
-         FROM record_inventory_current inventory
-         JOIN name_current name ON name.resource_id = inventory.resource_id
-         WHERE name.logical_name_id = $1",
+    let row = project_inventory(
+        scratch.pool(),
+        CHAIN,
+        name.resource_id.context("name resource")?,
     )
-    .bind(format!("ens:{:#x}", raw_namehash(&[b"alice", b"eth"])))
-    .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(inventory.0, "supported");
+    let inventory = (
+        row.coverage["status"]
+            .as_str()
+            .context("coverage status")?
+            .to_owned(),
+        row.entries,
+    );
+    assert_eq!(inventory.0, "projected");
     assert!(inventory.1.as_array().is_some_and(|entries| {
         entries.iter().any(|entry| {
             entry["record_key"] == "text:url"
@@ -5327,74 +5252,39 @@ async fn child_registry_fixture(
     run_engine(pool, chain, 1, through, InterpretRunMode::Normal).await
 }
 
-const SERVED_FIELDS: &str = "SELECT jsonb_build_object(
-        'authority_arm', provenance #>> '{authority_selection,authority_arm}',
-        'lifecycle_state', provenance #>> '{authority_selection,lifecycle_state}',
-        'resource_id', resource_id, 'surface_binding_id', surface_binding_id,
-        'registration', declared_summary -> 'registration',
-        'control', declared_summary -> 'control',
-        'resolver', declared_summary -> 'resolver')
-    FROM name_current WHERE logical_name_id = $1";
-
-/// Projects `chain` as resumed batches at `targets` and returns the fields `name` serves right
-/// after each of them.
+/// Publish resumed batches and read each name at the actual family publication.
 async fn served_after_each_batch(
     pool: &PgPool,
     chain: &str,
     targets: &[i64],
     name: &str,
 ) -> Result<Vec<Value>> {
-    let engine = ProjectEngine::new(pool.clone());
-    let mut previous: Option<bigname_project::Marker> = None;
-    let mut served = Vec::with_capacity(targets.len());
-    for &target in targets {
-        let outcome = engine
-            .run_batch(ProjectBatchRequest {
-                chain_id: chain.to_owned(),
-                target_block: target,
-                affected_from_block: previous.as_ref().map_or(0, |marker| marker.number + 1),
-                affected_to_block: target,
-                resume_current: previous.clone(),
-                mode: ProjectRunMode::Normal,
-            })
-            .await?;
-        assert!(outcome.complete);
-        previous = Some(outcome.current);
-        served.push(
-            sqlx::query_scalar(SERVED_FIELDS)
-                .bind(name)
-                .fetch_one(pool)
-                .await?,
-        );
+    let mut served = Vec::new();
+    for (index, &target) in targets.iter().enumerate() {
+        publish_families(
+            pool,
+            chain,
+            target,
+            if index == 0 {
+                FamilyMode::Rebuild
+            } else {
+                FamilyMode::Normal
+            },
+        )
+        .await?;
+        served.push(served_fields(pool, name).await?);
     }
     Ok(served)
 }
 
-/// Projects `chain` as one batch to `target` and returns the fields `name` serves.
 async fn served_after_one_batch(
     pool: &PgPool,
     chain: &str,
     target: i64,
     name: &str,
 ) -> Result<Value> {
-    run_project(pool, chain, target, 0, target).await?;
-    Ok(sqlx::query_scalar(SERVED_FIELDS)
-        .bind(name)
-        .fetch_one(pool)
-        .await?)
-}
-
-/// The events `name`'s row cites: its `selected_event_ids` and `raw_fact_refs`.
-async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
-    Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-             'selected_event_ids', provenance -> 'selected_event_ids',
-             'raw_fact_refs', provenance -> 'raw_fact_refs')
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(name)
-    .fetch_one(pool)
-    .await?)
+    publish_families(pool, chain, target, FamilyMode::Rebuild).await?;
+    served_fields(pool, name).await
 }
 
 // A registered child whose path is cut before its own expiry: when the parent's subregistry is
@@ -5476,7 +5366,6 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     assert_eq!(
         (
             served["authority_arm"].as_str(),
-            served["lifecycle_state"].as_str(),
             served["resource_id"].as_str(),
             served["registration"]["status"].as_str(),
             served["registration"]["latest_event_kind"].as_str(),
@@ -5486,7 +5375,6 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
         ),
         (
             Some("ens_v2"),
-            Some("unregistered"),
             Some(resource.to_string().as_str()),
             Some("released"),
             Some("RegistrationReleased"),
@@ -5550,7 +5438,6 @@ async fn detached_child_resumed_then_rebuilt(
     let (resource_text, binding_text) = (resource.to_string(), binding.to_string());
     let tombstone = (
         Some("ens_v2"),
-        Some("unregistered"),
         Some(resource_text.as_str()),
         Some(binding_text.as_str()),
         Some("released"),
@@ -5572,8 +5459,8 @@ async fn detached_child_resumed_then_rebuilt(
     let last = *targets.last().context("no target")?;
     // The row cites the release without a name that decided it, and a rebuild cites the same.
     let cited = cited_events(pool, &leaf).await?;
-    let release: i64 = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM normalized_events
+    let release: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events
          WHERE chain_id = $1 AND block_number = $2 AND logical_name_id IS NULL
            AND event_kind = 'RegistrationReleased'",
     )
@@ -5581,12 +5468,7 @@ async fn detached_child_resumed_then_rebuilt(
     .bind(lapse)
     .fetch_one(pool)
     .await?;
-    assert!(
-        cited["selected_event_ids"]
-            .as_array()
-            .is_some_and(|ids| ids.contains(&json!(release))),
-        "{cited}"
-    );
+    assert_eq!(cited["selected_event"], release, "{cited}");
     assert_eq!(
         served_after_one_batch(pool, chain, last, &leaf).await?,
         served[served.len() - 1],
@@ -5600,10 +5482,9 @@ async fn detached_child_resumed_then_rebuilt(
     Ok(())
 }
 
-/// Authority arm, lifecycle, resource, binding, registration status, control status, and the
+/// Authority arm, resource, binding, registration status, control status, and the
 /// registration's `released_at` and expiry.
 type DetachedChildServed<'a> = (
-    Option<&'a str>,
     Option<&'a str>,
     Option<&'a str>,
     Option<&'a str>,
@@ -5616,7 +5497,6 @@ type DetachedChildServed<'a> = (
 fn detached_child_served(served: &Value) -> DetachedChildServed<'_> {
     (
         served["authority_arm"].as_str(),
-        served["lifecycle_state"].as_str(),
         served["resource_id"].as_str(),
         served["surface_binding_id"].as_str(),
         served["registration"]["status"].as_str(),
@@ -5745,11 +5625,8 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
     );
     let served = served_after_each_batch(scratch.pool(), chain, &[1, 2, 3, 4], &leaf).await?;
     assert_eq!(
-        (
-            served[1]["lifecycle_state"].as_str(),
-            served[1]["registration"]["status"].as_str(),
-        ),
-        (Some("reserved"), Some("reserved")),
+        (served[1]["registration"]["status"].as_str(),),
+        (Some("reserved"),),
         "right after the batch at 2: {}",
         served[1]
     );
@@ -5759,7 +5636,6 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
             detached_child_served(fields),
             (
                 Some("ens_v2"),
-                Some("unregistered"),
                 Some(resource.as_str()),
                 Some(binding.as_str()),
                 Some("released"),
@@ -5815,7 +5691,6 @@ async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> 
     assert_eq!(
         (
             served["authority_arm"].as_str(),
-            served["lifecycle_state"].as_str(),
             served["resource_id"].as_str(),
             served["registration"]["status"].as_str(),
             served["registration"]["released_at"].as_i64(),
@@ -5824,7 +5699,6 @@ async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> 
         ),
         (
             Some("ens_v2"),
-            Some("unregistered"),
             Some(resource.to_string().as_str()),
             Some("released"),
             Some(30),
@@ -5844,7 +5718,7 @@ enum LapseRetraction {
     ProjectOnly,
     /// Blocks 2 and 3 are replaced by a fork where the child registry renews the detached token to
     /// 100 in block 2, and Interpret redoes both: it deletes the release and keeps its resource in
-    /// `project_redo_expiry_roots`.
+    /// the family undo journal.
     InterpretDeletes,
 }
 
@@ -5954,18 +5828,6 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
     reorg.commit().await?;
     if let LapseRetraction::InterpretDeletes = retraction {
         run_engine(pool, chain, 2, 3, InterpretRunMode::Redo).await?;
-        let kept: Vec<(Option<String>, Option<Uuid>)> = sqlx::query_as(
-            "SELECT logical_name_id, resource_id FROM project_redo_expiry_roots
-             WHERE chain_id = $1",
-        )
-        .bind(chain)
-        .fetch_all(pool)
-        .await?;
-        assert_eq!(
-            kept,
-            [(None, Some(resource))],
-            "Interpret keeps only the retracted lapse's resource for Project"
-        );
     }
     let remaining: Vec<String> = sqlx::query_scalar(
         "SELECT lineage.canonicality_state::text
@@ -5987,31 +5849,22 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
         "the lapse is left on the orphaned block, or deleted"
     );
 
-    let redone = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectBatchRequest {
-            chain_id: chain.to_owned(),
-            target_block: 3,
-            affected_from_block: fork_from,
-            affected_to_block: 3,
-            // A reorg rewinds every phase to the common ancestor.
-            resume_current: Some(bigname_project::Marker {
-                number: fork_from - 1,
-                hash: block_hash(chain, fork_from - 1),
-            }),
-            mode: ProjectRunMode::Redo,
-        })
-        .await?;
-    assert!(redone.complete);
-    let redone: Value = sqlx::query_scalar(SERVED_FIELDS)
-        .bind(&leaf)
-        .fetch_one(pool)
-        .await?;
+    publish_families(
+        pool,
+        chain,
+        3,
+        FamilyMode::Redo {
+            from: fork_from,
+            to: 3,
+        },
+    )
+    .await?;
+    let redone = served_fields(pool, &leaf).await?;
     let (resource, binding) = (resource.to_string(), binding.to_string());
     assert_eq!(
         detached_child_served(&redone),
         (
             Some("ens_v2"),
-            Some("unregistered"),
             Some(resource.as_str()),
             Some(binding.as_str()),
             Some("released"),
@@ -6087,24 +5940,8 @@ async fn a_redo_rebuilds_a_name_whose_deciding_release_is_no_longer_activated() 
     .bind(chain)
     .execute(pool)
     .await?;
-    let redone = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectBatchRequest {
-            chain_id: chain.to_owned(),
-            target_block: 3,
-            affected_from_block: 3,
-            affected_to_block: 3,
-            resume_current: Some(bigname_project::Marker {
-                number: 3,
-                hash: block_hash(chain, 3),
-            }),
-            mode: ProjectRunMode::Redo,
-        })
-        .await?;
-    assert!(redone.complete);
-    let redone: Value = sqlx::query_scalar(SERVED_FIELDS)
-        .bind(&leaf)
-        .fetch_one(pool)
-        .await?;
+    publish_families(pool, chain, 3, FamilyMode::Redo { from: 3, to: 3 }).await?;
+    let redone = served_fields(pool, &leaf).await?;
     assert_eq!(
         (
             redone["registration"]["status"].as_str(),
@@ -8313,18 +8150,18 @@ async fn run_project(
     affected_from_block: i64,
     affected_to_block: i64,
 ) -> Result<()> {
-    let outcome = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectBatchRequest {
-            chain_id: chain_id.to_owned(),
-            target_block,
-            affected_from_block,
-            affected_to_block,
-            resume_current: None,
-            mode: ProjectRunMode::Normal,
-        })
-        .await?;
-    assert!(outcome.complete);
-    assert_eq!(outcome.current, outcome.target);
+    assert!(affected_from_block <= affected_to_block);
+    publish_families(
+        pool,
+        chain_id,
+        target_block,
+        if affected_from_block == 0 {
+            FamilyMode::Rebuild
+        } else {
+            FamilyMode::Normal
+        },
+    )
+    .await?;
     Ok(())
 }
 

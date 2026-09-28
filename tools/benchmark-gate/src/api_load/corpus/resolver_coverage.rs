@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
-use bigname_storage::{CURRENT_PROJECT_PUBLICATION_JOIN, DEFAULT_RESOLVER_CURRENT_READ_FILTER};
 use sqlx::PgPool;
 
 use crate::api_load::{ResolverManifestCoverage, workload::ResolverTarget};
@@ -34,16 +33,31 @@ struct ResolverCoverageRow {
 }
 
 fn resolver_manifest_coverage_sql() -> String {
-    // Match the concrete `exact_declared` arm and the implementation-based
-    // `latest_upgrades` arm in crates/project/src/builders/resolver.rs.
-    format!(
-        r#"
+    // Preserve the corpus admission policy while binding its evidence to the
+    // published resolver classification and the retained manifest/upgrade events.
+    r#"
 WITH current_projects AS (
-    SELECT head.chain_id, project.current_block_number,
-           project.current_block_hash
+    SELECT head.chain_id, marker.current_block_number,
+           marker.current_block_hash
     FROM bigname_phase.chain_heads head
-    {CURRENT_PROJECT_PUBLICATION_JOIN}
-    WHERE project.input_content_hash = $1
+    JOIN bigname_phase.project_family_marker marker
+      ON marker.chain_id = head.chain_id
+     AND marker.current_block_number = head.latest_block_number
+     AND marker.current_block_hash = head.latest_block_hash
+    JOIN bigname_phase.chain_lineage publication_lineage
+      ON publication_lineage.chain_id = marker.chain_id
+     AND publication_lineage.block_number = marker.current_block_number
+     AND publication_lineage.block_hash = marker.current_block_hash
+     AND publication_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+    WHERE marker.state = 'live'
+      AND marker.input_content_hash = $1
+      AND NOT EXISTS (
+          SELECT 1 FROM bigname_phase.chain_phase_state input_phase
+          WHERE input_phase.chain_id = marker.chain_id
+            AND input_phase.phase_name IN ('interpret', 'project')
+            AND input_phase.redo_in_progress
+            AND input_phase.redo_from_block_number <= marker.current_block_number
+      )
 ), stored_resolver_manifests AS (
     SELECT manifest.*
     FROM bigname_phase.manifest_versions manifest
@@ -396,86 +410,37 @@ SELECT expected.chain_id,
        active.manifest_payload_from_latest_event,
        expected.manifest_binding_problem,
        expected.manifest_problem,
-       candidate.support_status,
+       resolver.support_status,
+       COALESCE(resolver.manifest_event_id = expected.manifest_event_id, FALSE)
+           AS manifest_event_bound,
        COALESCE(
-           candidate.provenance ->> 'manifest_event_id'
-               = expected.manifest_event_id::text,
-           FALSE
-       ) AS manifest_event_bound,
-       CASE
-           WHEN resolver.resolver_address IS NULL THEN FALSE
-           WHEN jsonb_typeof(
-                    resolver.chain_positions -> 'target_block_number'
-                ) <> 'number' THEN FALSE
-           WHEN jsonb_typeof(
-                    resolver.chain_positions -> 'target_block_hash'
-                ) <> 'string' THEN FALSE
-           WHEN (resolver.chain_positions ->> 'target_block_number')
-                    !~ '^[0-9]+$' THEN FALSE
-           WHEN (resolver.chain_positions ->> 'target_block_number')::numeric
-                    > 9223372036854775807::numeric THEN FALSE
-           WHEN resolver.manifest_version <> expected.manifest_version THEN FALSE
-           WHEN resolver.provenance ->> 'manifest_id'
-                    IS DISTINCT FROM expected.manifest_id::text THEN FALSE
-           WHEN resolver.provenance ->> 'manifest_event_id'
-                    IS DISTINCT FROM expected.manifest_event_id::text THEN FALSE
-           WHEN expected.upgrade_event_id IS NOT NULL
-            AND resolver.provenance ->> 'upgrade_event_id'
-                    IS DISTINCT FROM expected.upgrade_event_id::text THEN FALSE
-           WHEN expected.upgrade_block_number IS NOT NULL
-            AND jsonb_typeof(resolver.chain_positions -> 'block_number')
-                    <> 'number' THEN FALSE
-           WHEN expected.upgrade_block_number IS NOT NULL
-            AND jsonb_typeof(resolver.chain_positions -> 'block_hash')
-                    <> 'string' THEN FALSE
-           WHEN expected.upgrade_block_number IS NOT NULL
-            AND (resolver.chain_positions ->> 'block_number')
-                    !~ '^[0-9]+$' THEN FALSE
-           WHEN expected.upgrade_block_number IS NOT NULL
-            AND (resolver.chain_positions ->> 'block_number')::numeric
-                    > 9223372036854775807::numeric THEN FALSE
-           WHEN expected.upgrade_block_number IS NOT NULL
-            AND (
-                (resolver.chain_positions ->> 'block_number')::numeric
-                    <> expected.upgrade_block_number::numeric
-                OR resolver.chain_positions ->> 'block_hash'
-                    IS DISTINCT FROM expected.upgrade_block_hash
-            ) THEN FALSE
-           ELSE COALESCE(
-               (resolver.chain_positions ->> 'target_block_number')::numeric
-                    <= expected.target_block_number::numeric
-               AND (resolver.chain_positions ->> 'target_block_number')::numeric
-                    >= expected.applicable_start_block
-               AND EXISTS (
-                   SELECT 1
-                   FROM bigname_phase.chain_lineage numbered_lineage
-                   WHERE numbered_lineage.chain_id = resolver.chain_id
-                     AND numbered_lineage.block_hash =
-                         resolver.chain_positions ->> 'target_block_hash'
-                     AND numbered_lineage.block_number::numeric =
-                         (resolver.chain_positions ->> 'target_block_number')::numeric
+           resolver.unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
+           AND resolver.manifest_id = expected.manifest_id
+           AND resolver.manifest_event_id = expected.manifest_event_id
+           AND manifest_event.manifest_version = expected.manifest_version
+           AND publication.current_block_number >= expected.applicable_start_block
+           AND (
+               expected.upgrade_event_id IS NULL
+               OR (
+                   resolver.classification #>> '{upgrade,normalized_event_id}'
+                       = expected.upgrade_event_id::text
+                   AND resolver.classification #>> '{upgrade,block_number}'
+                       = COALESCE(expected.upgrade_block_number, 0)::text
                )
-               AND (
-                   (resolver.chain_positions ->> 'target_block_number')::numeric
-                        <> expected.target_block_number::numeric
-                   OR resolver.chain_positions ->> 'target_block_hash'
-                        = expected.target_block_hash
-               ),
-               FALSE
-           )
-       END AS api_visible
+           ),
+           FALSE
+       ) AS api_visible
 FROM expected
 JOIN active_families active
   ON active.manifest_id = expected.manifest_id
-LEFT JOIN bigname_phase.resolver_current candidate
-  ON candidate.chain_id = expected.chain_id
- AND lower(candidate.resolver_address) = expected.resolver_address
-LEFT JOIN bigname_phase.resolver_current resolver
+LEFT JOIN current_projects publication ON publication.chain_id = expected.chain_id
+LEFT JOIN bigname_phase.project_resolver_classification resolver
   ON resolver.chain_id = expected.chain_id
- AND lower(resolver.resolver_address) = expected.resolver_address
- {DEFAULT_RESOLVER_CURRENT_READ_FILTER}
+ AND resolver.resolver_address = expected.resolver_address
+LEFT JOIN bigname_phase.normalized_events manifest_event
+  ON manifest_event.normalized_event_id = resolver.manifest_event_id
 ORDER BY expected.chain_id, expected.source_family, expected.resolver_address"#
-    )
+        .to_owned()
 }
 
 pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
@@ -570,10 +535,10 @@ pub(super) async fn load(pool: &PgPool) -> Result<ResolverCoverage> {
         count.1 += 1;
         match support_status.as_deref() {
             None => failures.push(format!(
-                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is missing from resolver_current; rebuild Project from the stored active manifests and rerun the gate"
+                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is missing from the resolver classification family; rebuild Project from the stored active manifests and rerun the gate"
             )),
             Some(status) if status != "supported" => failures.push(format!(
-                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is {status:?}, not supported, in resolver_current; rebuild Project from the stored active manifests and rerun the gate"
+                "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} is {status:?}, not supported, in the resolver classification family; rebuild Project from the stored active manifests and rerun the gate"
             )),
             Some(_) if !manifest_event_bound => failures.push(format!(
                 "active resolver manifest address {resolver_address} on chain {chain_id:?} in family {source_family:?} for manifest {manifest_id} (stored version {stored_version_label}, latest event version {event_version_label}) does not cite latest projected manifest event {manifest_event_id:?}; rebuild Project from the latest canonical manifest event and rerun the gate"

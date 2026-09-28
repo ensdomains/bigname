@@ -57,17 +57,6 @@ justification = "The benchmark API orchestrator keeps target-identity boundaries
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling, its route workload builders and corpus loading are split into child modules, and its remaining code is one auditable gate sequence plus focused tests."
 
 [[files]]
-path = "tools/benchmark-gate/src/api_load/corpus.rs"
-loc = 986
-justification = "Production-scale corpus queries, their shared API-visibility filters, scale floors, namespace coverage, and database regressions remain together so the sampled and counted populations cannot drift apart."
-review_justification = "Reviewed as non-serving release tooling: the file remains below the 1200 LOC ceiling, production query assembly is compact, and most of its size is database-backed coverage proving every sampled corpus family follows its serving-read visibility predicate."
-
-[[files]]
-path = "tools/benchmark-gate/src/api_load/corpus/resolver_coverage.rs"
-loc = 634
-justification = "Resolver manifest reconciliation, schema-v2 projection-phase admission, projected-row evidence binding, and the resulting operator failures remain together so the gate's expectation set is auditable as one query and verdict path."
-
-[[files]]
 path = "tools/benchmark-gate/src/api_load/preflight.rs"
 loc = 621
 justification = "API build, database, Interpret redo, Project publication, and manifest-authority snapshots remain one preflight and endpoint-boundary contract; focused database tests account for most of the excess over the normal file target."
@@ -82,11 +71,6 @@ path = "tools/benchmark-gate/src/database.rs"
 loc = 1046
 justification = "Read-only and disposable-copy connection preflights, per-connection instance pinning, marker authorization, and their database-backed safety tests remain co-located for one reviewable connection boundary."
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling and most of its length is focused refusal-path coverage for the two connection modes rather than additional production responsibilities."
-
-[[files]]
-path = "tools/benchmark-gate/src/indexing.rs"
-loc = 723
-justification = "Index timing, rebuild, throughput, memory measurement, and red-report construction remain one release-gate operation with its budget and false-green regression tests."
 
 [[files]]
 path = "apps/phase-runner/src/heads.rs"

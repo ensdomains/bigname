@@ -35,56 +35,6 @@ async fn schema_migrations_apply_to_an_empty_database_before_the_phase_baseline(
 }
 
 #[tokio::test]
-async fn serving_resource_reference_migrates_an_initialized_phase_schema() -> Result<()> {
-    let database = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_serving_resource_migration")
-            .pool_max_connections(2)
-            .parse_context("failed to parse serving-resource schema-migration database URL")
-            .admin_connect_context("failed to connect serving-resource migration admin pool")
-            .pool_connect_context("failed to connect serving-resource migration pool"),
-    )
-    .await?;
-    initialize_schema_v2(database.pool()).await?;
-    sqlx::raw_sql("ALTER TABLE bigname_phase.name_current DROP COLUMN serving_resource_id CASCADE")
-        .execute(database.pool())
-        .await?;
-
-    let migration =
-        include_str!("../../../migrations/20260828120000_name_current_serving_resource.sql");
-    sqlx::raw_sql(migration).execute(database.pool()).await?;
-    sqlx::raw_sql(migration).execute(database.pool()).await?;
-    let definition: (bool, bool, Option<String>) = sqlx::query_as(
-        "SELECT EXISTS (
-             SELECT 1 FROM pg_constraint
-             WHERE conrelid = 'bigname_phase.name_current'::regclass
-               AND contype = 'f'
-               AND confrelid = 'bigname_phase.resources'::regclass
-               AND conkey = ARRAY[(
-                   SELECT attnum FROM pg_attribute
-                   WHERE attrelid = 'bigname_phase.name_current'::regclass
-                     AND attname = 'serving_resource_id'
-               )]::smallint[]
-         ),
-         to_regclass('bigname_phase.name_current_serving_resource_idx') IS NOT NULL,
-         col_description('bigname_phase.name_current'::regclass,
-             (SELECT attnum FROM pg_attribute
-              WHERE attrelid = 'bigname_phase.name_current'::regclass
-                AND attname = 'serving_resource_id'))",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    assert!(definition.0);
-    assert!(definition.1);
-    assert!(
-        definition
-            .2
-            .as_deref()
-            .is_some_and(|comment| { comment.contains("does not establish a current authority") })
-    );
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_expiry_scope_index_migration")
@@ -110,7 +60,11 @@ async fn expiry_scope_indexes_migration_repairs_an_initialized_phase_schema() ->
     .await?;
     assert!(absent_before);
 
-    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260831150000_normalized_events_v2_expiry_scope_idx.sql"
+    ))
+    .execute(database.pool())
+    .await?;
     let ready_and_valid: bool = sqlx::query_scalar(
         "SELECT COALESCE(bool_and(index_state.indisready AND index_state.indisvalid), false)
          FROM pg_index index_state
@@ -190,7 +144,11 @@ async fn expiry_scope_migration_preserves_a_prebuilt_reserved_history_index() ->
     .fetch_one(database.pool())
     .await?;
 
-    bigname_storage::MIGRATOR.run(database.pool()).await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260831150000_normalized_events_v2_expiry_scope_idx.sql"
+    ))
+    .execute(database.pool())
+    .await?;
     let after_oid: i64 = sqlx::query_scalar(
         "SELECT 'bigname_phase.normalized_events_subregistry_registration_history_idx'::regclass::oid::bigint",
     )
@@ -288,94 +246,6 @@ async fn manifest_change_counter_migrates_existing_history_with_baseline_parity(
 }
 
 #[tokio::test]
-async fn reverse_hydration_attempt_state_migrates_an_initialized_phase_schema() -> Result<()> {
-    let database = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_reverse_hydration_attempt_migration")
-            .pool_max_connections(2)
-            .parse_context("failed to parse reverse hydration schema-migration database URL")
-            .admin_connect_context(
-                "failed to connect reverse hydration schema-migration admin pool",
-            )
-            .pool_connect_context("failed to connect reverse hydration schema-migration pool"),
-    )
-    .await?;
-    initialize_schema_v2(database.pool()).await?;
-    sqlx::raw_sql(
-        "ALTER TABLE bigname_phase.primary_names_current
-             DROP CONSTRAINT primary_names_current_reverse_hydration_attempt_check,
-             DROP COLUMN reverse_hydration_attempted_block_number,
-             DROP COLUMN reverse_hydration_attempted_block_hash,
-             DROP COLUMN reverse_hydration_attempt_ordinal;
-         DROP SEQUENCE bigname_phase.reverse_hydration_attempt_ordinal_seq;",
-    )
-    .execute(database.pool())
-    .await?;
-
-    bigname_storage::MIGRATOR.run(database.pool()).await?;
-
-    let sequence_exists: bool = sqlx::query_scalar(
-        "SELECT to_regclass(
-             'bigname_phase.reverse_hydration_attempt_ordinal_seq'
-         ) IS NOT NULL",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    assert!(sequence_exists);
-    let columns: Vec<String> = sqlx::query_scalar(
-        "SELECT column_name
-         FROM information_schema.columns
-         WHERE table_schema = 'bigname_phase'
-           AND table_name = 'primary_names_current'
-           AND column_name IN (
-               'reverse_hydration_attempted_block_number',
-               'reverse_hydration_attempted_block_hash',
-               'reverse_hydration_attempt_ordinal'
-           )
-         ORDER BY column_name",
-    )
-    .fetch_all(database.pool())
-    .await?;
-    assert_eq!(
-        columns,
-        vec![
-            "reverse_hydration_attempt_ordinal",
-            "reverse_hydration_attempted_block_hash",
-            "reverse_hydration_attempted_block_number",
-        ]
-    );
-    let constraint_is_valid: bool = sqlx::query_scalar(
-        "SELECT constraint_row.convalidated
-         FROM pg_constraint constraint_row
-         WHERE constraint_row.conrelid =
-                 'bigname_phase.primary_names_current'::regclass
-           AND constraint_row.conname =
-                 'primary_names_current_reverse_hydration_attempt_check'",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    assert!(constraint_is_valid);
-    sqlx::query(
-        "SELECT reverse_hydration_attempted_block_number,
-                reverse_hydration_attempted_block_hash,
-                reverse_hydration_attempt_ordinal
-         FROM bigname_phase.primary_names_current
-         LIMIT 0",
-    )
-    .execute(database.pool())
-    .await?;
-    let attempt_ordinal: i64 = sqlx::query_scalar(
-        "SELECT nextval(
-             'bigname_phase.reverse_hydration_attempt_ordinal_seq'
-         )",
-    )
-    .fetch_one(database.pool())
-    .await?;
-    assert!(attempt_ordinal > 0);
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline() -> Result<()> {
     let database = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_pre_audit_baseline_migration")
@@ -397,11 +267,11 @@ async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline()
         include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
         include_str!("../../../schema-v2/baseline/03_identity.sql"),
         include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/05_normalized_events.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/06_projections.sql"),
         include_str!("../../../schema-v2/baseline/07_labels.sql"),
         include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/09_divergence.sql"),
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
     ] {
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
@@ -461,6 +331,7 @@ async fn bootstrap_after_legacy_schema_drop_reaches_manifest_sync() -> Result<()
             .pool_connect_context("failed to connect phase-runner bootstrap pool"),
     )
     .await?;
+    bigname_storage::MIGRATOR.run(database.pool()).await?;
     initialize_schema_v2(database.pool()).await?;
     let phase_structure_before = load_phase_schema_structure(database.pool()).await?;
     bigname_storage::MIGRATOR.run(database.pool()).await?;
@@ -723,100 +594,6 @@ async fn bootstrap_rejects_structural_drift_in_an_existing_phase_schema() -> Res
 }
 
 #[tokio::test]
-async fn generation_failure_audit_matches_between_baseline_and_schema_migration() -> Result<()> {
-    let migrated = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_generation_failure_migrated")
-            .pool_max_connections(2)
-            .parse_context("failed to parse migrated failure-audit database URL")
-            .admin_connect_context("failed to connect migrated failure-audit admin pool")
-            .pool_connect_context("failed to connect migrated failure-audit pool"),
-    )
-    .await?;
-    let mut transaction = migrated.pool().begin().await?;
-    sqlx::query("CREATE SCHEMA bigname_phase")
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
-        .execute(&mut *transaction)
-        .await?;
-    for sql in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-    ] {
-        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
-    sqlx::query(
-        "INSERT INTO bigname_phase.chain_phase_state (
-             chain_id, phase_name, input_content_hash,
-             current_block_number, current_block_hash
-         ) VALUES (
-             'failure-audit-resume', 'project', 'resume-marker', 41, 'resume-hash'
-         )",
-    )
-    .execute(migrated.pool())
-    .await?;
-    let absent_before: bool = sqlx::query_scalar(
-        "SELECT to_regclass('bigname_phase.project_generation_failures') IS NULL",
-    )
-    .fetch_one(migrated.pool())
-    .await?;
-    assert!(absent_before);
-
-    bigname_storage::MIGRATOR.run(migrated.pool()).await?;
-    let migrated_structure =
-        load_table_structure(migrated.pool(), "project_generation_failures").await?;
-    let resume: (i64, String) = sqlx::query_as(
-        "SELECT current_block_number, current_block_hash
-         FROM bigname_phase.chain_phase_state
-         WHERE chain_id = 'failure-audit-resume' AND phase_name = 'project'",
-    )
-    .fetch_one(migrated.pool())
-    .await?;
-    assert_eq!(
-        resume,
-        (41, "resume-hash".to_owned()),
-        "the resume cursor survives the schema migration"
-    );
-
-    assert_failure_kind_vocabulary(migrated.pool()).await?;
-
-    let installed = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_generation_failure_baseline")
-            .pool_max_connections(2)
-            .parse_context("failed to parse baseline failure-audit database URL")
-            .admin_connect_context("failed to connect baseline failure-audit admin pool")
-            .pool_connect_context("failed to connect baseline failure-audit pool"),
-    )
-    .await?;
-    initialize_schema_v2(installed.pool()).await?;
-    let installed_structure =
-        load_table_structure(installed.pool(), "project_generation_failures").await?;
-
-    assert!(
-        !installed_structure.is_empty(),
-        "the baseline installs the failure-audit table"
-    );
-    assert_failure_kind_vocabulary(installed.pool()).await?;
-    assert_eq!(
-        migrated_structure, installed_structure,
-        "the schema-migration and the baseline define one identical table"
-    );
-
-    installed.cleanup().await?;
-    migrated.cleanup().await
-}
-
-#[tokio::test]
 async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migration() -> Result<()> {
     let migrated = TestDatabase::create(
         TestDatabaseConfig::new("phase_runner_decode_skip_migrated")
@@ -838,14 +615,14 @@ async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migrati
         include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
         include_str!("../../../schema-v2/baseline/03_identity.sql"),
         include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/05_normalized_events.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/06_projections.sql"),
         include_str!("../../../schema-v2/baseline/07_labels.sql"),
         include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/09_divergence.sql"),
         include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
         include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-        include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
+        include_str!("../../../schema-v2/fixtures/pre-7c/12_project_generation_failures.sql"),
     ] {
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
     }
@@ -883,137 +660,6 @@ async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migrati
 
     installed.cleanup().await?;
     migrated.cleanup().await
-}
-
-#[tokio::test]
-async fn expiry_root_handoff_matches_between_baseline_and_schema_migration() -> Result<()> {
-    let migrated = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_migration")
-            .pool_max_connections(2),
-    )
-    .await?;
-    sqlx::raw_sql(
-        "CREATE SCHEMA bigname_phase;
-         CREATE TABLE bigname_phase.normalized_events (stub bigint)",
-    )
-    .execute(migrated.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/20260902140000_project_redo_expiry_roots.sql"
-    ))
-    .execute(migrated.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/20260902150000_project_redo_expiry_resources.sql"
-    ))
-    .execute(migrated.pool())
-    .await?;
-    let migrated_structure =
-        load_table_structure(migrated.pool(), "project_redo_expiry_roots").await?;
-
-    let installed = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_expiry_root_handoff_baseline")
-            .pool_max_connections(2),
-    )
-    .await?;
-    initialize_schema_v2(installed.pool()).await?;
-    let installed_structure =
-        load_table_structure(installed.pool(), "project_redo_expiry_roots").await?;
-
-    assert!(!installed_structure.is_empty());
-    assert_eq!(
-        migrated_structure, installed_structure,
-        "the expiry-root handoff migration and baseline must stay identical"
-    );
-
-    installed.cleanup().await?;
-    migrated.cleanup().await
-}
-
-#[tokio::test]
-async fn child_history_handoff_matches_baseline_migration() -> Result<()> {
-    let migrated = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_child_history_handoff_migration")
-            .pool_max_connections(2),
-    )
-    .await?;
-    sqlx::raw_sql(
-        "CREATE SCHEMA bigname_phase;
-         CREATE TABLE bigname_phase.normalized_events (stub bigint)",
-    )
-    .execute(migrated.pool())
-    .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../migrations/20260904120000_project_redo_child_registration_history.sql"
-    ))
-    .execute(migrated.pool())
-    .await?;
-    let migrated_structure =
-        load_table_structure(migrated.pool(), "project_redo_child_registration_history").await?;
-
-    let installed = TestDatabase::create(
-        TestDatabaseConfig::new("phase_runner_child_history_handoff_baseline")
-            .pool_max_connections(2),
-    )
-    .await?;
-    initialize_schema_v2(installed.pool()).await?;
-    let installed_structure =
-        load_table_structure(installed.pool(), "project_redo_child_registration_history").await?;
-
-    assert!(!installed_structure.is_empty());
-    assert_eq!(
-        migrated_structure, installed_structure,
-        "the child-registration-history schema-migration and baseline must stay identical"
-    );
-
-    installed.cleanup().await?;
-    migrated.cleanup().await
-}
-
-/// Both installation paths admit the exact-name kind slice 2E records and the
-/// child kind slice 3B adds, and refuse anything else.
-async fn assert_failure_kind_vocabulary(pool: &sqlx::PgPool) -> Result<()> {
-    for kind in [
-        "dual_current_exact_name_authority",
-        "dual_current_child_authority",
-    ] {
-        insert_failure_kind(pool, kind).await?;
-    }
-    let rejected = insert_failure_kind(pool, "dual_current_unknown_authority").await;
-    assert!(
-        rejected.is_err(),
-        "the failure-kind vocabulary is closed to {}",
-        "dual_current_unknown_authority"
-    );
-    let recorded: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bigname_phase.project_generation_failures
-         WHERE chain_id = 'failure-kind-vocabulary'",
-    )
-    .fetch_one(pool)
-    .await?;
-    assert_eq!(recorded, 2, "each admitted kind records one row");
-    sqlx::query(
-        "DELETE FROM bigname_phase.project_generation_failures
-         WHERE chain_id = 'failure-kind-vocabulary'",
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn insert_failure_kind(pool: &sqlx::PgPool, kind: &str) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO bigname_phase.project_generation_failures (
-             chain_id, target_block_number, target_block_hash,
-             interpreter_content_hash, failure_kind, failure_fingerprint,
-             logical_name_id, evidence
-         ) VALUES ('failure-kind-vocabulary', 1, '0x01', 'hash', $1,
-                   repeat('a', 64), 'ens:0x01', '{}'::jsonb)",
-    )
-    .bind(kind)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<String>> {

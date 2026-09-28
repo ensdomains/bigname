@@ -1250,7 +1250,10 @@ collection route carry neither header.
     reason covers an inventory row that Project replaced after the route
     loaded it and before it read the resolver's classification: the answer is
     withheld rather than computed from the older row and the newer
-    classification, and a retry reads the new row.
+    classification, and a retry reads the new row. Family inventories capture
+    classification in the same read snapshot as their selected writes; a later
+    family reset or completed replacement therefore leaves that coherent ABI
+    answer intact while its selected event evidence remains canonical and retained.
   - `abi_content_type_not_single_bit`: a selected ABI write names a content
     type that is zero or has more than one bit set. The ENS setters reject
     such types, so only a nonstandard resolver emits them; bigname neither
