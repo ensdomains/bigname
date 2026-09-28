@@ -1972,7 +1972,7 @@ async fn seed_fixture_manifest_update(
              (SELECT manifest_version FROM manifest_versions WHERE manifest_id = $4),
              $4, $5, 'manifest_sync', 'canonical', $6)",
     )
-    .bind(format!("fixture-manifest-{manifest}"))
+    .bind(format!("fixture-manifest-{manifest}-{}", NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)))
     .bind(namespace)
     .bind(family)
     .bind(manifest)
@@ -3823,36 +3823,6 @@ fn address_name_current_row(
     }
 }
 
-fn compact_name_declared_summary(
-    owner: &str,
-    registrant: &str,
-    resolver: &str,
-    expiry: i64,
-    registered_at: &str,
-    created_at: &str,
-) -> Value {
-    json!({
-        "registration": {
-            "status": "active",
-            "authority_kind": "registrar",
-            "registrant": registrant,
-            "expiry": expiry,
-            "registered_at": registered_at,
-            "created_at": created_at,
-        },
-        "control": {
-            "registry_owner": owner,
-            "registrant": registrant,
-            "expiry": expiry,
-        },
-        "resolver": {
-            "chain_id": "ethereum-mainnet",
-            "address": resolver,
-            "latest_event_kind": "ResolverChanged",
-        }
-    })
-}
-
 fn compact_records_inventory_current_row(
     logical_name_id: &str,
     resource_id: Uuid,
@@ -3936,13 +3906,169 @@ fn compact_records_inventory_current_row(
     row
 }
 
+/// Identity inputs shared by named API fixtures. All names go through the production normalizer;
+/// the caller supplies the actual chain position and stable resource/binding identities.
+#[allow(clippy::too_many_arguments)]
+async fn seed_family_identity_inputs(
+    pool: &PgPool,
+    namespace: &str,
+    name: &str,
+    chain: &str,
+    block: i64,
+    hash: &str,
+    resource: Uuid,
+    token: Uuid,
+    binding: Uuid,
+    arm: &str,
+) -> Result<String> {
+    let normalized = bigname_domain::normalization::normalize_name(name)?;
+    let (logical, namehash) = phase_logical_identity(namespace, &normalized.normalized_name)?;
+    let at: OffsetDateTime = sqlx::query_scalar(
+        "SELECT block_timestamp FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2 AND block_number = $3"
+    ).bind(chain).bind(hash).bind(block).fetch_one(pool).await?;
+    upsert_test_token_lineages(
+        pool,
+        &[TokenLineage {
+            token_lineage_id: token,
+            chain_id: chain.into(),
+            block_number: block,
+            block_hash: hash.into(),
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_resources(
+        pool,
+        &[Resource {
+            resource_id: resource,
+            token_lineage_id: Some(token),
+            chain_id: chain.into(),
+            block_number: block,
+            block_hash: hash.into(),
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_name_surfaces(
+        pool,
+        &[NameSurface {
+            logical_name_id: logical.clone(),
+            namespace: namespace.into(),
+            input_name: name.into(),
+            canonical_display_name: normalized.canonical_display_name,
+            normalized_name: normalized.normalized_name,
+            dns_encoded_name: normalized.dns_encoded_name,
+            namehash,
+            labelhashes: vec![],
+            normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.into(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: chain.into(),
+            block_number: block,
+            block_hash: hash.into(),
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_surface_bindings(
+        pool,
+        &[SurfaceBinding {
+            surface_binding_id: binding,
+            logical_name_id: format!("{namespace}:{name}"),
+            resource_id: resource,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            authority_arm: arm.into(),
+            active_from: at,
+            active_to: None,
+            chain_id: chain.into(),
+            block_number: block,
+            block_hash: hash.into(),
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    Ok(logical)
+}
+
+/// Extend a test's real resolver declaration and provide its manifest-sync input to Project.
+async fn declare_family_fixture_resolver(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    family: &str,
+    address: &str,
+) -> Result<i64> {
+    let existing: Option<(i64, Value)> = sqlx::query_as(
+        "SELECT manifest_id, manifest_payload FROM manifest_versions WHERE namespace = $1
+         AND chain_id = $2 AND source_family = $3 AND rollout_status = 'active'",
+    )
+    .bind(namespace)
+    .bind(chain)
+    .bind(family)
+    .fetch_optional(pool)
+    .await?;
+    let (manifest, mut payload) = if let Some(existing) = existing {
+        existing
+    } else {
+        let payload = json!({"contracts":[]});
+        let id = sqlx::query_scalar(
+            "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+             VALUES (1, $1, $2, $3, 'family-fixture', 'active', $4, $5, $6) RETURNING manifest_id",
+        )
+        .bind(namespace)
+        .bind(family)
+        .bind(chain)
+        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+        .bind(format!("test/{namespace}/{chain}/{family}.toml"))
+        .bind(&payload)
+        .fetch_one(pool)
+        .await?;
+        (id, payload)
+    };
+    if payload["contracts"]
+        .as_array()
+        .is_some_and(|contracts| contracts.iter().any(|c| c["address"] == address))
+    {
+        return Ok(manifest);
+    }
+    payload["contracts"].as_array_mut().context("fixture manifest contracts")?.push(json!({
+        "role":"resolver", "address":address, "proxy_kind":"none", "start_block":0, "read_features":[]
+    }));
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(manifest)
+        .bind(&payload)
+        .execute(pool)
+        .await?;
+    let instance = Uuid::new_v4();
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1, $2, 'contract')")
+        .bind(instance).bind(chain).execute(pool).await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind,
+        declaration_name, contract_instance_id, declared_address, role, proxy_kind)
+        VALUES ($1, $2, 'contract', $3, $4, $3, 'resolver', 'none')",
+    )
+    .bind(manifest)
+    .bind(chain)
+    .bind(address)
+    .bind(instance)
+    .execute(pool)
+    .await?;
+    seed_fixture_manifest_update(pool, manifest, chain, namespace, family, &payload).await?;
+    Ok(manifest)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn seed_identity_name(
     database: &TestDatabase,
     logical_name_id: &str,
     display_name: &str,
     normalized_name: &str,
-    namehash: &str,
+    _namehash: &str,
     resource_id: Uuid,
     token_lineage_id: Uuid,
     surface_binding_id: Uuid,
@@ -3950,85 +4076,173 @@ async fn seed_identity_name(
     relation: bigname_storage::AddressNameRelation,
     block_number: i64,
 ) -> Result<()> {
-    let name_row = address_name_name_current_row(
-        logical_name_id,
-        display_name,
-        normalized_name,
-        namehash,
-        surface_binding_id,
-        resource_id,
-        Some(token_lineage_id),
-        block_number,
-        compact_name_declared_summary(
-            address,
-            address,
-            address,
-            1_900_000_000,
-            "2026-04-17T00:00:21Z",
-            "2026-04-17T00:00:11Z",
-        ),
-    );
-    let publication_positions = name_row.chain_positions.clone();
-    let mut inventory = compact_records_inventory_current_row(logical_name_id, resource_id);
-    inventory.chain_positions = publication_positions.clone();
-    let address_row = address_name_current_row(
-        address,
-        logical_name_id,
-        relation,
-        display_name,
-        normalized_name,
-        namehash,
-        surface_binding_id,
-        resource_id,
-        Some(token_lineage_id),
-        block_number,
-    );
-
-    if name_row.namespace == "basenames" {
-        database
-            .seed_name_current_binding(
-                logical_name_id,
-                &name_row.namespace,
-                normalized_name,
-                display_name,
-                namehash,
-                resource_id,
-                token_lineage_id,
-                surface_binding_id,
-            )
-            .await?;
-    } else {
-        database
-            .seed_name_current_binding_migrated(
-                logical_name_id,
-                resource_id,
-                token_lineage_id,
-                surface_binding_id,
-            )
-            .await?;
-    }
-    database.insert_name_current_row(name_row.clone()).await?;
-    database
-        .insert_record_inventory_current_row(inventory.clone())
-        .await?;
-    upsert_phase_address_names_current_rows(
+    let namespace = logical_name_id
+        .split_once(':')
+        .context("fixture namespace")?
+        .0;
+    let chain = chain_id_for_namespace(namespace);
+    let hash = format!("0xname{block_number:02x}");
+    let at = format!("2026-04-17T00:00:{:02}Z", block_number % 60);
+    let positions = align_phase_chain_positions(
         &database.pool,
-        std::slice::from_ref(&address_row),
+        &json!({chain_slot_for_namespace(namespace): {
+            "chain_id":chain, "block_number":block_number, "block_hash":hash, "timestamp":at
+        }}),
     )
     .await?;
-    seed_phase_identity_name(
-        database,
-        display_name,
+    database
+        .seed_snapshot_selector_chain_positions(&positions)
+        .await?;
+    let hash = positions[chain_slot_for_namespace(namespace)]["block_hash"]
+        .as_str()
+        .context("identity hash")?;
+    let normalized = bigname_domain::normalization::normalize_name(display_name)?;
+    anyhow::ensure!(
+        normalized.normalized_name == normalized_name,
+        "identity fixture normalized bytes"
+    );
+    let arm = if namespace == "basenames" {
+        "basenames"
+    } else {
+        "ens_v1"
+    };
+    let registrar = if namespace == "basenames" {
+        "basenames_base_registrar"
+    } else {
+        "ens_v1_registrar_l1"
+    };
+    let registry = if namespace == "basenames" {
+        "basenames_base_registry"
+    } else {
+        "ens_v1_registry_l1"
+    };
+    let resolver_family = if namespace == "basenames" {
+        "basenames_base_resolver"
+    } else {
+        "ens_v1_resolver_l1"
+    };
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        namespace,
         normalized_name,
+        chain,
+        block_number,
+        hash,
         resource_id,
         token_lineage_id,
         surface_binding_id,
-        address,
-        relation,
-        &name_row.declared_summary,
+        arm,
     )
     .await?;
-
+    let node = bigname_lookup::ens_namehash_hex(normalized_name)?;
+    let manifest =
+        declare_family_fixture_resolver(&database.pool, namespace, chain, resolver_family, address)
+            .await?;
+    let mut inputs = vec![
+        (
+            "RegistrationGranted",
+            registrar,
+            Some(logical.as_str()),
+            Some(resource_id),
+            json!({"authority_kind":"registrar", "registrant":address, "expiry":1900000000}),
+        ),
+        (
+            "AuthorityTransferred",
+            registry,
+            Some(logical.as_str()),
+            Some(resource_id),
+            json!({"source_event":"Transfer", "node":node, "owner":address}),
+        ),
+        (
+            "ResolverChanged",
+            registry,
+            Some(logical.as_str()),
+            Some(resource_id),
+            json!({"node":node, "resolver":address}),
+        ),
+    ];
+    for (key, family, selector, value, source) in [
+        ("addr:0", "addr", json!("0"), json!("0x"), "AddressChanged"),
+        (
+            "addr:60",
+            "addr",
+            json!("60"),
+            json!("0x0000000000000000000000000000000000000abc"),
+            "AddressChanged",
+        ),
+        (
+            "text:avatar",
+            "text",
+            json!("avatar"),
+            json!("ipfs://avatar"),
+            "TextChanged",
+        ),
+        (
+            "contenthash",
+            "contenthash",
+            Value::Null,
+            json!("ipfs://content"),
+            "ContenthashChanged",
+        ),
+        (
+            "text:com.twitter",
+            "text",
+            json!("com.twitter"),
+            json!("@alice"),
+            "TextChanged",
+        ),
+    ] {
+        inputs.push((
+            "RecordChanged",
+            resolver_family,
+            None,
+            None,
+            json!({"source_event":source, "node":node, "resolver":address, "record_key":key,
+                "record_family":family, "selector_key":selector, "value":value}),
+        ));
+    }
+    let events = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(log, (kind, family, logical, resource, after))| {
+            let mut event = history_event(
+                &format!("identity-{resource_id}-{log}"),
+                logical,
+                resource,
+                Some(chain),
+                Some(block_number),
+                Some(hash),
+                Some("0xidentity"),
+                Some(log as i64),
+                CanonicalityState::Canonical,
+            );
+            event.namespace = namespace.into();
+            event.event_kind = kind.into();
+            event.source_family = family.into();
+            event.manifest_version = 1;
+            event.source_manifest_id = (kind == "RecordChanged").then_some(manifest);
+            event.raw_fact_ref =
+                json!({"kind":"raw_log", "emitting_address":address, "transaction_index":0});
+            event.before_state = json!({});
+            event.after_state = after;
+            event
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, chain, block_number, hash).await?;
+    let indexed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM project_address_name_index WHERE address = lower($1)
+         AND logical_name_id = $2 AND relation = $3)",
+    )
+    .bind(address)
+    .bind(&logical)
+    .bind(relation.as_str())
+    .fetch_one(&database.pool)
+    .await?;
+    anyhow::ensure!(
+        indexed,
+        "the actual identity inputs must produce the requested {relation:?} membership"
+    );
     Ok(())
 }
 
