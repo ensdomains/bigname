@@ -1,12 +1,20 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Result;
+use clap::Parser;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
+    cli::{Cli, ResolvedCommand},
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     phase::{
         AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
@@ -336,10 +344,11 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
         ..FamilySettings::default()
     };
     let stop = CancellationToken::new();
-    let project = Arc::new(StopAfterFinalBatch {
-        inner: ProjectPhase::new(scratch.pool().clone()).with_family_settings(families),
-        stop: stop.clone(),
-    });
+    let (project, _) = ServedBatches::cancelling_at(
+        ProjectPhase::new(scratch.pool().clone()).with_family_settings(families),
+        1,
+        stop.clone(),
+    );
     let error = redo_with_phase_and_stop(&scratch, project, 30, stop)
         .await
         .expect_err("the stop abandoned the family run");
@@ -364,14 +373,326 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
     scratch.cleanup().await
 }
 
-/// Project, with a stop raised as soon as its final batch returns, so the stop is pending while
-/// the runner records that batch and wins the select against the family run.
-struct StopAfterFinalBatch {
+// The one-shot `redo` command, configured as the command line resolves it, keeps a family
+// data-integrity failure's own kind: the command runs the served redo once, the families stop on
+// the refused block, and the command exits with the family error recorded instead of running the
+// served redo again forever. The redo stays in progress, so a rerun is admitted.
+#[tokio::test]
+async fn the_redo_command_exits_on_a_persistent_family_failure_after_one_served_redo() -> Result<()>
+{
+    let scratch = ready_through("families_runner_redo_exit", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    refuse_marker_integrity(&scratch, 15).await?;
+    let stop = CancellationToken::new();
+    // A second served redo would be the retry this test rules out; the stop then ends the command.
+    let (project, served) = ServedBatches::cancelling_at(
+        ProjectPhase::new(scratch.pool().clone())
+            .with_family_settings(redo_command_family_settings()?),
+        2,
+        stop.clone(),
+    );
+    let error = tokio::time::timeout(
+        Duration::from_secs(60),
+        redo_with_phase_and_stop(&scratch, project, 30, stop),
+    )
+    .await?
+    .expect_err("the family failure fails the command");
+    assert_eq!(
+        served.load(Ordering::SeqCst),
+        1,
+        "the served redo ran once: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("owned key families") && message.contains("injected family integrity"),
+        "{message}"
+    );
+    assert_eq!(marker(&scratch).await?, Some(14), "block 15 was refused");
+    assert_eq!(
+        redo_progress(&scratch).await?,
+        (true, Some(30)),
+        "the served redo's progress stands and the redo stays in progress"
+    );
+    let recorded = last_error(&scratch).await?.unwrap_or_default();
+    assert!(recorded.contains("owned key families"), "{recorded}");
+    scratch.cleanup().await
+}
+
+// Under the supervised runner's settings the same data-integrity family failure is retried: the
+// restart loop runs the served redo again and again while the block is refused, and once it
+// applies the families catch up to the served marker.
+#[tokio::test]
+async fn a_family_integrity_failure_is_retried_under_the_supervised_settings_and_catches_up()
+-> Result<()> {
+    let scratch = ready_through("families_runner_supervised_retry", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    refuse_marker_integrity(&scratch, 15).await?;
+    let stop = CancellationToken::new();
+    let (project, served) = ServedBatches::cancelling_at(
+        ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+            max_blocks_per_run: 10,
+            ..FamilySettings::default()
+        }),
+        usize::MAX,
+        stop.clone(),
+    );
+    let lift = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while served.load(Ordering::SeqCst) < 3 {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the restart loop did not retry"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        sqlx::query("DROP TRIGGER refuse_marker ON project_family_marker")
+            .execute(scratch.pool())
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let (command, lifted) =
+        tokio::join!(redo_with_phase_and_stop(&scratch, project, 30, stop), lift);
+    lifted?;
+    command?;
+    assert!(served.load(Ordering::SeqCst) >= 3);
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(marker(&scratch).await?, Some(30), "the retries caught up");
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
+    scratch.cleanup().await
+}
+
+// A family catch-up of several runs keeps the Project heartbeat fresh between runs, as a batch
+// settlement does. The first run's block 10 holds its transaction past the heartbeat interval;
+// block 11, the second run's first, reads how old the heartbeat is.
+#[tokio::test]
+async fn a_family_catch_up_of_several_runs_keeps_the_phase_heartbeat_fresh() -> Result<()> {
+    let scratch = ready_through("families_runner_heartbeat", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    sqlx::raw_sql(
+        "CREATE TABLE heartbeat_probe (age_seconds float8 NOT NULL);
+         CREATE FUNCTION probe_heartbeat() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.current_block_number = 10 THEN PERFORM pg_sleep(5.5); END IF;
+             IF NEW.current_block_number = 11 THEN
+                 INSERT INTO heartbeat_probe
+                 SELECT extract(epoch FROM clock_timestamp() - heartbeat_at)
+                 FROM service_heartbeats
+                 WHERE chain_id = NEW.chain_id AND phase_name = 'project';
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER probe_heartbeat AFTER INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW EXECUTE FUNCTION probe_heartbeat();",
+    )
+    .execute(scratch.pool())
+    .await?;
+    redo_project_through(
+        &scratch,
+        FamilySettings {
+            max_blocks_per_run: 10,
+            ..FamilySettings::default()
+        },
+        30,
+    )
+    .await?;
+    let ages: Vec<f64> = sqlx::query_scalar("SELECT age_seconds FROM heartbeat_probe")
+        .fetch_all(scratch.pool())
+        .await?;
+    assert_eq!(ages.len(), 1, "block 11 read the heartbeat once: {ages:?}");
+    assert!(
+        ages[0] < 2.0,
+        "the heartbeat was recorded after the first run, not before it: {} s old",
+        ages[0]
+    );
+    assert_eq!(marker(&scratch).await?, Some(30));
+    scratch.cleanup().await
+}
+
+// An input token that fails to read is the family run's failure, raised after the batch's
+// progress is recorded, and the restart loop retries it. Here only the token read fails: the
+// Project phase reads `chain_phase_state` through a view whose `last_error` column, which only the
+// token read selects, raises while armed.
+#[tokio::test]
+async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retried() -> Result<()> {
+    let scratch = ready("families_runner_token").await?;
+    let search_path: String = sqlx::query_scalar("SELECT current_setting('search_path')")
+        .fetch_one(scratch.pool())
+        .await?;
+    sqlx::raw_sql(
+        "CREATE SCHEMA token_fault;
+         CREATE TABLE token_fault.armed (armed boolean NOT NULL);
+         INSERT INTO token_fault.armed VALUES (true);
+         CREATE FUNCTION token_fault.guard(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$
+         BEGIN
+             IF (SELECT armed FROM token_fault.armed) THEN
+                 RAISE EXCEPTION 'injected token read failure';
+             END IF;
+             RETURN value;
+         END $$;
+         DO $$
+         DECLARE columns text;
+         BEGIN
+             SELECT string_agg(CASE WHEN attname = 'last_error'
+                                    THEN 'token_fault.guard(last_error) AS last_error'
+                                    ELSE quote_ident(attname) END,
+                               ', ' ORDER BY attnum)
+             INTO columns
+             FROM pg_attribute
+             WHERE attrelid = 'chain_phase_state'::regclass AND attnum > 0 AND NOT attisdropped;
+             EXECUTE format('CREATE VIEW token_fault.chain_phase_state AS SELECT %s FROM %s',
+                            columns, 'chain_phase_state'::regclass);
+         END $$;",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let search_path = format!("token_fault,{}", search_path.replace(' ', ""));
+    let project_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            scratch
+                .writer_connect_options()
+                .options([("search_path", search_path.as_str())]),
+        )
+        .await?;
+    let project: Arc<dyn Phase> = Arc::new(ProjectPhase::new(project_pool.clone()));
+
+    let observed = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(failure) = last_error(&scratch)
+                .await?
+                .filter(|failure| failure.contains("owned key families"))
+            {
+                let progress = redo_progress(&scratch).await?;
+                let family = marker(&scratch).await?;
+                sqlx::query("UPDATE token_fault.armed SET armed = false")
+                    .execute(scratch.pool())
+                    .await?;
+                return Ok::<_, anyhow::Error>((failure, progress, family));
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "no token read failure was recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let (command, observed) = tokio::join!(
+        redo_with_phase_and_stop(&scratch, project, 3, CancellationToken::new()),
+        observed
+    );
+    let (failure, progress, family) = observed?;
+    command?;
+    assert!(
+        failure.contains("failed to read the family input token")
+            && failure.contains("injected token read failure"),
+        "{failure}"
+    );
+    assert_eq!(
+        progress,
+        (true, Some(3)),
+        "the served redo recorded its progress before the token failure surfaced"
+    );
+    assert_eq!(family, None, "no family run started without a token");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(3), false),
+        "the retry finished the redo"
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(3),
+        "the retry ran the families"
+    );
+    project_pool.close().await;
+    scratch.cleanup().await
+}
+
+/// A trigger that refuses the family marker's move to `block` with a data-integrity error.
+async fn refuse_marker_integrity(scratch: &ScratchDatabase, block: i64) -> Result<()> {
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION refuse_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected family integrity failure' USING ERRCODE = 'check_violation';
+         END $$;
+         CREATE TRIGGER refuse_marker BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW WHEN (NEW.current_block_number = {block})
+         EXECUTE FUNCTION refuse_marker();"
+    ))
+    .execute(scratch.pool())
+    .await?;
+    Ok(())
+}
+
+/// The family settings the one-shot `redo` command resolves from its command line; they do not
+/// depend on the phase redone.
+fn redo_command_family_settings() -> Result<FamilySettings> {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "0",
+        "--to-block",
+        "30",
+        "--project-families-max-blocks",
+        "10",
+    ])?
+    .resolve()?;
+    let ResolvedCommand::Redo {
+        project_families, ..
+    } = command
+    else {
+        anyhow::bail!("expected the redo command");
+    };
+    Ok(project_families)
+}
+
+async fn last_error(scratch: &ScratchDatabase) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
+/// Project, counting the served batches that complete and raising a stop as soon as the
+/// `cancel_at`th returns, so the stop is pending while the runner records that batch and wins
+/// the select against the family run.
+struct ServedBatches {
     inner: ProjectPhase,
+    served: Arc<AtomicUsize>,
+    cancel_at: usize,
     stop: CancellationToken,
 }
 
-impl Phase for StopAfterFinalBatch {
+impl ServedBatches {
+    fn cancelling_at(
+        inner: ProjectPhase,
+        cancel_at: usize,
+        stop: CancellationToken,
+    ) -> (Arc<dyn Phase>, Arc<AtomicUsize>) {
+        let served = Arc::new(AtomicUsize::new(0));
+        let phase = Arc::new(Self {
+            inner,
+            served: Arc::clone(&served),
+            cancel_at,
+            stop,
+        });
+        (phase, served)
+    }
+}
+
+impl Phase for ServedBatches {
     fn name(&self) -> PhaseName {
         self.inner.name()
     }
@@ -388,7 +709,9 @@ impl Phase for StopAfterFinalBatch {
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
             let outcome = self.inner.run_batch(context).await;
-            if matches!(outcome, Ok(PhaseBatchOutcome::Complete(_))) {
+            if matches!(outcome, Ok(PhaseBatchOutcome::Complete(_)))
+                && self.served.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_at
+            {
                 self.stop.cancel();
             }
             outcome

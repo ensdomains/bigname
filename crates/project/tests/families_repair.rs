@@ -129,6 +129,11 @@ async fn a_second_application_of_a_published_block_is_refused_by_the_generation_
         (Some(13), Some(hash(13)), generation_at_12 + 2),
         "block 13 committed with the other writer's generation"
     );
+    assert_eq!(
+        rows_at_block(&fixture, 14).await?,
+        0,
+        "no family row or undo row carries the refused block"
+    );
     let refused = fixture.exact().await?;
 
     // Block 14, applied and undone, restores exactly what the refused run left.
@@ -139,12 +144,95 @@ async fn a_second_application_of_a_published_block_is_refused_by_the_generation_
     .await?;
     let applied = fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(applied.blocks, 1);
+    assert!(
+        rows_at_block(&fixture, 14).await? > 0,
+        "block 14 writes rows at its position, so the count above can see a leak"
+    );
     assert_eq!(families::undo_to(&fixture.pool, CHAIN, 13).await?, 1);
     assert_eq!(
         fixture.exact().await?,
         refused,
         "the refused block left nothing behind"
     );
+    fixture.cleanup().await
+}
+
+/// Rows at `block` in every family table that records a block position, and in the undo journal.
+async fn rows_at_block(fixture: &Fixture, block: i64) -> Result<i64> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.columns
+         WHERE table_schema = current_schema() AND column_name = 'block_number'
+           AND table_name::text = ANY($1)",
+    )
+    .bind(
+        families::family_tables()
+            .chain(["project_family_undo"])
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    anyhow::ensure!(
+        tables.len() > 1,
+        "the family tables record block positions: {tables:?}"
+    );
+    let mut rows = 0;
+    for table in tables {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE block_number = $1"
+        ))
+        .bind(block)
+        .fetch_one(&fixture.pool)
+        .await?;
+        rows += count;
+    }
+    Ok(rows)
+}
+
+// A run that fails part way hands back what the blocks before the failure committed, so a caller
+// observes each committed block's time and anomaly count even though the run returns an error.
+// Here block 15 is refused after blocks 1 to 14 each committed in a transaction of their own.
+#[tokio::test]
+async fn a_failed_run_hands_back_the_blocks_it_committed() -> Result<()> {
+    let fixture = Fixture::new("families_repair_failed_outcome", 20).await?;
+    seed(&fixture, 1..=20).await?;
+    sql(
+        &fixture,
+        "CREATE FUNCTION refuse_block() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected family failure';
+         END $$;
+         CREATE TRIGGER refuse_block BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW WHEN (NEW.current_block_number = 15)
+         EXECUTE FUNCTION refuse_block();",
+    )
+    .await?;
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
+    let (outcome, error) = families::run(
+        &fixture.pool,
+        CHAIN,
+        &families_support::marker(20),
+        FamilyMode::Normal,
+        &token,
+        &FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off),
+    )
+    .await;
+    let error = error.expect("block 15 is refused");
+    assert!(
+        error.to_string().contains("injected family failure"),
+        "{error}"
+    );
+    assert_eq!(outcome.blocks, 14);
+    assert_eq!(
+        outcome.block_ms.len(),
+        14,
+        "the run hands back the time of every block it committed"
+    );
+    assert_eq!(
+        outcome.marker.as_ref().map(|marker| marker.number),
+        Some(14)
+    );
+    assert_eq!(outcome.lag_blocks(), 6);
+    assert!(!outcome.budget_exhausted);
     fixture.cleanup().await
 }
 
