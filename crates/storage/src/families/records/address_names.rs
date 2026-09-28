@@ -53,7 +53,7 @@ pub async fn load_family_address_names_page(
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
-    let (rows, names) = compose_address_name_rows(&mut snapshot, address).await?;
+    let (rows, names) = compose_address_name_rows(&mut snapshot, address, namespace).await?;
     let page = load_address_names_page_from(
         &mut snapshot,
         RowSource::Composed {
@@ -82,14 +82,20 @@ pub async fn load_family_address_names_page(
 pub(super) async fn compose_address_name_rows(
     conn: &mut PgConnection,
     address: &str,
+    namespace: Option<&str>,
 ) -> Result<(Value, Value)> {
     let indexed: Vec<(String, String)> = sqlx::query_as(
         "/* storage:families.records.address_name_index */
-         SELECT DISTINCT chain_id, logical_name_id
-         FROM bigname_phase.project_address_name_index
-         WHERE address = lower($1)",
+         SELECT DISTINCT indexed.chain_id, indexed.logical_name_id
+         FROM bigname_phase.project_address_name_index indexed
+         WHERE indexed.address = lower($1)
+           AND ($2::text IS NULL OR EXISTS (
+               SELECT 1 FROM bigname_phase.name_surfaces surface
+               WHERE surface.logical_name_id = indexed.logical_name_id
+                 AND surface.namespace = $2))",
     )
     .bind(address)
+    .bind(namespace)
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
@@ -175,7 +181,7 @@ fn address_name_row(
         "logical_name_id": row.logical_name_id,
         "relation": relation,
         "namespace": row.namespace,
-        "raw_name": row.normalized_name,
+        "raw_name": row.canonical_display_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
         "resource_id": row.resource_id,

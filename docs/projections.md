@@ -1752,7 +1752,9 @@ the name names the zero owner, attributed as the served child build attributes
 it (by the name the Transfer carries, else the latest named registry event of
 any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node). Every name with a
-surface has a row. A list cannot compose those at read for every child of a parent, so
+surface has a row. The selected arm remains available when an unreadable token
+lineage withholds the composed name row: child relations still use that selection,
+while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
 the name row is composed at read (ruling J3) except for this summary, which is
 stored. After a block writes its other family rows, and on a block that writes
 none, the family step composes the summary again, with the composed name

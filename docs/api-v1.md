@@ -810,19 +810,21 @@ may issue 201 provider keys when the primary-address selector was absent; more
 than 200 inventory-derived selectors still returns the same error.
 
 `GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
-typed `verification` shapes. Every indexed answer reads
-`bigname_phase.primary_names_current`; `source` selection only narrows the
-answer list and does not select a different indexed projection. A successful
+typed `verification` shapes. With the
+[publication switch](glossary.md#publication-switch) off, indexed answers read
+`bigname_phase.primary_names_current`; with it on, they read the reverse-claim
+families at their publication. The request’s `source` parameter only narrows
+the answer list and does not override that process-wide publication source. A successful
 stored raw claim is normalized for the indexed product name even when its raw
 spelling was not already normalized. The verified producer is a fresh ENS/60
 lookup at the current readable Ethereum position. It applies the raw-claim
 normalization gate before forward resolution and persists neither a legacy
 execution outcome nor a divergence row. When `source` is omitted, the route
 returns the indexed and verified answers together only if the current Ethereum
-`chain_heads` position and exact completed `project` publication generation
-match that lookup before verified execution and remain unchanged after reading
-the indexed tuple from
-`bigname_phase.primary_names_current`; otherwise the whole
+`chain_heads` position and exact selected publication generation (Project with
+the switch off, the family marker with it on) match that lookup before verified
+execution and remain unchanged after reading the indexed tuple from that
+source; otherwise the whole
 request returns `409 stale` instead of assigning answers from different
 positions to one `meta.as_of`. The indexed answer depends only on the projected
 tuple: a live reverse claim or live lookup failure changes only the verified
@@ -830,7 +832,7 @@ answer. Other verified primary-name tuples are explicit `unsupported`; indexed
 answers remain available where their projection supports the requested tuple.
 Provider transport failures abort this route with `500 internal_error` rather
 than producing a verified answer entry with `status=stale`.
-The post-call guard also revalidates the Ethereum project generation and both
+The post-call guard also revalidates the selected Ethereum publication generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
@@ -922,7 +924,7 @@ record fields (`GET /v1/names/{name}`, both sources) and for
 `GET /v1/diagnostics/names/{name}/records`, the address-name relations of
 `GET /v1/addresses/{address}/names`, recomputed at read from the address index
 and the composed names, its `relation=resolves_to` pages (both the exact coin
-type and `coin_type=evm`) from the record-id index alone, the record counts of
+type and `coin_type=evm`) from the node-keyed and record-ID inverse address indexes, the record counts of
 `include=counts`, and the indexed primary-name claim of
 `GET /v1/addresses/{address}/primary-name`. Batch lookup identity records,
 address relations, inventory readback, and verified lookup inputs use those same
@@ -952,18 +954,6 @@ answers `409 stale` rather than `404` or an empty page, and the expiring listing
 composes only names of the requested namespace, so another namespace's rebuild
 does not refuse it.
 
-Composed names also refuse a publication while Interpret or Project has a redo
-whose range overlaps it. Interpret's normalization-flag recompute can change a
-surface's visibility before the required Project replay publishes the new name
-state; finishing Interpret alone does not make the old publication readable.
-The composed reader and the collection's final generation check both enforce
-this rule. Diagnostic reads that do not compose published names keep their
-existing snapshot selection. Event diagnostics still return their audit rows
-when the name publication is unavailable, omitting the optional name attachment.
-Resolver bound-name pages require the selected family publication even when the
-page is empty, so an older `at` answers
-`409 stale` rather than reporting current absence as historical absence.
-
 With the switch on, `GET /v1/permissions` and the resolver routes also serve
 their own rows from the families. The permission rows, the registry operator
 rows and each registration's authority context and restrictions are built at
@@ -977,12 +967,28 @@ and whether its `/aliases`, `/links` and `/roles` collections are supported come
 from the families' resolver classification, and those collections list the
 families' rows, with the names each row joins read from composed rows. History
 attribution through a resolver's classification reads the same classification.
+Its bounded pointer walk checks the relevant chains' classification publications
+in the same database snapshot; a partial rebuild returns `409 stale`, while a
+completed newer publication does not invalidate the bounded history walk. This
+classification check does not add a redo gate to raw audit diagnostics.
 A role holder's `grant_event` is the earliest permission event of that holder
 at that resolver scope, as before. Grants on a registration whose row is not
 readable are not listed; no other request-time lineage check applies, since a
 dropped block's grants leave the families when that block is undone. The bodies
 are meant to be identical to the served ones, and these routes answer
 `409 stale` while the families are not servable, as above.
+
+Composed names also refuse a publication while Interpret or Project has a redo
+whose range overlaps it. Interpret's normalization-flag recompute can change a
+surface's visibility before the required Project replay publishes the new name
+state; finishing Interpret alone does not make the old publication readable.
+The composed reader and the collection's final generation check both enforce
+this rule. Diagnostic reads that do not compose published names keep their
+existing snapshot selection. Event diagnostics still return their audit rows
+when the name publication is unavailable, omitting the optional name attachment.
+Resolver bound-name pages require the selected family publication even when the
+page is empty, so an older `at` answers
+`409 stale` rather than reporting current absence as historical absence.
 
 One difference remains with the switch on. After an ENSv1 registry `Transfer` to
 the zero address leaves a name's registry node ownerless

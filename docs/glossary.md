@@ -2579,7 +2579,7 @@ while the gauges show the unavailable -1.
 ## Publication switch
 
 `BIGNAME_SERVE_FROM_FAMILIES`: a process-wide setting the API and the phase
-runner read once at startup (`1` or `true` on, `0` or `false` off; unset keeps
+runner read once at startup (`1` or `true` on, `0` or `false` off; unset or empty keeps
 the build's default, off until [the flip](#the-flip); any other value refuses
 to start).
 Off, the serving fence reads the Project row of `chain_phase_state` as it

@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_name_summary (
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_name_summary IS
-    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no arm, serving resource, registration or clock boundary. Each column but zero_owner is the value the served lists read from the name''s name_current row.'
+    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no serving arm, resource or registration fields, but retains the next recomposition deadline. Each column but zero_owner is the value the served lists read from the name''s name_current row.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_name_summary.chain_id IS

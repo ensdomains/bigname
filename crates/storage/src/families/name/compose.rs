@@ -338,11 +338,18 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         ),
         _ => (None, None, None),
     };
+    let normalized = bigname_domain::normalization::normalize_name(&parts.surface.raw_name)
+        .with_context(|| {
+            format!(
+                "phase name row {} has an unreadable active raw_name",
+                parts.surface.logical_name_id
+            )
+        })?;
     Ok(NameCurrentRow {
         logical_name_id: parts.surface.logical_name_id.clone(),
         namespace: parts.surface.namespace.clone(),
-        canonical_display_name: parts.surface.raw_name.clone(),
-        normalized_name: parts.surface.raw_name.clone(),
+        canonical_display_name: normalized.canonical_display_name,
+        normalized_name: normalized.normalized_name,
         namehash: parts.surface.namehash.clone(),
         surface_binding_id,
         token_lineage_id: resource_id.and(parts.token_lineage_id),
