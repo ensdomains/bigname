@@ -518,12 +518,12 @@ async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Res
 /// splices the continuing mode's publication token into the flipped cursor, so only the
 /// resolver generation can refuse it. With the switch on the bound names are composed from the
 /// owned key families, so the fixture publishes both the served tables and the families from the
-/// same events (`seed_switch_names_fixture`), giving a second page in either mode.
+/// same events (`seed_switch_routes_fixture`, whose resolver is declared, so both describe it),
+/// giving a second page in either mode.
 #[tokio::test]
 async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_switch_routes_fixture(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     for flip in SWITCH_FLIPS {
@@ -547,10 +547,10 @@ async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way
 async fn v2_a_resolver_collection_cursor_restarts_when_the_switch_flips_either_way() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_resolver_roles_pages(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
+    // Role holders the served tables and the families both list, on a resolver both support.
+    seed_switch_permissions_fixture(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
-    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    let base = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles?page_size=1");
     for flip in SWITCH_FLIPS {
         assert_flip_restarts(&database, &base, collection_next_cursor, flip).await?;
         assert_generation_alone_restarts(
