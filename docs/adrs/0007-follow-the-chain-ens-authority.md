@@ -7,6 +7,18 @@ Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
 Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
 Amended: 2026-09-26 (the registration section follows authority selection for a nameless path-expiry release, product ruling)
 Amended: 2026-09-26 (a lapsed last-bound registration is presented over a live reservation elsewhere, ruling applied by the reviewer)
+Note: 2026-09-29 (dual-current halts and old serving tables removed)
+
+## 2026-09-29 Note: Dual-Current Halts Removed
+
+The family publisher that now writes all Project state has no dual-current
+generation halt, and schema-migration
+`20260929160000_remove_served_projections.sql` dropped `name_current` and the
+`project_generation_failures` audit. A name or child that keeps current state
+on both arms after a proven ENSv1→ENSv2 migration publishes through its selected
+arm like any other; the other arm's state stays retained and is not served.
+The sections below that describe the halts, or rows on `name_current`, record
+the system as it was when they were written.
 
 ## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
 

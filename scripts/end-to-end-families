@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Runs the Project end-to-end harness (apps/phase-runner/tests/project_end_to_end_benchmark.rs)
-# with the publication switch on: the served clock waits for the family marker, the routes'
-# readers serve the owned key families, the shadow comparisons keep their served side on the
-# served tables, and the composed listing walks print their cost in submitted rows
-# (SEPOLIA_END_TO_END_WALK lines).
+# Runs the Project end-to-end harness (apps/phase-runner/tests/project_end_to_end_benchmark.rs):
+# the real Project phase publishes each target, the family rows and the route readers' name and
+# subname values are compared with a rebuild at the same target, and the composed listing walks
+# print their cost in submitted rows (SEPOLIA_END_TO_END_WALK lines).
 #
-#   scripts/end-to-end-families            # both fixture corpus tests (needs a test database)
+#   scripts/end-to-end-families            # the fixture corpus test (needs a test database)
 #   scripts/end-to-end-families copy       # the disposable-copy test; set BIGNAME_END_TO_END=1,
 #                                          # BIGNAME_BENCHMARK_DATABASE_URL, _PREVIOUS, _TARGETS
-#                                          # and optionally BIGNAME_END_TO_END_SHADOW / _COMPARE
-#   BIGNAME_SERVE_FROM_FAMILIES=0 scripts/end-to-end-families   # the same run with the switch off
+#                                          # and optionally BIGNAME_END_TO_END_COMPARE=1
 #
 # Extra arguments after the mode go to cargo test before `--`.
 set -euo pipefail
@@ -21,7 +19,6 @@ mode="${1:-fixture}"
 if [ "$#" -gt 0 ]; then
   shift
 fi
-export BIGNAME_SERVE_FROM_FAMILIES="${BIGNAME_SERVE_FROM_FAMILIES:-1}"
 
 case "$mode" in
   fixture)

@@ -55,29 +55,16 @@ The authored manifest field remains `deployment_epoch` under the public [manifes
 source positions and before-and-after state. It has exactly two logical write
 owners: chain interpreters write chain-derived rows, and manifest sync writes
 `SourceManifestUpdated` through its `manifest_sync` manifest-change interpreter.
-Projection builders and read-only history or raw-event inspection read the
-table. The [adapter census](../simplification-audit-20260730.md#cratesadapters-fable)
+Project's family reducers and read-only history or raw-event inspection read
+the table. The [adapter census](../simplification-audit-20260730.md#cratesadapters-fable)
 and the [storage census](../simplification-audit-20260730.md#cratesstorage-fable)
 authorize this table.
 
-Before deleting normalized rows for a bounded redo, Interpret copies the
-`PermissionChanged`, `ResolverChanged`, and `AliasChanged` references needed by
-Project into `project_redo_resolver_evidence`. It separately copies the available
-logical-name or permission-resource identifiers from state-derived ENSv2
-path-expiry releases into
-`project_redo_expiry_roots`, because an earlier expiry publication may already
-have deleted every descendant projection that cited the ancestor. It also copies
-entry-creating child events from an ENSv1→ENSv2 [migration registry](../docs/glossary.md#migration-registry-wrapperregistry) into
-`project_redo_child_registration_history`. Project uses these small handoffs to
-select resolver rows, affected permission resources, and bounded child or
-descendant scope, then deletes the handoff rows inside its publication
-transaction. Interpret preserves the first copy across a restarted redo, so a
-retry cannot replace the original deleted suffix with only the prefix that has
-already been re-derived. Project consumes a row only when its publication covers
-the recorded block; a redo endpoint below an existing Project head can leave
-later rows until a covering redo or full rebuild. All three
-tables are redo coordination, not event history or serving state; raw facts and
-re-derived `normalized_events` remain the replay authority.
+A bounded redo deletes and re-derives the range's normalized rows. Project
+needs no copy of what was deleted: it undoes its journalled family publications
+to a trusted base and replays activated canonical input from there, so there is
+no Interpret-to-Project handoff table. Raw facts and re-derived
+`normalized_events` remain the replay authority.
 
 For chain-derived rows, `raw_fact_ref.interpreter_state_key` is an opaque,
 adapter-owned key used to compact prior interpreter state between batches. The
@@ -114,59 +101,56 @@ by the canonical
 
 ## Current projections
 
-`name_current`, `children_current`, `permissions_current`,
-`permissions_current_resource_summary`, `account_permission_state_current`,
-`record_inventory_current`, `resolver_current`, `address_names_current`, and
-`primary_names_current` are the current-state tables written by the project
-phase. The project phase is their single writer. The API reads the
-existing serving families; `/v1/permissions` and address-name role summaries read `account_permission_state_current` through storage's effective-permission readers. The [historical
-simplification census](../simplification-audit-20260730.md#appsworker--cratesexecution-fable)
-and the [storage
-census](../simplification-audit-20260730.md#cratesstorage-fable) authorize this
-enumerated set. The [support-status
+The Project phase is the single writer of the
+[owned key families](../docs/glossary.md#owned-key-family): the `project_*`
+tables in `baseline/06_projections.sql`, with the
+[family marker](../docs/glossary.md#family-marker) (`project_family_marker`),
+the undo journal (`project_family_undo`) and the repair record
+(`project_repair_record`). Each family keeps per-key current state: name identity
+and binding candidates, registration and lease state, wrapper state, registry
+ownership, resolver classification and pointers, records, grants and account
+approvals, aliases, child edges, reverse claims, address indexes, name history
+and the name summary. `child_registration_events` keeps historical child
+membership. The API reads these tables through storage's family readers
+(`crates/storage/src/families`), which compose names, records, permissions,
+resolver collections and primary claims at read time; no composed row is
+stored. [`docs/projections.md`](../docs/projections.md) is the contract.
+Schema-migration `20260929160000_remove_served_projections.sql` dropped the
+earlier per-route serving tables (`name_current`, `children_current`,
+`permissions_current`, `permissions_current_resource_summary`,
+`account_permission_state_current`, `record_inventory_current`,
+`resolver_current`, `address_names_current`, `address_records_current` and
+`primary_names_current`). The [support-status
 decision](../simplification-audit-20260730.md#kimi-k3-second-opinion-lenses--adjudicated)
 keeps explicit support fields and removes exhaustiveness accounting.
 
-Each run reads canonical-lineage identity rows and normalized events into
-connection-local stages. It builds all retained families before one database
-transaction replaces either the chain's complete projection set or the keys
-affected by an incremental run or bounded redo. Readers therefore see either
-the prior set or the complete successor set, never a half-published mixture.
-Publication has no marker, claim, journal, dead-letter, or watermark table.
-The phase runner's advisory lock, state row, content hash, and redo marker are
-the operating control plane. After event-derived publication, a project run
-with an Ethereum hydration RPC refreshes eligible legacy reverse-name and text
-values through Multicall3 at the exact `chain_heads` number and hash. It writes
-only `primary_names_current` and `record_inventory_current`, stores the pinned
-head and replaced event-derived baseline in hydration provenance, and
-revalidates that head in the publication
-transaction. These values are execution-derived enrichment, not project
-inputs: raw facts, identity, and normalized events remain unchanged, and a
-project redo first reconstructs the event-derived rows before hydration is
-layered on again. Hydration runs only when that publication target equals the
-current `chain_heads` marker; a behind-head redo defers enrichment until project
-catches up. A failed call restores the saved baseline and keeps the
-project attempt retryable instead of retaining an earlier head's value. The
-same rule applies to transport, RPC, decoding, or cardinality failure of an
-entire Multicall batch: every call in that batch restores its baseline in the
-head-revalidated publication transaction before the retryable failure returns.
-A previously hydrated reverse tuple that no longer selects an eligible legacy
-resolver also restores its baseline in that transaction without another call.
+Each Project block commits its changed family keys, their before-images and the
+advanced marker in one transaction; a rebuild range commits several blocks
+together. Readers see the prior publication or the complete successor, never a
+half-published mixture. The phase runner's advisory lock, state row, interpreter
+content hash and redo marker remain the operating control plane, and the family
+marker and repair record are Project's restart boundary. On configured Ethereum
+Mainnet follow blocks, Project may overlay hash-pinned Multicall3 results for
+legacy reverse names and ENSv1 text values onto the event-derived baseline in
+that same transaction. These values are execution-derived enrichment, not
+project inputs: raw facts, identity, and normalized events remain unchanged.
+Replay and rebuild make no calls, and a failed call leaves the baseline for a
+later follow block to retry
+([Follow-only hydration](../docs/projections.md#follow-only-hydration)).
 
 Projection JSON coverage fields say only that the row was derived from stored
 canonical inputs: `status = "projected"` and
 `exhaustiveness = "not_asserted"`. Support remains separate in
-`support_status` and `unsupported_reason`. `account_permission_state_current`
-carries no coverage object at all, so it emits neither field; it has no serving
-reader yet, and a consumer must not probe it for one.
+`support_status` and `unsupported_reason`. Account-level approvals carry no
+coverage object at all, so they emit neither field, and a consumer must not
+probe them for one.
 
-`children_current.raw_label` and `children_current.raw_name` retain exact
-observed bytes, including shadow identities that cannot be represented safely
-as PostgreSQL text. For a topology-only child known by hashes, `labelhash` and
-`namehash` remain non-null while all four byte/text fields are null; synthesized
-placeholder bytes are never stored. The nullable `decoded_label` and
-`decoded_name` companions are present only when raw bytes exist and UTF-8
-decoding round-trips to them. A later preimage upgrades the same child row.
+Child and name reads take exact label bytes and their decoded text from
+`label_preimages` at read time; the family tables store labelhashes, not label
+bytes. A topology-only child known by hashes keeps its labelhash and namehash
+with null byte and text fields; synthesized placeholder bytes are never stored.
+A later preimage changes what the next read composes without rewriting a
+family row.
 
 ## Label data
 
@@ -179,49 +163,52 @@ decoding round-trips to them. A later preimage upgrades the same child row.
 ## Live/indexed resolution differences
 
 `resolution_divergences` stores a row only when a live resolver answer differs
-from the indexed exact entry or manifest-authorized derived read evaluated from
-the `record_inventory_current` row selected by the projected record boundary's
-`resource_id`. It keeps at most one unresolved
+from the indexed exact entry or manifest-authorized derived read, evaluated from
+the record inventory the family readers compose for the projected record
+boundary's `resource_id`. It keeps at most one unresolved
 row for each exact name, resolver, and record key. A wildcard lookup with no
 exact inventory comparison executes without ledger persistence and never
 compares the request with its wildcard ancestor's inventory. Lookup execution
 pins the authoritative name chain to its newest processed block. For
 Basenames, it also uses the timestamp-aligned Ethereum auxiliary position
-already stored on that `name_current` row. Every recorded divergence position
+captured with the composed name. Every recorded divergence position
 therefore identifies an ingested block. Every active row must identify that
 block in `chain_lineage` with the same chain, hash, height, and timestamp and
 with readable canonicality; the strict position trigger remains required. The
-guarded writer locks the compared inventory row and accepts a mutation only
-while its `xmin` is unchanged from the read. It evaluates the indexed answer
-from that row's exact entries and projected read rules, then verifies the
-current requested name, selected resolver, record
-selector, and record boundary before targeting a ledger row. Callers supply
-only the live answer. When indexed comparison and live execution use different
-blocks on one chain, `observed_positions` retains separate `indexed` and `live`
-slots so either block's reorg clears the active row. Before inserting a disagreement or
-clearing one after restored agreement, it also locks every observed canonical
-lineage row and rejects a reorged observation. Its writer refuses
-CCIP-participating results before the mutation-specific guard or any mutation.
-A later chain canonicality change
+guarded writer receives the captured family publication (marker sequence, block
+identity and interpreter content hash) with the captured name and inventory,
+and accepts a mutation only while the live
+[family marker](../docs/glossary.md#family-marker) still matches that
+publication. It evaluates the indexed answer from the captured exact entries
+and projected read rules, then verifies the current requested name, selected
+resolver, record selector, and record boundary before targeting a ledger row.
+Callers supply only the live answer. When indexed comparison and live execution
+use different blocks on one chain, `observed_positions` retains separate
+`indexed` and `live` slots so either block's reorg clears the active row. Before
+inserting a disagreement or clearing one after restored agreement, it also
+locks every observed canonical lineage row and rejects a reorged observation.
+Its writer refuses CCIP-participating results before the mutation-specific
+guard or any mutation. A later chain canonicality change
 clears every active row that observed the affected block. This reorg auto-clear
 rule was maintainer-ratified on 2026-07-31. Position validation locks those
 lineage rows through commit, so a concurrent canonicality change cannot miss
 an uncommitted lookup insert. Projection support logic and operators read the
 rows. After live execution, the serving transaction revalidates and locks the
-authoritative head, completed project generation, every observed canonical
-position, the exact projected name when present, and the optional inventory row
-through `revalidate_resolution_lookup_state`; it also verifies every selected
-manifest version and contract declaration. The name lock precedes the inventory
-lock to match projection publication. A shared manifest-sync advisory lock is
-held through commit, including for admitted shadow execution declarations. This
-guard runs when wildcard or CCIP behavior precludes a ledger mutation, and CCIP
-still guards an inventory row it read. It then mutates the
+authoritative head, the captured family publication, every observed canonical
+position, and the Interpret and Project phase rows through
+`revalidate_resolution_lookup_state`, refusing any redo that overlaps the
+publication; it also verifies every selected manifest version and contract
+declaration. A shared manifest-sync advisory lock is held through commit,
+including for admitted shadow execution declarations. This guard runs when
+wildcard or CCIP behavior precludes a ledger mutation. It then mutates the
 ledger through `write_resolution_divergence`. Both are fixed-`search_path`,
 security-definer functions with default `PUBLIC` execution revoked. Deployment
 grants the API role explicit `EXECUTE` on them, but no direct write privilege on
 the guarded relations or ledger. ENS/60 primary-name verification uses the same
-head, lineage, project-generation, and manifest-authority guard after its live
-calls without passing a name or inventory comparison or mutating the ledger. The
+head, lineage, family-publication, and manifest-authority guard after its live
+calls without passing a name or inventory comparison or mutating the ledger.
+Project's only write to the ledger retires active direct observations for a name
+in the family publication that changes its ENS Mainnet exact resolver to null. The
 [B6 lookup-engine rule](../simplification-build-plan-20260730.md#stage-b--port-the-keep-set)
 and
 [no-outcome-cache decision](../simplification-audit-20260730.md#maintainer-question-list-consolidated-for-decision)
@@ -232,20 +219,6 @@ authorize this table as the only durable execution-adjacent store.
 Under the Issue #411 contract, `ingest_cursors` stores one cursor for each [intake-capable chain source](../docs/glossary.md#source-role), and verification-only sources never receive cursors. `chain_phase_state` stores one state row for each of the five phases, including the verify phase trust level and an explicit `paused` state for the capacity guard. Explicit redo fields retain the requested range, a cursor separate from normal progress, and a snapshot of the pre-redo lifecycle state; the marker remains until redo succeeds and blocks normal resume after an interruption. While an operator marker remains, `last_error` records the most recent failed redo attempt. A system-required downstream marker instead retains its ownership prefix and appends the most recent attempt failure so restart continues automatic repair. When a later redo completes, that attempt error is cleared and any pre-redo lifecycle error is restored. A normal verification mismatch also uses `last_error`; it records the block, field, stored value, and reference value without a new table or column.
 
 `manifest_authority_attestations` is the append-only audit for an operator-authorized Interpret redo that discharges a [manifest-authority marker](../docs/glossary.md#manifest-authority-marker). The marker-discharge transaction inserts one row for the chain, phase, invalidation generation, authority fingerprint, effective redo range, runner instance, and attestation time. The `(chain_id, phase_name, generation_token)` key prevents a second audit row for the same discharge. The phase runner emits telemetry from this row after commit and reads it again when resuming the matching interrupted redo.
-
-`project_generation_failures` is the append-only audit for a
-[projection generation](../docs/glossary.md#projection-generation) that a
-projection-blocking invariant aborted, recording one
-[projection generation failure](../docs/glossary.md#projection-generation-failure). After the Project transaction rolls back,
-the phase runner inserts one row in its own transaction for the chain, target
-block number and hash, interpreter content hash, failure kind, and a
-deterministic fingerprint of the conflict, plus an evidence payload carrying the
-conflicting binding and resource identities, the activated boundary event, each
-block, transaction, and log position, and the canonicality observed at failure.
-The fingerprint keeps a retried projection generation from recording a second
-row for the same conflict, and neither a later successful projection generation
-nor a reorg deletes an existing row. Operator diagnostics may read this table;
-product routes may not.
 
 `interpret_decode_skips` is the append-only audit for malformed event logs from
 undeclared emitters that Interpret skips under the manifest admission policy.
@@ -258,7 +231,7 @@ adapter output with conflict ignore, so replaying one log under one interpreter
 build records one diagnostic. Redo preparation and reorg repair do not delete
 them. Operators may read this table; product routes may not.
 
-The phase runner owns cursor and phase lifecycle, authority attestations, and the Project failure audit. Manifest synchronization and a completed Interpret pass may atomically install required Ingest work through the shared `chain_phase_state` installer; neither owns an independent queue. Interpret also owns the [discovery-watch admission snapshot](../docs/glossary.md#discovery-watch-admission-snapshot) and the malformed-event diagnostic table. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
+The phase runner owns cursor and phase lifecycle and authority attestations. Manifest synchronization and a completed Interpret pass may atomically install required Ingest work through the shared `chain_phase_state` installer; neither owns an independent queue. Interpret also owns the [discovery-watch admission snapshot](../docs/glossary.md#discovery-watch-admission-snapshot) and the malformed-event diagnostic table. The runner, redo command, health checks, and status path read cursor and phase state; redo restart also reads the attestation audit. The [indexer absorption census](../simplification-audit-20260730.md#appsindexer-fable) authorizes the cursor and phase-state tables. [Build-plan amendment B](../simplification-build-plan-20260730.md#b-verify-carried-raw-before-deleting-its-coverage-record) lists the seed inputs as Base block `48,428,000`, the verified historical starts for the three newly watched signature groups, and the observed Ethereum head. The schema does not preload the dynamic starts or Ethereum head. [Build-plan amendment D](../simplification-build-plan-20260730.md#d-status-label-honesty-razor-3) defines [provider-trusted](../docs/glossary.md#verification-level), independently cross-checked, and node-checked status; the Issue #411 source-role contract narrows it by denying independent evidence to any source that also serves intake. The production verifier records `cross_checked` for a distinct verification-only Base or Sepolia dRPC and `node_checked` for a distinct verification-only Ethereum Mainnet reth; without one, the target-covering intake cursor records `quick_synced`. The phase runner rejects a level stronger than the chain-specific verification path earned before persistence. Base's dRPC cross-check extent stops at the Coinbase-to-dRPC ingest seam, and a partial verify redo retains the weaker of retained and currently available evidence. [Build-plan amendment F](../simplification-build-plan-20260730.md#f-specs-pinned) defines the five phase names and the ingest-to-live handoff fields. The [approved phase-runner design](../a2-phase-runner-design-20260731.md#status-and-heartbeats) requires capacity pauses to remain distinguishable from failures.
 
 Normal verification reads its start from these durable ingest cursors. A resumed
 normal scan retains the weaker whole-extent verification level when its
@@ -273,6 +246,6 @@ in dependency order; they are ranges, not a second scheduler or queue. The
 stamp's ownership marker distinguishes pending selection or live gap fill from
 an active replay. Once active, the replay observes the same non-verify writer
 exclusion as any other phase write. Project
-redo supplements the surviving-event range with current projection keys whose
-normalized-event provenance citations are no longer readable, including both
-event IDs carried by a primary-name tuple.
+redo undoes its journalled family publications to a trusted base below the range
+and replays activated canonical input
+([Reorg and redo](../docs/projections.md#reorg-and-redo)).

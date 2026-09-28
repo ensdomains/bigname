@@ -362,7 +362,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 `ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by widening this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
 
-The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in `bigname_phase.primary_names_current`; provider lookup responses are not persisted as execution outcomes or traces.
+The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in the family reverse claims (`bigname_phase.project_reverse_tuple` and `project_reverse_node_claim`); provider lookup responses are not persisted as execution outcomes or traces.
 
 `ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for that indexed claim-state contract. The current Sepolia profile declares its canonical ReverseRegistrar at `0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6` (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L2 @ ens_v1@91c966f).
 
@@ -573,9 +573,10 @@ classifies the address as supported `ens_v2_resolver_l1` /
 `ensv1_mirror_resolver` with basis `manifest_declared_address` when the exact
 same-namespace declaration applies (the same declaration-precedence rule as the
 direct `public_resolver_v2` role; no `Upgraded` history is required), and
-publishes `declared_summary.classification.mirror = {mirrored_source_family:
+records `classification.mirror = {mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
-mirrored_registry_address}` on `resolver_current`. A name whose current ENSv2
+mirrored_registry_address}` in the resolver's `project_resolver_classification`
+row. A name whose current ENSv2
 resolver pointer targets the mirror is then served through the ENSv1 resolver
 the mirror's registry walk selects at the name's own node, read for the
 queried node as specified in
@@ -1017,10 +1018,9 @@ source authority: fixed contracts, `manifests/mainnet/`, `manifests/sepolia/`,
 and the generated watch plans remain byte-for-byte unchanged. The new
 [interpreter content hash](glossary.md#interpreter-content-hash) therefore
 requires one complete retained-range Interpret re-walk followed by Project,
-with publication blocked until the completed generation is coherent. The
-dual-current integrity assertions apply to activated proofs on the configured
-Mainnet and Sepolia ENS deployment profiles. A Sepolia name with facts on both
-arms and no proof follows the chain per name and never blocks publication.
+with publication blocked until the completed generation is coherent. A name
+with facts on both arms follows the chain per name, with or without a proof,
+and never blocks publication.
 [PR #852](https://github.com/ensdomains/bigname/pull/852) supplies the connected
 wrapped and locked Interpret-to-Project publication proof. There is no
 production interval serving candidate-only data.
@@ -1158,7 +1158,7 @@ address is declared only under `resolver_implementations` in
 resolver contract, and Project's support rule serves an `ens_v2_resolver_l1`
 candidate that has no canonical `Upgraded` observation naming it as the proxy
 as unsupported with `resolver_implementation_unknown` (the `support_reason`
-case on a null `upgrade_event_id` in `crates/project/src/builders/resolver.rs`;
+case on a missing upgrade in `crates/project/src/families/classification/sql.rs`;
 vocabulary in
 [`projections.md` § Resolver and records](projections.md#resolver-and-records)).
 The implementation address is served that way until and unless a canonical

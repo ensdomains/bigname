@@ -48,12 +48,12 @@ pub(super) fn table_scale_failures(
     let mut failures = Vec::new();
     if name_rows < min_name_rows {
         failures.push(format!(
-            "name_current has {name_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_name_rows}"
+            "family readers compose {name_rows} API-visible supported names in active public namespaces after canonical and identity filtering; release profile requires {min_name_rows}"
         ));
     }
     if address_rows < min_address_rows {
         failures.push(format!(
-            "address_names_current has {address_rows} API-visible supported rows in active public namespaces after canonical projection and identity filtering; release profile requires {min_address_rows}"
+            "family readers compose {address_rows} API-visible supported address-name relations in active public namespaces after canonical and identity filtering; release profile requires {min_address_rows}"
         ));
     }
     failures
