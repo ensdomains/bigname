@@ -580,7 +580,12 @@ async fn run(
         // With the switch on the served publication is the family marker, so the family run is
         // inside the clock; with it off the families follow outside it, below.
         let families_in_clock = families_mode::on();
-        let families_started = Instant::now();
+        // With the switch on the batch above is the family run itself.
+        let families_started = if families_in_clock {
+            started
+        } else {
+            Instant::now()
+        };
         if families_in_clock {
             while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
         }
