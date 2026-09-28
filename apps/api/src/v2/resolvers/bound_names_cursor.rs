@@ -1,8 +1,9 @@
 use bigname_storage::{NameCurrentListCursor, NameCurrentListCursorValue};
 
 use crate::v2::{
-    CursorPayload, V2Result,
-    cursor::{cursor_value, invalid_cursor_error},
+    V2Result,
+    cursor::invalid_cursor_error,
+    list_cursor::{ListCursor, ListPosition},
 };
 
 const CHAIN_ID_FILTER_KEY: &str = "chain_id";
@@ -13,21 +14,26 @@ const CURSOR_NAMESPACE_KEY: &str = "namespace";
 const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
 const NONE_FILTER_VALUE: &str = "";
+const POSITION_KEYS: [&str; 4] = [
+    SORT_VALUE_CURSOR_KEY,
+    CURSOR_NAMESPACE_KEY,
+    NORMALIZED_NAME_CURSOR_KEY,
+    NAMEHASH_CURSOR_KEY,
+];
 
+/// What a bound-names cursor binds besides its position: the resolver, the namespace filter,
+/// the sort and, when the request pinned `at`, its `at` token (`list_cursor`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BoundNamesCursorBinding<'a> {
     pub(crate) chain_id: u64,
     pub(crate) resolver_address: &'a str,
     pub(crate) namespace: Option<&'a str>,
     pub(crate) sort: &'a str,
-    pub(crate) snapshot_token: &'a str,
+    pub(crate) at: Option<&'a str>,
 }
 
-pub(crate) fn bound_names_cursor_payload(
-    cursor: &NameCurrentListCursor,
-    binding: &BoundNamesCursorBinding<'_>,
-) -> CursorPayload {
-    CursorPayload::new(
+fn bound_names_list_cursor(binding: &BoundNamesCursorBinding<'_>) -> ListCursor {
+    ListCursor::new(
         binding.sort,
         std::collections::BTreeMap::from([
             (CHAIN_ID_FILTER_KEY.to_owned(), binding.chain_id.to_string()),
@@ -40,57 +46,39 @@ pub(crate) fn bound_names_cursor_payload(
                 option_filter(binding.namespace),
             ),
         ]),
-        std::collections::BTreeMap::from([
-            (SORT_VALUE_CURSOR_KEY.to_owned(), cursor_sort_value(cursor)),
-            (CURSOR_NAMESPACE_KEY.to_owned(), cursor.namespace.clone()),
-            (
-                NORMALIZED_NAME_CURSOR_KEY.to_owned(),
-                cursor.normalized_name.clone(),
-            ),
-            (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
-        ]),
-        Some(binding.snapshot_token.to_owned()),
     )
+    .pinned_at(binding.at.map(str::to_owned))
 }
 
+/// The continuation after `cursor`'s row.
+pub(crate) fn bound_names_next_cursor(
+    cursor: &NameCurrentListCursor,
+    binding: &BoundNamesCursorBinding<'_>,
+) -> String {
+    bound_names_list_cursor(binding).next(ListPosition::new([
+        (SORT_VALUE_CURSOR_KEY, cursor_sort_value(cursor)),
+        (CURSOR_NAMESPACE_KEY, cursor.namespace.clone()),
+        (NORMALIZED_NAME_CURSOR_KEY, cursor.normalized_name.clone()),
+        (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
+    ]))
+}
+
+/// The storage position a request's `cursor` continues from; `400 invalid_input` for a cursor
+/// this binding did not write.
 pub(crate) fn bound_names_storage_cursor(
-    payload: &CursorPayload,
+    cursor: &str,
     binding: &BoundNamesCursorBinding<'_>,
 ) -> V2Result<NameCurrentListCursor> {
-    let expected_chain_id = binding.chain_id.to_string();
-    let expected_namespace = option_filter(binding.namespace);
-    if payload.sort != binding.sort {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.filters.len() != 3
-        || payload.filters.get(CHAIN_ID_FILTER_KEY).map(String::as_str)
-            != Some(expected_chain_id.as_str())
-        || payload.filters.get(RESOLVER_FILTER_KEY).map(String::as_str)
-            != Some(binding.resolver_address)
-        || payload
-            .filters
-            .get(NAMESPACE_FILTER_KEY)
-            .map(String::as_str)
-            != Some(expected_namespace.as_str())
-    {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 4 {
-        return Err(invalid_cursor_error());
-    }
-
+    let position = bound_names_list_cursor(binding)
+        .read(Some(cursor), &POSITION_KEYS)?
+        .ok_or_else(invalid_cursor_error)?;
     Ok(NameCurrentListCursor {
-        sort_value: NameCurrentListCursorValue::Name(cursor_value(
-            payload,
-            SORT_VALUE_CURSOR_KEY,
-            invalid_cursor_error,
-        )?),
-        namespace: cursor_value(payload, CURSOR_NAMESPACE_KEY, invalid_cursor_error)?,
-        normalized_name: cursor_value(payload, NORMALIZED_NAME_CURSOR_KEY, invalid_cursor_error)?,
-        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY, invalid_cursor_error)?,
+        sort_value: NameCurrentListCursorValue::Name(
+            position.get(SORT_VALUE_CURSOR_KEY)?.to_owned(),
+        ),
+        namespace: position.get(CURSOR_NAMESPACE_KEY)?.to_owned(),
+        normalized_name: position.get(NORMALIZED_NAME_CURSOR_KEY)?.to_owned(),
+        namehash: position.get(NAMEHASH_CURSOR_KEY)?.to_owned(),
     })
 }
 

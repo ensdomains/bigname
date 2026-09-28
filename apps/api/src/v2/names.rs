@@ -18,13 +18,13 @@ use sqlx::types::time::OffsetDateTime;
 use super::collection_snapshot::CollectionSnapshot;
 use crate::AppState;
 
-use super::cursor::{cursor_value, invalid_cursor_error};
+use super::cursor::invalid_cursor_error;
+use super::list_cursor::{ListCursor, ListPosition};
 use super::search::{SearchName, build_search_name};
 use super::support::ensure_public_namespace;
 use super::{
-    CursorPayload, Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error,
-    V2Result, api_error_to_v2, decode, encode, format_timestamp,
-    validate_latest_collection_selectors,
+    Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, format_timestamp, validate_latest_collection_selectors,
 };
 
 const NAMES_SORT: &str = "expires_at";
@@ -36,6 +36,12 @@ const EXPIRES_AT_CURSOR_KEY: &str = "expires_at";
 const NAME_CURSOR_KEY: &str = "name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
 const NONE_FILTER_VALUE: &str = "";
+const POSITION_KEYS: [&str; 4] = [
+    EXPIRES_AT_CURSOR_KEY,
+    NAMESPACE_FILTER_KEY,
+    NAME_CURSOR_KEY,
+    NAMEHASH_CURSOR_KEY,
+];
 
 pub(crate) struct NamesQueryParams;
 
@@ -102,21 +108,16 @@ pub(crate) async fn get_names(
         expires_before: params.expires_before,
         order,
     };
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            names_storage_cursor(&payload, &binding)
-        })
+    // The cursor holds the window, order and position only; a continuation reads what is
+    // published now (`list_cursor`).
+    let list = names_list_cursor(&binding);
+    let storage_cursor = list
+        .read(params.cursor.as_deref(), &POSITION_KEYS)?
+        .map(|position| names_storage_cursor(&position))
         .transpose()?;
 
-    let snapshot = CollectionSnapshot::capture_for_namespace(
-        &state,
-        params.cursor.as_deref(),
-        Some(&namespace),
-    )
-    .await?;
+    let snapshot =
+        CollectionSnapshot::capture_for_namespace(&state, None, Some(&namespace)).await?;
 
     let filter = NameCurrentExpiringFilter {
         namespace: namespace.clone(),
@@ -148,10 +149,7 @@ pub(crate) async fn get_names(
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
-        .map(|cursor| {
-            names_cursor_payload(cursor, &binding)
-                .map(|payload| encode(&snapshot.bind_cursor(payload)))
-        })
+        .map(|cursor| names_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().map(build_search_name).collect();
@@ -201,55 +199,35 @@ fn option_timestamp_filter(value: Option<OffsetDateTime>) -> String {
     value.map_or_else(|| NONE_FILTER_VALUE.to_owned(), format_timestamp)
 }
 
-pub(crate) fn names_cursor_payload(
-    cursor: &NameCurrentListCursor,
-    binding: &NamesCursorBinding<'_>,
-) -> V2Result<CursorPayload> {
+fn names_list_cursor(binding: &NamesCursorBinding<'_>) -> ListCursor {
+    ListCursor::new(NAMES_SORT, cursor_filters(binding))
+}
+
+fn names_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
     let NameCurrentListCursorValue::Timestamp(Some(expires_at)) = cursor.sort_value else {
         return Err(V2Error::internal_error(
             "names listing cursor must carry an expiry timestamp",
         ));
     };
 
-    Ok(CursorPayload::new(
-        NAMES_SORT,
-        cursor_filters(binding),
-        BTreeMap::from([
-            (
-                EXPIRES_AT_CURSOR_KEY.to_owned(),
-                format_timestamp(expires_at),
-            ),
-            (NAMESPACE_FILTER_KEY.to_owned(), cursor.namespace.clone()),
-            (NAME_CURSOR_KEY.to_owned(), cursor.normalized_name.clone()),
-            (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
-        ]),
-        None,
-    ))
+    Ok(ListPosition::new([
+        (EXPIRES_AT_CURSOR_KEY, format_timestamp(expires_at)),
+        (NAMESPACE_FILTER_KEY, cursor.namespace.clone()),
+        (NAME_CURSOR_KEY, cursor.normalized_name.clone()),
+        (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
+    ]))
 }
 
-pub(crate) fn names_storage_cursor(
-    payload: &CursorPayload,
-    binding: &NamesCursorBinding<'_>,
-) -> V2Result<NameCurrentListCursor> {
-    if payload.sort != NAMES_SORT || payload.filters != cursor_filters(binding) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 4 {
-        return Err(invalid_cursor_error());
-    }
-
-    let expires_at = bigname_storage::parse_rfc3339_utc_timestamp(&cursor_value(
-        payload,
-        EXPIRES_AT_CURSOR_KEY,
-        invalid_cursor_error,
-    )?)
-    .map_err(|_| invalid_cursor_error())?;
+fn names_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
+    let expires_at =
+        bigname_storage::parse_rfc3339_utc_timestamp(position.get(EXPIRES_AT_CURSOR_KEY)?)
+            .map_err(|_| invalid_cursor_error())?;
 
     Ok(NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Timestamp(Some(expires_at)),
-        namespace: cursor_value(payload, NAMESPACE_FILTER_KEY, invalid_cursor_error)?,
-        normalized_name: cursor_value(payload, NAME_CURSOR_KEY, invalid_cursor_error)?,
-        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY, invalid_cursor_error)?,
+        namespace: position.get(NAMESPACE_FILTER_KEY)?.to_owned(),
+        normalized_name: position.get(NAME_CURSOR_KEY)?.to_owned(),
+        namehash: position.get(NAMEHASH_CURSOR_KEY)?.to_owned(),
     })
 }
 
@@ -281,10 +259,19 @@ mod tests {
         }
     }
 
+    fn read(binding: &NamesCursorBinding<'_>, cursor: &str) -> V2Result<NameCurrentListCursor> {
+        let position = names_list_cursor(binding)
+            .read(Some(cursor), &POSITION_KEYS)?
+            .expect("a cursor was sent");
+        names_storage_cursor(&position)
+    }
+
     #[test]
     fn names_cursor_round_trips_and_binds_window_and_order() {
         let binding = binding();
-        let payload = names_cursor_payload(&cursor(), &binding).expect("payload must build");
+        let cursor_text = names_list_cursor(&binding)
+            .next(names_position(&cursor()).expect("position must build"));
+        let payload = crate::v2::decode(&cursor_text).expect("cursor must decode");
         assert_eq!(payload.sort, "expires_at");
         assert_eq!(
             payload.filters,
@@ -299,7 +286,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            names_storage_cursor(&payload, &binding).expect("cursor must decode"),
+            read(&binding, &cursor_text).expect("cursor must decode"),
             cursor()
         );
 
@@ -322,19 +309,18 @@ mod tests {
             },
         ] {
             assert!(
-                names_storage_cursor(&payload, &other).is_err(),
+                read(&other, &cursor_text).is_err(),
                 "{other:?} must reject a cursor bound to {binding:?}"
             );
         }
 
         let mut wrong_sort = payload.clone();
         wrong_sort.sort = "name".to_owned();
-        assert!(names_storage_cursor(&wrong_sort, &binding).is_err());
+        assert!(read(&binding, &crate::v2::encode(&wrong_sort)).is_err());
     }
 
     #[test]
-    fn names_cursor_payload_refuses_a_name_or_null_sort_value() {
-        let binding = binding();
+    fn names_position_refuses_a_name_or_null_sort_value() {
         for sort_value in [
             NameCurrentListCursorValue::Name("beta.eth".to_owned()),
             NameCurrentListCursorValue::Timestamp(None),
@@ -343,7 +329,7 @@ mod tests {
                 sort_value,
                 ..cursor()
             };
-            assert!(names_cursor_payload(&cursor, &binding).is_err());
+            assert!(names_position(&cursor).is_err());
         }
     }
 }
