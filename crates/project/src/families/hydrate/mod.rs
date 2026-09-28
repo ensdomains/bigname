@@ -3,6 +3,7 @@
 //! checks the same predecessor, revision and block hash again. Replay/rebuild never hydrate
 //! (TYR-36 step7a packet E3); their restored or empty overlays refresh on later follow blocks.
 mod reverse;
+mod text;
 
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -14,6 +15,7 @@ pub(crate) const ETHEREUM: &str = "ethereum-mainnet";
 pub(crate) struct Prepared {
     block: input::BlockHeader,
     reverse: reverse::Prepared,
+    text: text::Prepared,
 }
 
 pub(crate) async fn prepare(
@@ -50,13 +52,16 @@ pub(crate) async fn prepare(
     super::records::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     super::reverse::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     let reverse = reverse::select(&mut opened.transaction, &context, &rows).await?;
+    let text = text::select(&mut opened.transaction, &context, &rows).await?;
     opened.transaction.rollback().await.map_err(|error| {
         ProjectError::database("failed to close family hydration preparation", error)
     })?;
     let reverse = reverse::execute(reverse, rpc_urls, &opened.block).await?;
+    let text = text::execute(text, rpc_urls, &opened.block).await?;
     Ok(Some(Prepared {
         block: opened.block,
         reverse,
+        text,
     }))
 }
 
@@ -79,6 +84,7 @@ impl Prepared {
     ) -> Result<()> {
         self.reverse
             .apply(transaction, context, rows, ordinal)
-            .await
+            .await?;
+        self.text.apply(transaction, context, rows, ordinal).await
     }
 }

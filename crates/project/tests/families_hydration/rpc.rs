@@ -66,7 +66,7 @@ async fn respond(State(state): State<Responses>, Json(request): Json<Value>) -> 
         .unwrap()
         .to_owned();
     let data = request["params"][0]["data"].as_str().unwrap();
-    let count = data.matches("691f3431").count();
+    let count = data.matches("691f3431").count() + data.matches("59d1d43c").count();
     state.calls.lock().unwrap().push((hash.clone(), count));
     let name = state.values.lock().unwrap().get(&hash).cloned().flatten();
     let Some(name) = name else {
