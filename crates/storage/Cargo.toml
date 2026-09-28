@@ -24,6 +24,7 @@ bigname-domain.workspace = true
 bigname-content-hash.workspace = true
 
 [dev-dependencies]
+bigname-project.workspace = true
 bigname-manifests.workspace = true
 bigname-test-support.workspace = true
 tokio.workspace = true

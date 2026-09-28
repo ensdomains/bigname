@@ -1,3 +1,6 @@
+//! Minimal current-family query fixture for malformed manifest and mismatched evidence cases.
+//! Production reducers cannot manufacture those inconsistent snapshots; the actual sync and
+//! publication path is covered by PhaseRunner's benchmark_resolver_reconciliation tests.
 use sqlx::PgPool;
 
 pub(super) async fn install_name_visibility_schema(pool: &PgPool) {

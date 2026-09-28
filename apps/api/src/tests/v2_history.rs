@@ -229,6 +229,8 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     )
     .await?;
 
+    seed_schema_v2_ens_lookup_head(&database.pool, 132, "0xhistory132", "2023-11-14T22:15:32Z").await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 132, "0xhistory132").await?;
     // With `include=child_registrations` the name arm reads the same attributed writes.
     for include in ["", "&include=child_registrations"] {
         for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
@@ -1565,15 +1567,17 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
         )],
     )
     .await?;
+    sqlx::query("UPDATE surface_bindings SET active_from = to_timestamp(1700000102) WHERE resource_id = $1")
+        .bind(Uuid::from_u128(0x7100)).execute(&database.pool).await?;
     let mut prior_binding = address_name_surface_binding(
         Uuid::from_u128(0x9101),
         logical_name_id,
         prior_resource_id,
         "0xprior-binding",
         77,
-        1_717_176_077,
+        1_700_000_077,
     );
-    prior_binding.active_to = Some(timestamp(1_717_176_079));
+    prior_binding.active_to = Some(timestamp(1_700_000_102));
     upsert_test_surface_bindings(&database.pool, &[prior_binding]).await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
@@ -1587,6 +1591,7 @@ async fn v2_get_history_keeps_prior_registration_resources_after_rebinding() -> 
     )
     .await?;
 
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let payload = v2_history_payload_for_database(
         &database,
         "/v1/names/history.eth/history?scope=registration&page_size=20",
@@ -1626,6 +1631,7 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
     )
     .await?;
 
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let payload =
         v2_history_payload_for_database(&database, "/v1/names/quiet.eth/history").await?;
     assert_eq!(payload["data"], json!([]));
@@ -1794,7 +1800,7 @@ async fn seed_v2_history_fixture(database: &TestDatabase) -> Result<()> {
     .context("failed to upsert v2 history fixture events")?;
 
     database.seed_default_ens_primary_name_fallback_context().await?;
-    Ok(())
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 async fn seed_v2_mixed_phase_head_history(database: &TestDatabase) -> Result<()> {
@@ -1847,32 +1853,18 @@ async fn seed_v2_history_name(
     database: &TestDatabase,
     logical_name_id: &str,
     display_name: &str,
-    namehash: &str,
+    _namehash: &str,
     block_number: i64,
     resource_id: Uuid,
     token_lineage_id: Uuid,
     surface_binding_id: Uuid,
 ) -> Result<()> {
-    seed_v2_subnames_bound_child(
-        database,
-        logical_name_id,
-        display_name,
-        namehash,
-        block_number,
-        resource_id,
-        token_lineage_id,
-        surface_binding_id,
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar"
-            },
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000000001"
-            }
-        }),
-    )
-    .await?;
+    let namespace = logical_name_id.split_once(':').context("history namespace")?.0;
+    let normalized = bigname_domain::normalization::normalize_name(display_name)?;
+    seed_v2_history_blocks(database, block_number..=block_number).await?;
+    seed_family_identity_inputs(&database.pool, namespace, &normalized.normalized_name,
+        "ethereum-mainnet", block_number, &format!("0xhistory{block_number}"), resource_id,
+        token_lineage_id, surface_binding_id, "ens_v1").await?;
     database.seed_default_ens_snapshot_selector_position().await
 }
 
@@ -2630,6 +2622,7 @@ async fn v2_history_continuation_reads_interpret_events_once_published() -> Resu
         "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
         "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
     }})).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_004, "0xhistory21000004").await?;
     // Once published, the continuation reads it: the count grows, and the newest-first walk
     // still continues below its anchor.
     let published =

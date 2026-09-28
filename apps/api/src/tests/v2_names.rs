@@ -1,130 +1,189 @@
 // `GET /v1/names`: the namespace-wide expiry window listing.
 //
-// The fixture writes `registration.expiry` the way the projection does — a JSON number of unix
-// seconds — plus one string-expiry row and one no-expiry row that the index-backed listing must
-// not serve, and one basenames row the namespace filter must exclude. Rows are seeded without a
-// surface binding, so their `registration_status` classifies as unregistered; the listing's
-// window, order, and cursor behaviour are what is under test here.
+// Retained registrar grants produce expiry values; an unbound surface has no expiry, and a
+// Basenames grant verifies namespace filtering. Dates and owners are read from actual family data.
 
 const V2_NAMES_BETA_EXPIRY: i64 = 1_790_812_800; // 2026-10-01T00:00:00Z
 const V2_NAMES_GAMMA_EXPIRY: i64 = 1_764_547_200; // 2025-12-01T00:00:00Z
 const V2_NAMES_ALPHA_EXPIRY: i64 = 1_798_761_600; // 2027-01-01T00:00:00Z
 const V2_NAMES_BASE_EXPIRY: i64 = 1_793_491_200; // 2026-11-01T00:00:00Z
 
-async fn seed_v2_names_fixture(database: &TestDatabase) -> Result<()> {
-    let rows: [(&str, &str, &str, i64, Value); 6] = [
-        (
-            "ens:alpha.eth",
-            "alpha.eth",
-            "node:alpha.eth",
-            91,
-            json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar",
-                    "registrant": "0x00000000000000000000000000000000000000a2",
-                    "registered_at": "2024-01-02T00:00:00Z",
-                    "expiry": V2_NAMES_ALPHA_EXPIRY
-                },
-                "control": { "registry_owner": "0x00000000000000000000000000000000000000a1" }
-            }),
-        ),
-        (
-            "ens:beta.eth",
-            "beta.eth",
-            "node:beta.eth",
-            92,
-            json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar",
-                    "registrant": "0x00000000000000000000000000000000000000b2",
-                    "registered_at": "2024-02-02T00:00:00Z",
-                    "expiry": V2_NAMES_BETA_EXPIRY
-                },
-                "control": { "registry_owner": "0x00000000000000000000000000000000000000b1" }
-            }),
-        ),
-        (
-            "ens:gamma.eth",
-            "gamma.eth",
-            "node:gamma.eth",
-            93,
-            json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar",
-                    "registrant": "0x00000000000000000000000000000000000000c2",
-                    "registered_at": "2024-03-02T00:00:00Z",
-                    "expiry": V2_NAMES_GAMMA_EXPIRY
-                },
-                "control": { "registry_owner": "0x00000000000000000000000000000000000000c1" }
-            }),
-        ),
-        (
-            "ens:delta.eth",
-            "delta.eth",
-            "node:delta.eth",
-            94,
-            json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar",
-                    "registrant": "0x00000000000000000000000000000000000000d2",
-                    "expiry": "2026-10-15T00:00:00Z"
-                },
-                "control": { "registry_owner": "0x00000000000000000000000000000000000000d1" }
-            }),
-        ),
-        (
-            "ens:epsilon.eth",
-            "epsilon.eth",
-            "node:epsilon.eth",
-            95,
-            json!({}),
-        ),
-        (
-            "basenames:alpha.base.eth",
-            "alpha.base.eth",
-            "node:alpha.base.eth",
-            96,
-            json!({
-                "registration": {
-                    "status": "active",
-                    "authority_kind": "registrar",
-                    "registrant": "0x00000000000000000000000000000000000000e2",
-                    "expiry": V2_NAMES_BASE_EXPIRY
-                },
-                "control": { "registry_owner": "0x00000000000000000000000000000000000000e1" }
-            }),
-        ),
-    ];
+async fn publish_v2_names_fixture(database: &TestDatabase) -> Result<()> {
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "ethereum":{"chain_id":"ethereum-mainnet","block_number":100,"block_hash":"0xcollection-head","timestamp":"2026-06-10T00:00:00Z"},
+        "base":{"chain_id":"base-mainnet","block_number":100,"block_hash":"0xbase-collection-head","timestamp":"2026-06-10T00:00:00Z"}
+    })).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 100, "0xcollection-head").await?;
+    rebuild_fixture_families(
+        &database.pool,
+        "base-mainnet",
+        100,
+        "0xbase-collection-head",
+    )
+    .await
+}
 
-    for (logical_name_id, name, namehash, block_number, declared_summary) in rows {
-        upsert_test_name_surfaces(
-            &database.pool,
-            &[collection_name_surface(
-                logical_name_id,
-                name,
-                namehash,
-                block_number,
-            )],
+#[allow(clippy::too_many_arguments)]
+async fn seed_names_registration(
+    database: &TestDatabase,
+    namespace: &str,
+    name: &str,
+    block: i64,
+    registered_at: &str,
+    expiry: u64,
+    owner: &str,
+    registrant: &str,
+) -> Result<Uuid> {
+    let chain = chain_id_for_namespace(namespace);
+    let hash = format!("0xnames{block}");
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[
+            raw_block(
+                chain,
+                "0xnames-created",
+                None,
+                80,
+                parse_rfc3339_utc_timestamp("2023-01-02T00:00:00Z")?.unix_timestamp(),
+            ),
+            raw_block(
+                chain,
+                &hash,
+                None,
+                block,
+                parse_rfc3339_utc_timestamp(registered_at)?.unix_timestamp(),
+            ),
+        ],
+    )
+    .await?;
+    let resource = Uuid::from_u128(0x85000 + block as u128 * 10);
+    let token = Uuid::from_u128(resource.as_u128() + 1);
+    let binding = Uuid::from_u128(resource.as_u128() + 2);
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        namespace,
+        name,
+        chain,
+        80,
+        "0xnames-created",
+        resource,
+        token,
+        binding,
+        if namespace == "ens" {
+            "ens_v1"
+        } else {
+            "basenames"
+        },
+    )
+    .await?;
+    let (registrar, registry) = if namespace == "ens" {
+        ("ens_v1_registrar_l1", "ens_v1_registry_l1")
+    } else {
+        ("basenames_base_registrar", "basenames_base_registry")
+    };
+    let mut events = Vec::new();
+    for (log, kind, family, after) in [
+        (
+            0,
+            "RegistrationGranted",
+            registrar,
+            json!({"authority_kind":"registrar","registrant":registrant,"expiry":expiry}),
+        ),
+        (
+            1,
+            "AuthorityTransferred",
+            registry,
+            json!({"source_event":"Transfer","node":bigname_lookup::ens_namehash_hex(name)?,"owner":owner}),
+        ),
+    ] {
+        let mut event = history_event(
+            &format!("names-{name}-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some(chain),
+            Some(block),
+            Some(&hash),
+            Some("0xnames"),
+            Some(log),
+            CanonicalityState::Canonical,
+        );
+        event.namespace = namespace.into();
+        event.event_kind = kind.into();
+        event.source_family = family.into();
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok(resource)
+}
+
+async fn seed_v2_names_fixture(database: &TestDatabase) -> Result<()> {
+    seed_v2_names_with_alpha_expiry(database, V2_NAMES_ALPHA_EXPIRY as u64).await
+}
+
+async fn seed_v2_names_with_alpha_expiry(database: &TestDatabase, alpha_expiry: u64) -> Result<()> {
+    for (namespace, name, block, registered, expiry, owner, registrant) in [
+        (
+            "ens",
+            "alpha.eth",
+            91,
+            "2024-01-02T00:00:00Z",
+            alpha_expiry,
+            "0x00000000000000000000000000000000000000a1",
+            "0x00000000000000000000000000000000000000a2",
+        ),
+        (
+            "ens",
+            "beta.eth",
+            92,
+            "2024-02-02T00:00:00Z",
+            V2_NAMES_BETA_EXPIRY as u64,
+            "0x00000000000000000000000000000000000000b1",
+            "0x00000000000000000000000000000000000000b2",
+        ),
+        (
+            "ens",
+            "gamma.eth",
+            93,
+            "2024-03-02T00:00:00Z",
+            V2_NAMES_GAMMA_EXPIRY as u64,
+            "0x00000000000000000000000000000000000000c1",
+            "0x00000000000000000000000000000000000000c2",
+        ),
+        (
+            "basenames",
+            "alpha.base.eth",
+            96,
+            "2024-03-02T00:00:00Z",
+            V2_NAMES_BASE_EXPIRY as u64,
+            "0x00000000000000000000000000000000000000e1",
+            "0x00000000000000000000000000000000000000e2",
+        ),
+    ] {
+        seed_names_registration(
+            database, namespace, name, block, registered, expiry, owner, registrant,
         )
         .await?;
-        database
-            .insert_name_current_row(v2_subnames_name_current_row(
-                logical_name_id,
-                name,
-                namehash,
-                block_number,
-                None,
-                None,
-                None,
-                declared_summary,
-            ))
-            .await?;
     }
-    Ok(())
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        "epsilon.eth",
+        "ethereum-mainnet",
+        80,
+        "0xnames-created",
+        Uuid::from_u128(0x86000),
+        Uuid::from_u128(0x86001),
+        Uuid::from_u128(0x86002),
+        "ens_v1",
+    )
+    .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE logical_name_id=$1")
+        .bind(logical)
+        .execute(&database.pool)
+        .await?;
+    publish_v2_names_fixture(database).await
 }
 
 async fn v2_names_response(database: &TestDatabase, uri: &str) -> Result<Response> {
@@ -167,36 +226,22 @@ fn v2_names_listed(payload: &Value) -> Vec<String> {
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_names_fixture(&database).await?;
-    for (expiry, control, listed, alpha_expires_at) in [
-        (json!(u64::MAX), Value::Null, vec!["gamma.eth", "beta.eth"], None),
-        (json!(253_402_300_800_i64), Value::Null, vec!["gamma.eth", "beta.eth"], None),
-        (json!(-1), Value::Null, vec!["gamma.eth", "beta.eth"], None),
+    for (expiry, listed, alpha_expires_at) in [
+        (u64::MAX, vec!["gamma.eth", "beta.eth"], None),
+        (253_402_300_800_u64, vec!["gamma.eth", "beta.eth"], None),
         (
-            json!(253_402_300_799_i64),
-            json!("9999-12-31T23:59:59Z"),
+            253_402_300_799_u64,
             vec!["gamma.eth", "beta.eth", "alpha.eth"],
             Some("9999-12-31T23:59:59Z"),
         ),
         (
-            json!(0),
-            json!("1970-01-01T00:00:00Z"),
+            0_u64,
             vec!["alpha.eth", "gamma.eth", "beta.eth"],
             Some("1970-01-01T00:00:00Z"),
         ),
     ] {
-        sqlx::query(
-            "UPDATE bigname_phase.name_current
-             SET declared_summary = jsonb_set(jsonb_set(
-                 declared_summary, '{registration,expiry}', $1, true), '{control,expiry}', $2, true)
-             WHERE raw_name = 'alpha.eth'",
-        )
-        .bind(&expiry)
-        .bind(&control)
-        .execute(&database.pool)
-        .await?;
-
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_names_with_alpha_expiry(&database, expiry).await?;
         let payload = v2_names_payload(
             &database,
             "/v1/names?namespace=ens&expires_after=1969-01-01T00:00:00Z&sort=expires_at&order=asc",
@@ -213,8 +258,8 @@ async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()>
             alpha_expires_at.map(Value::from).as_ref(),
             "{expiry}"
         );
+        database.cleanup().await?;
     }
-    database.cleanup().await?;
     Ok(())
 }
 
@@ -231,7 +276,7 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     assert_eq!(
         v2_names_listed(&payload),
         vec!["gamma.eth", "beta.eth", "alpha.eth"],
-        "numeric registration expiries in the window, ascending; string and missing expiries and other namespaces are absent"
+        "registration expiries in the window, ascending; missing expiries and other namespaces are absent"
     );
     assert_eq!(
         payload["data"][0]["expires_at"],
@@ -249,7 +294,7 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     );
     assert_eq!(
         payload["data"][0]["registered_at"],
-        json!("2024-03-02T00:00:00Z")
+        json!("2024-03-02T00:00:00+00:00")
     );
     assert!(payload["data"][0].get("relations").is_none());
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -316,11 +361,25 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
 
     // At large Unix timestamps, f64 rounds a fractional bound back onto the whole-second
     // expiry. The index prefilter must still leave the exact timestamp comparison to decide.
-    sqlx::query(
-        "UPDATE name_current SET declared_summary = jsonb_set(         declared_summary, '{registration,expiry}', '253402214400'::jsonb)          WHERE raw_name = 'beta.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
+    let resource = Uuid::from_u128(0x85000 + 92 * 10);
+    let mut renewal = history_event(
+        "names-beta-renewed",
+        Some(&logical),
+        Some(resource),
+        Some("ethereum-mainnet"),
+        Some(100),
+        Some("0xcollection-head"),
+        Some("0xrenew"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    renewal.event_kind = "RegistrationRenewed".into();
+    renewal.source_family = "ens_v1_registrar_l1".into();
+    renewal.before_state = json!({});
+    renewal.after_state = json!({"expiry":253402214400_u64});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[renewal]).await?;
+    publish_v2_names_fixture(&database).await?;
     let payload = v2_names_payload(
         &database,
         "/v1/names?namespace=ens&expires_after=9999-12-31T00:00:00Z&expires_before=9999-12-31T00:00:00.00001Z",
@@ -338,53 +397,63 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
 async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
     let database = TestDatabase::new_migrated().await?;
-    for (logical, name, resource, token, binding) in [
-        (
-            "ens:lapsed-listed.eth",
-            "lapsed-listed.eth",
-            0x5a_0702_u128,
-            0x5a_0703_u128,
-            0x5a_0704_u128,
-        ),
-        (
-            "ens:live-listed.eth",
-            "live-listed.eth",
-            0x5a_0712,
-            0x5a_0713,
-            0x5a_0714,
-        ),
-    ] {
-        seed_identity_name(
-            &database,
-            logical,
-            name,
-            name,
-            &format!("namehash:{name}"),
-            Uuid::from_u128(resource),
-            Uuid::from_u128(token),
-            Uuid::from_u128(binding),
-            HOLDER,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            38,
-        )
-        .await?;
-    }
-    // The registration object Project writes for a released ENSv1 tombstone.
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = declared_summary || jsonb_build_object(
-             'registration', (declared_summary -> 'registration') || jsonb_build_object(
-                 'status', 'released', 'authority_kind', NULL, 'authority_key', NULL,
-                 'registrant', NULL, 'expiry', 1700000000, 'released_at', 1707776000,
-                 'lapsed_registration', jsonb_build_object(
-                     'registrant', $1::text, 'authority_kind', 'registrar',
-                     'authority_key', 'registrar:lapsed', 'released_at', 1707776000)),
-             'control', jsonb_build_object('status', 'unregistered'))
-         WHERE raw_name = 'lapsed-listed.eth'",
+    let released = seed_names_registration(
+        &database,
+        "ens",
+        "lapsed-listed.eth",
+        91,
+        "2023-02-02T00:00:00Z",
+        1700000000,
+        HOLDER,
+        HOLDER,
     )
-    .bind(HOLDER)
-    .execute(&database.lookup_pool)
     .await?;
+    seed_names_registration(
+        &database,
+        "ens",
+        "live-listed.eth",
+        92,
+        "2024-02-02T00:00:00Z",
+        1900000000,
+        HOLDER,
+        HOLDER,
+    )
+    .await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "lapsed-listed.eth");
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xnames-released",
+            None,
+            93,
+            1707776000,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to=to_timestamp(1707776000) WHERE resource_id=$1",
+    )
+    .bind(released)
+    .execute(&database.pool)
+    .await?;
+    let mut release = history_event(
+        "names-lapsed-release",
+        Some(&logical),
+        Some(released),
+        Some("ethereum-mainnet"),
+        Some(93),
+        Some("0xnames-released"),
+        Some("0xrelease"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    release.event_kind = "RegistrationReleased".into();
+    release.source_family = "ens_v1_registrar_l1".into();
+    release.before_state = json!({"registrant":HOLDER,"authority_kind":"registrar","authority_key":"registrar:lapsed"});
+    release.after_state = json!({"expiry":1700000000,"released_at":1707776000});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release]).await?;
+    publish_v2_names_fixture(&database).await?;
 
     let payload = v2_names_payload(
         &database,
@@ -400,8 +469,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "namespace": "ens",
                 "namehash": "0x648f55586c02f13100041eeef8fa1550dc7dc35f0e5871dc7bea445cfbccce32",
                 "registration_status": "released",
-                "registered_at": "2026-04-17T00:00:21Z",
-                "created_at": "2026-04-17T00:00:11Z",
+                "registered_at": "2023-02-02T00:00:00+00:00",
+                "created_at": "2023-02-02T00:00:00+00:00",
                 "expires_at": "2023-11-14T22:13:20Z"
             },
             {
@@ -412,8 +481,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "owner": HOLDER,
                 "registrant": HOLDER,
                 "registration_status": "active",
-                "registered_at": "2026-04-17T00:00:21Z",
-                "created_at": "2026-04-17T00:00:11Z",
+                "registered_at": "2024-02-02T00:00:00+00:00",
+                "created_at": "2024-02-02T00:00:00+00:00",
                 "expires_at": "2030-03-17T17:46:40Z"
             }
         ]),
@@ -450,13 +519,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
 async fn v2_names_cursor_holds_no_publication_and_continues_across_one() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
-    seed_schema_v2_ens_lookup_head(
-        &database.pool,
-        100,
-        "0xcollection-head",
-        "2026-06-10T00:00:00Z",
-    )
-    .await?;
+    publish_v2_names_fixture(&database).await?;
     let base = "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&page_size=1";
     let first = v2_names_payload(&database, base).await?;
     let cursor = first["page"]["next_cursor"]
@@ -469,13 +532,7 @@ async fn v2_names_cursor_holds_no_publication_and_continues_across_one() -> Resu
     let second = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
 
     // Same block and hash, but a new Project publication transaction.
-    seed_schema_v2_ens_lookup_head(
-        &database.pool,
-        100,
-        "0xcollection-head",
-        "2026-06-10T00:00:00Z",
-    )
-    .await?;
+    publish_v2_names_fixture(&database).await?;
     let again = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
     assert_eq!(again["data"], second["data"]);
     assert_eq!(again["page"], second["page"]);
@@ -502,13 +559,7 @@ async fn v2_names_cursor_holds_no_publication_and_continues_across_one() -> Resu
 async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
-    seed_schema_v2_ens_lookup_head(
-        &database.pool,
-        100,
-        "0xcollection-head",
-        "2026-06-10T00:00:00Z",
-    )
-    .await?;
+    publish_v2_names_fixture(&database).await?;
     let state = database.app_state();
     let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
@@ -518,13 +569,7 @@ async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
     .await
     .expect("capture ready publication");
     assert!(snapshot.finish(&state).await.is_ok());
-    seed_schema_v2_ens_lookup_head(
-        &database.pool,
-        100,
-        "0xcollection-head",
-        "2026-06-10T00:00:00Z",
-    )
-    .await?;
+    publish_v2_names_fixture(&database).await?;
     let error = snapshot
         .finish(&state)
         .await
@@ -557,13 +602,7 @@ async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
     )
     .await
     .expect("cursor bound to the current publication");
-    seed_schema_v2_ens_lookup_head(
-        &database.pool,
-        100,
-        "0xcollection-head",
-        "2026-06-10T00:00:00Z",
-    )
-    .await?;
+    publish_v2_names_fixture(&database).await?;
     let error = continued
         .finish(&state)
         .await
@@ -841,6 +880,7 @@ async fn v2_collection_explicit_namespace_ignores_unavailable_other_namespace() 
                 "block_hash": "0xcollection-head", "timestamp": "2026-06-10T00:00:00Z" }
         }))
         .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 100, "0xcollection-head").await?;
     let state = database.app_state();
     let ens = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,

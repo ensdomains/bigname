@@ -33,9 +33,8 @@ async fn record_id_resolver_inventory_serves_explicit_empty_values() -> Result<(
 async fn record_id_resolver_permissions_preserve_generation_specific_powers() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
-    sqlx::query("UPDATE bigname_phase.permissions_current SET effective_powers = $1 WHERE resource_id = $2 AND scope_kind = 'resolver'")
-        .bind(json!(["set_abi", "set_interface", "set_name", "set_data", "link", "admin_link"]))
-        .bind(v2_permissions_current_resource_id()).execute(&database.pool).await?;
+    replace_permission_resolver_roles(&database, 120,
+        json!(["set_abi", "set_interface", "set_name", "set_data", "link", "admin_link"]), None).await?;
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!(
@@ -73,10 +72,8 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let hash = "0x00000000000000000000000000000000000000000000000000000000000000aa";
-    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1, effective_powers = $3 WHERE resource_id = $2 AND scope_kind = 'resolver'")
-        .bind(json!({"resource_selector": {"kind": "text", "key": "url", "hash": hash}}))
-        .bind(v2_permissions_current_resource_id())
-        .bind(json!(["set_text", "link"])).execute(&database.pool).await?;
+    replace_permission_resolver_roles(&database, 120, json!(["set_text", "link"]),
+        Some(json!({"kind":"text", "key":"url", "hash":hash}))).await?;
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!(
@@ -102,8 +99,6 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
     );
     assert!(row["grant_scope"]["detail"].get("resource_selector").is_none());
 
-    let resolver = resolver_current_row("ethereum-mainnet", "0x0000000000000000000000000000000000000abc");
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
     let roles = v2_resolver_payload_for_database(
         &database,
         "/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles",
@@ -123,10 +118,8 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
     assert_eq!(role["powers"], json!(["set_text", "link"]));
 
     // A coin type is a number on the wire, on both routes.
-    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1, effective_powers = $3 WHERE resource_id = $2 AND scope_kind = 'resolver'")
-        .bind(json!({"resource_selector": {"kind": "address", "key": "2147483658", "hash": hash}}))
-        .bind(v2_permissions_current_resource_id())
-        .bind(json!(["set_addr"])).execute(&database.pool).await?;
+    replace_permission_resolver_roles(&database, 121, json!(["set_addr"]),
+        Some(json!({"kind":"address", "key":"2147483658", "hash":hash}))).await?;
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!(
@@ -160,12 +153,8 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
 
     // The text setter revoked: the argument still names the resource, but it is no
     // longer a record this holder may set, so neither row describes it.
-    sqlx::query("UPDATE bigname_phase.permissions_current SET scope_detail = scope_detail || $1 WHERE resource_id = $2 AND scope_kind = 'resolver'")
-        .bind(json!({"resource_selector": {"kind": "text", "key": "url", "hash": hash}}))
-        .bind(v2_permissions_current_resource_id()).execute(&database.pool).await?;
-    sqlx::query("UPDATE bigname_phase.permissions_current SET effective_powers = $2 WHERE resource_id = $1 AND scope_kind = 'resolver'")
-        .bind(v2_permissions_current_resource_id())
-        .bind(json!(["link"])).execute(&database.pool).await?;
+    replace_permission_resolver_roles(&database, 122, json!(["link"]),
+        Some(json!({"kind":"text", "key":"url", "hash":hash}))).await?;
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!(

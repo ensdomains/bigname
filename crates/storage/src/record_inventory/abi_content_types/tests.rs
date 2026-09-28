@@ -191,6 +191,9 @@ fn rows_without_a_usable_basis_are_answered_before_any_read() {
     let complete = json!({
         "chain_id": "ethereum-mainnet",
         "resolver_address": "0xABC",
+        "abi_observation_classification": {
+            "source_family": "ens_v1_resolver_l1", "role": "public_resolver"
+        },
         "record_event_ids": [1, 2],
         "record_link_event_ids": [2]
     });
@@ -200,13 +203,15 @@ fn rows_without_a_usable_basis_are_answered_before_any_read() {
     ));
     match planned(true, complete) {
         Plan::Classify {
-            resolver_address,
+            chain_id,
+            mirrored_family,
             event_ids,
             link_event_ids,
             max_block_number,
             ..
         } => {
-            assert_eq!(resolver_address.as_deref(), Some("0xabc"));
+            assert_eq!(chain_id, "ethereum-mainnet");
+            assert_eq!(mirrored_family, None);
             assert_eq!(event_ids, vec![1, 2]);
             assert_eq!(link_event_ids, BTreeSet::from([2]));
             assert_eq!(max_block_number, Some(100));

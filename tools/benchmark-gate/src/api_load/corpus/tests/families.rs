@@ -73,31 +73,13 @@ async fn registered(f: &Fixture, ns: &str, id: u32) -> Result<()> {
     } else {
         "basenames_base_registry"
     };
-    f.binding(
-        &uuid(id + 10_000),
-        &name(ns, id),
-        &uuid(id),
-        if ns == "ens" { "ens_v1" } else { "basenames" },
-        9,
-        0,
-        None,
-    )
-    .await?;
-    // Move the retained identity created by the shared single-chain helper to this namespace's chain.
-    for table in ["resources", "surface_bindings"] {
-        sqlx::query(&format!(
-            "UPDATE {table} SET chain_id=$1 WHERE resource_id=$2::uuid"
-        ))
-        .bind(chain)
-        .bind(uuid(id))
-        .execute(&f.pool)
-        .await?;
-    }
-    sqlx::query("UPDATE name_surfaces SET chain_id=$1 WHERE logical_name_id=$2")
-        .bind(chain)
-        .bind(name(ns, id))
-        .execute(&f.pool)
-        .await?;
+    f.surface_on(chain, &name(ns, id), &node(id)).await?;
+    sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,0,'canonical')")
+        .bind(uuid(id)).bind(chain).bind(hash(0)).execute(&f.pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,provenance,canonicality_state)
+        VALUES ($1::uuid,$2,$3::uuid,'declared_registry_path',$4,to_timestamp(1800000000+9*12),$5,$6,9,'{\"transaction_index\":0,\"log_index\":0}','canonical')")
+        .bind(uuid(id+10000)).bind(name(ns,id)).bind(uuid(id)).bind(if ns=="ens" {"ens_v1"} else {"basenames"})
+        .bind(chain).bind(hash(9)).execute(&f.pool).await?;
     event(f,ns,id,"RegistrationGranted",registrar,json!({"authority_kind":"registrar","status":"registered","registrant":OWNER,"expiry":2_000_000_000u64})).await?;
     event(
         f,
@@ -122,7 +104,7 @@ async fn seed(f: &Fixture) -> Result<()> {
         } else {
             "basenames_base_registry"
         };
-        event(f,ns,ids[1],"AuthorityTransferred",registry,json!({"source_event":"NewOwner", "node":node(ids[0]),"child_node":node(ids[1]),"label":node(99),"owner":OWNER})).await?;
+        event(f,ns,ids[1],"SubregistryChanged",registry,json!({"source_event":"NewOwner", "node":node(ids[0]),"child_node":node(ids[1]),"labelhash":node(99),"owner":OWNER})).await?;
     }
     for (ns, id) in [("ens", 1), ("basenames", 101)] {
         event(f,ns,id,"ReverseChanged","ens_v1_reverse_registrar_l1",json!({"address":OWNER,"namespace":ns,"coin_type":"60","source_event":"NameForAddrChanged"})).await?;
@@ -161,6 +143,10 @@ async fn names_addresses_parents_and_scale_use_real_family_admission() -> Result
         namespace_counts(&names),
         [("basenames".into(), 1), ("ens".into(), 1)].into()
     );
+    assert_eq!(
+        namespace_counts(&readers::names(&f.pool, 3, false).await?),
+        [("basenames".into(), 2), ("ens".into(), 1)].into()
+    );
     let parents = readers::names(&f.pool, 2, true).await?;
     assert_eq!(namespace_counts(&parents), namespace_counts(&names));
     let (relations, addresses) = readers::addresses(&f.pool, 2).await?;
@@ -179,6 +165,52 @@ async fn names_addresses_parents_and_scale_use_real_family_admission() -> Result
     assert_eq!(scale.name_current_rows, 4);
     assert_eq!(scale.address_names_current_rows, relations);
     assert!(!permissions::load(&f.pool, 4).await?.is_empty());
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn subregistry_parents_are_sampled_only_while_their_children_are_visible() -> Result<()> {
+    let f = setup("benchmark_family_subregistry").await?;
+    registered(&f, "ens", 1).await?;
+    f.surface(&name("ens", 2), &node(2)).await?;
+    sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,0,'canonical')")
+        .bind(uuid(2)).bind(CHAIN).bind(hash(0)).execute(&f.pool).await?;
+    let parent: String =
+        sqlx::query_scalar("SELECT raw_name FROM name_surfaces WHERE logical_name_id=$1")
+            .bind(name("ens", 1))
+            .fetch_one(&f.pool)
+            .await?;
+    let child = bigname_domain::normalization::normalize_name(&format!("child.{parent}"))?;
+    let labels: Vec<String> = child
+        .normalized_labels
+        .iter()
+        .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+        .collect();
+    sqlx::query("UPDATE name_surfaces SET raw_name=$2,raw_labels=$3,dns_encoded_name=$4,labelhashes=$5 WHERE logical_name_id=$1")
+        .bind(name("ens", 2)).bind(child.normalized_name).bind(child.normalized_labels)
+        .bind(child.dns_encoded_name).bind(labels).execute(&f.pool).await?;
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1::uuid,$2,'contract')")
+        .bind(uuid(90)).bind(CHAIN).execute(&f.pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address) VALUES ($1::uuid,$2,$3)")
+        .bind(uuid(90)).bind(CHAIN).bind(OWNER).execute(&f.pool).await?;
+    event(
+        &f,
+        "ens",
+        1,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        json!({"subregistry":OWNER}),
+    )
+    .await?;
+    event(&f,"ens",2,"RegistrationGranted","ens_v2_registry_l1",json!({"registry_contract_instance_id":uuid(90),"registrant":OWNER,"expiry":2_000_000_000u64})).await?;
+    publish(&f).await?;
+    assert_eq!(
+        readers::names(&f.pool, 2, true).await?,
+        vec![("ens".into(), parent)]
+    );
+    sqlx::query("UPDATE name_surfaces SET visibility_state='shadow',deactivation_reason='fixture',deactivated_at=now() WHERE logical_name_id=$1")
+        .bind(name("ens", 2)).execute(&f.pool).await?;
+    assert!(readers::names(&f.pool, 2, true).await?.is_empty());
     f.cleanup().await
 }
 
@@ -250,6 +282,8 @@ async fn primary_sampling_excludes_invalid_claims_and_unpublished_families() -> 
 async fn permission_corpus_retains_superseded_registration_audit_targets() -> Result<()> {
     let f = setup("benchmark_family_permission_audit").await?;
     registered(&f, "ens", 1).await?;
+    sqlx::query("UPDATE surface_bindings SET active_to=to_timestamp(1800000000+11*12) WHERE surface_binding_id=$1::uuid")
+        .bind(uuid(10001)).execute(&f.pool).await?;
     f.binding(
         &uuid(20000),
         &name("ens", 1),
@@ -260,8 +294,6 @@ async fn permission_corpus_retains_superseded_registration_audit_targets() -> Re
         None,
     )
     .await?;
-    sqlx::query("UPDATE surface_bindings SET active_to=to_timestamp(1800000000+11*12) WHERE surface_binding_id=$1::uuid")
-        .bind(uuid(10001)).execute(&f.pool).await?;
     registered(&f, "ens", 2).await?;
     publish(&f).await?;
     let targets = permissions::load(&f.pool, 4).await?;

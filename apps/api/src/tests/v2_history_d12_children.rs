@@ -30,17 +30,21 @@ async fn d12c_position(
 }
 
 async fn d12c_parent(database: &TestDatabase, parent: &str, seed: u128) -> Result<()> {
-    seed_v2_history_name(
-        database,
-        &format!("ens:{parent}"),
+    seed_v2_history_blocks(database, 80..=80).await?;
+    seed_family_identity_inputs(
+        &database.pool,
+        "ens",
         parent,
-        &format!("node:{parent}"),
+        "ethereum-mainnet",
         80,
+        "0xhistory80",
         Uuid::from_u128(seed),
         Uuid::from_u128(seed + 1),
         Uuid::from_u128(seed + 2),
+        "ens_v1",
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 /// `trio.eth` has three child registrations in block 132 and no rows of its own: A in
@@ -69,8 +73,7 @@ async fn d12c_seed_trio(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    seed_child_registration_memberships(database, "trio.eth", &["trio-a", "trio-b", "trio-c"])
-        .await
+    publish_test_families(database, 133).await
 }
 
 /// `kids.eth` has its own rows in blocks 141 and 143, and block 142 holds five child
@@ -80,7 +83,14 @@ async fn d12c_seed_kids(database: &TestDatabase) -> Result<()> {
     d12c_parent(database, "kids.eth", 0xd200).await?;
     seed_child_surfaces(
         database,
-        &["a.kids.eth", "b.kids.eth", "c.kids.eth", "d.kids.eth", "e.kids.eth", "s.kids.eth"],
+        &[
+            "a.kids.eth",
+            "b.kids.eth",
+            "c.kids.eth",
+            "d.kids.eth",
+            "e.kids.eth",
+            "s.kids.eth",
+        ],
     )
     .await?;
     seed_v2_history_blocks(database, 141..=143).await?;
@@ -95,9 +105,19 @@ async fn d12c_seed_kids(database: &TestDatabase) -> Result<()> {
             )
         })
         .to_vec();
-    for (identity, block) in [("kids-n0", 141), ("kids-n1", 142), ("kids-n2", 142), ("kids-n3", 143)]
-    {
-        events.push(child_history_event(identity, Some("kids.eth"), None, "RecordChanged", block));
+    for (identity, block) in [
+        ("kids-n0", 141),
+        ("kids-n1", 142),
+        ("kids-n2", 142),
+        ("kids-n3", 143),
+    ] {
+        events.push(child_history_event(
+            identity,
+            Some("kids.eth"),
+            None,
+            "RecordChanged",
+            block,
+        ));
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     d12c_position(
@@ -114,12 +134,7 @@ async fn d12c_seed_kids(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    seed_child_registration_memberships(
-        database,
-        "kids.eth",
-        &["kids-a", "kids-b", "kids-c", "kids-d", "kids-e", "kids-s"],
-    )
-    .await
+    publish_test_families(database, 143).await
 }
 
 const KIDS_NEWEST_FIRST: [&str; 10] = [
@@ -128,7 +143,10 @@ const KIDS_NEWEST_FIRST: [&str; 10] = [
 ];
 
 fn d12c_expected(newest_first: &[&str], order: &str) -> Vec<String> {
-    let mut expected = newest_first.iter().map(|identity| hkw_id(identity)).collect::<Vec<_>>();
+    let mut expected = newest_first
+        .iter()
+        .map(|identity| hkw_id(identity))
+        .collect::<Vec<_>>();
     if order == "asc" {
         expected.reverse();
     }
@@ -187,16 +205,30 @@ async fn v2_child_history_mixed_pages_follow_the_block_order() -> Result<()> {
         let unpaged = hk_ok(&database, &format!("{base}&page_size=50")).await?;
         assert_eq!(hk_ids(&unpaged), expected, "{base}: unpaged");
         for page_size in [1, 2, 3] {
-            assert_eq!(d12c_walk(&database, &base, page_size).await?, expected, "{base}: {page_size}");
+            assert_eq!(
+                d12c_walk(&database, &base, page_size).await?,
+                expected,
+                "{base}: {page_size}"
+            );
         }
         let counted = hk_ok(
             &database,
-            &format!("/v1/names/kids.eth/history?include=child_registrations,total_count&order={order}"),
+            &format!(
+                "/v1/names/kids.eth/history?include=child_registrations,total_count&order={order}"
+            ),
         )
         .await?;
-        assert_eq!(counted["page"]["total_count"], json!(expected.len()), "{base}: count");
+        assert_eq!(
+            counted["page"]["total_count"],
+            json!(expected.len()),
+            "{base}: count"
+        );
         for token in [D12Token::TransactionHash, D12Token::Both, D12Token::Legacy] {
-            assert_eq!(d12_walk(&database, &base, token).await?, expected, "{base}: {token:?}");
+            assert_eq!(
+                d12_walk(&database, &base, token).await?,
+                expected,
+                "{base}: {token:?}"
+            );
         }
     }
     database.cleanup().await

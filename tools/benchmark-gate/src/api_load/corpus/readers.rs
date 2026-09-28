@@ -42,7 +42,11 @@ pub(super) async fn name_batch(
            AND (NOT $3 OR EXISTS (
                SELECT 1 FROM bigname_phase.project_child_edge_candidate edge
                WHERE edge.chain_id = surface.chain_id AND edge.namespace = surface.namespace
-                 AND edge.parent_node = surface.namehash))
+                 AND edge.parent_node = surface.namehash)
+               OR EXISTS (
+                   SELECT 1 FROM bigname_phase.project_parent_subregistry subregistry
+                   WHERE subregistry.chain_id = surface.chain_id
+                     AND subregistry.logical_name_id = surface.logical_name_id))
          ORDER BY surface.logical_name_id LIMIT $4",
     )
     .bind(namespaces)
