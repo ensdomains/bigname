@@ -1777,7 +1777,8 @@ when that revision differs from the one the run applies under or Interpret is
 in redo. The supervised runner retries it, and the retry adopts the new
 revision or fails again until the redo ends; the one-shot `redo` command
 returns the error and ends, as it does on any family failure. The block
-records that revision and the whole input token on the marker. The run reads
+records that revision and the token's interpretation and redo fields on the
+marker; Project's last-error text is not stored there. The run reads
 the chain's manifest updates once, before its first block; each block takes its
 active manifest set from that read and records the set's key, and a rebuild
 takes the declaration start blocks of its work list from the same read, so an

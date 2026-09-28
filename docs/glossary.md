@@ -2538,10 +2538,15 @@ the reducer under `crates/project/src/families/` that writes them:
 
 `project_family_marker`: the block and hash a chain's [owned key
 families](#owned-key-family) stand at, the generation (`sequence`) every block,
-[rebuild range](#rebuild-range) and undo advances, and the [input
-token](#family-input-token), input revision and [active manifest
-set](#active-manifest-set-family-block) key the last block read. A block, range or undo applies only against the generation it
-planned from.
+[rebuild range](#rebuild-range) and undo advances, and what the last write
+applied under: the [input token](#family-input-token)'s interpretation and redo
+fields (the Interpret row's content hash, redo attempt and redo flag, which
+make up the [input revision](#family-input-revision), and the Project row's
+redo attempt, mode and range) and the [active manifest
+set](#active-manifest-set-family-block) key. A single block records its own
+token and set key. A range records the token fields it read at its opening
+fence and its final block's set key. A block, range or undo applies only
+against the generation it planned from.
 
 While the [publication switch](#publication-switch) is on, the marker is also
 what the API serves from: snapshot selection and the verified lookup's
@@ -2615,11 +2620,11 @@ in the same transaction as the reset, undo or block it describes.
 the Interpret row's content hash, redo attempt and redo flag and the Project
 row's redo attempt, mode, range and last error, read from `chain_phase_state` in
 one statement (`input_token` in `crates/project/src/families/input.rs`). A
-block applied in a transaction of its own reads it inside that transaction and
-records it on the [family marker](#family-marker); a [rebuild
-range](#rebuild-range) reads it once, at its opening fence, and records it with
-its final marker. Its [revision](#family-input-revision) is what a run applies
-under. The Project phase also reads it once after a batch commits and
+single-block transaction reads the token inside that transaction. A [rebuild
+range](#rebuild-range) reads it once at its opening fence. Each records the
+token's interpretation and redo fields with its final [family
+marker](#family-marker); Project's last-error text is not stored on the marker.
+Its [revision](#family-input-revision) is what a run applies under. The Project phase also reads it once after a batch commits and
 before the batch's progress is recorded, bounded at 30 seconds; a read that
 fails or outlasts the bound fails the family run that follows
 ([projections](projections.md#owned-key-families)).
