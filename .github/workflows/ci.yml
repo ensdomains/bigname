@@ -230,9 +230,9 @@ jobs:
         include:
           - name: api
             packages: "-p bigname-api"
-            # The API plan tests assert that a page or count plan does not
-            # cross PostgreSQL's JIT threshold, as production API connections
-            # would. They need JIT on to see it.
+            # JIT stays on, as on production API connections. The tests that
+            # asserted plans stay under the JIT threshold were GraphQL's and
+            # left with it; no remaining API test depends on this setting.
             postgres_initdb_args: ""
           - name: core
             packages: >-
@@ -262,18 +262,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Sync pinned upstream checkouts
-        if: matrix.name == 'api'
-        run: |
-          scripts/sync-refs
-          scripts/sync-refs --check
-
-      - name: Verify GraphQL oracle tooling (offline)
-        if: matrix.name == 'api'
-        run: |
-          scripts/graphql-compat-oracle verify-fixtures --offline
-          (cd scripts && bash test-graphql-compat-oracle)
 
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@master
@@ -1307,81 +1295,3 @@ jobs:
 
       - name: rollback smoke gate (no network)
         run: ./scripts/rollback-smoke --no-network
-
-  manager-graphql-compat:
-    # Guards that bigname's GraphQL schema still serves every field the ENS
-    # Manager's operations ask for. Validates the Manager's committed operation
-    # documents (pulled from apps-monorepo) against bigname's committed SDL
-    # fixture. This is a subset check ("does bigname serve what the Manager
-    # needs"), not a schema-to-schema diff — bigname is deliberately a subset,
-    # so a diff would be all noise. A breaking schema change (removed/renamed
-    # field the Manager reads) fails this job; adding or removing a
-    # bigname-private field the Manager never reads does not.
-    name: Manager GraphQL compat
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # GitHub withholds repository secrets (except GITHUB_TOKEN) from
-    # fork-originated pull_request runs, so the private apps-monorepo checkout
-    # below cannot authenticate on external-fork PRs. Skip the job cleanly for
-    # those instead of failing at checkout; it still runs for same-repo
-    # branches and on every push to main, so a fork-merged regression is
-    # caught on main immediately. (Skipped jobs satisfy required checks, so
-    # making this check required would not block external contributors.)
-    # merge_group runs are skipped for the same reason: a queued fork PR's
-    # unmerged code would otherwise execute with the private-repo token before
-    # any merge happens. Same-repo changes were checked at PR time; queued
-    # fork changes stay covered by the post-merge run on main, unchanged.
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-    steps:
-      - name: Checkout bigname
-        uses: actions/checkout@v4
-
-      - name: Checkout Manager operation documents
-        uses: actions/checkout@v4
-        with:
-          repository: ensdomains/apps-monorepo
-          # Pinned deliberately so bigname CI does not flake red on every
-          # Manager edit; bump this when the Manager's indexer documents change.
-          ref: 759860f5acc62ea287b0feefa23c0d17aeb862a9
-          # apps-monorepo is private; this checkout needs a fine-grained PAT /
-          # GitHub App token with contents:read on ensdomains/apps-monorepo.
-          token: ${{ secrets.APPS_MONOREPO_READ_TOKEN }}
-          path: apps-monorepo
-          # Only the operation documents are needed — keep the checkout minimal.
-          sparse-checkout: packages/indexer/documents
-          persist-credentials: false
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Validate Manager operations against bigname schema
-        run: |
-          # The generated-style Domain roots require two pinned Manager declaration updates.
-          # Assert that these are the only raw validation differences, then validate every
-          # unchanged field selection through a temporary declaration overlay until that
-          # coordination lands.
-          set +e
-          raw_validation="$(npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
-            'apps-monorepo/packages/indexer/documents/**/*.graphql' \
-            apps/api/src/tests/fixtures/subgraph_schema.graphql 2>&1)"
-          raw_status=$?
-          set -e
-          printf '%s\n' "$raw_validation"
-          test "$raw_status" -le 1
-          test "$(printf '%s\n' "$raw_validation" | grep -c 'Detected 2 invalid documents')" -eq 1
-          test "$(printf '%s\n' "$raw_validation" | grep -Fc 'Variable $id of type String! used in position expecting type ID!.')" -eq 1
-          test "$(printf '%s\n' "$raw_validation" | grep -Fc 'Variable $where of type DomainFilter! used in position expecting type Domain_filter.')" -eq 1
-          unexpected="$(printf '%s\n' "$raw_validation" | sed -n '/\[log\]  - /p' | grep -Fv -e 'Variable $id of type String! used in position expecting type ID!.' -e 'Variable $where of type DomainFilter! used in position expecting type Domain_filter.' || true)"
-          test -z "$unexpected"
-          compat_dir="$(mktemp -d)"
-          cp -R apps-monorepo/packages/indexer/documents "$compat_dir/documents"
-          find "$compat_dir/documents" -type f -name '*.graphql' \
-            -exec sed -i 's/\$id: String!/\$id: ID!/g' {} +
-          domains_document="$compat_dir/documents/queries/Domains.graphql"
-          sed -i 's/\$where: DomainFilter!/\$where: Domain_filter!/' "$domains_document"
-          test "$(grep -rlF '$where: Domain_filter!' "$compat_dir/documents" | wc -l)" -eq 1
-          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
-            "$compat_dir/documents/**/*.graphql" \
-            apps/api/src/tests/fixtures/subgraph_schema.graphql

@@ -182,8 +182,8 @@ to record values, resolver pointers and record-version boundaries. A read from
 an orphaned block is retried at the current canonical head; failure restores
 the missing-value baseline. Previously hydrated entries that become unsupported
 or fall outside the admitted resolver list are restored without an RPC call.
-Every record-inventory reader (the snapshot and batch reads, the identity name
-records behind lookup, and the GraphQL record loader) exposes the event-derived
+Every record-inventory reader (the snapshot reads and the identity name
+records behind lookup) exposes the event-derived
 baseline immediately when a hydration block is orphaned, even before a retry
 runs. This text policy does not change the bounded refresh of event-silent
 reverse claims described below.
@@ -1531,7 +1531,7 @@ explicitly unsupported. For ENSv2, current-emitter version evidence may define a
 boundary while the unadmitted resolver profile still publishes no record
 values. Basenames record facts remain gated by the admitted Base resolver
 profile. Readers enforce this on the inventory row itself: the records route,
-name detail, batch lookup, the GraphQL resolver fields, the
+name detail, batch lookup, the
 `address_records_current` builder, and the divergence-ledger comparison take
 values only from a `supported` row. Entries retained on an `unsupported` row are
 diagnostics for operators, never answers

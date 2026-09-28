@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 mod bounds;
 mod cli;
 mod errors;
-mod graphql;
 mod health;
 mod metrics;
 mod name_filter;
@@ -178,7 +177,6 @@ fn app_router_with_bounds(
 ) -> Router {
     let bounded_router = v2::router()
         .with_state(state.clone())
-        .merge(graphql::graphql_routes(state.clone()))
         .route_layer(CorsLayer::permissive());
     let health_router = Router::new()
         .route("/healthz", get(health))
@@ -187,7 +185,7 @@ fn app_router_with_bounds(
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager
     // dev build, deployed on a different origin). Permissive CORS — wildcard origin, no
-    // credentials — lets the browser read responses and answers the GraphQL POST preflight.
+    // credentials — lets the browser read responses and answers CORS preflights.
     // This is not access control: the endpoint is unauthenticated and reachable regardless;
     // CORS only governs whether browser JS on another origin may read the response.
     // Request bounds wrap CORS so even preflight responses pass through the family-wide backstop;

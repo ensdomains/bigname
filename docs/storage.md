@@ -90,9 +90,9 @@ The physical layers are:
 reusable row reads, and database invariants. These rules are shared across callers and remain
 below route code even when a route composes them into a larger query.
 
-`apps/api` owns route-specific joins, pagination, wire shaping, and GraphQL compatibility.
-GraphQL compatibility queries therefore live with the API surface, while their reusable
-canonicality predicates come from storage. API helpers that confirm one request reads against an
+`apps/api` owns route-specific joins, pagination, and wire shaping. Route-specific queries
+therefore live with the API surface, while their reusable canonicality predicates come from
+storage. API helpers that confirm one request reads against an
 unchanged selected chain position also remain in `apps/api`; they are not reusable database reads.
 
 This documented boundary is authoritative. `scripts/check-query-ownership` is a tripwire for
@@ -1088,7 +1088,7 @@ legacy execution-cache invalidation call.
 
 Project output is admitted only when its publication target is at or before the
 selected readable head. Equal-height admission requires the selected block hash
-to match. Name, relation, inventory, primary-name, and GraphQL reads all apply
+to match. Name, relation, inventory, and primary-name reads all apply
 this rule against phase lineage.
 
 When a chain is removed from runtime configuration, recovery may change its
@@ -1951,11 +1951,6 @@ the newest stored head with the API's compiled interpreter content hash. The
 API reads only projections eligible for the selected positions and revalidates
 the Project generation before returning. A concurrent head or generation
 change returns `409 stale`.
-
-GraphQL carries the selected ENS head from the root operation into nested record
-inventory reads, scopes list and count queries to the same selected chains, and
-excludes unsupported name rows. An unsupported inventory maps to the existing
-empty compatibility shape.
 
 ### History page order
 

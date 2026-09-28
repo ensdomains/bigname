@@ -273,7 +273,7 @@ included. Time spent in the single dispatcher before that point is excluded and
 is bounded separately by the achieved-throughput floor. Timing ends only after
 the complete response body has been read. The report contains
 achieved throughput, success rate, and p50, p95, and p99 for each route.
-Diagnostics, GraphQL compatibility, health, and documentation routes are
+Diagnostics, health, and documentation routes are
 outside this traffic gate; they retain their ordinary functional checks.
 
 `POST /v1/lookup` keeps the latency-sensitive 5/10/25 ms p50/p95/p99 limits.

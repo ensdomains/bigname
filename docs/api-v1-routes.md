@@ -960,8 +960,7 @@ collection route carry neither header.
   Contenthash and address answers are scalar lowercase, `0x`-prefixed hex.
   This route flattens both projected `{encoding,bytes}` address values and
   projected scalar address values to that same public string; the exact-name
-  detail route, `profile=detail` lookup, and GraphQL resolver address fields
-  apply the same normalization.
+  detail route and `profile=detail` lookup apply the same normalization.
   A zero-length byte payload makes the exact stored answer `not_found` and
   omits `value`, so a cleared exact value answers `not_found` unless a
   documented derived-record rule supplies a replacement answer. The ENSIP-19

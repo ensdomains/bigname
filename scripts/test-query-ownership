@@ -62,41 +62,6 @@ fi
 printf '%s\n' 'PASS: gate basename invocation from scripts/'
 
 expect_probe_rejected \
-  'exact GraphQL storage file' \
-  'crates/storage/src/graphql.rs' \
-  '// query ownership probe' \
-  'crates/storage/src/graphql.rs'
-expect_probe_rejected \
-  'GraphQL storage directory' \
-  'crates/storage/src/graphql/query_ownership_probe.rs' \
-  '// query ownership probe' \
-  'crates/storage/src/graphql/query_ownership_probe.rs'
-expect_probe_rejected \
-  'prefixed GraphQL storage directory child' \
-  'crates/storage/src/graphql_query_ownership_probe/child_file.rs' \
-  '// query ownership probe' \
-  'crates/storage/src/graphql_query_ownership_probe/child_file.rs'
-expect_probe_rejected \
-  'prefixed GraphQL storage file' \
-  'crates/storage/src/graphql_query_ownership_probe.rs' \
-  '// query ownership probe' \
-  'crates/storage/src/graphql_query_ownership_probe.rs'
-expect_probe_rejected \
-  'exact GraphQL storage module' \
-  'crates/storage/src/query_ownership_exact_module_probe.rs' \
-  'mod graphql;' \
-  'mod graphql;'
-expect_probe_rejected \
-  'prefixed GraphQL storage module' \
-  'crates/storage/src/query_ownership_prefixed_module_probe.rs' \
-  'mod graphql_query_ownership_probe;' \
-  'mod graphql_query_ownership_probe;'
-expect_probe_rejected \
-  'inline GraphQL storage module' \
-  'crates/storage/src/query_ownership_inline_module_probe.rs' \
-  'mod graphql {' \
-  'mod graphql {'
-expect_probe_rejected \
   'forbidden API read directory child' \
   'apps/api/src/v2/ownership_probe_reads/child_file.rs' \
   '// query ownership probe' \

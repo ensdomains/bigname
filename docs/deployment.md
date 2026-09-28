@@ -30,7 +30,7 @@ persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase can compare Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and Ethereum Mainnet with local reth. Only a distinct [verification-only](glossary.md#source-role) reference earns an independent level, and the target-covering intake cursor records
-`quick_synced` without one. V2, GraphQL, and operational paths consume its
+`quick_synced` without one. V2 and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
 in the image. A release may also carry explicitly reviewed additive baseline
@@ -703,7 +703,7 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v1/status`, snapshot selection,
+connection. `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
 phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by

@@ -28,9 +28,6 @@ mod resolves_to;
 mod scope;
 
 use admission::require_reverse_records_at_served_head;
-pub(crate) use admission::{
-    require_name_current_at_served_head, require_name_projection_at_served_head,
-};
 use build::{build_reverse_detail_record, build_reverse_feed_record, lookup_address_status};
 use cursor::{
     LookupReverseCursorBinding, ReverseCursorKey, ReverseStorageKey, lookup_reverse_cursor_payload,
