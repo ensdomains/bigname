@@ -2174,7 +2174,7 @@ async fn seed_schema_v2_basenames_record_lookup(
     .bind(contract_instance_id)
     .execute(pool)
     .await?;
-    let manifest_payload = json!({"contracts":[{"role":"l1_resolver", "address":l1_resolver,
+    let manifest_payload = json!({"deployment_epoch":"basenames_v1","contracts":[{"role":"l1_resolver", "address":l1_resolver,
         "proxy_kind":"none", "start_block":0, "read_features":[]}],
         "capability_flags":{"verified_resolution":{"status":"supported"}}});
     let manifest_id: i64 = sqlx::query_scalar(
@@ -4392,108 +4392,6 @@ async fn seed_phase_primary_name_snapshot(
         }],
     )
     .await
-}
-
-fn basenames_execution_manifest_version() -> Value {
-    json!({
-        "source_family": "basenames_execution",
-        "manifest_version": 2,
-        "chain": "ethereum-mainnet",
-        "deployment_epoch": "basenames_v1",
-    })
-}
-
-fn basenames_dynamic_resolver_record_inventory_boundary(
-    logical_name_id: &str,
-    resource_id: Uuid,
-    normalized_event_id: Option<i64>,
-    event_kind: Option<&str>,
-) -> Value {
-    json!({
-        "logical_name_id": logical_name_id,
-        "resource_id": resource_id.to_string(),
-        "normalized_event_id": normalized_event_id,
-        "event_kind": event_kind,
-        "chain_position": {
-            "chain_id": "base-mainnet",
-            "block_number": 21_000_003,
-            "block_hash": "0xbase-binding",
-            "timestamp": "2026-04-17T00:00:03Z",
-        }
-    })
-}
-
-fn basenames_l2resolver_record_inventory_current_row(
-    logical_name_id: &str,
-    resource_id: Uuid,
-) -> bigname_storage::RecordInventoryCurrentRow {
-    bigname_storage::RecordInventoryCurrentRow {
-        resource_id,
-        record_version_boundary: basenames_dynamic_resolver_record_inventory_boundary(
-            logical_name_id,
-            resource_id,
-            Some(1201),
-            Some("RecordChanged"),
-        ),
-        enumeration_basis: json!({
-            "observed_selectors": true,
-            "capability_declared_families": true,
-            "globally_enumerable": false,
-        }),
-        selectors: json!([{
-            "record_key": "text",
-            "record_family": "text",
-            "selector_key": null,
-            "cacheable": true,
-        }]),
-        explicit_gaps: json!([]),
-        unsupported_families: json!([]),
-        last_change: Some(json!({
-            "normalized_event_id": 1201,
-            "event_kind": "RecordChanged",
-            "chain_position": {
-                "chain_id": "base-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbase-binding",
-                "timestamp": "2026-04-17T00:00:03Z",
-            }
-        })),
-        entries: json!([{
-            "record_key": "text",
-            "record_family": "text",
-            "selector_key": null,
-            "status": "unsupported",
-            "unsupported_reason": "value_not_retained_in_normalized_events",
-        }]),
-        provenance: json!({
-            "normalized_event_ids": [1201],
-            "derivation_kind": "record_inventory_current_rebuild",
-        }),
-        coverage: json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "source_classes_considered": [
-                "basenames_base_registry",
-                "basenames_base_resolver",
-            ],
-            "unsupported_reason": null,
-            "enumeration_basis": "declared_record_inventory",
-        }),
-        chain_positions: json!({
-            "base-mainnet": {
-                "chain_id": "base-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbase-binding",
-                "timestamp": "2026-04-17T00:00:03Z",
-            }
-        }),
-        canonicality_summary: json!({
-            "status": "finalized",
-            "chains": { "base-mainnet": "finalized" }
-        }),
-        manifest_version: 6,
-        last_recomputed_at: timestamp(1_717_171_719),
-    }
 }
 
 fn primary_name_universal_resolver_addr60_response(address: &str) -> Value {
