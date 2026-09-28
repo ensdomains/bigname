@@ -218,9 +218,7 @@ pub const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS: &str = r#"
    AND membership_token_lineage_lineage.block_hash = membership_token_lineage.block_hash
 "#;
 
-/// Load one current exact-name projection row by deterministic logical name identity. Under the
-/// publication switch the row is composed from the owned key families instead
-/// (`families::name`).
+/// Compose a current exact-name row by deterministic logical name identity from the families.
 pub async fn load_name_current(
     pool: &PgPool,
     logical_name_id: &str,
@@ -233,7 +231,7 @@ pub async fn load_name_current(
 /// The returned map is keyed by `logical_name_id`, so duplicate requested ids collapse into one
 /// found row and missing rows are omitted. Iteration order is deterministic `BTreeMap` key order;
 /// callers that need request or page order should iterate their original ids and look up into the
-/// map. Under the publication switch the rows are composed from the owned key families.
+/// map. The rows are composed from the owned key families.
 pub async fn load_name_current_by_logical_name_ids(
     pool: &PgPool,
     logical_name_ids: &[String],
@@ -249,7 +247,7 @@ pub async fn load_name_current_by_logical_name_ids(
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the
 /// `canonical_display_name ASC` tie-break the rest of v2 uses and returns the picked exact-name
-/// row, including its declared wrapper summary. Under the publication switch the rows are
+/// row, including its declared wrapper summary. The rows are
 /// composed from the owned key families.
 pub async fn load_current_names_by_resource_ids(
     pool: &PgPool,

@@ -90,7 +90,7 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     .await
 }
 
-/// Under the publication switch the page is read from the owned key families instead
+/// The page is read from the owned key families
 /// (`families::records::load_family_address_names_page`, TYR-36 step 7b).
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_names_current_page_filtered(

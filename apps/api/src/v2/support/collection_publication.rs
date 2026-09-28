@@ -66,14 +66,9 @@ impl PublicNamespaceSet {
     }
 }
 
-/// Tags a publication-bound current-state cursor identity with the publication source. With the
-/// [publication switch](bigname_storage::publication_source) off the identity is returned
-/// unchanged, so every cursor token is byte-identical to one issued before the switch existed;
-/// with it on the identity is prefixed with `families:`. The two sources' generations are both
-/// untagged decimal strings (the Project row's `xmin`, the family marker's `sequence`) and can
-/// coincide at the same position, so without the tag a cursor issued on one side of a flip could
-/// pass validation on the other while its expiry clock changes. History cursors bind no
-/// publication and are not tagged.
+/// Prefixes publication-bound cursor identities with `families:`. Legacy cursor generations
+/// from the removed serving tables cannot collide with a family sequence. History cursors do
+/// not bind a publication and are not tagged.
 pub(crate) fn publication_source_tagged(identity: String) -> String {
     format!("families:{identity}")
 }

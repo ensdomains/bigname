@@ -23,10 +23,7 @@ JOIN bigname_phase.chain_phase_state project
 /// wedged or paused Project surfaces within one block instead of serving old data.
 pub const PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS: i64 = 1;
 
-/// Why a chain has no servable publication, for a `409 stale`: the Project row's wording with the
-/// [publication switch](crate::publication_source) off (unchanged from before the switch), the
-/// family marker's with it on, so an operator reading it during a family rebuild looks at the
-/// marker.
+/// Why a chain's family publication is unavailable, for an operator-visible `409 stale`.
 pub(super) fn unpublished_message(chain_id: &str) -> String {
     {
         format!(
@@ -42,8 +39,7 @@ pub(super) struct ProjectPublication {
     pub block_hash: String,
 }
 
-/// The current publication: the family marker's block while the
-/// [publication switch](crate::publication_source) is on, the Project row's otherwise.
+/// The current live family marker for this binary's interpreter generation.
 pub(super) async fn load_current_project_publication(
     pool: &PgPool,
     chain_id: &str,
@@ -114,22 +110,12 @@ const CURRENT_FAMILY_MARKER_PUBLICATION: &str = concat!(
     servable_family_marker!()
 );
 
-/// The served generation for the publication that serves `block_number` / `block_hash` on
-/// `chain_id`, or `None` when no such publication is servable. The generation is the project
-/// phase row's `xmin`, or the family marker's `sequence` while the
-/// [publication switch](crate::publication_source) is on; callers compare it as an opaque
-/// string.
-///
-/// The publication must be completed for this binary's interpreter generation, sit on the
-/// readable lineage (a reorg that orphans it makes it unservable until Project republishes),
-/// and trail the stored head by at most [`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`]. With
-/// `require_position_is_publication` the publication must sit exactly at the given position
-/// (the position a head-consistency selection returns); otherwise the position is left to the
-/// per-row projection-target checks, as for historical `at` reads. With
-/// `require_interpret_not_redo` a history-rewriting interpret redo also makes the publication
-/// unservable. With the switch on the marker must also be `live`, and any Interpret or Project
-/// redo that overlaps the publication makes it unservable regardless of that option: the
-/// composed readers also consume mutable Interpret identity, including surface visibility.
+/// The family marker sequence serving `block_number` / `block_hash`, or `None` when unavailable.
+/// Callers compare the sequence as an opaque string. The marker must be live, on readable
+/// lineage, from this interpreter build and within the one-block head lag tolerance.
+/// `require_position_is_publication` additionally requires the exact selected position.
+/// `require_interpret_not_redo` requires a completed/running Interpret row without redo;
+/// any Interpret or Project redo overlapping the publication is refused regardless of it.
 pub async fn load_served_project_generation(
     pool: &PgPool,
     chain_id: &str,
@@ -151,16 +137,8 @@ pub async fn load_served_project_generation(
         .await
 }
 
-/// The marker's `sequence` grows with every family block and undo, so it is the generation a
-/// same-request recheck compares. The Interpret-not-in-redo clause stays on `chain_phase_state`.
-///
-/// Interim gap (TYR-36 step 7b, disclosed in docs/api-v1.md under the publication switch): until
-/// slices 2 to 4 move a route's rows onto the owned key families, that route still reads the
-/// served tables, which the served Project batch commits before the family block moves the
-/// marker. A served batch landing between a read's capture and its recheck therefore leaves
-/// `sequence` unchanged and passes this check; only the per-row snapshot checks (no row target
-/// newer than the selected position) still refuse. The guard closes for a route once its rows
-/// come from the families, whose block commit advances `sequence` in the same transaction.
+/// Each family publication and undo advances the sequence in the same transaction as its rows.
+/// Rechecks also refuse overlapping Interpret/Project redo while those inputs can change.
 const SERVED_FAMILY_MARKER_GENERATION: &str = concat!(
     r#"
         SELECT marker.sequence::TEXT

@@ -94,8 +94,7 @@ pub async fn load_family_record_inventory_detail(
     Ok(inventory)
 }
 
-/// The record inventory `GET /v1/names/{name}/records` reads under the publication switch
-/// (TYR-36 step 7b): the family inventory of the resource `row` serves records through, when the
+/// The record inventory `GET /v1/names/{name}/records` reads: the family inventory of the resource `row` serves records through, when the
 /// row has a record-inventory lookup key (`resolution_record_inventory_lookup_key_any_chain`), at
 /// the family marker's publication. The composed name row describes that publication only, so a
 /// selected position other than it is stale, as is a chain whose marker is not
@@ -186,7 +185,7 @@ async fn family_record_inventory_for_key(
     }))
 }
 
-/// Under the publication switch, the public record selector count of each composed name row
+/// The public record selector count of each composed name row
 /// (`count_record_inventory_selectors_by_lookup_keys` over the families): the selectors of the
 /// family inventory of the resource the row serves records through, `None` when the row has no
 /// lookup key or the resource no inventory. Read in one snapshot at each chain's publication.

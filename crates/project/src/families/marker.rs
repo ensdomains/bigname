@@ -1,8 +1,6 @@
-//! The shadow marker: how far the owned-key families have been applied, with the generation every
-//! family block and every family undo advances, and the input token and active manifest set key
-//! the last block read inside its own transaction. With the publication switch off it is not the
-//! served marker and the Project row of `chain_phase_state` keeps that role; with it on, the API
-//! and the verified lookup serve from this marker.
+//! Permanent publication marker for the owned key families. Each family block, rebuild range
+//! and undo advances its generation. It records the input token and active manifest set used
+//! by the publication; the API and verified lookup serve only an admitted live marker.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 

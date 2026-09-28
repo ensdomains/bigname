@@ -52,7 +52,7 @@ pub(crate) async fn load_primary_name_lookup_state(
         Err(load_error)
             if bigname_storage::families::name::is_publication_unavailable(&load_error) =>
         {
-            // Under the publication switch, families that are not published answer stale.
+            // Families that are not published answer stale.
             Err(crate::v2::stale_name_rows_api_error(
                 crate::v2::SnapshotReadResource::Resource,
             ))

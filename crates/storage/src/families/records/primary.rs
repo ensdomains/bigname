@@ -1,16 +1,15 @@
-//! Primary-name claims over the families under the publication switch (TYR-36 step 7b):
+//! Primary-name claims over the families at the family publication:
 //! the reverse claim of each (address, namespace, coin type) tuple from F12 (`reverse.rs`) at
 //! the family publication, overlaid with the tuple's hydration from the F12 hydration columns
-//! (`project_reverse_tuple.hydrated_name`, `attempt_block`, `attempt_hash`), as the served read
-//! overlays `primary_names_current` with its `canonical_head_multicall_hydration`
-//! (primary_name/reads.rs): a hydration whose attempt block is no longer on canonical lineage is
+//! (`project_reverse_tuple.hydrated_name`, `attempt_block`, `attempt_hash`): a hydration
+//! whose attempt block is no longer on canonical lineage is
 //! not read, and the pre-hydration claim is served.
 //!
 //! Hydration is applied only while its prepared reverse node and resolver still match the
 //! current claim and its attempt block remains canonical. Replay can preserve hydration
 //! columns while changing a pointer, so attempt lineage alone does not establish that match.
 //!
-//! The served tuple has no chain; the family tuple has one. A namespace's tuples live on one
+//! The public tuple has no chain; the stored family tuple has one. A namespace's tuples live on one
 //! chain, which the read takes from the family rows.
 use std::collections::BTreeMap;
 

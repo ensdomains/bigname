@@ -199,8 +199,7 @@ pub(super) async fn apply(
 
 /// The event's active flag, active when it carries none, as both alias readers take it
 /// (`COALESCE((after_state ->> 'active')::boolean, true)`). A text or number is read the way
-/// PostgreSQL reads a boolean; a spelling it rejects fails the served batch, and is kept active
-/// here.
+/// PostgreSQL reads a boolean; missing or unrecognized values use the active default.
 fn active(event: &BlockEvent) -> Value {
     Value::Bool(json_boolean(&field(event, "active")).unwrap_or(true))
 }

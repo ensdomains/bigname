@@ -1,8 +1,5 @@
-//! The permission reads `GET /v1/permissions` serves, by the
-//! [publication switch](crate::publication_source): off, the served tables
-//! (`permissions_current`, `account_permission_state_current`,
-//! `permissions_current_resource_summary`); on, the owned key families
-//! (`families::control::permissions::page`), with the same page, cursor and summary shapes.
+//! Effective permission pages and resource summaries served from the owned key families.
+//! Page, cursor and summary types remain the public storage interface.
 use std::collections::BTreeMap;
 
 use anyhow::Result;

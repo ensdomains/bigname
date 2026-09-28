@@ -14,7 +14,7 @@ use super::NameCurrentRow;
 /// the route-specific `not_found` behavior without filling stale snapshots from
 /// raw facts.
 ///
-/// Under the publication switch the row is composed from the owned key families and describes
+/// The row is composed from the owned key families and describes
 /// the family marker's publication only, so a selected position on the name's chain other than
 /// the publication (an `at` below it) is stale: no per-row position is kept to prove an older
 /// read (ruling J5).
