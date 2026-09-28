@@ -1547,54 +1547,34 @@ async fn resolver_coverage_accepts_an_exact_current_head_match() {
 
 #[tokio::test]
 async fn malformed_resolver_block_numbers_produce_report_failures() {
-    for case in ["manifest_start"] {
-        let database = TestDatabase::create(
-            TestDatabaseConfig::new(format!("benchmark_resolver_bad_block_{case}"))
-                .pool_max_connections(1),
-        )
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("benchmark_resolver_bad_manifest_block").pool_max_connections(1),
+    )
+    .await
+    .unwrap();
+    tests::install_name_visibility_schema(database.pool()).await;
+    let resolver = "0x0000000000000000000000000000000000000100";
+    insert_resolver_manifest(
+        database.pool(),
+        &CheckedInResolverManifest {
+            namespace: "ens".into(),
+            chain_id: "ethereum-mainnet".into(),
+            source_family: "ens_v1_resolver_l1".into(),
+            payload: serde_json::json!({"contracts":[{"address":resolver,"start_block":"later"}]}),
+            addresses: vec![resolver.into()],
+        },
+    )
+    .await;
+    insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
+    let coverage = super::resolver_coverage::load(database.pool())
         .await
-        .unwrap();
-        tests::install_name_visibility_schema(database.pool()).await;
-        let resolver = "0x0000000000000000000000000000000000000100";
-        let start_block = if case == "manifest_start" {
-            serde_json::json!("later")
-        } else {
-            serde_json::json!(100)
-        };
-        insert_resolver_manifest(
-            database.pool(),
-            &CheckedInResolverManifest {
-                namespace: "ens".to_owned(),
-                chain_id: "ethereum-mainnet".to_owned(),
-                source_family: "ens_v1_resolver_l1".to_owned(),
-                payload: serde_json::json!({
-                    "contracts": [{"address": resolver, "start_block": start_block}]
-                }),
-                addresses: vec![resolver.to_owned()],
-            },
-        )
-        .await;
-        insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
-        let coverage = super::resolver_coverage::load(database.pool())
-            .await
-            .expect("malformed stored block numbers must remain reportable");
-        let failures = coverage.failures.join("; ");
-
-        if case == "manifest_start" {
-            assert!(
-                failures.contains("a contract entry has an invalid start_block"),
-                "{failures}"
-            );
-        } else {
-            assert!(
-                failures.contains(
-                    "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
-                ),
-                "{failures}"
-            );
-        }
-        database.cleanup().await.unwrap();
-    }
+        .expect("malformed manifest numbers must remain reportable");
+    let failures = coverage.failures.join("; ");
+    assert!(
+        failures.contains("a contract entry has an invalid start_block"),
+        "{failures}"
+    );
+    database.cleanup().await.unwrap();
 }
 
 #[tokio::test]
