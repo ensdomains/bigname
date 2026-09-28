@@ -1,5 +1,7 @@
 /* project:families.hydrate.text.select */
 -- Preview only the owned rows changed in this block; all other keys read their stored image.
+-- The query decides which selectors need work and cuts the block's share, so a block transfers
+-- at most $7 rows however many selectors are already current.
 WITH value_changes AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $3)
 ), record_values AS (
@@ -26,23 +28,68 @@ WITH value_changes AS (
         WHERE (change.chain_id, change.resolver_address) =
               (classification.chain_id, classification.resolver_address))
     UNION ALL SELECT * FROM classification_changes
-)
-SELECT to_jsonb(value.*) || jsonb_build_object(
-    '_version', partition.version_position,
-    '_namehash', CASE WHEN value.arm = 'named' THEN surface.namehash ELSE value.node END,
-    '_admission', jsonb_build_object('classification', classification.classification,
-        'support_status', classification.support_status,
-        'unsupported_reason', classification.unsupported_reason,
-        'manifest_id', classification.manifest_id),
-    '_readable', EXISTS (SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = value.chain_id
-          AND lineage.block_number = value.hydrated_at_block
-          AND lineage.block_number <= $2
-          AND lineage.block_hash = value.hydrated_value ->> 'block_hash'
-          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')),
-    -- The block changed this selector's value, record version or admission: hydrate it first.
-    -- Stored rows are still the prior block's, in preparation and publication alike.
-    '_delta', EXISTS (SELECT 1 FROM value_changes change
+), admissions AS MATERIALIZED (
+    -- One verdict per resolver, built once rather than for every selector it serves.
+    SELECT chain_id, resolver_address, support_status,
+        jsonb_build_object('classification', classification, 'support_status', support_status,
+            'unsupported_reason', unsupported_reason, 'manifest_id', manifest_id) AS admission
+    FROM classifications
+), selected AS (
+    SELECT value.*,
+        -- What an overlay is read for, part by part; `_selector` below assembles it.
+        jsonb_build_object('block_number', value.block_number,
+            'transaction_index', value.transaction_index, 'log_index', value.log_index,
+            'event_identity', value.event_identity) AS _source_position,
+        COALESCE(partition.version_position, 'null') AS _version_position,
+        COALESCE(admission.admission, jsonb_build_object('classification', NULL,
+            'support_status', NULL, 'unsupported_reason', NULL, 'manifest_id', NULL)) AS _admission,
+        COALESCE(to_jsonb(CASE WHEN value.arm = 'named' THEN surface.namehash ELSE value.node END),
+            'null') AS _namehash,
+        -- Eligible for a read: an event-less text value of an admitted text resolver, with a
+        -- non-blank key (Rust's `str::trim` white space, listed below) and a namehash, written
+        -- after the partition's record version in the canonical event order (families/position.rs).
+        COALESCE(value.status = 'unsupported'
+            AND value.record_key = 'text:' || COALESCE(value.selector_key, '')
+            AND btrim(COALESCE(value.selector_key, ''), U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000') <> ''
+            AND value.resolver_address = ANY($6::text[])
+            AND admission.support_status = 'supported'
+            AND CASE WHEN value.arm = 'named' THEN surface.namehash ELSE value.node END IS NOT NULL
+            AND (boundary.block_number IS NULL OR (
+                value.block_number, COALESCE(value.transaction_index, -1),
+                COALESCE(value.log_index, -1),
+                COALESCE(CASE WHEN value.transaction_index IS NOT NULL
+                        AND value.log_index IS NOT NULL THEN (
+                    SELECT CASE WHEN digits.d = '' THEN 0::bigint
+                        WHEN length(digits.d) < 10 OR (length(digits.d) = 10
+                            AND digits.d COLLATE "C" <= '4294967295' COLLATE "C")
+                        THEN digits.d::bigint END
+                    FROM (SELECT ltrim(m[1], '0') AS d FROM regexp_match(
+                        value.event_identity COLLATE "C", ':([0-9]+)$') m) digits
+                ) END, -1::bigint),
+                value.event_identity COLLATE "C"
+            ) > (
+                boundary.block_number, COALESCE(boundary.transaction_index, -1),
+                COALESCE(boundary.log_index, -1),
+                COALESCE(CASE WHEN boundary.transaction_index IS NOT NULL
+                        AND boundary.log_index IS NOT NULL THEN (
+                    SELECT CASE WHEN digits.d = '' THEN 0::bigint
+                        WHEN length(digits.d) < 10 OR (length(digits.d) = 10
+                            AND digits.d COLLATE "C" <= '4294967295' COLLATE "C")
+                        THEN digits.d::bigint END
+                    FROM (SELECT ltrim(m[1], '0') AS d FROM regexp_match(
+                        boundary.event_identity COLLATE "C", ':([0-9]+)$') m) digits
+                ) END, -1::bigint),
+                boundary.event_identity COLLATE "C"
+            )), false) AS _active,
+        EXISTS (SELECT 1 FROM chain_lineage lineage
+            WHERE lineage.chain_id = value.chain_id
+              AND lineage.block_number = value.hydrated_at_block
+              AND lineage.block_number <= $2
+              AND lineage.block_hash = value.hydrated_value ->> 'block_hash'
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')) AS _readable,
+        -- The block changed this selector's value, record version or admission: hydrate it first.
+        -- Stored rows are still the prior block's, in preparation and publication alike.
+        EXISTS (SELECT 1 FROM value_changes change
             WHERE (change.resolver_address, change.arm, change.arm_identity, change.record_key) =
                   (value.resolver_address, value.arm, value.arm_identity, value.record_key))
         OR EXISTS (SELECT 1 FROM partition_changes change
@@ -59,12 +106,45 @@ SELECT to_jsonb(value.*) || jsonb_build_object(
             WHERE change.resolver_address = value.resolver_address
               AND (change.classification, change.support_status, change.unsupported_reason,
                    change.manifest_id) IS DISTINCT FROM (stored.classification,
-                   stored.support_status, stored.unsupported_reason, stored.manifest_id)))
-FROM record_values value
-LEFT JOIN partitions partition USING (chain_id, resolver_address, arm, arm_identity)
-LEFT JOIN classifications classification USING (chain_id, resolver_address)
-LEFT JOIN name_surfaces surface ON surface.logical_name_id = value.logical_name_id
-WHERE value.namespace = 'ens' AND value.record_family = 'text'
-  AND (value.status = 'unsupported' OR value.hydrated_value IS NOT NULL)
-  AND (value.resolver_address = ANY($6::text[]) OR value.hydrated_value IS NOT NULL)
-ORDER BY value.resolver_address, value.arm, value.arm_identity, value.record_key
+                   stored.support_status, stored.unsupported_reason, stored.manifest_id))
+            AS _delta
+    FROM record_values value
+    LEFT JOIN partitions partition USING (chain_id, resolver_address, arm, arm_identity)
+    LEFT JOIN admissions admission USING (chain_id, resolver_address)
+    LEFT JOIN name_surfaces surface ON surface.logical_name_id = value.logical_name_id
+    -- The record version as a position, when it is one (Position::of_row).
+    LEFT JOIN LATERAL (
+        SELECT (version.v ->> 'block_number')::bigint AS block_number,
+            CASE WHEN jsonb_typeof(version.v -> 'transaction_index') = 'number'
+                THEN (version.v ->> 'transaction_index')::bigint END AS transaction_index,
+            CASE WHEN jsonb_typeof(version.v -> 'log_index') = 'number'
+                THEN (version.v ->> 'log_index')::bigint END AS log_index,
+            version.v ->> 'event_identity' AS event_identity
+        FROM (SELECT partition.version_position AS v) version
+        WHERE jsonb_typeof(version.v -> 'block_number') = 'number'
+          AND jsonb_typeof(version.v -> 'event_identity') = 'string'
+    ) boundary ON true
+    WHERE value.namespace = 'ens' AND value.record_family = 'text'
+      AND (value.status = 'unsupported' OR value.hydrated_value IS NOT NULL)
+      AND (value.resolver_address = ANY($6::text[]) OR value.hydrated_value IS NOT NULL)
+), work AS (
+    -- Work is an eligible selector whose overlay is not current (a read is current while it is
+    -- readable and its overlay records every part of the selector), or an ineligible one that
+    -- still carries an overlay to clear.
+    SELECT * FROM selected
+    WHERE CASE WHEN _active THEN NOT (_readable
+            AND COALESCE(hydrated_value -> 'namehash', 'null') = _namehash
+            AND COALESCE(hydrated_value -> 'version_position', 'null') = _version_position
+            AND COALESCE(hydrated_value -> 'source_position', 'null') = _source_position
+            AND COALESCE(hydrated_value -> 'admission', 'null') = _admission)
+        ELSE COALESCE(hydrated_value <> 'null', false) END
+)
+-- The block's share: its own changes first, then never-read selectors, then the oldest attempts,
+-- each in key order.
+SELECT to_jsonb(work.*) || jsonb_build_object('_selector', jsonb_build_object(
+    'source_position', _source_position, 'version_position', _version_position,
+    'admission', _admission, 'namehash', _namehash))
+FROM work
+ORDER BY NOT _delta, hydrated_at_block NULLS FIRST,
+    resolver_address, arm, arm_identity, record_key
+LIMIT $7
