@@ -237,3 +237,41 @@ fn a_reordered_list_reports_the_order() {
         }]
     );
 }
+
+fn inventory(provenance: Value) -> RecordInventoryCurrentRow {
+    RecordInventoryCurrentRow {
+        resource_id: uuid::Uuid::nil(),
+        record_version_boundary: json!({}),
+        enumeration_basis: json!({}),
+        selectors: json!([]),
+        explicit_gaps: json!([]),
+        unsupported_families: json!([]),
+        last_change: None,
+        entries: json!([]),
+        provenance,
+        coverage: json!({}),
+        chain_positions: json!({}),
+        canonicality_summary: json!({}),
+        manifest_version: 1,
+        last_recomputed_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+#[test]
+fn inventory_admission_metadata_is_internal_but_record_provenance_is_compared() {
+    let today = inventory(json!({"record_event_ids":[42]}));
+    for admission in [
+        Value::Null,
+        json!({"source_family":"ens_v1_resolver_l1", "role":"resolver"}),
+    ] {
+        let mut family = inventory(json!({"record_event_ids":[42],
+            "abi_observation_classification":admission}));
+        assert!(compare_record_inventory(Some(&today), Some(&family)).is_empty());
+        family.provenance["record_event_ids"] = json!([43]);
+        let differences = compare_record_inventory(Some(&today), Some(&family));
+        assert_eq!(differences.len(), 1, "{differences:?}");
+        assert_eq!(differences[0].field, "provenance.record_event_ids");
+        assert_eq!(differences[0].today, Some(json!([42])));
+        assert_eq!(differences[0].family, Some(json!([43])));
+    }
+}
