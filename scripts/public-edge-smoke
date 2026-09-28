@@ -322,8 +322,9 @@ page_label() {
     /docs) echo docs ;;
     /docs/) echo docs-slash ;;
     /openapi.json) echo openapi ;;
-    # Any other path still gets a distinct, file-name-safe label; a fail here
-    # would only end the $(...) subshell, not the script.
+    # Any other path still gets a distinct, file-name-safe label. The callers
+    # check the substitution's status, since a fail inside $(...) would only
+    # end the subshell.
     *) printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' ;;
   esac
 }
@@ -332,8 +333,9 @@ page_label() {
 # is not served until TYR-18; the API answers all four paths like any unknown
 # route. /openapi.json flips to 200 internally and publicly together.
 for page_path in / /docs /docs/ /openapi.json; do
+  page_name="$(page_label "$page_path")" || fail "could not label $page_path"
   for page_method in GET HEAD; do
-    assert_status "internal-$(page_label "$page_path")-${page_method}" 404 "$page_method" "${internal_api_url}${page_path}" ''
+    assert_status "internal-${page_name}-${page_method}" 404 "$page_method" "${internal_api_url}${page_path}" ''
   done
 done
 assert_status internal-unknown 404 GET "${internal_api_url}${unknown_path}" ''
@@ -394,8 +396,9 @@ log "checking public default-deny behavior"
 # which shows the @openapi matcher proxied the request and the deferred header
 # replaced rather than duplicated.
 for page_path in / /docs /docs/ /openapi.json; do
+  page_name="$(page_label "$page_path")" || fail "could not label $page_path"
   for page_method in GET HEAD; do
-    page_check="public-$(page_label "$page_path")-${page_method}"
+    page_check="public-${page_name}-${page_method}"
     assert_status "$page_check" 404 "$page_method" "${public_edge_url}${page_path}" ''
     if [ "$page_path" = /openapi.json ]; then
       assert_single_wildcard_origin "$page_check"
