@@ -275,13 +275,14 @@ pub(super) async fn get_address_resolves_to(
             BTreeMap::new()
         };
     let subname_counts_by_name = if include.counts {
+        use crate::v2::SnapshotReadResource::Resource;
         bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
-            .map_err(|_| {
+            .map_err(crate::v2::name_rows_error(Resource, |_| {
                 V2Error::internal_error(format!(
                     "failed to load subname counts for names resolving to {normalized_address}"
                 ))
-            })?
+            }))?
             .into_iter()
             .map(|summary| {
                 (
@@ -300,11 +301,11 @@ pub(super) async fn get_address_resolves_to(
             &name_rows,
         )
         .await
-        .map_err(|_| {
+        .map_err(name_rows_error(Resource, |_| {
             V2Error::internal_error(format!(
                 "failed to load record counts for names resolving to {normalized_address}"
             ))
-        })?
+        }))?
     } else {
         BTreeMap::new()
     };

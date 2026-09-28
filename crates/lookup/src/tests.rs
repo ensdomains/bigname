@@ -1111,11 +1111,13 @@ async fn lookup_publication_migration_preserves_guard_and_privileges() -> AnyRes
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
          'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
     ).fetch_one(fixture.pool()).await?;
-    raw_sql(include_str!(
-        "../../../migrations/20260914120000_lookup_publication_revalidation.sql"
-    ))
-    .execute(fixture.pool())
-    .await?;
+    // The upgrade path: the Project-row guard, then its family-marker successor.
+    for migration in [
+        include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
+        include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
+    ] {
+        raw_sql(migration).execute(fixture.pool()).await?;
+    }
     let after: (String, Option<String>) = sqlx::query_as(
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
          'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
@@ -3833,6 +3835,10 @@ async fn make_null_resolver_discovery(fixture: &Fixture) -> AnyResult<()> {
 }
 
 async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixture> {
+    // These fixtures seed the Project row as the served publication, so the lookup tests hold
+    // the switch off whatever the build's default; `family_marker` scopes it where it tests the
+    // family marker.
+    bigname_storage::publication_source::hold_for_test_process(false);
     let database =
         TestDatabase::create(TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6))
             .await?;

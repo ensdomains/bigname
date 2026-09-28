@@ -32,10 +32,7 @@ use crate::{
             rows::{BindingCandidate, WrapperRow},
             wrapper::load_wrapper_rows,
         },
-        name::{
-            CoverageShape, FamilyPublication, all_servable_publications, load_composed,
-            servable_publication,
-        },
+        name::{CoverageShape, FamilyPublication, load_composed, servable_publication},
     },
 };
 
@@ -97,8 +94,8 @@ pub(super) async fn compose_address_name_rows(
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
     if indexed.is_empty() {
-        // Nothing listed: an answer only when every chain's families are published.
-        all_servable_publications(conn).await?;
+        // The route captures and revalidates its requested namespace publication. No rows
+        // identify another chain to read here; unrelated markers cannot veto that scope.
         return Ok((json!([]), json!([])));
     }
     let mut by_chain: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -196,7 +193,7 @@ fn address_name_row(
 
 /// The per-chain family rows the relations of a batch of composed names read.
 struct ChainInputs {
-    candidates: Vec<ControllerCandidate>,
+    candidates: BTreeMap<String, Vec<ControllerCandidate>>,
     bindings: BTreeMap<String, BindingCandidate>,
     wrappers: BTreeMap<String, WrapperRow>,
 }
@@ -208,7 +205,7 @@ impl ChainInputs {
         composed: &BTreeMap<String, NameCurrentRow>,
     ) -> Result<Self> {
         let ids: Vec<String> = composed.keys().cloned().collect();
-        let candidates = sqlx::query(
+        let rows = sqlx::query(
             "/* storage:families.records.address_controller_candidates */
              SELECT logical_name_id, block_number, transaction_index, log_index, event_identity,
                     resource_id::text AS resource_id, event_kind, source_family, action, subject
@@ -219,10 +216,10 @@ impl ChainInputs {
         .bind(&ids)
         .fetch_all(&mut *conn)
         .await
-        .context("failed to load the address controller candidates")?
-        .iter()
-        .map(|row| {
-            Ok(ControllerCandidate {
+        .context("failed to load the address controller candidates")?;
+        let mut candidates: BTreeMap<String, Vec<ControllerCandidate>> = BTreeMap::new();
+        for row in &rows {
+            let candidate = ControllerCandidate {
                 logical_name_id: row.try_get("logical_name_id")?,
                 position: FamilyPosition::from_row(row)?,
                 resource_id: row.try_get("resource_id")?,
@@ -230,17 +227,20 @@ impl ChainInputs {
                 source_family: row.try_get("source_family")?,
                 set: row.try_get::<String, _>("action")? == "set",
                 subject: row.try_get("subject")?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-        let selected: Vec<String> = composed
+            };
+            candidates
+                .entry(candidate.logical_name_id.clone())
+                .or_default()
+                .push(candidate);
+        }
+        let selected: Vec<_> = composed
             .values()
-            .filter_map(|row| row.surface_binding_id.map(|id| id.to_string()))
+            .filter_map(|row| row.surface_binding_id)
             .collect();
         let bindings: Vec<Value> = sqlx::query_scalar(
             "/* storage:families.records.address_selected_bindings */
              SELECT to_jsonb(candidate) FROM bigname_phase.project_binding_candidate candidate
-             WHERE candidate.chain_id = $1 AND candidate.surface_binding_id::text = ANY($2)",
+             WHERE candidate.chain_id = $1 AND candidate.surface_binding_id = ANY($2::uuid[])",
         )
         .bind(chain_id)
         .bind(&selected)
@@ -272,8 +272,9 @@ impl ChainInputs {
 
     fn candidates_of(&self, logical_name_id: &str) -> Vec<&ControllerCandidate> {
         self.candidates
-            .iter()
-            .filter(|candidate| candidate.logical_name_id == logical_name_id)
+            .get(logical_name_id)
+            .into_iter()
+            .flatten()
             .collect()
     }
 

@@ -370,6 +370,20 @@ registration. It is the counterpart of the
 that the row is the requested name's current authority, while `resource_audit`
 makes no current-name claim.
 
+## Current-state list cursor
+
+The cursor of `GET /v1/search`, `GET /v1/names`, and the resolver overview's
+`bound_names`: it holds the list's sort and filters, the sort position of the
+last row returned, and the `at` token when the request pinned `at`, and no
+publication, generation, or evaluation time. A continuation reads the
+publication current when it runs and returns the rows after that position, so
+a newer publication does not refuse it and a row that changed between pages can
+repeat or be skipped. With `at` pinned, the cursor is tied to that block, and
+publishing a later block refuses it. Contrast the publication-bound cursors of the other
+current-state collections, which a newer publication refuses, and the
+[history walk](#history-walk). See
+[api-v1.md](api-v1.md#current-state-list-cursors).
+
 ## Declared vs verified
 
 *declared* state is what protocol-side observation
@@ -2523,7 +2537,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
 | F3, resolver classification | `project_resolver_classification` | `classification.rs` |
 | F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
-| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer`, `project_named_resource_pointer` | `resolver.rs` |
 | F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
 | F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
 | F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
@@ -2533,6 +2547,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
 | F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+| F15, name summary | `project_name_summary` | `derived/summary.rs` |
 
 ## Family marker
 
@@ -2549,14 +2564,19 @@ admission accept a chain's publication only while its marker is `live` (never
 `bootstrap_pending`, the state of a rebuild still populating the families),
 belongs to this build's interpreter, sits on readable lineage and trails the
 stored head by at most one block, and the marker's `sequence` is the served
-generation a same-request recheck compares. `/v1/status` is mixed-source until
-the flip: its generation check applies the same rule to the marker, while its
-projected block and Project phase state still come from the Project row.
+generation a same-request recheck compares, and the verified lookup's guard
+compares too. With the switch on `/v1/status` and the served-lag gauges take
+the projected block from the marker, while the Project phase state still comes
+from the Project row. During a family rebuild (`bootstrap_pending`) status
+shows the rebuild's progress block as `indexed_block` and reports `degraded`,
+while the gauges show the unavailable -1.
 
 ## Publication switch
 
 `BIGNAME_SERVE_FROM_FAMILIES`: a process-wide setting the API and the phase
-runner read once at startup (`1` or `true` on; anything else, or unset, off).
+runner read once at startup (`1` or `true` on, `0` or `false` off; unset keeps
+the build's default, off until [the flip](#the-flip); any other value refuses
+to start).
 Off, the serving fence reads the Project row of `chain_phase_state` as it
 always has. On, it reads the [family marker](#family-marker) instead, and
 collection expiry filters are evaluated at the published block's timestamp
@@ -2566,11 +2586,21 @@ It exists only while the served reads move to the
 [per-block publication](#per-block-publication), and goes with the served
 batch.
 
+## The flip
+
+the change of the [publication switch](#publication-switch)'s default from off
+to on (TYR-36 step 7b-6), after which every serving fence, the verified
+lookup's guard, `/v1/status` and the served-lag gauges follow the
+[family marker](#family-marker) unless `BIGNAME_SERVE_FROM_FAMILIES` overrides
+it. It is a one-line change of the default; the served batch and the switch
+itself are removed later (step 7c).
+
 ## Composed name row
 
 a `name_current`-shaped row that `bigname_storage::families::name` builds for
 one name at read, from the [owned key families](#owned-key-family) and the
-identity input tables, with no stored per-name row: the selection among the
+identity input tables, with no stored per-name row besides the [name
+summary](#name-summary) the child lists read: the selection among the
 name's binding candidates, its registration and control, NameWrapper state,
 serving pointer and resolver, history heads and coverage. It describes the
 [family marker](#family-marker)'s publication. With the
@@ -2581,6 +2611,28 @@ block, and none is served unless the marker is servable by the publication
 fence's rule (`live`, this build's, on the readable lineage). The name
 comparison of the fixture-corpus harness checks every composed row against the
 served row.
+
+## Name summary
+
+`project_name_summary`, family F15: per name, the fields the subnames page, the
+child counts and the registry labels filter, sort and count by inside one
+statement, which a list cannot compose at read for every child: the selected
+authority arm, whether the name has a serving resource, its registration
+status, expiry and registration times, and whether the latest registry
+Transfer attributed to it names the zero owner. Each but the last is the value
+the [composed name row](#composed-name-row) carries, from the same selection
+code; the zero-owner flag attributes a Transfer as the served child build does
+(by the name it carries, else the latest named registry event of any kind of its
+resource, else an active surface at its node), which is not the name row's rule. Every
+name with a surface has a row, empty but for that flag when the composed reader
+serves no row for it. The family step writes it for every
+name a block touches and for every name whose `recompose_at`, the first second
+(in Unix seconds, kept even when the name composes no row) its composition can
+change with no fact changing, the block's time has reached;
+it is journalled like every other family
+([projections](projections.md#owned-key-families)). With the [publication
+switch](#publication-switch) on, the child lists read it
+([API](api-v1.md#tier-2-product-reads)).
 
 ## Family undo journal
 

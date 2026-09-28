@@ -430,3 +430,8 @@ include!("tests/v2_family_marker_fence.rs");
 include!("tests/v2_switch_names.rs");
 include!("tests/v2_switch_permissions.rs");
 include!("tests/v2_switch_records.rs");
+include!("tests/v2_switch_records_review.rs");
+include!("tests/v2_flip_readiness.rs");
+include!("tests/v2_list_cursor.rs");
+include!("tests/v2_switch_children.rs");
+include!("tests/v2_switch_name_publication_changes.rs");

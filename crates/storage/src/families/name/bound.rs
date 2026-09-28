@@ -133,25 +133,12 @@ async fn candidates(
              WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
                AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
              UNION
-             -- A name whose own pointer on a resource names the resolver while the resource's
-             -- latest pointer (F5) belongs to another name: F5 keeps one pointer per resource,
-             -- and the composed row reads the name's own (loaders.rs, named_resource_pointers).
-             -- The predicates are normalized_events_resolver_current_address_lookup_idx's.
-             SELECT event.logical_name_id
-             FROM bigname_phase.normalized_events event
-             WHERE event.chain_id = $1 AND event.event_kind = 'ResolverChanged'
-               AND lower(event.after_state ->> 'resolver') = lower($2)
-               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
-               AND event.after_state ->> 'resolver' IS NOT NULL
-               AND event.after_state ->> 'resolver' <> ''
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND EXISTS (
-                   SELECT 1
-                   FROM bigname_phase.project_resource_pointer shared
-                   JOIN bigname_phase.normalized_events latest
-                     ON latest.event_identity = shared.pointer_position ->> 'event_identity'
-                   WHERE shared.chain_id = $1 AND shared.resource_id = event.resource_id
-                     AND latest.logical_name_id IS DISTINCT FROM event.logical_name_id)
+             -- Named F5 keys retain a name's own latest pointer when the resource's latest
+             -- pointer names another name. The resolver index reads retained pointer keys,
+             -- never the history of ResolverChanged events at this resolver.
+             SELECT pointer.logical_name_id
+             FROM bigname_phase.project_named_resource_pointer pointer
+             WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
          )
          SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
          FROM reached
