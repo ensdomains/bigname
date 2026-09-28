@@ -102,6 +102,20 @@ fn a_child_addressed_subregistry_change_owns_the_child_and_the_parent_node() {
 }
 
 #[test]
+fn an_ens_v2_registry_owner_transfer_owns_its_names_node() {
+    let mut transfer = event(
+        "AuthorityTransferred",
+        "ens_v2_registry_l1",
+        json!({"source_event": "LabelRegistered", "owner": "0x00000000000000000000000000000000000000aa"}),
+    );
+    transfer.logical_name_id = Some("ens:0xNAME".to_owned());
+    let keys = derive(&[transfer.clone()]);
+    assert!(keys.contains(Space::RegistryNode, &["ens", "0xname"]));
+    transfer.logical_name_id = None;
+    assert_eq!(derive(&[transfer]).of(Space::RegistryNode).count(), 0);
+}
+
+#[test]
 fn a_before_only_resolver_and_node_are_owned_like_the_after_ones() {
     let mut pointer = event(
         "ResolverChanged",

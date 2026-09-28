@@ -22,7 +22,8 @@ pub(crate) enum Space {
     Triple,
     /// F2a: (logical_name_id, registry contract instance) of an ENSv2 child registration.
     ChildRegistration,
-    /// F2c: (namespace, node) of an ENSv1 or Basenames registry.
+    /// F2c: (namespace, node) of an ENSv1 or Basenames registry, or the name's node of an ENSv2
+    /// registry AuthorityTransferred.
     RegistryNode,
     /// F3: a resolver address.
     Resolver,
@@ -268,6 +269,20 @@ fn derive_event(event: &BlockEvent, keys: &mut BlockKeys) {
                 );
             }
         }
+    }
+    // An ENSv2 registry's AuthorityTransferred is kept at its name's node (registry.rs).
+    if kind == "AuthorityTransferred"
+        && matches!(family, "ens_v2_root_l1" | "ens_v2_registry_l1")
+        && let Some(node) = event
+            .logical_name_id
+            .as_deref()
+            .and_then(|name| name.strip_prefix(event.namespace.as_str()))
+            .and_then(|rest| rest.strip_prefix(':'))
+    {
+        keys.add(
+            Space::RegistryNode,
+            [namespace.clone(), lower(Some(node.to_owned()))],
+        );
     }
     if kind == "AccountPermissionChanged" {
         for state in [&event.after, &event.before] {
