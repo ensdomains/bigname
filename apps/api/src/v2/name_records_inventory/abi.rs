@@ -73,6 +73,8 @@ pub(crate) async fn fill_records_route_abi_content_types(
             let input = abi_input_for_row(row, &boundary_key);
             if bigname_storage::publication_source::serve_from_families() {
                 // The route's row is a family inventory under the switch (TYR-36 step 7b).
+                #[cfg(test)]
+                abi_content_types_test_hooks::record(pool, 1).await;
                 bigname_storage::load_family_record_inventory_abi_content_types(pool, &[input])
                     .await
                     .map_err(|load_error| {
@@ -138,6 +140,30 @@ pub(crate) mod abi_content_types_test_hooks {
 
     static HOOKS: ScopedTestHookRegistry<String, Calls> = ScopedTestHookRegistry::new();
     static INTERLEAVED: ScopedTestHookRegistry<String, String> = ScopedTestHookRegistry::new();
+    static PAUSED: ScopedTestHookRegistry<String, Pause> = ScopedTestHookRegistry::new();
+
+    #[derive(Clone, Default)]
+    pub(crate) struct Pause {
+        reached: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    impl Pause {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.notified().await;
+        }
+        pub(crate) fn resume(&self) {
+            self.resume.notify_one();
+        }
+    }
+
+    pub(crate) async fn pause(
+        pool: &PgPool,
+    ) -> Result<(ScopedTestHookGuard<String, Pause>, Pause)> {
+        let control = Pause::default();
+        let guard = PAUSED.install(current_test_database(pool).await?, control.clone());
+        Ok((guard, control))
+    }
 
     pub(crate) async fn install(
         pool: &PgPool,
@@ -161,6 +187,10 @@ pub(crate) mod abi_content_types_test_hooks {
         };
         if let Some(calls) = HOOKS.get_cloned(&database) {
             calls.lock().expect("ABI read calls").push(inputs);
+        }
+        if let Some(pause) = PAUSED.take(&database) {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
         }
         if let Some(statement) = INTERLEAVED.take(&database) {
             sqlx::raw_sql(&statement)
