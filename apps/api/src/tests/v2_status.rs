@@ -48,6 +48,8 @@ async fn v2_status_and_startup_chain_discovery_read_phase_state() -> Result<()> 
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
+    // The indexed block is the family publication's block.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 115, "0xphase-projected").await?;
 
     assert_eq!(
         bigname_storage::load_phase_expected_status_chain_ids(&database.lookup_pool).await?,
@@ -131,6 +133,7 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 120, "0xphase-head").await?;
 
     let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
         "ethereum-mainnet=http://rpc.test".to_owned(),
@@ -213,67 +216,48 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     assert_eq!(payload["data"]["chains"]["1"]["status"], json!("ready"));
     assert_eq!(payload["data"]["status"], json!("ready"));
 
-    sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = 'old-interpreter' \
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    // A publication another build wrote is not current for this one.
+    publish_status_families(&database, 120, "0xphase-head", "old-interpreter").await?;
     assert_eq!(status_value(state.clone()).await?, json!("degraded"));
-    sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = $1 \
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    publish_status_families(
+        &database,
+        120,
+        "0xphase-head",
+        bigname_content_hash::INTERPRETER_CONTENT_HASH,
     )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .execute(&database.lookup_pool)
     .await?;
     assert_eq!(status_value(state.clone()).await?, json!("ready"));
 
-    sqlx::query(
-        "UPDATE chain_phase_state SET current_block_hash = '0xold-same-height-head' \
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    let read = bigname_storage::load_phase_indexing_status(&database.lookup_pool).await?;
-    assert!(!read.chains[0].project_generation_current);
-    assert_eq!(status_value(state.clone()).await?, json!("degraded"));
-    sqlx::query(
-        "UPDATE chain_phase_state SET current_block_hash = '0xphase-head' \
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    assert_eq!(status_value(state.clone()).await?, json!("ready"));
-
+    // While Project runs, a publication more than the lag tolerance behind the head is not
+    // current, and the head publication is.
     sqlx::query(
         r#"
         UPDATE chain_phase_state
-        SET phase_status = 'running', current_block_number = 115,
-            current_block_hash = '0xphase-projected', finished_at = NULL
+        SET phase_status = 'running', finished_at = NULL
         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
         "#,
     )
     .execute(&database.lookup_pool)
     .await?;
-    assert_eq!(status_value(state.clone()).await?, json!("ready"));
-
-    sqlx::query(
-        r#"
-        UPDATE chain_phase_state
-        SET current_block_number = NULL, current_block_hash = NULL
-        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'
-        "#,
+    publish_status_families(
+        &database,
+        115,
+        "0xphase-projected",
+        bigname_content_hash::INTERPRETER_CONTENT_HASH,
     )
-    .execute(&database.lookup_pool)
     .await?;
     assert_eq!(status_value(state.clone()).await?, json!("degraded"));
+    publish_status_families(
+        &database,
+        120,
+        "0xphase-head",
+        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
+    assert_eq!(status_value(state.clone()).await?, json!("ready"));
 
     sqlx::raw_sql(
         r#"
-        UPDATE chain_phase_state
-        SET current_block_number = 120, current_block_hash = '0xphase-head'
-        WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project';
         UPDATE service_heartbeats
         SET started_at = now() - interval '1 minute',
             heartbeat_at = now()
@@ -403,6 +387,7 @@ async fn v2_status_keeps_sepolia_unready_until_verification_floor_is_met() -> Re
     )
     .execute(&database.lookup_pool)
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-sepolia", 120, "0xsepolia-published").await?;
     let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
         "ethereum-sepolia=http://rpc.test".to_owned(),
     ])?;
@@ -671,4 +656,28 @@ async fn sepolia_status_value(state: AppState) -> Result<Value> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     Ok(payload["data"]["chains"]["11155111"]["status"].clone())
+}
+
+/// Publish the families at `block` as the build with `content_hash` would.
+async fn publish_status_families(
+    database: &TestDatabase,
+    block: i64,
+    hash: &str,
+    content_hash: &str,
+) -> Result<()> {
+    let chain = "ethereum-mainnet";
+    let token = bigname_project::families::input_token(&database.pool, chain).await?;
+    bigname_project::families::apply(
+        &database.pool,
+        chain,
+        &bigname_project::Marker {
+            number: block,
+            hash: hash.to_owned(),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &token,
+        &bigname_project::families::FamilyOptions::new(content_hash),
+    )
+    .await?;
+    Ok(())
 }

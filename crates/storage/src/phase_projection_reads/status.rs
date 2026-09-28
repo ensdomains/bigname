@@ -57,13 +57,7 @@ const FAMILY_MARKER_JOIN: &str = r#"
 /// `/v1/status` readiness: indexed block, timestamp and generation come from the family marker.
 /// Lifecycle state and redo flags continue to come from the corresponding phase rows.
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
-    let (project_generation_current, family_marker_join, projected) = {
-        (
-            family_marker_generation_current(),
-            FAMILY_MARKER_JOIN,
-            "marker",
-        )
-    };
+    let project_generation_current = family_marker_generation_current();
     let rows = sqlx::query(&format!(
         r#"
         WITH known_chains AS ({PHASE_EXPECTED_CHAIN_IDS_SELECT})
@@ -73,7 +67,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             head.safe_block_number,
             head.finalized_block_number,
             latest_lineage.block_timestamp AS latest_timestamp,
-            {projected}.current_block_number AS latest_projected_block,
+            marker.current_block_number AS latest_projected_block,
             projected_lineage.block_timestamp AS latest_projected_timestamp,
             ingest.phase_status AS ingest_phase_status,
             project.phase_status AS project_phase_status,
@@ -92,7 +86,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
           ON head.chain_id = known_chains.chain_id
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
-         AND project.phase_name = 'project'{family_marker_join}
+         AND project.phase_name = 'project'{FAMILY_MARKER_JOIN}
         LEFT JOIN chain_phase_state interpret
           ON interpret.chain_id = known_chains.chain_id
          AND interpret.phase_name = 'interpret'
@@ -116,9 +110,9 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
              'canonical', 'safe', 'finalized'
          )
         LEFT JOIN bigname_phase.chain_lineage projected_lineage
-          ON projected_lineage.chain_id = {projected}.chain_id
-         AND projected_lineage.block_number = {projected}.current_block_number
-         AND projected_lineage.block_hash = {projected}.current_block_hash
+          ON projected_lineage.chain_id = marker.chain_id
+         AND projected_lineage.block_number = marker.current_block_number
+         AND projected_lineage.block_hash = marker.current_block_hash
          AND projected_lineage.canonicality_state IN (
              'canonical', 'safe', 'finalized'
         )
