@@ -218,6 +218,15 @@ pub(crate) fn stale_name_rows_api_error(resource: SnapshotReadResource) -> ApiEr
     }
 }
 
+/// The stale 409 for a route that still reads served tables while the
+/// [publication switch](bigname_storage::publication_source) is on (ruling J11): the served batch
+/// stops writing those tables at the flip, so the route refuses with the fence's own body rather
+/// than serve rows that no longer follow the chain. `None` with the switch off.
+pub(crate) fn served_tables_gate(resource: SnapshotReadResource) -> Option<V2Error> {
+    bigname_storage::publication_source::serve_from_families()
+        .then(|| V2Error::stale(stale_snapshot_message(resource)))
+}
+
 fn stale_snapshot_message(resource: SnapshotReadResource) -> String {
     format!(
         "requested snapshot is not available for {}",

@@ -127,13 +127,20 @@ fn build_chain_status(
     heartbeat_max_age_seconds: i64,
     status_freshness: &StatusFreshness,
 ) -> ChainStatus {
+    // With the publication switch on, an Interpret or Project redo stalls both the stored head
+    // and the family marker, so their difference would read 0 while the chain moves on: the lags
+    // are unknown for the redo's duration (the redo already makes the chain `degraded`).
+    let lag_unknown = bigname_storage::publication_source::serve_from_families()
+        && (row.interpret_redo_in_progress || row.project_redo_in_progress);
     let lag_blocks = row
         .canonical_block
         .zip(row.latest_projected_block)
+        .filter(|_| !lag_unknown)
         .map(|(canonical, projected)| canonical.saturating_sub(projected).max(0));
     let lag_seconds = row
         .canonical_timestamp
         .zip(row.latest_projected_timestamp)
+        .filter(|_| !lag_unknown)
         .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
     let data_readiness = status_freshness.readiness(
         row.canonical_block,

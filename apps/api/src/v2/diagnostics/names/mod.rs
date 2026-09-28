@@ -8,7 +8,7 @@ use crate::v2::support::{load_name_current_for_selected_snapshot, normalize_infe
 
 use super::super::{
     Envelope, QueryParams, RawQueryParams, SnapshotReadResource, V2Error, V2Result,
-    api_error_to_v2_for_resource, resolve_v2_snapshot_for, snapshot_meta,
+    api_error_to_v2_for_resource, resolve_v2_snapshot_for, served_tables_gate, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
@@ -90,6 +90,10 @@ async fn resolve_diagnostic_name_with_resolution_auxiliary(
         .namespace
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
+    // These routes read served inventory, resolver and binding rows beyond the name row.
+    if let Some(stale) = served_tables_gate(SnapshotReadResource::DiagnosticData) {
+        return Err(stale);
+    }
 
     let scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
         state,
