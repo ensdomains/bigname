@@ -30,8 +30,8 @@ pub struct Walk {
 
 /// Walks the composed /v1/search listing (the namespace, supported names only, no name filter)
 /// and the composed expiring listing (every expiry, ascending) at `page_size` for at most
-/// `max_pages` pages each, and prints what each submitted (flip prerequisite 1: the walks must
-/// stay linear in the rows they serve; the flip commit bounds `submitted` against `rows`).
+/// `max_pages` pages each, and prints what each submitted: the walks must stay linear in the rows
+/// they serve, so the caller bounds `submitted` against `rows`.
 pub async fn measure_walks(
     pool: &PgPool,
     target: i64,
