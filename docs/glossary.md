@@ -2558,15 +2558,15 @@ canonical surface binding, a resolver discovery edge or its target's contract
 address starting or stopping there, or the start block of a manifest
 declaration the run captured. A rebuild visits only these blocks, plus its
 target, since no other block owns a family fact; the block-by-block catch-up
-outside a rebuild applies every block. The sources are the five unions of `work_blocks` in
-`crates/project/src/families/input.rs`
+outside a rebuild applies every block. The sources are the five unions of
+`work_blocks` in `crates/project/src/families/input.rs`
 ([projections](projections.md#owned-key-families)).
 
 ## Rebuild range
 
 several [work blocks](#work-block) of an owned key family rebuild applied in
-one transaction: the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
-target with no safe block). The range folds its blocks one by one exactly as
+one transaction: the blocks at or below the chain's safe block minus 5 (or 256
+blocks below the target with no safe block). The range folds its blocks one by one exactly as
 single blocks would, then journals, writes and advances the [family
 marker](#family-marker) once, to its last block, as one generation
 ([projections](projections.md#owned-key-families)). The first range after the
@@ -2587,10 +2587,12 @@ in the same transaction as the reset, undo or block it describes.
 
 the Interpret row's content hash, redo attempt and redo flag and the Project
 row's redo attempt, mode, range and last error, read from `chain_phase_state` in
-one statement (`input_token` in `crates/project/src/families/input.rs`). Every
-family block reads it inside its own transaction and records it on the [family
-marker](#family-marker); its [revision](#family-input-revision) is what a run
-applies under. The Project phase also reads it once after a batch commits and
+one statement (`input_token` in `crates/project/src/families/input.rs`). A
+block applied in a transaction of its own reads it inside that transaction and
+records it on the [family marker](#family-marker); a [rebuild
+range](#rebuild-range) reads it once, at its opening fence, and records it with
+its final marker. Its [revision](#family-input-revision) is what a run applies
+under. The Project phase also reads it once after a batch commits and
 before the batch's progress is recorded, bounded at 30 seconds; a read that
 fails or outlasts the bound fails the family run that follows
 ([projections](projections.md#owned-key-families)).

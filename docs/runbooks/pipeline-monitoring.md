@@ -525,6 +525,8 @@ For `BignamePhaseRunnerCapacityPaused`:
    The guard adds the preceding batch's reserved-write estimate to the floor;
    that estimate starts at zero for a new batch loop and is not a reservation.
    Capacity is checked before batches, not before all startup work or every write.
+   Before each Project family run the check may reuse the batch's reading when
+   it is younger than the capacity poll interval and showed room.
    Heartbeats and unrelated writes can continue during a pause, so this is not
    an absolute ENOSPC guarantee. A probe permission error is a retryable phase
    failure, not an ordinary capacity breach.

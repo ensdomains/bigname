@@ -1698,14 +1698,18 @@ normal mode, so a rebuild or a long catch-up holds up the next batch until it
 ends. Before each family run, the first after the batch included, the runner
 probes the phase lock, records the phase heartbeat as it does after a batch,
 so a catch-up that spans hours does not read as a stalled phase, and checks
-storage capacity as it does before a batch, with no write reservation, since a
-family run carries no estimate: while the database is over its ceiling or free
-disk under its floor, the Project phase is paused and no family run starts. A
-measurement younger than the capacity poll interval that showed room is reused
-rather than taken again, so the batch prelude's probe usually covers the first
-run; a breach, or an older measurement, is measured again.
-After a run that leaves more to do, it records its loop progress. The one-shot `redo` command runs
-the same loop and returns with the families on the served marker. The family work is driven by served batches
+storage capacity, with no write reservation, since a family run carries no
+estimate. The batch prelude (the checks the runner makes before it starts a
+batch: the lock probe, the capacity check and the batch's context reads)
+always measures storage afresh. The check before a family run may instead
+reuse a measurement younger than the capacity poll interval that showed room,
+so the prelude's probe usually covers the first run; served and family writes
+made since that measurement are not in it. When the check sees a breach, the
+Project phase is paused and no further family run starts, and while it is
+paused every poll measures afresh until a reading shows room. After a run that
+leaves more to do, the runner records its loop progress. The one-shot `redo`
+command runs the same loop and returns with the families on the served
+marker. The family work is driven by served batches
 and held in memory, but every Project run starts with a batch, an empty
 incremental one when the head has not moved, so after a restart the families
 run on the first Project run. The families trail the served marker until the
@@ -1738,11 +1742,11 @@ would run the served redo again each time, forever when the failure persists,
 as it does while Interpret is in redo. A stop already observable at the
 runner's check before a run, including one raised while the batch's progress is
 recorded, ends the loop before that run is planned. A run admitted before the
-stop becomes observable is cancelled cooperatively, at its next await: a block
-whose commit has not been sent rolls back, while a commit already sent can
-still land, leaving the family marker one block past what the runner saw, which
-is harmless since the next run starts from the marker. Either way the Project
-run ends as cancelled, so a redo stays in progress and rerunning it repairs the
+stop becomes observable is cancelled cooperatively, at its next await: a
+transaction whose commit has not begun is left to roll back, while a commit
+already in progress may complete. The next run resumes from the durable family
+marker and repair record, whichever happened. Either way the Project run ends
+as cancelled, so a redo stays in progress and rerunning it repairs the
 families. A settled batch with no family run waiting completes despite a
 pending stop. A family run is planned by the batch that precedes it and by
 none other: a batch that plans none, such as one that finds no readable head,
@@ -1754,10 +1758,11 @@ recorded, while a finished redo's session is still open. The read is bounded
 at 30 seconds: a read that fails or outlasts the bound is a transient family
 failure raised after the batch's progress is recorded, never a skip, so the
 supervised runner retries it and the one-shot `redo` command ends with it. The
-bound stops the runner waiting, not the database: the statement runs on, and
-its pooled connection stays out of the pool until the statement finishes and
-is checked before reuse, so each stalled read parks one connection for as long
-as it stalls.
+bound stops the runner waiting, not the database: a statement already
+executing on an acquired connection runs on, and that connection stays out of
+the pool until the statement finishes and is checked before reuse, so each
+such stall parks one connection for as long as it lasts. A read that times out
+while still waiting for a pool connection parks nothing extra.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
 
