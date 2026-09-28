@@ -193,6 +193,11 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
+    publish_list_cursor_block_241(database).await
+}
+
+/// Publishes block 241 for Project and the families over whatever events are stored.
+async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
     publish_project_and_families(database, 241).await?;
     // Project's batch replaces the served resolver rows, and writes one only for a declared
     // resolver (see `seed_switch_resolver_current`): seed it again at the new publication.
@@ -443,5 +448,96 @@ async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the
         assert_eq!(rows.len(), 1, "{continued}");
         assert_eq!(last, None, "{continued}");
     }
+    database.cleanup().await
+}
+
+/// With `at` pinned, a continuation is tied to that publication: once a newer one lands it
+/// answers 409 stale, even when the newer block changed nothing the page shows. gamma.eth, which
+/// no resolver serves, is registered at 241; the bound names are the same at 240 and 241.
+#[tokio::test]
+async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_events(&database).await?;
+    let (gamma, gamma_resource) =
+        seed_switch_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
+    publish_project_and_families(&database, 240).await?;
+    seed_switch_resolver_current(&database).await?;
+    let at_240 = switch_timestamp(1_700_000_240)?;
+    let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
+    let mut issued = Vec::new();
+    for on in [false, true] {
+        let (first, next) = list_cursor_page(&database, on, &pinned, "/data/bound_names").await?;
+        assert_eq!(first, [json!("alpha.eth")]);
+        let next = next.context("pinned continuation")?;
+        // At the pinned publication the continuation pages.
+        let (rest, _) = list_cursor_page(
+            &database,
+            on,
+            &list_cursor_continue(&pinned, &next),
+            "/data/bound_names",
+        )
+        .await?;
+        assert_eq!(rest, [json!("beta.eth")]);
+        issued.push((on, next));
+    }
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[switch_event(
+            "list-cursor-gamma-grant",
+            Some(&gamma),
+            Some(gamma_resource),
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            241,
+            0,
+            json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE,
+                   "expiry": 1_900_000_000i64}),
+        )],
+    )
+    .await?;
+    publish_list_cursor_block_241(&database).await?;
+    for (on, cursor) in issued {
+        let continued = list_cursor_continue(&pinned, &cursor);
+        let (status, body) = list_cursor_get(&database, on, &continued).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "switch {on}: {body:#}");
+        assert_eq!(
+            body["error"],
+            json!({"code": "stale", "details": {},
+                   "message": "resolver data is unavailable at the selected historical position"}),
+            "switch {on}"
+        );
+        // Latest bound names are unchanged, so the refusal is the pin alone.
+        let (latest, _) = list_cursor_page(
+            &database,
+            on,
+            &format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=5"),
+            "/data/bound_names",
+        )
+        .await?;
+        assert_eq!(latest, [json!("alpha.eth"), json!("beta.eth")], "switch {on}");
+    }
+    database.cleanup().await
+}
+
+/// A malformed cursor is refused before anything is read: on a resolver that does not exist,
+/// and on a database with no publication at all.
+#[tokio::test]
+async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_reading()
+-> Result<()> {
+    let empty = TestDatabase::new_migrated().await?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
+    for on in [false, true] {
+        for db in [&database, &empty] {
+            for uri in [
+                format!("/v1/resolvers/1/{LIST_CURSOR_OTHER_RESOLVER}?page_size=1&cursor=not-a-cursor"),
+                format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&cursor=7b7d"),
+            ] {
+                assert_list_cursor_refused(db, on, &uri, "malformed").await?;
+            }
+        }
+    }
+    empty.cleanup().await?;
     database.cleanup().await
 }

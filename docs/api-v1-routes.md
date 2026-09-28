@@ -3097,7 +3097,9 @@ For a registrar lease first identified by a later readable observation, registra
   with or without its cursor, can simply be retried. The `bound_names` cursor
   binds the resolver and sort, and `at` when the request pinned it, and holds the last name's position; a continuation without `at` reads the
   current publication, so a name whose resolver changed between pages can be
-  missed or appear again (see
+  missed or appear again. A continuation with `at` returns `409 stale` once a
+  newer publication has landed, before any row is read. A malformed cursor
+  returns `400 invalid_input` before the resolver or publication is read (see
   [current-state list cursors](api-v1.md#current-state-list-cursors)).
 - Status semantics: only a request without `at` and with `finality=latest`
   applies the latest served-head Interpret-redo check and returns retryable `409

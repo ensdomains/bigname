@@ -1475,8 +1475,7 @@ cursor of `GET /v1/search`, `GET /v1/names`, or the resolver overview's
 row it returned, and, when the request pinned `at`, that `at` token (of these
 three, only the resolver overview accepts `at`). It holds no publication,
 generation, or evaluation time. A continuation reads whatever is published when
-it runs and returns the rows that sort after that position, the way a subgraph
-query pages with a `where` filter on the last id it saw:
+it runs and returns the rows that sort after that position:
 
 - The row the cursor came from need not still exist or still sort where it did;
   the page starts after the position either way.
@@ -1497,9 +1496,10 @@ query pages with a `where` filter on the last id it saw:
   before this contract, and the snapshot field of `GET /v1/search` cursors
   issued before July 2026, so such a cursor is refused once.
 - With `at`, the continuation must send the same `at`, or it returns
-  `400 invalid_input`. Once a newer publication lands, that `at` is below the
-  current publication and the continuation returns `409 stale`, as any read at
-  such an `at` does.
+  `400 invalid_input`. The cursor then walks that one publication: once a newer
+  publication lands, the continuation returns `409 stale` with
+  `resolver data is unavailable at the selected historical position`, whatever
+  rows the newer block changed.
 - A publication that lands while one page is being read still returns
   `409 stale` for that request, with a message asking to retry it; the same
   cursor then continues.

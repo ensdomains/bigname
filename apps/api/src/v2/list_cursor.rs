@@ -3,8 +3,8 @@
 //! A cursor holds what the list is (its sort and filters), the position of the last row it
 //! returned, and the request's `at` token when the request pinned `at`. It holds no publication,
 //! generation or evaluation time. A continuation reads whatever is published when it runs and
-//! returns the rows after the position, the way a subgraph query with `where: {id_gt: ...}`
-//! does. docs/api-v1.md "Current-state list cursors" states what a client sees:
+//! returns the rows after the position. docs/api-v1.md "Current-state list cursors" states what
+//! a client sees:
 //!
 //! - The row the cursor came from need not still exist or still sort there; the page starts
 //!   after the position either way. A row whose sort key moved between pages can be returned
@@ -14,8 +14,8 @@
 //!   anything this contract does not write (the publication token, evaluation time or
 //!   generation that cursors issued before it carried) answers `400 invalid_input`.
 //! - With `at`, the cursor binds that `at` token: the continuation must send the same `at`
-//!   (else 400), and once a newer publication lands the route answers `409 stale` as it does
-//!   for any `at` below the current publication.
+//!   (else 400), and once a newer publication lands the route answers `409 stale` before
+//!   reading rows (the route compares the captured publication with the pinned position).
 //!
 //! Only a publication that lands during one request's own read refuses that request
 //! (`CollectionSnapshot::finish`, 409 asking for a retry); the same cursor then continues.

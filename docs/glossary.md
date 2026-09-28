@@ -376,10 +376,10 @@ The cursor of `GET /v1/search`, `GET /v1/names`, and the resolver overview's
 `bound_names`: it holds the list's sort and filters, the sort position of the
 last row returned, and the `at` token when the request pinned `at`, and no
 publication, generation, or evaluation time. A continuation reads the
-publication current when it runs and returns the rows after that position, the
-way a subgraph query pages with a `where` filter on the last id it saw, so a
-newer publication does not refuse it and a row that changed between pages can
-repeat or be skipped. Contrast the publication-bound cursors of the other
+publication current when it runs and returns the rows after that position, so
+a newer publication does not refuse it and a row that changed between pages can
+repeat or be skipped. With `at` pinned, the cursor walks that one publication
+and a newer publication refuses it. Contrast the publication-bound cursors of the other
 current-state collections, which a newer publication refuses, and the
 [history walk](#history-walk). See
 [api-v1.md](api-v1.md#current-state-list-cursors).
