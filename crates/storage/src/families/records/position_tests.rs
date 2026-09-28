@@ -1,4 +1,4 @@
-//! The shared order vectors against the shadow readers' comparator and reader
+//! The shared order vectors against the family readers' comparator and reader
 //! (`FamilyPosition`'s `Ord` and `from_json`).
 use serde_json::Value;
 

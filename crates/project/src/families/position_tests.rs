@@ -142,7 +142,7 @@ fn stored_positions_order_as_they_did() {
 // The shared vectors. Their twin, the same three lists asserted against the storage crate's
 // comparator and reader (`Ord` and `from_json`), is in
 // crates/storage/src/families/control/position.rs; keep the two copies identical, since a drift
-// between the comparators moves the shadow read and the canonical excuse read together.
+// between the comparators moves the family read and the canonical excuse read together.
 type Place = (i64, Option<i64>, Option<i64>, &'static str);
 /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
 /// decimal point, and far past `u32::MAX`: no ordinal.

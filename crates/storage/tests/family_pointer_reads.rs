@@ -1,4 +1,4 @@
-//! The pointer reads of the family shadow readers, over tables installed by their own
+//! The pointer reads of the family readers, over tables installed by their own
 //! migrations:
 //! - `load_family_link_selection`: the latest link per (resolver, node); the link at the name's
 //!   own node wins unless it is absent or a clear (record id `0`); then the link at the empty-name
