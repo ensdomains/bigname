@@ -36,6 +36,7 @@ test('parseApi accepts absolute http(s) URLs and rejects the rest outright', () 
     null, '', '/v1', 'api.example.test', 'javascript:alert(1)', 'ftp://example.test',
     "https://x/';/usr/bin/id;'", 'https://x/a b', 'https://x/a\tb', 'https://x/a;b', 'https://x/a"b',
     'https://x/a\\b', 'https://x/a`b', 'https://x/<b>',
+    'https://example.com/x$(id)', 'https://example.com/$HOME', 'https://example.com/x(1)',
   ]) assert.equal(net.parseApi(bad), null, String(bad));
   assert.deepEqual(net.initialSelection("?api=https://x/';id;'"), { network: sepolia, custom: null, rewrite: true });
   assert.equal(net.initialSelection('?api=http://127.0.0.1:3000').custom, 'http://127.0.0.1:3000');

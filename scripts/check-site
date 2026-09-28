@@ -85,6 +85,13 @@ fi
 if grep -nE 'curl -s' "${pages[@]}" | grep -F "'\${"; then
   fail "a generated curl command interpolates inside hand-written quotes; use shq()"
 fi
+# The static curl examples on the docs page get the base substituted for
+# __API__; each one must sit right after an opening single quote, so a base
+# that slipped past parseApi still cannot reach the shell.
+if grep -nF '__API__' "${pages[@]}" | grep -vF 'replace(/__API__/g' | grep -E "(^|[^'])__API__"; then
+  fail "a static example uses __API__ outside single quotes"
+fi
+
 unquoted_curl="$(awk '/curl -s/ {
   all = gsub(/\$\{/, "&"); quoted = gsub(/\$\{shq\(/, "&")
   if (all != quoted) print FILENAME ":" FNR ": " $0

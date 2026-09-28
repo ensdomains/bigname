@@ -225,10 +225,10 @@ const GUIDES = [
   keywords: ['quick start', 'base url', 'endpoints', 'routes'],
   sections: [
     { h: 'Examples', id: 'examples', html: `
-<pre class="block"><code>$ curl -s __API__/v1/names/taytems.eth
+<pre class="block"><code>$ curl -s '__API__/v1/names/taytems.eth'
 $ curl -s '__API__/v1/names/taytems.eth/records?keys=addr:60,text:avatar'
-$ curl -s __API__/v1/addresses/0x8e8Db5CcEF88cca9d624701Db544989C996E3216/primary-name
-$ curl -s -X POST __API__/v1/lookup -H 'content-type: application/json' \\
+$ curl -s '__API__/v1/addresses/0x8e8Db5CcEF88cca9d624701Db544989C996E3216/primary-name'
+$ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
        -d '{"profile":"feed","inputs":[{"name":"taytems.eth"}]}'</code></pre>` },
     { h: 'Manual pages', id: 'pages', html: '__ROUTE_TABLE__' },
     { h: 'The six rules', id: 'rules', html: `

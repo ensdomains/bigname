@@ -29,11 +29,11 @@
   const defaultNetwork = () => selectable(DEFAULT_NETWORK);
 
   // An override must be an absolute http(s) URL; anything else is ignored. A
-  // value with a quote, backslash, whitespace, semicolon or angle bracket is
-  // rejected outright rather than cleaned, since the pages print the base into
-  // shell commands and markup.
+  // value with a quote, backslash, whitespace, semicolon, angle bracket, `$`
+  // or parenthesis is rejected outright rather than cleaned, since the pages
+  // print the base into shell commands and markup; no real API base needs them.
   function parseApi(raw) {
-    if (!raw || /['"`\\\s;<>]/.test(raw)) return null;
+    if (!raw || /['"`\\\s;<>$()]/.test(raw)) return null;
     try {
       const u = new URL(raw);
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
