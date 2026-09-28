@@ -287,47 +287,6 @@ async fn phase_projection_target_for_chain(
     Ok((block_number, block_hash))
 }
 
-async fn upsert_phase_resolver_current_rows(
-    pool: &PgPool,
-    rows: &[ResolverCurrentRow],
-) -> Result<Vec<ResolverCurrentRow>> {
-    for row in rows {
-        let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
-        sqlx::query(
-            r#"
-            INSERT INTO bigname_phase.resolver_current (
-                chain_id, resolver_address, declared_summary, support_status,
-                unsupported_reason, provenance, chain_positions, canonicality_summary,
-                manifest_version, last_recomputed_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (chain_id, resolver_address) DO UPDATE SET
-                declared_summary = EXCLUDED.declared_summary,
-                support_status = EXCLUDED.support_status,
-                unsupported_reason = EXCLUDED.unsupported_reason,
-                provenance = EXCLUDED.provenance,
-                chain_positions = EXCLUDED.chain_positions,
-                canonicality_summary = EXCLUDED.canonicality_summary,
-                manifest_version = EXCLUDED.manifest_version,
-                last_recomputed_at = EXCLUDED.last_recomputed_at
-            "#,
-        )
-        .bind(&row.chain_id)
-        .bind(row.resolver_address.to_ascii_lowercase())
-        .bind(&row.declared_summary)
-        .bind(support_status)
-        .bind(unsupported_reason)
-        .bind(&row.provenance)
-        .bind(phase_chain_positions(&row.chain_positions))
-        .bind(&row.canonicality_summary)
-        .bind(row.manifest_version)
-        .bind(row.last_recomputed_at)
-        .execute(pool)
-        .await?;
-    }
-    Ok(rows.to_vec())
-}
-
 struct TestDatabase {
     database: bigname_test_support::TestDatabase,
     pool: PgPool,
