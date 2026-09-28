@@ -7,17 +7,16 @@ use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
 use crate::harness::responses::pointer;
-use crate::harness::{anvil::Anvil, ens_v2, pipeline, repo_root};
+use crate::harness::{anvil::Anvil, ens_v2, families, pipeline, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MONTH: u64 = 30 * 24 * 60 * 60;
 
 async fn name_resource(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Uuid> {
-    sqlx::query_scalar("SELECT resource_id FROM name_current WHERE logical_name_id = $1")
-        .bind(logical_name_id)
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("name_current row missing for {logical_name_id}"))
+    families::required_name(pool, logical_name_id)
+        .await?
+        .resource_id
+        .with_context(|| format!("published name row of {logical_name_id} has no resource"))
 }
 
 /// Rows 1, 3, and 9: registrar renewal preserves the promoted exact-name
@@ -272,12 +271,15 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
         ],
         "resolver edge must follow set/change/zero"
     );
-    let current_resolver: Option<String> = sqlx::query_scalar(
-        "SELECT declared_summary->'resolver'->>'address' FROM name_current \
-         WHERE logical_name_id = 'ens:0xef82654fb982e788fba316ac3b4cfbea26669009aac0c5378156e7bf50880d67'",
+    let current_resolver = families::required_name(
+        &run.db.pool,
+        "ens:0xef82654fb982e788fba316ac3b4cfbea26669009aac0c5378156e7bf50880d67",
     )
-    .fetch_one(&run.db.pool)
-    .await?;
+    .await?
+    .declared_summary
+    .pointer("/resolver/address")
+    .and_then(Value::as_str)
+    .map(str::to_owned);
     assert_eq!(current_resolver, None, "zeroed resolver must detach");
 
     // Detach-to-zero likewise derives a NULL subregistry edge.
@@ -544,13 +546,7 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
         leaf_owner: format!("{carol:#x}"),
         leaf_registration_id: leaf_resource_b.to_string(),
         // Project formats the registry expiry into `control.expiry`; the API serves it as is.
-        leaf_expires_at: sqlx::query_scalar(
-            "SELECT declared_summary #>> '{control,expiry}' FROM name_current \
-             WHERE logical_name_id = $1",
-        )
-        .bind(&leaf_id)
-        .fetch_one(&moved.db.pool)
-        .await?,
+        leaf_expires_at: control_expiry(&moved.db.pool, &leaf_id).await?,
         leaf_resolver: format!("{resolver_b:#x}"),
     };
     assert_moved_over_http(&mut moved.db, &anvil, &expected, "full derivation").await?;
@@ -717,19 +713,33 @@ async fn served_subregistry_name(
     })
 }
 
+/// The control expiry as Project formats it into the published name row, as text.
+async fn control_expiry(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<String> {
+    families::required_name(pool, logical_name_id)
+        .await?
+        .declared_summary
+        .pointer("/control/expiry")
+        .and_then(|expiry| match expiry {
+            Value::Null => None,
+            Value::String(expiry) => Some(expiry.clone()),
+            other => Some(other.to_string()),
+        })
+        .with_context(|| format!("published name row of {logical_name_id} has no control expiry"))
+}
+
 async fn current_name_facts(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Value> {
-    Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-             'resource_id', resource_id,
-             'support_status', support_status,
-             'registration', (declared_summary -> 'registration') - 'latest_event_kind',
-             'control', declared_summary -> 'control',
-             'resolver', declared_summary #> '{resolver,address}')
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_one(pool)
-    .await?)
+    let row = families::required_name(pool, logical_name_id).await?;
+    let mut registration = row.declared_summary["registration"].clone();
+    if let Some(registration) = registration.as_object_mut() {
+        registration.remove("latest_event_kind");
+    }
+    Ok(json!({
+        "resource_id": row.resource_id,
+        "support_status": families::support_status(&row),
+        "registration": registration,
+        "control": row.declared_summary["control"],
+        "resolver": row.declared_summary.pointer("/resolver/address"),
+    }))
 }
 
 /// Row 5: registry expiry passes with no transaction (a state-derived flip),
@@ -998,11 +1008,9 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
         vec![format!("0x{:064x}", 1), format!("0x{:064x}", 0)],
         "grant must set exactly the registrar bit and revoke must clear the bitmap"
     );
-    let current_root_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE lower(subject) = $1")
-            .bind(&grantee_hex)
-            .fetch_one(&run.db.pool)
-            .await?;
+    let current_root_rows = families::subject_permissions(&run.db.pool, &grantee_hex)
+        .await?
+        .len();
     assert_eq!(
         current_root_rows, 0,
         "revoke must remove the current subject row"
@@ -1532,11 +1540,12 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             );
         }
     }
-    let sale_summary: Value = sqlx::query_scalar(
-        "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059'",
+    let sale_summary = families::required_name(
+        &run.db.pool,
+        "ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059",
     )
-    .fetch_one(&run.db.pool)
-    .await?;
+    .await?
+    .declared_summary;
     assert_eq!(
         sale_summary["registration"]["registrant"],
         format!("{bob:#x}"),
@@ -1545,12 +1554,9 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     for logical_name_id in
         ["ens:batchsaleone.eth", "ens:batchsaletwo.eth"].map(support::schema_v2_logical_name_id)
     {
-        let batch_summary: Value = sqlx::query_scalar(
-            "SELECT declared_summary FROM name_current WHERE logical_name_id = $1",
-        )
-        .bind(&logical_name_id)
-        .fetch_one(&run.db.pool)
-        .await?;
+        let batch_summary = families::required_name(&run.db.pool, &logical_name_id)
+            .await?
+            .declared_summary;
         assert_eq!(
             batch_summary["registration"]["registrant"],
             format!("{carol:#x}"),
@@ -1568,14 +1574,13 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         "ens:0xf31116838b246bb4a6b332f695a3f6d42fa3216bd663c1ff90ebd97fd8b79059",
     )
     .await?;
-    let power_rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT effective_powers FROM permissions_current \
-         WHERE resource_id = $1 AND lower(subject) = $2",
-    )
-    .bind(sale_resource)
-    .bind(format!("{bob:#x}"))
-    .fetch_all(&run.db.pool)
-    .await?;
+    let bob_hex = format!("{bob:#x}");
+    let power_rows: Vec<Value> = families::resource_permissions(&run.db.pool, sale_resource)
+        .await?
+        .into_iter()
+        .filter(|row| row.subject.eq_ignore_ascii_case(&bob_hex))
+        .map(|row| row.effective_powers)
+        .collect();
     assert!(
         !power_rows.is_empty(),
         "buyer powers missing after the role migration"

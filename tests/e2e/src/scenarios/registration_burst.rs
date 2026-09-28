@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::support;
 use crate::harness::responses::pointer;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -249,14 +249,12 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         "normalized layer holds the post-setRecord owner: {last_owner_subject}"
     );
 
-    let (projected_resource, declared): (String, Value) = sqlx::query_as(
-        "SELECT resource_id::text, declared_summary
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&burst_id)
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert_eq!(projected_resource, current_resource);
+    let projected = families::required_name(&run.db.pool, &burst_id).await?;
+    let declared = projected.declared_summary;
+    assert_eq!(
+        projected.resource_id.map(|id| id.to_string()).as_deref(),
+        Some(current_resource.as_str())
+    );
     assert_eq!(
         pointer(&declared, "/resolver/address"),
         format!("{resolver:#x}"),
@@ -266,13 +264,10 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         pointer(&declared, "/registration/registrant"),
         format!("{alice:#x}")
     );
-    let (selectors, entries): (Value, Value) = sqlx::query_as(
-        "SELECT selectors, entries FROM record_inventory_current
-         WHERE resource_id::text = $1",
-    )
-    .bind(&current_resource)
-    .fetch_one(&run.db.pool)
-    .await?;
+    let inventory = families::record_inventory(&run.db.pool, current_resource.parse()?)
+        .await?
+        .context("published burst.eth record inventory")?;
+    let (selectors, entries) = (inventory.selectors, inventory.entries);
     let selector_keys = selectors
         .as_array()
         .into_iter()
@@ -298,16 +293,16 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f).
     // Project joins the node-keyed name observation through the current reverse
     // resolver and publishes the declared claim without forward verification.
-    let primary: (String, Option<String>) = sqlx::query_as(
-        "SELECT claim_status, raw_claim_name FROM primary_names_current
-         WHERE address = $1 AND coin_type = '60' AND namespace = 'ens'",
-    )
-    .bind(format!("{alice:#x}"))
-    .fetch_one(&run.db.pool)
-    .await?;
+    let primary = families::primary_name(&run.db.pool, &format!("{alice:#x}"), "ens", "60")
+        .await?
+        .context("published alice reverse claim")?
+        .row;
     assert_eq!(
-        primary,
-        ("success".to_owned(), Some("burst.eth".to_owned()))
+        (
+            primary.claim_status.as_str(),
+            primary.raw_claim_name.as_deref()
+        ),
+        ("success", Some("burst.eth"))
     );
 
     let (topics, data): (Vec<String>, Vec<u8>) = sqlx::query_as(
@@ -356,17 +351,14 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
     let recovered_id = support::schema_v2_logical_name_id(
         "ens:0xff8b5f8209f6197db09fe13cdf9395c8ed39d5e0546c071e44a7d51ca50d1854",
     );
-    let recovered_resource: String =
-        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
-            .bind(&recovered_id)
-            .fetch_one(&recovered.db.pool)
-            .await?;
-    let recovered_entries: Value = sqlx::query_scalar(
-        "SELECT entries FROM record_inventory_current WHERE resource_id::text = $1",
-    )
-    .bind(&recovered_resource)
-    .fetch_one(&recovered.db.pool)
-    .await?;
+    let recovered_resource = families::required_name(&recovered.db.pool, &recovered_id)
+        .await?
+        .resource_id
+        .context("recovered burst.eth resource")?;
+    let recovered_entries = families::record_inventory(&recovered.db.pool, recovered_resource)
+        .await?
+        .context("recovered burst.eth record inventory")?
+        .entries;
     assert!(recovered_entries.as_array().is_some_and(|entries| {
         entries.iter().any(|entry| {
             entry["record_key"] == "addr:60" && entry["value"] == format!("{record_target:#x}")

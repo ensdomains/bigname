@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
 use super::support;
-use crate::harness::{anvil::Anvil, artifacts::Deployed, basenames, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, artifacts::Deployed, basenames, ens_v1, families, repo_root};
 
 const NAME: &str = "operatorlife.eth";
 const API: &str = "bigname-api";
@@ -96,10 +96,9 @@ fn operator_rows(body: &Value) -> Vec<&Value> {
 }
 
 async fn resource_id(run: &support::PipelineRun) -> Result<Uuid> {
-    sqlx::query_scalar("SELECT resource_id FROM name_current WHERE raw_name=$1")
-        .bind(NAME)
-        .fetch_one(&run.db.pool)
-        .await
+    families::required_name_by_raw(&run.db.pool, "ens", NAME)
+        .await?
+        .resource_id
         .context("current operatorlife resource")
 }
 
@@ -113,7 +112,7 @@ async fn assert_operator(
     let api = RealApi::start(run, anvil).await?;
     let operator_hex = format!("{operator:#x}");
     let resource = resource_id(run).await?;
-    let storage = bigname_storage::load_effective_permissions_account_resource_page(
+    let storage = bigname_storage::load_serving_effective_permissions_page(
         &run.db.pool,
         Some(&operator_hex),
         Some(resource),
@@ -183,7 +182,7 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     let grant_run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
+        Some("SELECT EXISTS (SELECT 1 FROM project_account_approval WHERE approved)"),
     )
     .await?;
     assert_operator(&grant_run, &anvil, owner, operator, true).await?;
@@ -193,7 +192,7 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     let revoke_run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE NOT approved)"),
+        Some("SELECT EXISTS (SELECT 1 FROM project_account_approval WHERE NOT approved)"),
     )
     .await?;
     assert_operator(&revoke_run, &anvil, owner, operator, false).await?;
@@ -216,12 +215,11 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     .await?;
     let move_run = support::ingest_and_serve(&anvil, &next, None).await?;
     // Manifest reconciliation retires account state for the demoted registry emitter.
-    let old_registry_state: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE authority_contract = $1)",
-    )
-    .bind(format!("{:#x}", deployment.registry.address))
-    .fetch_one(&move_run.db.pool)
-    .await?;
+    let old_registry = format!("{:#x}", deployment.registry.address);
+    let old_registry_state = families::approvals(&move_run.db.pool, "ethereum-mainnet")
+        .await?
+        .iter()
+        .any(|approval| approval.authority_contract == old_registry);
     assert!(
         !old_registry_state,
         "old registry account state was retained"
@@ -233,7 +231,7 @@ async fn registry_operator_approval_serving_lifecycle() -> Result<()> {
     let new_run = support::ingest_and_serve(
         &anvil,
         &next,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
+        Some("SELECT EXISTS (SELECT 1 FROM project_account_approval WHERE approved)"),
     )
     .await?;
     assert_operator(&new_run, &anvil, owner, operator, true).await?;
@@ -292,8 +290,15 @@ async fn verify_snapshot(
         isApprovedForAllCall::abi_decode_returns(&approval)?,
         "on-chain approval control"
     );
-    let projected_source: Value = sqlx::query_scalar("SELECT grant_source FROM account_permission_state_current WHERE subject=$1 AND owner=$2 AND approved")
-        .bind(format!("{operator:#x}")).bind(format!("{account:#x}")).fetch_one(&run.db.pool).await?;
+    let (operator_hex, account_hex) = (format!("{operator:#x}"), format!("{account:#x}"));
+    let projected_source = families::approvals(&run.db.pool, chain)
+        .await?
+        .into_iter()
+        .find(|approval| {
+            approval.approved && approval.subject == operator_hex && approval.owner == account_hex
+        })
+        .context("published approval of the operator")?
+        .grant_source;
     assert_eq!(
         projected_source,
         json!({"kind":"raw_log","source_event":"ApprovalForAll"})
@@ -324,13 +329,15 @@ async fn verify_snapshot(
         let body = api
             .get(&format!("/v1/permissions?name={name}&include=lineage"))
             .await?;
-        let projected_names: Vec<Value> =
-            sqlx::query_scalar("SELECT to_jsonb(n) FROM name_current n WHERE raw_name=$1")
-                .bind(&name)
-                .fetch_all(&run.db.pool)
-                .await?;
-        let projected_bindings: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(s) FROM permissions_current_resource_summary s WHERE resource_id IN (SELECT resource_id FROM name_current WHERE raw_name=$1)")
-            .bind(&name).fetch_all(&run.db.pool).await?;
+        let projected_name = families::name_by_raw(&run.db.pool, namespace, &name).await?;
+        let projected_summaries = bigname_storage::load_serving_permission_summaries(
+            &run.db.pool,
+            &projected_name
+                .iter()
+                .filter_map(|row| row.resource_id)
+                .collect::<Vec<_>>(),
+        )
+        .await?;
         let account_http = api
             .get(&format!(
                 "/v1/permissions?address={operator:#x}&include=lineage"
@@ -338,13 +345,20 @@ async fn verify_snapshot(
             .await?;
         println!(
             "AUTHOR_UNTOUCHED_DIAGNOSTIC {}",
-            json!({"name":name,"name_current":projected_names,"resource_summaries":projected_bindings,"account_http":account_http})
+            json!({"name":name,"name_row":format!("{projected_name:?}"),"resource_summaries":format!("{projected_summaries:?}"),"account_http":account_http})
         );
         assert_eq!(has_operator(&body), expected, "name route {name}: {body}");
         if label == "authortoken" {
-            let (selected, owner, token): (Uuid, Option<String>, Option<Uuid>) = sqlx::query_as(
-                "SELECT resource_id, declared_summary #>> '{control,registry_owner}', token_lineage_id FROM name_current WHERE raw_name=$1",
-            ).bind(&name).fetch_one(&run.db.pool).await?;
+            let row = projected_name
+                .as_ref()
+                .context("published authortoken row")?;
+            let selected = row.resource_id.context("published authortoken resource")?;
+            let owner = row
+                .declared_summary
+                .pointer("/control/registry_owner")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let token = row.token_lineage_id;
             let expected_resource: Uuid = if namespace == "ens" {
                 "d9740532-4b9a-567d-8bb0-6d256816c926"
             } else {
@@ -361,8 +375,8 @@ async fn verify_snapshot(
                 "transfer must retain the registry-only resource"
             );
             let active: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM name_current n JOIN surface_bindings b ON b.surface_binding_id=n.surface_binding_id JOIN chain_lineage c ON c.chain_id=b.chain_id AND c.block_hash=b.block_hash AND c.block_number=b.block_number WHERE n.raw_name=$1 AND b.resource_id=$2 AND b.active_to IS NULL AND b.canonicality_state IN ('canonical','safe','finalized') AND c.canonicality_state IN ('canonical','safe','finalized'))",
-            ).bind(&name).bind(selected).fetch_one(&run.db.pool).await?;
+                "SELECT EXISTS (SELECT 1 FROM surface_bindings b JOIN chain_lineage c ON c.chain_id=b.chain_id AND c.block_hash=b.block_hash AND c.block_number=b.block_number WHERE b.surface_binding_id=$1 AND b.resource_id=$2 AND b.active_to IS NULL AND b.canonicality_state IN ('canonical','safe','finalized') AND c.canonicality_state IN ('canonical','safe','finalized'))",
+            ).bind(row.surface_binding_id).bind(selected).fetch_one(&run.db.pool).await?;
             assert!(
                 active,
                 "selected registry authority must have a canonical active binding"
@@ -372,14 +386,12 @@ async fn verify_snapshot(
             ).bind(format!("{namespace}:{:#x}", ens_v1::namehash(&name))).bind(selected).fetch_one(&run.db.pool).await?;
             assert_eq!(epoch["registry_owner"], format!("{account:#x}"));
             assert_eq!(epoch["authority_kind"], "registry_only");
-            assert_eq!(projected_bindings.len(), 1);
+            // The registry-only resource's permission summary is the registry binding's; the
+            // operator row below carries that binding's registry contract and owner.
+            assert_eq!(projected_summaries.len(), 1);
             assert_eq!(
-                projected_bindings[0]["registry_owner"],
-                format!("{account:#x}")
-            );
-            assert_eq!(
-                projected_bindings[0]["registry_contract"],
-                format!("{registry:#x}")
+                projected_summaries[&selected].authority_kind.as_deref(),
+                Some("registry_only")
             );
             // The registry-only resource holds the rows but is not a registration handle. The
             // rows carry the registration the name serves, its registrar lease, the same value
@@ -390,12 +402,11 @@ async fn verify_snapshot(
                 .as_str()
                 .expect("name detail registration_id")
                 .to_owned();
-            let declared: Option<String> = sqlx::query_scalar(
-                "SELECT declared_summary #>> '{registration,resource_id}' FROM name_current WHERE raw_name=$1",
-            )
-            .bind(&name)
-            .fetch_one(&run.db.pool)
-            .await?;
+            let declared = row
+                .declared_summary
+                .pointer("/registration/resource_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             assert_eq!(
                 declared.as_deref(),
                 Some(served.as_str()),
@@ -597,7 +608,7 @@ async fn author_ens_real_producer_and_http() -> Result<()> {
     let run = support::ingest_and_serve(
         &anvil,
         &d,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
+        Some("SELECT EXISTS (SELECT 1 FROM project_account_approval WHERE approved)"),
     )
     .await?;
     verify_snapshot(
@@ -648,7 +659,7 @@ async fn author_basenames_real_producer_and_http() -> Result<()> {
     let run = support::ingest_basenames_and_serve(
         &anvil,
         &d,
-        Some("SELECT EXISTS (SELECT 1 FROM account_permission_state_current WHERE approved)"),
+        Some("SELECT EXISTS (SELECT 1 FROM project_account_approval WHERE approved)"),
     )
     .await?;
     verify_snapshot(

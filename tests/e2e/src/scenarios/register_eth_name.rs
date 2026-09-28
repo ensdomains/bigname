@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 /// Walking skeleton: deploy the pinned ENSv1 stack onto a local chain,
 /// register alice.eth through the real registrar controller, execute the
@@ -94,22 +93,15 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     }
 
     // --- layer 3: schema-v2 projection ---
-    let (projected_id, raw_name, binding_kind, declared_summary, support_status): (
-        String,
-        String,
-        Option<String>,
-        Value,
-        String,
-    ) = sqlx::query_as(
-        "SELECT logical_name_id, raw_name, binding_kind, declared_summary, support_status
-         FROM name_current WHERE namespace = 'ens' AND raw_name = 'alice.eth'",
-    )
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert_eq!(projected_id, logical_name_id);
-    assert_eq!(raw_name, "alice.eth");
-    assert_eq!(binding_kind.as_deref(), Some("declared_registry_path"));
-    assert_eq!(support_status, "supported");
+    let projected = families::required_name_by_raw(&run.db.pool, "ens", "alice.eth").await?;
+    let declared_summary = projected.declared_summary.clone();
+    assert_eq!(projected.logical_name_id, logical_name_id);
+    assert_eq!(projected.normalized_name, "alice.eth");
+    assert_eq!(
+        projected.binding_kind.map(|kind| kind.as_str()),
+        Some("declared_registry_path")
+    );
+    assert_eq!(families::support_status(&projected), "supported");
     let pointer = |path: &str| crate::harness::responses::pointer(&declared_summary, path);
     assert_eq!(pointer("/coverage/status"), "projected");
     assert_eq!(pointer("/coverage/exhaustiveness"), "not_asserted");

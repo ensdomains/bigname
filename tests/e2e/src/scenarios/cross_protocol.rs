@@ -304,15 +304,23 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
     );
     let bridged = tested[0];
     assert_eq!(bridged["normalized_name"], "bridged.locked-migration.eth");
-    let manifest_versions = bridged
-        .pointer("/provenance/manifest_versions")
-        .and_then(Value::as_array)
-        .context("bridged child lacks provenance manifest versions")?;
+    // The served child comes from a published ENSv1 registry edge under the locked parent.
+    let edge_sources: Vec<String> = sqlx::query_scalar(
+        "SELECT source_family FROM project_child_edge_candidate \
+         WHERE parent_node = $1 AND child_node = $2",
+    )
+    .bind(format!("{:#x}", ens_v1::namehash("locked-migration.eth")))
+    .bind(format!(
+        "{:#x}",
+        ens_v1::namehash("bridged.locked-migration.eth")
+    ))
+    .fetch_all(&run.db.pool)
+    .await?;
     assert!(
-        manifest_versions
+        edge_sources
             .iter()
-            .any(|version| version["source_family"] == "ens_v1_registry_l1"),
-        "bridged child lost ENSv1 provenance: {bridged}"
+            .any(|source| source == "ens_v1_registry_l1"),
+        "bridged child lost its ENSv1 registry edge: {bridged} {edge_sources:?}"
     );
     assert!(
         children

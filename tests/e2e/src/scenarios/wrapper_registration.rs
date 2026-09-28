@@ -5,7 +5,7 @@ use sqlx::types::Uuid;
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer};
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const GRACE_PERIOD: u64 = 90 * 24 * 60 * 60;
@@ -16,6 +16,10 @@ async fn active_binding(
     pool: &sqlx::PgPool,
     logical_name_id: &str,
 ) -> Result<(Uuid, Option<Uuid>, String)> {
+    let published = families::required_name(pool, logical_name_id)
+        .await?
+        .resource_id
+        .with_context(|| format!("published {logical_name_id} has no resource"))?;
     sqlx::query_as(
         "SELECT binding.resource_id, resource.token_lineage_id, \
                 (SELECT event.after_state->>'authority_kind' \
@@ -27,10 +31,8 @@ async fn active_binding(
                           event.normalized_event_id DESC LIMIT 1) \
          FROM surface_bindings binding \
          JOIN resources resource USING (resource_id) \
-         JOIN name_current current \
-           ON current.logical_name_id = binding.logical_name_id \
-          AND current.resource_id = binding.resource_id \
          WHERE binding.logical_name_id = $1 \
+           AND binding.resource_id = $2 \
            AND binding.active_to IS NULL \
            AND binding.canonicality_state = 'canonical' \
            AND resource.canonicality_state = 'canonical' \
@@ -38,6 +40,7 @@ async fn active_binding(
          LIMIT 1",
     )
     .bind(logical_name_id)
+    .bind(published)
     .fetch_one(pool)
     .await
     .with_context(|| format!("active binding missing for {logical_name_id}"))
@@ -844,20 +847,14 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     .await?;
     assert_eq!(child_bindings, 1, "the wrap is the child's only binding");
 
-    let (child_projected_resource, child_projected_lineage, child_summary): (
-        Uuid,
-        Option<Uuid>,
-        Value,
-    ) = sqlx::query_as(
-        "SELECT resource_id, token_lineage_id, declared_summary \
-         FROM name_current WHERE logical_name_id = $1",
+    let child_row = families::required_name(
+        &run.db.pool,
+        &support::schema_v2_logical_name_id(&format!("ens:{child_name}")),
     )
-    .bind(support::schema_v2_logical_name_id(&format!(
-        "ens:{child_name}"
-    )))
-    .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(child_projected_resource, child_resource);
+    let (child_projected_lineage, child_summary) =
+        (child_row.token_lineage_id, child_row.declared_summary);
+    assert_eq!(child_row.resource_id, Some(child_resource));
     assert_eq!(child_projected_lineage, child_lineage);
     assert_eq!(child_summary["registration"]["authority_kind"], "wrapper");
     assert_eq!(
@@ -876,17 +873,14 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     .await?;
     assert_eq!(parent_kind, "registry_only");
     assert_eq!(parent_lineage, None);
-    let (parent_projected_resource, parent_projected_lineage, parent_summary): (
-        Uuid,
-        Option<Uuid>,
-        Value,
-    ) = sqlx::query_as(
-        "SELECT resource_id, token_lineage_id, declared_summary \
-         FROM name_current WHERE logical_name_id = 'ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05'",
+    let parent_row = families::required_name(
+        &run.db.pool,
+        "ens:0xfb43d46f1fd1b637140404515fcb87f1aaa2c42faef41bd7313aff9b912dda05",
     )
-    .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(parent_projected_resource, parent_resource);
+    let (parent_projected_lineage, parent_summary) =
+        (parent_row.token_lineage_id, parent_row.declared_summary);
+    assert_eq!(parent_row.resource_id, Some(parent_resource));
     assert_eq!(parent_projected_lineage, None);
     assert_eq!(
         parent_summary["registration"]["authority_kind"],
