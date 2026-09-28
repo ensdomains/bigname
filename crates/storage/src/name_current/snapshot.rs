@@ -14,11 +14,19 @@ use super::{NameCurrentRow, load_name_current};
 /// Missing rows stay distinguishable from stale rows so API callers can preserve
 /// the route-specific `not_found` behavior without filling stale snapshots from
 /// raw facts.
+///
+/// Under the publication switch the row is composed from the owned key families and describes
+/// the family marker's publication only, so a selected position on the name's chain other than
+/// the publication (an `at` below it) is stale: no per-row position is kept to prove an older
+/// read (ruling J5).
 pub async fn load_name_current_for_snapshot(
     pool: &PgPool,
     logical_name_id: &str,
     selected_chain_positions: &ChainPositions,
 ) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
+    if crate::publication_source::serve_from_families() {
+        return family_name_for_snapshot(pool, logical_name_id, selected_chain_positions).await;
+    }
     let row = load_name_current(pool, logical_name_id)
         .await
         .map_err(|error| {
@@ -48,6 +56,45 @@ pub async fn load_name_current_for_snapshot(
                 return Err(error);
             }
         }
+    }
+    Ok(SnapshotProjectionRead::Found(row))
+}
+
+async fn family_name_for_snapshot(
+    pool: &PgPool,
+    logical_name_id: &str,
+    selected_chain_positions: &ChainPositions,
+) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
+    let row = crate::families::name::load_family_name(pool, logical_name_id)
+        .await
+        .map_err(|error| {
+            SnapshotSelectionError::internal(format!(
+                "failed to compose the name row for logical_name_id {logical_name_id}: {error}"
+            ))
+        })?;
+    let Some(row) = row else {
+        return Ok(SnapshotProjectionRead::NotFound);
+    };
+    let publication = ChainPositions::from_value(&row.chain_positions).map_err(|error| {
+        SnapshotSelectionError::internal(format!(
+            "composed name row has unusable chain_positions: {}",
+            error.message()
+        ))
+    })?;
+    let selected = positions_by_chain_id(selected_chain_positions)?;
+    let at_publication =
+        positions_by_chain_id(&publication)?
+            .into_iter()
+            .all(|(chain_id, published)| {
+                selected.get(&chain_id).is_some_and(|position| {
+                    position.block_number == published.block_number
+                        && position.block_hash == published.block_hash
+                })
+            });
+    if !at_publication {
+        return Err(SnapshotSelectionError::stale(
+            "name data is unavailable at the selected historical position",
+        ));
     }
     Ok(SnapshotProjectionRead::Found(row))
 }

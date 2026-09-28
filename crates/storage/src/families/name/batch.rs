@@ -94,18 +94,26 @@ pub async fn load_family_names_by_resource_ids(
     .fetch_all(pool)
     .await
     .context("failed to load the names bound to resources")?;
-    let rows = load(pool, &names, CoverageShape::Plain).await?;
+    // The served pick orders by raw name then name id in the database's collation, so the
+    // order is taken from the database too.
+    let ordered: Vec<String> = sqlx::query_scalar(
+        "/* storage:families.name.by_resource_order */
+         SELECT surface.logical_name_id FROM bigname_phase.name_surfaces surface
+         WHERE surface.logical_name_id = ANY($1)
+         ORDER BY surface.raw_name ASC, surface.logical_name_id ASC",
+    )
+    .bind(&names)
+    .fetch_all(pool)
+    .await
+    .context("failed to order the names bound to resources")?;
+    let mut rows = load(pool, &names, CoverageShape::Plain).await?;
     let mut out: BTreeMap<Uuid, NameCurrentRow> = BTreeMap::new();
-    for row in rows.into_values() {
-        let Some(resource) = row.resource_id.filter(|id| resource_ids.contains(id)) else {
+    for name in ordered {
+        let Some(row) = rows.remove(&name) else {
             continue;
         };
-        let replace = out.get(&resource).is_none_or(|held| {
-            (&row.canonical_display_name, &row.logical_name_id)
-                < (&held.canonical_display_name, &held.logical_name_id)
-        });
-        if replace {
-            out.insert(resource, row);
+        if let Some(resource) = row.resource_id.filter(|id| resource_ids.contains(id)) {
+            out.entry(resource).or_insert(row);
         }
     }
     Ok(out)

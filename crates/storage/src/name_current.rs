@@ -218,11 +218,16 @@ pub const DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS: &str = r#"
    AND membership_token_lineage_lineage.block_hash = membership_token_lineage.block_hash
 "#;
 
-/// Load one current exact-name projection row by deterministic logical name identity.
+/// Load one current exact-name projection row by deterministic logical name identity. Under the
+/// publication switch the row is composed from the owned key families instead
+/// (`families::name`).
 pub async fn load_name_current(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameCurrentRow>> {
+    if crate::publication_source::serve_from_families() {
+        return crate::families::name::load_family_name(pool, logical_name_id).await;
+    }
     let row = sqlx::query(&format!(
         r#"
         SELECT
@@ -284,13 +289,20 @@ pub async fn load_name_current(
 /// The returned map is keyed by `logical_name_id`, so duplicate requested ids collapse into one
 /// found row and missing rows are omitted. Iteration order is deterministic `BTreeMap` key order;
 /// callers that need request or page order should iterate their original ids and look up into the
-/// map.
+/// map. Under the publication switch the rows are composed from the owned key families.
 pub async fn load_name_current_by_logical_name_ids(
     pool: &PgPool,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
     if logical_name_ids.is_empty() {
         return Ok(BTreeMap::new());
+    }
+    if crate::publication_source::serve_from_families() {
+        return crate::families::name::load_family_names_by_logical_name_ids(
+            pool,
+            logical_name_ids,
+        )
+        .await;
     }
 
     let rows = sqlx::query(&format!(
@@ -355,13 +367,17 @@ pub async fn load_name_current_by_logical_name_ids(
 ///
 /// `name_current.resource_id` is 1:many; this picks one representative per resource using the
 /// `canonical_display_name ASC` tie-break the rest of v2 uses and returns the picked exact-name
-/// row, including its declared wrapper summary.
+/// row, including its declared wrapper summary. Under the publication switch the rows are
+/// composed from the owned key families.
 pub async fn load_current_names_by_resource_ids(
     pool: &PgPool,
     resource_ids: &[Uuid],
 ) -> Result<BTreeMap<Uuid, NameCurrentRow>> {
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
+    }
+    if crate::publication_source::serve_from_families() {
+        return crate::families::name::load_family_names_by_resource_ids(pool, resource_ids).await;
     }
 
     let rows = sqlx::query(&format!(
