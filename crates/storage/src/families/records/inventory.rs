@@ -203,7 +203,14 @@ pub async fn load_family_record_counts(
             counts.push(None);
             continue;
         };
-        // The served count reads the inventory row of the name's exact lookup key.
+        // The composed topology carries the selected resolver version (or link) boundary.
+        // The generic lookup key has no event identity and is only the unversioned fallback.
+        let boundary = row
+            .declared_summary
+            .get("topology")
+            .map(crate::projected_resolution_boundaries_from_topology)
+            .transpose()?
+            .map_or(boundary, |(_, record)| record);
         let wanted_key = crate::record_version_boundary_storage_key(&boundary, resource_id)?;
         let chain_id = crate::ChainPositions::from_value(&row.chain_positions)
             .ok()

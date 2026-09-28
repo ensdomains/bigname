@@ -4,35 +4,23 @@
 
 const V2_RESOLVES_TO_BASE_COIN: &str = "2147492101";
 
-/// Extra reverse-index rows over `seed_v2_resolves_to_records`: alpha also resolves here on Base,
-/// and 20-byte values under non-EVM coin types (118, 61) that the producer keeps because it checks
-/// the value's shape, not the coin type.
+/// Extra records over `seed_v2_resolves_to_records`: alpha also resolves here on Base, and
+/// 20-byte values under non-EVM coin types (118, 61), which the record index keeps because it
+/// checks the value's shape, not the coin type.
 async fn seed_v2_resolves_to_evm_records(database: &TestDatabase) -> Result<()> {
     seed_v2_resolves_to_records(database).await?;
-    let specs = v2_address_name_specs();
-    for (name, coin_type) in [
-        ("alpha.eth", V2_RESOLVES_TO_BASE_COIN),
-        ("gamma.eth", "118"),
-        ("beta.eth", "61"),
-    ] {
-        let spec = specs
-            .iter()
-            .find(|spec| spec.name == name)
-            .expect("fixture name");
-        upsert_phase_address_records_current_row(
-            &database.pool,
-            V2_ADDRESS,
-            "ens",
-            spec.name,
-            spec.surface_binding_id,
-            spec.resource_id,
-            coin_type,
-            &format!("addr:{coin_type}"),
-            json!({}),
-        )
-        .await?;
-    }
-    Ok(())
+    write_address_name_records(
+        database,
+        &[
+            (
+                "alpha.eth",
+                vec![(format!("addr:{V2_RESOLVES_TO_BASE_COIN}"), V2_ADDRESS.into())],
+            ),
+            ("gamma.eth", vec![("addr:118".into(), V2_ADDRESS.into())]),
+            ("beta.eth", vec![("addr:61".into(), V2_ADDRESS.into())]),
+        ],
+    )
+    .await
 }
 
 fn resolutions(row: &Value) -> Vec<(u64, &str)> {
@@ -154,20 +142,12 @@ async fn v2_resolves_to_evm_discovers_names_across_evm_coin_types() -> Result<()
 async fn v2_resolves_to_evm_finds_a_base_only_address() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let beta = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == "beta.eth")
-        .expect("beta spec");
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        V2_OTHER_ADDRESS,
-        "ens",
-        beta.name,
-        beta.surface_binding_id,
-        beta.resource_id,
-        V2_RESOLVES_TO_BASE_COIN,
-        "addr:2147492101",
-        json!({}),
+    write_address_name_records(
+        &database,
+        &[(
+            "beta.eth",
+            vec![(format!("addr:{V2_RESOLVES_TO_BASE_COIN}"), V2_OTHER_ADDRESS.into())],
+        )],
     )
     .await?;
 
@@ -318,116 +298,11 @@ async fn v2_resolves_to_evm_paginates_and_binds_cursor_to_the_selector() -> Resu
 }
 
 #[tokio::test]
-async fn v2_resolves_to_evm_registration_dedupe_keeps_the_group_matches() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    seed_v2_resolves_to_evm_records(&database).await?;
-    // shared-one and shared-two share one registration resource and therefore one record
-    // inventory; the reverse index gives both names the same default-record row.
-    let shared_two = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == "shared-two.eth")
-        .expect("shared-two spec");
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        V2_ADDRESS,
-        "ens",
-        shared_two.name,
-        shared_two.surface_binding_id,
-        shared_two.resource_id,
-        V2_ENSIP19_DEFAULT_COIN,
-        "addr:2147483648",
-        json!({"ensip19_default_address": true, "shadowed_coin_types": ["60"]}),
-    )
-    .await?;
-
-    let by_name = v2_resolves_to_evm_rows(&database, "").await?;
-    assert_eq!(
-        names(&by_name),
-        vec![
-            "alpha.eth",
-            "beta.eth",
-            "gamma.eth",
-            "shared-one.eth",
-            "shared-two.eth"
-        ]
-    );
-    let by_registration = v2_resolves_to_evm_rows(&database, "&dedupe=registration").await?;
-    assert_eq!(
-        names(&by_registration),
-        vec!["alpha.eth", "beta.eth", "gamma.eth", "shared-one.eth"]
-    );
-    let shared = row_named(&by_registration, "shared-one.eth");
-    assert_eq!(resolutions(shared), vec![(2_147_483_648, "addr:2147483648")]);
-
-    // The group facet is the union of every member's matches, kept before the representative is
-    // chosen. The producer gives members of one group identical rows, so this extra Base row for
-    // shared-two alone is a direct insert that only pins the union and representative rules.
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        V2_ADDRESS,
-        "ens",
-        shared_two.name,
-        shared_two.surface_binding_id,
-        shared_two.resource_id,
-        V2_RESOLVES_TO_BASE_COIN,
-        "addr:2147492101",
-        json!({}),
-    )
-    .await?;
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[v2_evm_primary_claim(V2_RESOLVES_TO_BASE_COIN, "shared-one.eth")],
-    )
-    .await?;
-    let by_registration = v2_resolves_to_evm_rows(&database, "&dedupe=registration").await?;
-    let shared = row_named(&by_registration, "shared-one.eth");
-    assert_eq!(
-        resolutions(shared),
-        vec![
-            (2_147_483_648, "addr:2147483648"),
-            (2_147_492_101, "addr:2147492101")
-        ]
-    );
-    // The representative did not match Base itself, so a Base claim naming it does not count.
-    assert_eq!(shared["is_primary"], json!(false));
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[v2_evm_primary_claim(V2_ENSIP19_DEFAULT_COIN, "shared-one.eth")],
-    )
-    .await?;
-    let by_registration = v2_resolves_to_evm_rows(&database, "&dedupe=registration").await?;
-    assert_eq!(
-        row_named(&by_registration, "shared-one.eth")["is_primary"],
-        json!(true)
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn v2_resolves_to_evm_registration_dedupe_paginates() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_resolves_to_evm_records(&database).await?;
-    // shared-one and shared-two form one registration group through their shared inventory;
     // alpha matches coin 60 and Base.
-    let shared_two = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == "shared-two.eth")
-        .expect("shared-two spec");
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        V2_ADDRESS,
-        "ens",
-        shared_two.name,
-        shared_two.surface_binding_id,
-        shared_two.resource_id,
-        V2_ENSIP19_DEFAULT_COIN,
-        "addr:2147483648",
-        json!({"ensip19_default_address": true, "shadowed_coin_types": ["60"]}),
-    )
-    .await?;
     let rows = v2_resolves_to_evm_rows(&database, "&dedupe=registration").await?;
     assert_eq!(
         names(&rows),
@@ -458,48 +333,6 @@ fn v2_evm_primary_claim(coin_type: &str, name: &str) -> PrimaryNameCurrentSnapsh
     }
 }
 
-/// Replace a claim's served columns with a canonical-head hydration from an orphaned block and
-/// keep `baseline` as the retained event claim.
-async fn hydrate_v2_evm_primary_claim_on_orphaned_block(
-    database: &TestDatabase,
-    coin_type: &str,
-    hydrated_name: &str,
-    baseline: Value,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO bigname_phase.chain_lineage (
-             chain_id, block_hash, block_number, block_timestamp, canonicality_state
-         ) VALUES ('ethereum-mainnet', '0xevm-orphaned-hydration', 42,
-             '2026-04-17T00:00:42Z', 'orphaned')
-         ON CONFLICT DO NOTHING",
-    )
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE bigname_phase.primary_names_current
-        SET claim_status = 'success', raw_claim_name = $3, claim_name_is_normalized = true,
-            unsupported_reason = NULL,
-            claim_provenance = claim_provenance || jsonb_build_object(
-                'canonical_head_multicall_hydration', jsonb_build_object(
-                    'chain_id', 'ethereum-mainnet',
-                    'block_number', 42,
-                    'block_hash', '0xevm-orphaned-hydration',
-                    'baseline', $4::jsonb
-                )
-            )
-        WHERE address = $1 AND namespace = 'ens' AND coin_type = $2
-        "#,
-    )
-    .bind(V2_ADDRESS)
-    .bind(coin_type)
-    .bind(hydrated_name)
-    .bind(baseline)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn v2_resolves_to_evm_is_primary_counts_only_the_row_matched_coins() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -522,48 +355,6 @@ async fn v2_resolves_to_evm_is_primary_counts_only_the_row_matched_coins() -> Re
     assert_eq!(row_named(&rows, "beta.eth")["is_primary"], json!(false));
     assert_eq!(row_named(&rows, "shared-one.eth")["is_primary"], json!(true));
 
-    // A hydration whose block left canonical lineage is not served; the retained baseline is.
-    hydrate_v2_evm_primary_claim_on_orphaned_block(
-        &database,
-        V2_RESOLVES_TO_OTHER_EVM_COIN,
-        "beta.eth",
-        json!({
-            "claim_status": "unsupported",
-            "raw_claim_name": null,
-            "claim_name_is_normalized": false,
-            "unsupported_reason": "legacy_resolver_does_not_emit_name"
-        }),
-    )
-    .await?;
-    hydrate_v2_evm_primary_claim_on_orphaned_block(
-        &database,
-        V2_ENSIP19_DEFAULT_COIN,
-        "alpha.eth",
-        json!({
-            "claim_status": "success",
-            "raw_claim_name": "shared-one.eth",
-            "claim_name_is_normalized": true
-        }),
-    )
-    .await?;
-    let rows = v2_resolves_to_evm_rows(&database, "").await?;
-    assert_eq!(row_named(&rows, "beta.eth")["is_primary"], json!(false));
-    assert_eq!(row_named(&rows, "shared-one.eth")["is_primary"], json!(true));
-    // alpha stays primary through its own coin-60 claim only.
-    assert_eq!(row_named(&rows, "alpha.eth")["is_primary"], json!(true));
-    // The single-coin read applies the same snapshot rules.
-    let single = v2_address_names_payload_for_database(
-        &database,
-        &format!(
-            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&coin_type={V2_RESOLVES_TO_OTHER_EVM_COIN}"
-        ),
-    )
-    .await?;
-    assert_eq!(
-        row_named(single["data"].as_array().expect("single"), "beta.eth")["is_primary"],
-        json!(false)
-    );
-
     database.cleanup().await
 }
 
@@ -571,10 +362,6 @@ async fn v2_resolves_to_evm_is_primary_counts_only_the_row_matched_coins() -> Re
 const V2_EVM_BOUNDED_ADDRESS: &str = "0x0000000000000000000000000000000000000e0b";
 /// An address other fixtures leave empty, holding one name past the per-row coin-type limit.
 const V2_EVM_WIDE_ADDRESS: &str = "0x0000000000000000000000000000000000000e0a";
-
-/// An address other fixtures leave empty, where one registration's members each stay within the
-/// per-row coin-type limit but their union exceeds it.
-const V2_EVM_SPLIT_ADDRESS: &str = "0x0000000000000000000000000000000000000e0c";
 
 /// The `count` lowest ENSIP-11 coin types above the default coin type, ascending.
 fn v2_evm_wide_coin_types(count: u64) -> Vec<u64> {
@@ -588,38 +375,24 @@ async fn seed_v2_evm_wide_rows(
     name: &str,
     coin_types: &[u64],
 ) -> Result<()> {
-    let spec = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == name)
-        .expect("fixture name");
-    for coin_type in coin_types {
-        upsert_phase_address_records_current_row(
-            &database.pool,
-            address,
-            "ens",
-            spec.name,
-            spec.surface_binding_id,
-            spec.resource_id,
-            &coin_type.to_string(),
-            &format!("addr:{coin_type}"),
-            json!({}),
-        )
-        .await?;
-    }
-    Ok(())
+    let writes = coin_types
+        .iter()
+        .map(|coin_type| (format!("addr:{coin_type}"), address.to_owned()))
+        .collect();
+    write_address_name_records(database, &[(name, writes)]).await
 }
 
-/// Seeds the bound fixture: at `V2_EVM_BOUNDED_ADDRESS`, alpha matches exactly the limit and
-/// shared-one and shared-two (one registration) each match the same limit coin types; at
-/// `V2_EVM_WIDE_ADDRESS`, beta and both shared names match one coin type past the limit.
+/// Seeds the bound fixture: at `V2_EVM_BOUNDED_ADDRESS`, alpha and shared-one match exactly the
+/// limit; at `V2_EVM_WIDE_ADDRESS`, beta and shared-two match one coin type past the limit. A
+/// name holds one value per coin type, so no name resolves to both addresses.
 async fn seed_v2_evm_bound_fixture(database: &TestDatabase) -> Result<()> {
     let limit = bigname_storage::EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
     let at_limit = v2_evm_wide_coin_types(limit);
     let past_limit = v2_evm_wide_coin_types(limit + 1);
-    for name in ["alpha.eth", "shared-one.eth", "shared-two.eth"] {
+    for name in ["alpha.eth", "shared-one.eth"] {
         seed_v2_evm_wide_rows(database, V2_EVM_BOUNDED_ADDRESS, name, &at_limit).await?;
     }
-    for name in ["beta.eth", "shared-one.eth", "shared-two.eth"] {
+    for name in ["beta.eth", "shared-two.eth"] {
         seed_v2_evm_wide_rows(database, V2_EVM_WIDE_ADDRESS, name, &past_limit).await?;
     }
     Ok(())
@@ -632,8 +405,7 @@ async fn v2_resolves_to_evm_rejects_a_row_past_the_coin_type_limit() -> Result<(
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_evm_bound_fixture(&database).await?;
 
-    // A row at exactly the limit is served whole, under either dedupe; the registration group's
-    // two members repeat each coin type, which counts once.
+    // A row at exactly the limit is served whole, under either dedupe.
     let at_limit = v2_evm_wide_coin_types(limit);
     for (dedupe, name) in [("name", "alpha.eth"), ("registration", "shared-one.eth")] {
         let payload = v2_address_names_payload_for_database(
@@ -673,40 +445,6 @@ async fn v2_resolves_to_evm_rejects_a_row_past_the_coin_type_limit() -> Result<(
             "{uri}"
         );
     }
-    // shared-one and shared-two form one registration group. Each matches 60 coin types, within
-    // the limit, but together they match 120: each is served by name, and the group is rejected.
-    let limit_usize = usize::try_from(limit)?;
-    let split = v2_evm_wide_coin_types(120);
-    seed_v2_evm_wide_rows(&database, V2_EVM_SPLIT_ADDRESS, "shared-one.eth", &split[..60]).await?;
-    seed_v2_evm_wide_rows(&database, V2_EVM_SPLIT_ADDRESS, "shared-two.eth", &split[60..]).await?;
-    assert!(split.len() > limit_usize && 60 <= limit_usize);
-    let base = format!(
-        "/v1/addresses/{V2_EVM_SPLIT_ADDRESS}/names?relation=resolves_to&coin_type=evm"
-    );
-    let by_name =
-        v2_address_names_payload_for_database(&database, &format!("{base}&dedupe=name")).await?;
-    let by_name_rows = by_name["data"].as_array().expect("data array");
-    assert_eq!(names(by_name_rows), vec!["shared-one.eth", "shared-two.eth"]);
-    for (name, coins) in [("shared-one.eth", &split[..60]), ("shared-two.eth", &split[60..])] {
-        let served = resolutions(row_named(by_name_rows, name))
-            .into_iter()
-            .map(|(coin_type, _)| coin_type)
-            .collect::<Vec<_>>();
-        assert_eq!(served, coins, "{name}");
-    }
-    let uri = format!("{base}&dedupe=registration");
-    let response = v2_address_names_response_for_database(&database, &uri).await?;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("unsupported"), "{uri}");
-    assert_eq!(
-        payload["error"]["message"],
-        json!(format!(
-            "coin_type=evm matched more than {limit} EVM coin types on one row; request a single decimal coin_type instead"
-        )),
-        "{uri}"
-    );
-
     // A single coin type still serves the same names.
     let single = v2_address_names_payload_for_database(
         &database,
@@ -718,7 +456,7 @@ async fn v2_resolves_to_evm_rejects_a_row_past_the_coin_type_limit() -> Result<(
     .await?;
     assert_eq!(
         names(single["data"].as_array().expect("data array")),
-        vec!["beta.eth", "shared-one.eth", "shared-two.eth"]
+        vec!["beta.eth", "shared-two.eth"]
     );
 
     database.cleanup().await

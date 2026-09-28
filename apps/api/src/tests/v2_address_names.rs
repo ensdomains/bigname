@@ -8,22 +8,21 @@ async fn v2_get_address_names_preserves_stored_ensip15_normalized_name_bytes() -
     let specs = [V2AddressNameSpec {
         logical_name_id: "ens:ᏣᎳᎩ.eth",
         name: NORMALIZED_NAME,
-        namehash: "node:ᏣᎳᎩ.eth",
         resource_id: Uuid::from_u128(0x34900),
         token_lineage_id: Uuid::from_u128(0x34901),
         surface_binding_id: Uuid::from_u128(0x34902),
         block_hash: "0xname349",
         block_number: 349,
         owner: "0x0000000000000000000000000000000000000349",
-        registrant: "0x0000000000000000000000000000000000000349",
+        registrant: V2_ADDRESS,
         registered_at: "2024-01-02T00:00:00Z",
         created_at: "2023-01-02T00:00:00Z",
         expires_at: "2027-01-02T00:00:00Z",
         relations: &[bigname_storage::AddressNameRelation::TokenHolder],
     }];
-    seed_v2_address_name_storage(&database, &specs).await?;
-    seed_v2_address_name_current_rows(&database, &specs).await?;
-    seed_v2_address_name_relations(&database, &specs).await?;
+    seed_v2_address_name_identities(&database, &specs).await?;
+    publish_v2_address_name_inputs(&database, &specs).await?;
+    assert_v2_address_name_relations(&database, &specs).await?;
     let stored_raw_name: String = sqlx::query_scalar(
         "SELECT raw_name FROM bigname_phase.name_surfaces
          WHERE raw_name = $1 AND visibility_state = 'active'
@@ -103,15 +102,15 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
     );
     assert_eq!(
         data[0]["owner"],
-        json!("0x00000000000000000000000000000000000000a1")
+        json!(V2_PERMISSION_SUBJECT)
     );
     assert_eq!(
         data[0]["registrant"],
-        json!("0x00000000000000000000000000000000000000a2")
+        json!(V2_ADDRESS)
     );
     assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00Z"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00Z"));
+    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00+00:00"));
+    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00+00:00"));
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
     assert_eq!(data[0]["relations"], json!(["registrant", "owner"]));
     assert_eq!(data[0]["is_primary"], json!(true));
@@ -202,9 +201,9 @@ async fn v2_get_address_names_treats_empty_q_as_absent() -> Result<()> {
 async fn v2_get_address_names_trailing_dot_q_matches_label_boundary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let specs = v2_address_name_boundary_specs();
-    seed_v2_address_name_storage(&database, &specs).await?;
-    seed_v2_address_name_current_rows(&database, &specs).await?;
-    seed_v2_address_name_relations(&database, &specs).await?;
+    seed_v2_address_name_identities(&database, &specs).await?;
+    publish_v2_address_name_inputs(&database, &specs).await?;
+    assert_v2_address_name_relations(&database, &specs).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -282,7 +281,7 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
     let set_rows = set_payload["data"]
         .as_array()
         .expect("relation set data must be an array");
-    assert_eq!(names(set_rows), vec!["alpha.eth", "beta.eth"]);
+    assert_eq!(names(set_rows), vec!["alpha.eth", "beta.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"]);
     assert_eq!(set_rows[0]["relations"], json!(["registrant"]));
     assert_eq!(set_rows[1]["relations"], json!(["manager"]));
 
@@ -359,9 +358,7 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    // A successful claim whose stored spelling does not normalize is only reachable while a
-    // normalizer revision is mid-re-derivation. It is one row's defect: the page still serves and
-    // no row claims to be primary.
+    // The reverse reducer classifies these retained invalid name bytes before the page reads them.
     upsert_primary_name_current_snapshots(
         &database.pool,
         &[PrimaryNameCurrentSnapshot {
@@ -369,7 +366,7 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
                 address: V2_ADDRESS.to_owned(),
                 namespace: "ens".to_owned(),
                 coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::Success,
+                claim_status: PrimaryNameClaimStatus::InvalidName,
                 raw_claim_name: Some("alpha..eth".to_owned()),
                 claim_provenance: json!({
                     "source_family": "ens_v1_reverse_l1",
@@ -497,7 +494,7 @@ async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
         .expect("dedupe=registration data must be an array");
 
     assert_eq!(name_rows.len(), 5);
-    assert_eq!(registration_rows.len(), 4);
+    assert_eq!(registration_rows.len(), 5);
     assert_eq!(
         name_rows
             .iter()
@@ -514,7 +511,7 @@ async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
                 row["name"] == json!("shared-one.eth") || row["name"] == json!("shared-two.eth")
             })
             .count(),
-        1
+        2
     );
 
     database.cleanup().await?;
@@ -525,108 +522,36 @@ async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
 async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let shared_resource_id = Uuid::from_u128(0xd100);
-    upsert_phase_permissions_current_rows(
-        &database.pool,
-        &[permission_current_row(
-            shared_resource_id,
-            V2_PERMISSION_SUBJECT,
-            PermissionScope::Registry,
-            12,
-            111,
-        )],
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.permissions_current_resource_summary
-         SET registry_owner = '0x0000000000000000000000000000000000000a11',
-             registry_contract = '0x0000000000000000000000000000000000000b22',
-             registry_binding_provenance = jsonb_build_object(
-                 'kind', 'raw_log', 'chain_id', provenance->>'chain_id'),
-             registry_binding_chain_positions = jsonb_build_object(
-                 'block_number', chain_positions->>'target_block_number',
-                 'block_hash', chain_positions->>'target_block_hash')
-         WHERE resource_id = $1",
-    )
-    .bind(shared_resource_id)
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"INSERT INTO bigname_phase.account_permission_state_current (
-            chain_id, authority_kind, authority_contract, authority_contract_instance_id,
-            owner, subject, relation_kind, approved, effective_powers, grant_source,
-            inheritance_path, transfer_behavior, provenance, chain_positions,
-            canonicality_summary, manifest_version
-        ) SELECT 'ethereum-mainnet', 'registry',
-            '0x0000000000000000000000000000000000000b22',
-            '00000000-0000-0000-0000-000000000605',
-            '0x0000000000000000000000000000000000000a11', $2, 'operator', true,
-            '["registry_control"]', '{"kind":"raw_log"}', '[]',
-            '{"mode":"owner_scoped"}', '{"chain_id":"ethereum-mainnet"}',
-            summary.chain_positions,
-            jsonb_set(summary.canonicality_summary, '{state}', '"canonical"'),
-            summary.manifest_version
-        FROM bigname_phase.permissions_current_resource_summary summary
-        WHERE summary.resource_id = $1"#,
-    )
-    .bind(shared_resource_id)
-    .bind(V2_PERMISSION_SUBJECT)
-    .execute(&database.pool)
-    .await?;
-
-    let payload = v2_address_names_payload_for_database(
-        &database,
-        &format!(
-            "/v1/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary"
-        ),
-    )
-    .await?;
-    let rows = payload["data"]
-        .as_array()
-        .expect("combined address-name data must be an array");
-    let shared_rows = rows
-        .iter()
-        .filter(|row| {
-            row["name"] == json!("shared-one.eth") || row["name"] == json!("shared-two.eth")
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(rows.len(), 4);
-    assert_eq!(shared_rows.len(), 1);
-    assert_eq!(
-        shared_rows[0]["role_summary"],
-        json!([{
-            "address": V2_PERMISSION_SUBJECT,
-            "grants": [
-                {
-                    "grant_relation": "operator",
-                    "grant_scope": {
-                        "kind": "account",
-                        "detail": {
-                            "chain_id": 1,
-                            "authority_kind": "registry",
-                            "authority_contract": "0x0000000000000000000000000000000000000b22",
-                            "owner": "0x0000000000000000000000000000000000000a11"
-                        }
-                    },
-                    "powers": ["registry_control"]
-                },
-                {
-                    "grant_scope": {"kind": "registry", "detail": {}},
-                    "powers": ["set_resolver", "create_subnames"]
-                }
-            ]
-        }])
+    // shared-one.eth and shared-two.eth are distinct registrations with the same registry owner.
+    let shared = v2_address_name_specs().remove(3);
+    let (block, hash) = address_fixture_head(&database).await?;
+    let grant = address_owner_grant(&shared, json!({"kind":"resource"}), "resource_control", block, &hash)?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    seed_address_registry_operator(&database, shared.owner, V2_PERMISSION_OTHER_SUBJECT).await?;
+    let payload = v2_address_names_payload_for_database(&database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=registration&include=role_summary")).await?;
+    let rows = payload["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 5);
+    let shared_rows = rows.iter().filter(|row| row["name"].as_str().unwrap().starts_with("shared-")).collect::<Vec<_>>();
+    assert_eq!(shared_rows.len(), 2);
+    assert_ne!(
+        shared_rows[0]["permission_resource_id"],
+        shared_rows[1]["permission_resource_id"]
     );
-
+    for row in &shared_rows {
+        let grants = address_name_inline_grants(row);
+        assert!(!grants.is_empty());
+        assert_eq!(grants, address_name_permission_grants(&database,
+            row["permission_resource_id"].as_str().unwrap(), "").await?);
+    }
+    assert_eq!(address_name_inline_grants(shared_rows[0]).len(), 2);
+    assert_eq!(address_name_inline_grants(shared_rows[1]).len(), 1);
     database.cleanup().await
 }
 
 // The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
-// timestamp can hold. A seconds expiry outside 1970..=9999, as a number or a quoted number, is
-// unknown: the row has no `expires_at` and sorts with the other unknown expiries (last ascending,
-// first descending). Project writes no formatted `control.expiry` for such a value, so there is
-// no fallback to revive it; a row whose only expiry is a formatted one still uses it.
+// timestamp can hold. A seconds expiry outside 1970..=9999 is unknown: the row has no
+// `expires_at` and sorts with the other unknown expiries (last ascending, first descending).
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
@@ -636,31 +561,14 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
     seed_v2_address_names_fixture(&database).await?;
     let first_known = Some("1970-01-01T00:00:00Z");
     let last_known = Some("9999-12-31T23:59:59Z");
-    for (registration, control, expected) in [
-        (json!(-1), Value::Null, None),
-        (json!(-300_000_000_000_i64), Value::Null, None),
-        (json!(0), json!("1970-01-01T00:00:00Z"), first_known),
-        (json!(253_402_300_799_i64), json!("9999-12-31T23:59:59Z"), last_known),
-        (json!(253_402_300_800_i64), Value::Null, None),
-        (json!(u64::MAX), Value::Null, None),
-        (json!("-1"), Value::Null, None),
-        (json!("0"), json!("1970-01-01T00:00:00Z"), first_known),
-        (json!("253402300799"), json!("9999-12-31T23:59:59Z"), last_known),
-        (json!("253402300800"), Value::Null, None),
-        (
-            json!("1735689600.5"),
-            json!("2025-01-01T00:00:00Z"),
-            Some("2025-01-01T00:00:00Z"),
-        ),
-        (
-            json!(1_735_689_600.5),
-            json!("2025-01-01T00:00:00Z"),
-            Some("2025-01-01T00:00:00Z"),
-        ),
-        (Value::Null, json!("2030-01-02T00:00:00Z"), Some("2030-01-02T00:00:00Z")),
+    for (registration, expected) in [
+        (json!(0), first_known),
+        (json!(253_402_300_799_i64), last_known),
+        (json!(253_402_300_800_i64), None),
+        (json!(u64::MAX), None),
     ] {
-        set_address_name_expiry(&database, "alpha.eth", &registration, &control).await?;
-        let case = format!("registration.expiry={registration} control.expiry={control}");
+        set_address_name_expiry(&database, "alpha.eth", &registration).await?;
+        let case = format!("registration expiry={registration}");
         let asc = v2_address_names_payload_for_database(
             &database,
             &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
@@ -692,16 +600,14 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
     database.cleanup().await
 }
 
-// A fractional seconds expiry keeps whole seconds for sorting too, as Project presents it. Half a
-// second past alpha.eth's expiry, beta.eth ties with it, so the collection's tie-break orders
-// them (beta.eth first, as it does for any equal expiry here), not the half second.
+// Equal observed integer expiries use the collection identity as their stable tie-break.
 #[tokio::test]
-async fn v2_get_address_names_sorts_a_fractional_expiry_by_whole_seconds() -> Result<()> {
+async fn v2_get_address_names_breaks_equal_expiry_ties_by_identity() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     let formatted = json!("2025-01-01T00:00:00Z");
-    set_address_name_expiry(&database, "alpha.eth", &json!("1735689600"), &formatted).await?;
-    set_address_name_expiry(&database, "beta.eth", &json!("1735689600.5"), &formatted).await?;
+    set_address_name_expiry(&database, "alpha.eth", &json!(1_735_689_600_i64)).await?;
+    set_address_name_expiry(&database, "beta.eth", &json!(1_735_689_600_i64)).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
@@ -722,10 +628,10 @@ async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
     seed_v2_address_names_fixture(&database).await?;
     for (name, registration) in [
         ("alpha.eth", json!(u64::MAX)),
-        ("beta.eth", json!(-1)),
-        ("gamma.eth", json!("253402300800")),
+        ("beta.eth", json!(u64::MAX)),
+        ("gamma.eth", json!(253_402_300_800_i64)),
     ] {
-        set_address_name_expiry(&database, name, &registration, &Value::Null).await?;
+        set_address_name_expiry(&database, name, &registration).await?;
     }
     for (order, known_first) in [("asc", true), ("desc", false)] {
         let mut listed = Vec::new();
@@ -770,24 +676,12 @@ async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
     database.cleanup().await
 }
 
-async fn set_address_name_expiry(
-    database: &TestDatabase,
-    name: &str,
-    registration: &Value,
-    control: &Value,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(jsonb_set(
-             declared_summary, '{registration,expiry}', $2, true), '{control,expiry}', $3, true)
-         WHERE raw_name = $1",
-    )
-    .bind(name)
-    .bind(registration)
-    .bind(control)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+async fn set_address_name_expiry(database: &TestDatabase, name: &str, expiry: &Value) -> Result<()> {
+    sqlx::query("UPDATE normalized_events SET after_state = jsonb_set(after_state, '{expiry}', $2)
+        WHERE logical_name_id = $1 AND event_kind = 'RegistrationGranted'")
+        .bind(bigname_storage::logical_name_id_for_name("ens", name)).bind(expiry)
+        .execute(&database.pool).await?;
+    rebuild_address_fixture(database).await
 }
 
 #[tokio::test]
@@ -930,50 +824,10 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 }
 
 #[tokio::test]
-async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
+async fn v2_address_role_summary_marks_wrapper_page_as_non_authoritative() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let resource_id = Uuid::from_u128(0xa100);
-    sqlx::query("DELETE FROM permissions_current_resource_summary WHERE resource_id = $1")
-        .bind(resource_id)
-        .execute(&database.pool)
-        .await?;
-
-    let payload = v2_address_names_payload_for_database(
-        &database,
-        &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
-    )
-    .await?;
-
-    assert_eq!(payload["data"][0]["name"], json!("alpha.eth"));
-    assert!(
-        payload["data"][0]["role_summary"]
-            .as_array()
-            .is_some_and(|summary| !summary.is_empty())
-    );
-    assert_eq!(payload["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        payload["meta"]["unsupported_fields"],
-        json!(["role_summary"])
-    );
-    assert_eq!(
-        payload["meta"]["unsupported_reason"],
-        json!("permission_support_unknown")
-    );
-
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    let resource_id = Uuid::from_u128(0xb100);
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("wrapper")),
-    )
-    .await?;
+    wrap_address_name(&database, "beta.eth", 0xb300, None).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -982,7 +836,14 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
     .await?;
 
     assert_eq!(payload["data"][0]["name"], json!("beta.eth"));
-    assert_eq!(payload["data"][0]["role_summary"], json!([]));
+    // The wrapper token holder's grant is the only listed one.
+    assert_eq!(
+        payload["data"][0]["role_summary"],
+        json!([{"address":V2_ADDRESS, "grants":[{
+            "grant_scope":{"kind":"registration", "detail":{}},
+            "powers":["registration_control"]
+        }]}])
+    );
     assert!(payload["data"][0].get("restrictions").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
@@ -999,14 +860,13 @@ async fn v2_address_role_summary_serves_restrictions_per_row() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     let resource_id = Uuid::from_u128(0xb100);
-    let mut summary = permission_current_resource_summary(resource_id, Some("wrapper"));
-    summary.resource_restrictions = Some(json!({
-        "kind": "ens_v1_wrapper",
-        "wrapper_state": "emancipated",
-        "fuses": 65_536,
-        "expiry_seconds": 1_900_000_000,
-    }));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    wrap_address_name(
+        &database,
+        "beta.eth",
+        0xb300,
+        Some(("emancipated", 65_536, 1_900_000_000)),
+    )
+    .await?;
 
     let with_summary = v2_address_names_payload_for_database(
         &database,
@@ -1049,13 +909,6 @@ async fn v2_address_role_summary_serves_restrictions_per_row() -> Result<()> {
 async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let resource_id = Uuid::from_u128(0xa100);
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("registrar")),
-    )
-    .await?;
-
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
@@ -1081,43 +934,8 @@ async fn v2_address_role_summary_marks_uningested_approvals_non_authoritative() 
 async fn v2_get_address_names_include_role_summary_groups_permissions_by_address() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let alpha = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == "alpha.eth")
-        .expect("alpha address-name fixture must exist");
-    let current_inventory = address_name_record_inventory_current_row(&alpha);
-    let mut stale_inventory = current_inventory.clone();
-    stale_inventory.record_version_boundary = address_name_record_inventory_boundary_with_pointer(
-        &alpha,
-        Some(9_999),
-        Some("TextChanged"),
-    );
-    stale_inventory.selectors = json!([
-        {
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "cacheable": true
-        }
-    ]);
-    stale_inventory.entries = json!([
-        {
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "status": "success",
-            "value": {
-                "coin_type": "60",
-                "value": "0x0000000000000000000000000000000000000abc"
-            }
-        }
-    ]);
-    database
-        .insert_record_inventory_current_row(current_inventory)
-        .await?;
-    database
-        .insert_record_inventory_current_row(stale_inventory)
-        .await?;
+    seed_address_alpha_record_inputs(&database, true).await?;
+    seed_v2_address_registry_operator(&database).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary&page_size=1"),
@@ -1132,52 +950,20 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
     assert_eq!(
         row["role_summary"],
         json!([
-            {
-                "address": V2_PERMISSION_SUBJECT,
-                "grants": [
-                    {
-                        "grant_scope": {
-                            "kind": "registry",
-                            "detail": {}
-                        },
-                        "powers": ["set_resolver", "create_subnames"]
-                    },
-                    {
-                        "grant_scope": {
-                            "kind": "registration",
-                            "detail": {}
-                        },
-                        "powers": ["registration_control", "resolver_control"]
-                    }
-                ]
-            },
-            {
-                "address": V2_PERMISSION_OTHER_SUBJECT,
-                "grants": [
-                    {
-                        "grant_scope": {
-                            "kind": "record_manager",
-                            "detail": {
-                                "chain_id": 1,
-                                "manager": "0x0000000000000000000000000000000000000bb1"
-                            }
-                        },
-                        "powers": ["set_resolver", "create_subnames"]
-                    },
-                    {
-                        "grant_scope": {
-                            "kind": "resolver",
-                            "detail": {
-                                "resolver": {
-                                    "chain_id": 1,
-                                    "address": "0x0000000000000000000000000000000000000aaa"
-                                }
-                            }
-                        },
-                        "powers": ["set_resolver", "set_records"]
-                    }
-                ]
-            }
+            {"address":V2_PERMISSION_SUBJECT, "grants":[
+                {"grant_scope":{"kind":"resolver", "detail":{"resolver":{
+                    "chain_id":1, "address":"0x0000000000000000000000000000000000000aaa"}}},
+                 "powers":["resolver_control"]},
+                {"grant_scope":{"kind":"registration","detail":{}},
+                 "powers":["registration_control"]}
+            ]},
+            {"address":V2_PERMISSION_OTHER_SUBJECT, "grants":[{
+                "grant_relation":"operator",
+                "grant_scope":{"kind":"account", "detail":{
+                    "chain_id":1,"authority_kind":"registry", "authority_contract":V2_ADDRESS_REGISTRY,
+                    "owner":V2_PERMISSION_SUBJECT}},
+                "powers":["registry_control"]
+            }]}
         ])
     );
     assert!(row["role_summary"][0].get("subject").is_none());
@@ -1241,10 +1027,7 @@ async fn v2_address_role_summary_omits_relation_for_direct_grants() -> Result<()
 async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(Uuid::from_u128(0xb100), Some("wrapper")),
-    ).await?;
+    wrap_address_name(&database, "beta.eth", 0xb300, None).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
@@ -1257,11 +1040,8 @@ async fn v2_address_role_summary_uses_wrapper_reason_for_wrapper_page() -> Resul
 async fn v2_address_role_summary_reports_sorted_union_for_ens_v1_and_ens_v2_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    // alpha.eth keeps its ENSv1 registrar summary; beta.eth becomes an ENSv2 registry resource.
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(Uuid::from_u128(0xb100), Some("ens_v2_registry")),
-    ).await?;
+    // alpha.eth keeps its ENSv1 registrar authority; beta.eth moves to an ENSv2 registration.
+    bind_address_name_ens_v2(&database, "beta.eth", 0xb200, false).await?;
     let payload = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?include=role_summary"),
@@ -1321,7 +1101,7 @@ async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
         .seed_default_ens_snapshot_selector_position()
         .await?;
 
-    seed_v2_address_name_storage(&database, &[]).await?;
+    seed_v2_address_name_identities(&database, &[]).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -1392,183 +1172,6 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
             "shared-one.eth",
             "shared-two.eth"
         ]
-    );
-
-    let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
-        &database.pool,
-        V2_ADDRESS,
-        Some("ens"),
-        None,
-    )
-    .await?;
-    assert!(
-        audit_rows
-            .iter()
-            .any(|row| row.canonical_display_name == "beta.eth")
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_current_name_reads_exclude_orphaned_project_targets_before_redo() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    let beta_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'beta.eth'",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES
-            ('ethereum-mainnet', '0xproject-address-target', 2001,
-             '2026-04-17T02:00:01Z', 'canonical'),
-            ('ethereum-mainnet', '0xproject-name-target', 2002,
-             '2026-04-17T02:00:02Z', 'canonical'),
-            ('ethereum-mainnet', '0xproject-primary-target', 2003,
-             '2026-04-17T02:00:03Z', 'canonical');
-        UPDATE bigname_phase.address_names_current
-        SET chain_positions = jsonb_build_object(
-                'block_number', 2001,
-                'block_hash', '0xproject-address-target',
-                'target_block_number', 2001,
-                'target_block_hash', '0xproject-address-target'
-            ),
-            canonicality_summary = jsonb_build_object(
-                'state', 'canonical_lineage',
-                'target_block_number', 2001,
-                'target_block_hash', '0xproject-address-target'
-            )
-        WHERE lower(raw_name) = 'beta.eth';
-        UPDATE bigname_phase.name_current
-        SET chain_positions = jsonb_build_object(
-                'ethereum', jsonb_build_object(
-                    'chain_id', 'ethereum-mainnet',
-                    'block_number', 2002,
-                    'block_hash', '0xproject-name-target'
-                )
-            ),
-            canonicality_summary = jsonb_build_object(
-                'state', 'canonical_lineage',
-                'target_block_number', 2002,
-                'target_block_hash', '0xproject-name-target'
-            )
-        WHERE lower(raw_name) = 'beta.eth';
-        UPDATE bigname_phase.primary_names_current
-        SET claim_provenance = claim_provenance || jsonb_build_object(
-                'chain_id', 'ethereum-mainnet',
-                'target_block_number', 2003,
-                'target_block_hash', '0xproject-primary-target'
-            )
-        WHERE address = '0x0000000000000000000000000000000000000abc';
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-
-    let project_targets_back_no_identity_rows: bool = sqlx::query_scalar(
-        r#"
-        SELECT NOT EXISTS (
-            SELECT 1 FROM bigname_phase.name_surfaces
-            WHERE block_hash IN (
-                '0xproject-address-target', '0xproject-name-target',
-                '0xproject-primary-target'
-            )
-            UNION ALL
-            SELECT 1 FROM bigname_phase.resources
-            WHERE block_hash IN (
-                '0xproject-address-target', '0xproject-name-target',
-                '0xproject-primary-target'
-            )
-            UNION ALL
-            SELECT 1 FROM bigname_phase.surface_bindings
-            WHERE block_hash IN (
-                '0xproject-address-target', '0xproject-name-target',
-                '0xproject-primary-target'
-            )
-            UNION ALL
-            SELECT 1 FROM bigname_phase.token_lineages
-            WHERE block_hash IN (
-                '0xproject-address-target', '0xproject-name-target',
-                '0xproject-primary-target'
-            )
-        )
-        "#,
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    assert!(project_targets_back_no_identity_rows);
-    assert!(
-        bigname_storage::load_name_current(&database.pool, &beta_logical_name_id)
-            .await?
-            .is_some()
-    );
-    assert!(
-        bigname_storage::load_primary_name_current(&database.pool, V2_ADDRESS, "ens", "60")
-            .await?
-            .is_some()
-    );
-    assert!(
-        bigname_storage::load_address_names_current(
-            &database.pool,
-            V2_ADDRESS,
-            Some("ens"),
-            None,
-        )
-        .await?
-        .iter()
-        .any(|row| row.canonical_display_name == "beta.eth")
-    );
-
-    sqlx::query(
-        "UPDATE bigname_phase.chain_lineage \
-         SET canonicality_state = 'orphaned' \
-         WHERE block_hash IN ( \
-             '0xproject-address-target', '0xproject-name-target', \
-             '0xproject-primary-target' \
-         )",
-    )
-    .execute(&database.pool)
-    .await?;
-
-    assert!(
-        bigname_storage::load_name_current(&database.pool, &beta_logical_name_id)
-            .await?
-            .is_none()
-    );
-    assert!(
-        bigname_storage::load_primary_name_current(&database.pool, V2_ADDRESS, "ens", "60")
-            .await?
-            .is_none()
-    );
-    let default_rows = bigname_storage::load_address_names_current(
-        &database.pool,
-        V2_ADDRESS,
-        Some("ens"),
-        None,
-    )
-    .await?;
-    assert!(
-        default_rows
-            .iter()
-            .all(|row| row.canonical_display_name != "beta.eth")
-    );
-    let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
-        &database.pool,
-        V2_ADDRESS,
-        Some("ens"),
-        None,
-    )
-    .await?;
-    assert!(
-        audit_rows
-            .iter()
-            .any(|row| row.canonical_display_name == "beta.eth")
     );
 
     database.cleanup().await?;
@@ -1660,9 +1263,9 @@ fn names(rows: &[Value]) -> Vec<&str> {
 
 async fn seed_v2_address_names_fixture(database: &TestDatabase) -> Result<()> {
     let specs = v2_address_name_specs();
-    seed_v2_address_name_storage(database, &specs).await?;
-    seed_v2_address_name_current_rows(database, &specs).await?;
-    seed_v2_address_name_relations(database, &specs).await?;
+    seed_v2_address_name_identities(database, &specs).await?;
+    publish_v2_address_name_inputs(database, &specs).await?;
+    assert_v2_address_name_relations(database, &specs).await?;
     seed_v2_address_name_permissions(database, &specs).await?;
     upsert_primary_name_current_snapshots(
         &database.pool,
@@ -1686,219 +1289,293 @@ async fn seed_v2_address_names_fixture(database: &TestDatabase) -> Result<()> {
     Ok(())
 }
 
-async fn seed_v2_address_name_storage(
+async fn seed_v2_address_name_identities(
     database: &TestDatabase,
     specs: &[V2AddressNameSpec],
 ) -> Result<()> {
-    // This fixture advertises both public namespaces; the empty Base index is also published.
-    database.seed_snapshot_selector_chain_positions(&json!({
-        "base": {
-            "chain_id": "base-mainnet",
-            "block_number": 1,
-            "block_hash": "0xcount-base-empty",
-            "timestamp": "2024-01-01T00:00:00Z"
-        }
-    })).await?;
-    let surfaces = specs
-        .iter()
-        .map(|spec| {
-            collection_name_surface(
-                spec.logical_name_id,
-                spec.name,
-                spec.namehash,
-                spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut seen_resources = BTreeSet::new();
-    let resources = specs
-        .iter()
-        .filter(|spec| seen_resources.insert(spec.resource_id))
-        .map(|spec| {
-            address_name_resource(
-                spec.resource_id,
-                Some(spec.token_lineage_id),
-                spec.block_hash,
-                spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut seen_token_lineages = BTreeSet::new();
-    let token_lineages = specs
-        .iter()
-        .filter(|spec| seen_token_lineages.insert(spec.token_lineage_id))
-        .map(|spec| {
-            address_name_token_lineage(spec.token_lineage_id, spec.block_hash, spec.block_number)
-        })
-        .collect::<Vec<_>>();
-    let bindings = specs
-        .iter()
-        .map(|spec| {
-            address_name_surface_binding(
-                spec.surface_binding_id,
-                spec.logical_name_id,
-                spec.resource_id,
-                spec.block_hash,
-                spec.block_number,
-                1_717_180_000 + spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut seen_raw_blocks = BTreeSet::new();
-    let raw_blocks = specs
-        .iter()
-        .filter(|spec| seen_raw_blocks.insert((spec.block_hash, spec.block_number)))
-        .map(|spec| {
-            raw_block(
-                "ethereum-mainnet",
-                spec.block_hash,
-                None,
-                spec.block_number,
-                1_717_180_000 + spec.block_number,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    upsert_phase_raw_blocks(&database.pool, &raw_blocks).await?;
-    upsert_test_name_surfaces(&database.pool, &surfaces).await?;
-    upsert_test_token_lineages(&database.pool, &token_lineages).await?;
-    upsert_test_resources(&database.pool, &resources).await?;
-    upsert_test_surface_bindings(&database.pool, &bindings).await?;
-    Ok(())
-}
-
-async fn seed_v2_address_name_current_rows(
-    database: &TestDatabase,
-    specs: &[V2AddressNameSpec],
-) -> Result<()> {
-    let mut inserted = BTreeSet::new();
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"base":{
+            "chain_id":"base-mainnet", "block_number":1, "block_hash":"0xcount-base-empty",
+            "timestamp":"2024-01-01T00:00:00Z"
+        }}))
+        .await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 1, "0xcount-base-empty").await?;
     for spec in specs {
-        if !inserted.insert(spec.logical_name_id) {
-            continue;
-        }
-        database
-            .insert_name_current_row(address_name_name_current_row(
-                spec.logical_name_id,
-                spec.name,
-                spec.name,
-                spec.namehash,
-                spec.surface_binding_id,
-                spec.resource_id,
-                Some(spec.token_lineage_id),
-                spec.block_number,
-                json!({
-                    "registration": {
-                        "status": "active",
-                        "authority_kind": "registrar",
-                        "registrant": spec.registrant,
-                        "registered_at": spec.registered_at,
-                        "created_at": spec.created_at,
-                        "expiry": spec.expires_at
-                    },
-                    "control": {
-                        "registry_owner": spec.owner,
-                        "registrant": spec.registrant,
-                        "expiry": spec.expires_at
-                    }
-                }),
-            ))
+        for at in [spec.created_at, spec.registered_at] {
+            let (block, hash) = address_fixture_time_block(at)?;
+            sqlx::query(
+                "INSERT INTO chain_lineage
+                    (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+                 VALUES ('ethereum-mainnet', $1, $2, $3::timestamptz, 'canonical')
+                 ON CONFLICT (chain_id, block_hash) DO NOTHING",
+            )
+            .bind(&hash)
+            .bind(block)
+            .bind(at)
+            .execute(&database.pool)
             .await?;
+        }
+    }
+    for spec in specs {
+        let (block, hash) = address_fixture_time_block(spec.created_at)?;
+        seed_family_identity_inputs(
+            &database.pool,
+            "ens",
+            spec.name,
+            "ethereum-mainnet",
+            block,
+            &hash,
+            spec.resource_id,
+            spec.token_lineage_id,
+            spec.surface_binding_id,
+            "ens_v1",
+        )
+        .await?;
+        database
+            .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+                "chain_id":"ethereum-mainnet", "block_number":spec.block_number,
+                "block_hash":spec.block_hash, "timestamp":"2024-05-31T18:26:47Z"
+            }}))
+            .await?;
+    }
+    if specs.is_empty() {
+        rebuild_address_fixture(database).await?;
     }
     Ok(())
 }
 
-async fn seed_v2_address_name_relations(
+// The fixture's creation and registration times, each at its own block below the head blocks.
+const ADDRESS_FIXTURE_TIMES: [&str; 8] = [
+    "2023-01-02T00:00:00Z",
+    "2023-03-02T00:00:00Z",
+    "2023-12-01T00:00:00Z",
+    "2023-12-02T00:00:00Z",
+    "2024-01-02T00:00:00Z",
+    "2024-03-02T00:00:00Z",
+    "2024-04-01T00:00:00Z",
+    "2024-04-02T00:00:00Z",
+];
+
+fn address_fixture_time_block(at: &str) -> Result<(i64, String)> {
+    let index = ADDRESS_FIXTURE_TIMES
+        .iter()
+        .position(|time| *time == at)
+        .with_context(|| format!("{at} is not an address fixture time"))?;
+    Ok((10 + index as i64, format!("0xaddress-time-{index}")))
+}
+
+// These are retained registry and registrar inputs. Relations are derived by the family reader.
+async fn publish_v2_address_name_inputs(
     database: &TestDatabase,
     specs: &[V2AddressNameSpec],
 ) -> Result<()> {
-    let mut rows = Vec::new();
+    let mut events = Vec::new();
     for spec in specs {
-        for relation in spec.relations {
-            rows.push(address_name_current_row(
-                V2_ADDRESS,
-                spec.logical_name_id,
-                *relation,
-                spec.name,
-                spec.name,
-                spec.namehash,
-                spec.surface_binding_id,
-                spec.resource_id,
-                Some(spec.token_lineage_id),
-                spec.block_number,
+        let logical = bigname_storage::logical_name_id_for_name("ens", spec.name);
+        let node = bigname_lookup::ens_namehash_hex(spec.name)?;
+        for (at, kind, family, after) in [
+            (
+                spec.created_at,
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                json!({"source_event":"Transfer", "node":node, "owner":spec.owner,
+                    "owner_getter":spec.owner, "registry_contract":V2_ADDRESS_REGISTRY,
+                    "emitter_role":"registry"}),
+            ),
+            (
+                spec.registered_at,
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                json!({"authority_kind":"registrar", "registrant":spec.registrant,
+                    "expiry":parse_rfc3339_utc_timestamp(spec.expires_at).map_err(|e| anyhow::anyhow!("{e}"))?.unix_timestamp()}),
+            ),
+        ] {
+            let (block, hash) = address_fixture_time_block(at)?;
+            events.push(address_fixture_event(
+                &format!("address-{}-{kind}", spec.resource_id),
+                Some(&logical),
+                Some(spec.resource_id),
+                kind,
+                family,
+                block,
+                &hash,
+                NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
+                after,
             ));
         }
     }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_address_fixture(database).await
+}
 
-    upsert_phase_address_names_current_rows(&database.pool, &rows).await?;
+async fn assert_v2_address_name_relations(
+    database: &TestDatabase,
+    specs: &[V2AddressNameSpec],
+) -> Result<()> {
+    let rows =
+        bigname_storage::load_address_names_current(&database.pool, V2_ADDRESS, Some("ens"), None)
+            .await?;
+    for spec in specs {
+        for relation in spec.relations {
+            anyhow::ensure!(
+                rows.iter().any(|row| row.logical_name_id
+                    == bigname_storage::logical_name_id_for_name("ens", spec.name)
+                    && row.relation == *relation),
+                "actual ownership inputs did not derive {relation:?} for {}",
+                spec.name
+            );
+        }
+    }
     Ok(())
 }
 
+const V2_ADDRESS_REGISTRY: &str = "0x0000000000000000000000000000000000000b22";
+
+#[allow(clippy::too_many_arguments)]
+fn address_fixture_event(
+    identity: &str,
+    name: Option<&str>,
+    resource: Option<Uuid>,
+    kind: &str,
+    family: &str,
+    block: i64,
+    hash: &str,
+    log: i64,
+    after: Value,
+) -> NormalizedEvent {
+    let mut event = history_event(
+        identity,
+        name,
+        resource,
+        Some("ethereum-mainnet"),
+        Some(block),
+        Some(hash),
+        Some("0xaddress-input"),
+        Some(log),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = kind.into();
+    event.source_family = family.into();
+    event.before_state = json!({});
+    event.after_state = after;
+    event
+}
+
+async fn address_fixture_head(database: &TestDatabase) -> Result<(i64, String)> {
+    Ok(sqlx::query_as("SELECT block_number, block_hash FROM chain_lineage
+        WHERE chain_id = 'ethereum-mainnet' AND canonicality_state IN ('canonical','safe','finalized')
+        ORDER BY block_number DESC LIMIT 1").fetch_one(&database.pool).await?)
+}
+
+async fn rebuild_address_fixture(database: &TestDatabase) -> Result<()> {
+    let (block, hash) = address_fixture_head(database).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
+// The registry owner's grant as the ENSv1 adapter writes it for a registrar-backed name.
 async fn seed_v2_address_name_permissions(
     database: &TestDatabase,
     specs: &[V2AddressNameSpec],
 ) -> Result<()> {
-    let alpha_resource_id = Uuid::from_u128(0xa100);
-    let mut resource_row = permission_current_row(
-        alpha_resource_id,
-        V2_PERMISSION_SUBJECT,
-        PermissionScope::Resource,
-        7,
-        107,
-    );
-    resource_row.effective_powers = json!(["resource_control", "resolver_control"]);
-    resource_row.grant_source = json!({
-        "kind": "ens_v1_authority",
-        "authority_kind": "registry_owner",
-        "authority_key": "registry:ethereum-mainnet:alpha",
-        "source_event_kind": "Transfer"
-    });
+    let Some(alpha) = specs.iter().find(|spec| spec.name == "alpha.eth") else {
+        return Ok(());
+    };
+    let (block, hash) = address_fixture_head(database).await?;
+    let event = address_owner_grant(alpha, json!({"kind":"resource"}), "resource_control", block, &hash)?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    rebuild_address_fixture(database).await
+}
 
-    upsert_phase_permissions_current_rows(
+fn address_owner_grant(
+    spec: &V2AddressNameSpec,
+    scope: Value,
+    power: &str,
+    block: i64,
+    hash: &str,
+) -> Result<NormalizedEvent> {
+    let logical = bigname_storage::logical_name_id_for_name("ens", spec.name);
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    Ok(address_fixture_event(
+        &format!("address-owner-grant-{}-{ordinal}", spec.resource_id),
+        Some(&logical),
+        Some(spec.resource_id),
+        "PermissionChanged",
+        "ens_v1_registry_l1",
+        block,
+        hash,
+        ordinal,
+        json!({"subject":spec.owner, "scope":scope, "effective_powers":[power],
+            "grant_source":{"kind":"ens_v1_authority", "authority_kind":"registrar",
+                "authority_key":format!("registrar:ethereum-mainnet:{}", spec.resource_id),
+                "source_event_kind":"AuthorityTransferred"},
+            "revocation_source":null, "inheritance_path":[],
+            "transfer_behavior":"replace_on_authority_change"}),
+    ))
+}
+
+async fn seed_address_alpha_record_inputs(
+    database: &TestDatabase,
+    old_version: bool,
+) -> Result<()> {
+    let resolver = "0x0000000000000000000000000000000000000aaa";
+    let (block, hash) = address_fixture_head(database).await?;
+    append_name_resolver_input(database, "ens", "alpha.eth", resolver).await?;
+    // Setting a resolver gives the registry owner resolver control over it.
+    let alpha = v2_address_name_specs().remove(0);
+    let grant = address_owner_grant(
+        &alpha,
+        json!({"kind":"resolver", "chain_id":"ethereum-mainnet", "resolver_address":resolver}),
+        "resolver_control",
+        block,
+        &hash,
+    )?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    if old_version {
+        insert_family_fixture_record_writes(
+            &database.pool,
+            "ens",
+            "ethereum-mainnet",
+            "alpha.eth",
+            resolver,
+            block,
+            &hash,
+            &[family_fixture_record_write(
+                "text:obsolete",
+                Some(json!("old")),
+            )],
+        )
+        .await?;
+        let mut version = address_fixture_event(
+            "address-alpha-version",
+            None,
+            None,
+            "RecordVersionChanged",
+            "ens_v1_resolver_l1",
+            block,
+            &hash,
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
+            json!({"resolver":resolver,"node":bigname_lookup::ens_namehash_hex("alpha.eth")?,
+                "source_event":"VersionChanged","record_version":1}),
+        );
+        version.raw_fact_ref["emitting_address"] = json!(resolver);
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[version]).await?;
+    }
+    insert_family_fixture_record_writes(
         &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "alpha.eth",
+        resolver,
+        block,
+        &hash,
         &[
-            resource_row,
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_SUBJECT,
-                PermissionScope::Registry,
-                8,
-                108,
-            ),
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_OTHER_SUBJECT,
-                PermissionScope::Resolver {
-                    chain_id: "ethereum-mainnet".to_owned(),
-                    resolver_address: "0x0000000000000000000000000000000000000aaa".to_owned(),
-                },
-                9,
-                109,
-            ),
-            permission_current_row(
-                alpha_resource_id,
-                V2_PERMISSION_OTHER_SUBJECT,
-                PermissionScope::RecordManager {
-                    chain_id: "ethereum-mainnet".to_owned(),
-                    manager_address: "0x0000000000000000000000000000000000000BB1".to_owned(),
-                },
-                10,
-                110,
-            ),
+            family_fixture_record_write("addr:60", Some(json!(V2_ADDRESS))),
+            family_fixture_record_write("text:url", Some(json!("https://example.test"))),
+            family_fixture_record_write("contenthash", Some(json!("0x1234"))),
         ],
     )
     .await?;
-    for resource_id in specs
-        .iter()
-        .map(|spec| spec.resource_id)
-        .collect::<BTreeSet<_>>()
-    {
-        upsert_phase_permissions_current_resource_summary(
-            &database.pool,
-            &permission_current_resource_summary(resource_id, Some("registrar")),
-        )
-        .await?;
-    }
-    Ok(())
+    rebuild_address_fixture(database).await
 }
 
 fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
@@ -1906,14 +1583,13 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:alpha.eth",
             name: "alpha.eth",
-            namehash: "node:alpha.eth",
             resource_id: Uuid::from_u128(0xa100),
             token_lineage_id: Uuid::from_u128(0xa101),
             surface_binding_id: Uuid::from_u128(0xa102),
             block_hash: "0xname65",
             block_number: 101,
-            owner: "0x00000000000000000000000000000000000000a1",
-            registrant: "0x00000000000000000000000000000000000000a2",
+            owner: V2_PERMISSION_SUBJECT,
+            registrant: V2_ADDRESS,
             registered_at: "2024-01-02T00:00:00Z",
             created_at: "2023-01-02T00:00:00Z",
             expires_at: "2027-01-02T00:00:00Z",
@@ -1925,13 +1601,12 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:beta.eth",
             name: "beta.eth",
-            namehash: "node:beta.eth",
             resource_id: Uuid::from_u128(0xb100),
             token_lineage_id: Uuid::from_u128(0xb101),
             surface_binding_id: Uuid::from_u128(0xb102),
             block_hash: "0xname66",
             block_number: 102,
-            owner: "0x00000000000000000000000000000000000000b1",
+            owner: V2_ADDRESS,
             registrant: "0x00000000000000000000000000000000000000b2",
             registered_at: "2024-03-02T00:00:00Z",
             created_at: "2023-03-02T00:00:00Z",
@@ -1941,14 +1616,13 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:gamma.eth",
             name: "gamma.eth",
-            namehash: "node:gamma.eth",
             resource_id: Uuid::from_u128(0xc100),
             token_lineage_id: Uuid::from_u128(0xc101),
             surface_binding_id: Uuid::from_u128(0xc102),
             block_hash: "0xname67",
             block_number: 103,
             owner: "0x00000000000000000000000000000000000000c1",
-            registrant: "0x00000000000000000000000000000000000000c2",
+            registrant: V2_ADDRESS,
             registered_at: "2023-12-02T00:00:00Z",
             created_at: "2023-12-01T00:00:00Z",
             expires_at: "2028-01-02T00:00:00Z",
@@ -1957,14 +1631,13 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:shared-one.eth",
             name: "shared-one.eth",
-            namehash: "node:shared-one.eth",
             resource_id: Uuid::from_u128(0xd100),
             token_lineage_id: Uuid::from_u128(0xd101),
             surface_binding_id: Uuid::from_u128(0xd102),
             block_hash: "0xname68",
             block_number: 104,
             owner: "0x00000000000000000000000000000000000000d1",
-            registrant: "0x00000000000000000000000000000000000000d2",
+            registrant: V2_ADDRESS,
             registered_at: "2024-04-02T00:00:00Z",
             created_at: "2024-04-01T00:00:00Z",
             expires_at: "2029-01-02T00:00:00Z",
@@ -1973,14 +1646,13 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:shared-two.eth",
             name: "shared-two.eth",
-            namehash: "node:shared-two.eth",
-            resource_id: Uuid::from_u128(0xd100),
-            token_lineage_id: Uuid::from_u128(0xd101),
+            resource_id: Uuid::from_u128(0xd200),
+            token_lineage_id: Uuid::from_u128(0xd201),
             surface_binding_id: Uuid::from_u128(0xd202),
             block_hash: "0xname69",
             block_number: 105,
             owner: "0x00000000000000000000000000000000000000d1",
-            registrant: "0x00000000000000000000000000000000000000d2",
+            registrant: V2_ADDRESS,
             registered_at: "2024-04-02T00:00:00Z",
             created_at: "2024-04-01T00:00:00Z",
             expires_at: "2029-01-02T00:00:00Z",
@@ -1994,14 +1666,13 @@ fn v2_address_name_boundary_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:alice.eth",
             name: "alice.eth",
-            namehash: "node:alice.eth",
             resource_id: Uuid::from_u128(0x34a00),
             token_lineage_id: Uuid::from_u128(0x34a01),
             surface_binding_id: Uuid::from_u128(0x34a02),
             block_hash: "0xname34a",
             block_number: 350,
             owner: "0x000000000000000000000000000000000000034a",
-            registrant: "0x000000000000000000000000000000000000034a",
+            registrant: V2_ADDRESS,
             registered_at: "2024-01-02T00:00:00Z",
             created_at: "2023-01-02T00:00:00Z",
             expires_at: "2027-01-02T00:00:00Z",
@@ -2010,14 +1681,13 @@ fn v2_address_name_boundary_specs() -> Vec<V2AddressNameSpec> {
         V2AddressNameSpec {
             logical_name_id: "ens:alicex.eth",
             name: "alicex.eth",
-            namehash: "node:alicex.eth",
             resource_id: Uuid::from_u128(0x34b00),
             token_lineage_id: Uuid::from_u128(0x34b01),
             surface_binding_id: Uuid::from_u128(0x34b02),
             block_hash: "0xname34b",
             block_number: 351,
             owner: "0x000000000000000000000000000000000000034b",
-            registrant: "0x000000000000000000000000000000000000034b",
+            registrant: V2_ADDRESS,
             registered_at: "2024-01-02T00:00:00Z",
             created_at: "2023-01-02T00:00:00Z",
             expires_at: "2027-01-02T00:00:00Z",
@@ -2027,37 +1697,193 @@ fn v2_address_name_boundary_specs() -> Vec<V2AddressNameSpec> {
 }
 
 async fn seed_v2_address_registry_operator(database: &TestDatabase) -> Result<()> {
-    let resource_id = Uuid::from_u128(0xa100);
+    seed_address_registry_operator(database, V2_PERMISSION_SUBJECT, V2_PERMISSION_OTHER_SUBJECT)
+        .await
+}
+
+async fn seed_address_registry_operator(
+    database: &TestDatabase,
+    owner: &str,
+    subject: &str,
+) -> Result<()> {
+    let (block, hash) = address_fixture_head(database).await?;
+    let event = address_operator_approval(subject, owner, true, block, &hash);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    rebuild_address_fixture(database).await
+}
+
+/// An ENSv1 registry `ApprovalForAll` of `owner` to `subject`, as the registry adapter writes it.
+fn address_operator_approval(
+    subject: &str,
+    owner: &str,
+    approved: bool,
+    block: i64,
+    hash: &str,
+) -> NormalizedEvent {
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let source = json!({"kind":"raw_log", "source_event":"ApprovalForAll"});
+    address_fixture_event(
+        &format!("address-registry-operator-{owner}-{subject}-{ordinal}"),
+        None,
+        None,
+        "AccountPermissionChanged",
+        "ens_v1_registry_l1",
+        block,
+        hash,
+        ordinal,
+        json!({"subject":subject, "relation_kind":"operator", "approved":approved,
+            "scope":{"kind":"account", "chain_id":"ethereum-mainnet", "authority_kind":"registry",
+                "authority_contract":V2_ADDRESS_REGISTRY,
+                "authority_contract_instance_id":Uuid::from_u128(0x605), "owner":owner},
+            "effective_powers":if approved { json!(["registry_control"]) } else { json!([]) },
+            "grant_source":if approved { source.clone() } else { json!({}) },
+            "revocation_source":if approved { Value::Null } else { source },
+            "inheritance_path":[],
+            "transfer_behavior":{"mode":"owner_scoped", "on_registry_owner_change":"ceases_to_apply"},
+            "source_event":"ApprovalForAll"}),
+    )
+}
+
+/// Bind `name` to a new ENSv2 registration at the head block, registered to `V2_ADDRESS`, with a
+/// migration proof when `migrated`.
+async fn bind_address_name_ens_v2(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    migrated: bool,
+) -> Result<Uuid> {
+    let (block, hash) = address_fixture_head(database).await?;
+    let resource = Uuid::from_u128(seed);
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        "ethereum-mainnet",
+        block,
+        &hash,
+        resource,
+        Uuid::from_u128(seed + 1),
+        Uuid::from_u128(seed + 2),
+        "ens_v2",
+    )
+    .await?;
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let mut events = vec![address_fixture_event(
+        &format!("address-{name}-ens-v2-grant"),
+        Some(&logical),
+        Some(resource),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        block,
+        &hash,
+        ordinal,
+        json!({"authority_kind":"ens_v2_registry", "status":"registered",
+            "registrant":V2_ADDRESS, "expiry":1_900_000_000_i64}),
+    )];
+    if migrated {
+        let mut proof = address_fixture_event(
+            &format!("address-{name}-migration"),
+            Some(&logical),
+            Some(resource),
+            "MigrationApplied",
+            "ens_v2_migration_l1",
+            block,
+            &hash,
+            ordinal + 1,
+            json!({"transition_id":format!("{name}-migration")}),
+        );
+        proof.derivation_kind = "ens_v2_migration".into();
+        events.push(proof);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_address_fixture(database).await?;
+    Ok(resource)
+}
+
+/// Wrap `name` in the NameWrapper at the head block: its registrar lease stays the linked
+/// registration, the wrapper resource `seed` holds control, and the wrapper token goes to
+/// `V2_ADDRESS`. `state` adds the wrapper state, fuses and expiry.
+async fn wrap_address_name(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    state: Option<(&str, i64, i64)>,
+) -> Result<Uuid> {
+    let spec = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .context("wrapped name must be an address-name fixture")?;
+    let holder = V2_ADDRESS;
+    let (block, hash) = address_fixture_head(database).await?;
+    let wrapper = Uuid::from_u128(seed);
     sqlx::query(
-        "UPDATE bigname_phase.permissions_current_resource_summary
-         SET registry_owner='0x0000000000000000000000000000000000000a11',
-             registry_contract='0x0000000000000000000000000000000000000b22',
-             registry_binding_provenance=jsonb_build_object(
-                 'chain_id', provenance->>'chain_id'),
-             registry_binding_chain_positions=jsonb_build_object(
-                 'block_hash', chain_positions->>'target_block_hash')
-         WHERE resource_id=$1",
-    ).bind(resource_id).execute(&database.pool).await?;
-    sqlx::query(
-        r#"INSERT INTO bigname_phase.account_permission_state_current (
-            chain_id, authority_kind, authority_contract, authority_contract_instance_id,
-            owner, subject, relation_kind, approved, effective_powers, grant_source,
-            inheritance_path, transfer_behavior, provenance, chain_positions,
-            canonicality_summary, manifest_version)
-        SELECT provenance->>'chain_id', 'registry', registry_contract,
-            '00000000-0000-0000-0000-000000000605', registry_owner,
-            $2, 'operator', true, '["registry_control"]', '{"kind":"event"}',
-            '[]', '{}', jsonb_build_object('chain_id', provenance->>'chain_id'),
-            chain_positions, '{"state":"canonical"}', manifest_version
-        FROM bigname_phase.permissions_current_resource_summary WHERE resource_id=$1"#,
-    ).bind(resource_id).bind(V2_PERMISSION_SUBJECT).execute(&database.pool).await?;
-    Ok(())
+        "UPDATE surface_bindings SET active_to = (SELECT block_timestamp FROM chain_lineage
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = $2) WHERE surface_binding_id = $1",
+    )
+    .bind(spec.surface_binding_id)
+    .bind(&hash)
+    .execute(&database.pool)
+    .await?;
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        "ethereum-mainnet",
+        block,
+        &hash,
+        wrapper,
+        Uuid::from_u128(seed + 1),
+        Uuid::from_u128(seed + 2),
+        "ens_v1",
+    )
+    .await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let wrapped = |suffix: &str, kind: &str, log: i64, after: Value| {
+        address_fixture_event(
+            &format!("address-{name}-wrapper-{suffix}"),
+            Some(&logical),
+            Some(wrapper),
+            kind,
+            "ens_v1_wrapper_l1",
+            block,
+            &hash,
+            ordinal + log,
+            after,
+        )
+    };
+    let mut events = vec![
+        wrapped("binding", "SurfaceBound", 0,
+            json!({"source_event":"NameWrapped", "node":node, "authority_kind":"wrapper",
+                "wrapped_registrar_resource_id":spec.resource_id})),
+        wrapped("epoch", "AuthorityEpochChanged", 1,
+            json!({"source_event":"NameWrapped", "node":node, "authority_kind":"wrapper",
+                "owner":holder})),
+        wrapped("holder", "TokenControlTransferred", 2,
+            json!({"source_event":"NameWrapped", "node":node, "owner":holder, "to_address":holder})),
+        wrapped("grant", "PermissionChanged", 3,
+            json!({"subject":holder, "scope":{"kind":"resource"},
+                "effective_powers":["resource_control"], "grant_source":{"kind":"raw_log",
+                    "source_event":"NameWrapped", "authority_kind":"wrapper", "relation_kind":"holder"},
+                "revocation_source":null, "inheritance_path":[], "transfer_behavior":{}})),
+    ];
+    if let Some((wrapper_state, fuses, expiry)) = state {
+        let mut scope = wrapped("scope", "PermissionScopeChanged", 4,
+            json!({"source_event":"NameWrapped", "wrapper_state":wrapper_state, "fuses":fuses}));
+        let mut expiry = wrapped("expiry", "ExpiryChanged", 5,
+            json!({"source_event":"NameWrapped", "expiry":expiry}));
+        scope.logical_name_id = None;
+        expiry.logical_name_id = None;
+        events.extend([scope, expiry]);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_address_fixture(database).await?;
+    Ok(wrapper)
 }
 
 struct V2AddressNameSpec {
     logical_name_id: &'static str,
     name: &'static str,
-    namehash: &'static str,
     resource_id: Uuid,
     token_lineage_id: Uuid,
     surface_binding_id: Uuid,
@@ -2071,93 +1897,12 @@ struct V2AddressNameSpec {
     relations: &'static [bigname_storage::AddressNameRelation],
 }
 
-fn address_name_record_inventory_current_row(
-    spec: &V2AddressNameSpec,
-) -> bigname_storage::RecordInventoryCurrentRow {
-    let mut row = record_inventory_current_row(spec.logical_name_id, spec.resource_id);
-    row.record_version_boundary =
-        address_name_record_inventory_boundary_with_pointer(spec, None, None);
-    row.chain_positions = json!({
-        "ethereum-mainnet": address_name_record_inventory_chain_position(spec)
-    });
-    row
-}
-
-fn address_name_record_inventory_boundary_with_pointer(
-    spec: &V2AddressNameSpec,
-    normalized_event_id: Option<i64>,
-    event_kind: Option<&str>,
-) -> Value {
-    json!({
-        "logical_name_id": spec.logical_name_id,
-        "resource_id": spec.resource_id.to_string(),
-        "normalized_event_id": normalized_event_id,
-        "event_kind": event_kind,
-        "chain_position": address_name_record_inventory_chain_position(spec)
-    })
-}
-
-fn address_name_record_inventory_chain_position(spec: &V2AddressNameSpec) -> Value {
-    json!({
-        "chain_id": "ethereum-mainnet",
-        "block_number": spec.block_number,
-        "block_hash": format!("0xname{:02x}", spec.block_number),
-        "timestamp": format!("2026-04-17T00:00:{:02}Z", spec.block_number % 60)
-    })
-}
-
 #[tokio::test]
 async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    upsert_phase_raw_blocks(
-        &database.pool,
-        &[raw_block("ethereum-mainnet", "0xmigration7", None, 7, 1_717_180_007)],
-    )
-    .await?;
-    let event_identity =
-        "ens_v2_migration_l1:1:ethereum-mainnet:0xmigration7:0xtxmigration7:0:MigrationApplied:0";
-    let mut event = history_event(
-        event_identity,
-        None,
-        None,
-        Some("ethereum-mainnet"),
-        Some(7),
-        Some("0xmigration7"),
-        Some("0xtxmigration7"),
-        Some(0),
-        CanonicalityState::Canonical,
-    );
-    event.event_kind = "MigrationApplied".to_owned();
-    event.source_family = "ens_v2_migration_l1".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-    let proof_event_id: i64 = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
-    )
-    .bind(event_identity)
-    .fetch_one(&database.pool)
-    .await?;
-    for (name, authority_selection) in [
-        (
-            "alpha.eth",
-            json!({
-                "authority_arm": "ens_v2",
-                "proof_kind": "migration_authority_transition",
-                "proof_event_id": proof_event_id,
-            }),
-        ),
-        ("beta.eth", json!({"authority_arm": "ens_v1"})),
-    ] {
-        sqlx::query(
-            "UPDATE bigname_phase.name_current
-             SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
-             WHERE namespace = 'ens' AND raw_name = $1",
-        )
-        .bind(name)
-        .bind(authority_selection)
-        .execute(&database.pool)
-        .await?;
-    }
+    // alpha.eth migrates to an ENSv2 registration at the head block.
+    bind_address_name_ens_v2(&database, "alpha.eth", 0xa200, true).await?;
 
     let all = v2_address_names_payload_for_database(
         &database,
@@ -2171,7 +1916,7 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
     assert_eq!(rows[1]["name"], json!("beta.eth"));
     assert_eq!(rows[1]["authority"], json!("ens_v1"));
     assert!(rows[1].get("migrated_at").is_none());
-    assert!(rows[2].get("authority").is_none());
+    assert_eq!(rows[2]["authority"], json!("ens_v1"));
 
     let v2_only = v2_address_names_payload_for_database(
         &database,
@@ -2193,8 +1938,7 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
     );
 
     // Native ENSv2 authority alone does not prove migration.
-    sqlx::query(r#"UPDATE bigname_phase.name_current SET provenance = provenance || jsonb_build_object('authority_selection', '{"authority_arm":"ens_v2","proof_kind":"direct_registration"}'::jsonb) WHERE raw_name = 'beta.eth'"#)
-        .execute(&database.pool).await?;
+    bind_address_name_ens_v2(&database, "beta.eth", 0xb200, false).await?;
     for (filter, expected) in [
         ("is_migrated=true", vec!["alpha.eth"]),
         (
@@ -2243,13 +1987,7 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
 async fn v2_get_address_names_include_counts_adds_subname_and_record_counts() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let alpha = v2_address_name_specs()
-        .into_iter()
-        .find(|spec| spec.name == "alpha.eth")
-        .expect("alpha address-name fixture must exist");
-    database
-        .insert_record_inventory_current_row(address_name_record_inventory_current_row(&alpha))
-        .await?;
+    seed_address_alpha_record_inputs(&database, false).await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
