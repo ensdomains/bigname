@@ -1,61 +1,15 @@
 use super::*;
 
-/// The public `authority` value for each projected selection shape Project writes, keyed by the
-/// address-names fixture's names. `shared-one.eth` is the ownerless registry profile: it keeps
-/// its ENSv1 arm (and here its 2017-registry generation) but serves no `authority`.
-fn ens_v0_selections() -> [(&'static str, Value, Option<&'static str>); 5] {
-    [
-        (
-            "alpha.eth",
-            json!({"authority_arm": "ens_v1", "registry_generation": "old"}),
-            Some("ens_v0"),
-        ),
-        (
-            "beta.eth",
-            json!({"authority_arm": "ens_v1", "registry_generation": "current",
-                   "registry_handoff_block_number": 90}),
-            Some("ens_v1"),
-        ),
-        // A row projected before registry generation existed reads as `ens_v1`.
-        (
-            "gamma.eth",
-            json!({"authority_arm": "ens_v1"}),
-            Some("ens_v1"),
-        ),
-        (
-            "shared-one.eth",
-            json!({"authority_arm": "ens_v1", "registry_generation": "old",
-                   "ownerless_registry": true}),
-            None,
-        ),
-        (
-            "shared-two.eth",
-            json!({"authority_arm": "ens_v2"}),
-            Some("ens_v2"),
-        ),
-    ]
-}
-
-async fn stamp_ens_v0_selections(database: &TestDatabase) -> Result<()> {
-    for (name, selection, _) in ens_v0_selections() {
-        sqlx::query(
-            "UPDATE bigname_phase.name_current
-             SET provenance = provenance || jsonb_build_object('authority_selection', $2::jsonb)
-             WHERE namespace = 'ens' AND raw_name = $1",
-        )
-        .bind(name)
-        .bind(selection)
-        .execute(&database.pool)
-        .await?;
-    }
-    Ok(())
-}
-
+/// The public `authority` each name of `seed_authority_shape_names` serves. `shared-one.eth`
+/// is the ownerless registry profile: it keeps its ENSv1 arm (and its 2017-registry generation)
+/// but serves no `authority`.
 fn expected_authority(name: &str) -> Option<&'static str> {
-    ens_v0_selections()
-        .into_iter()
-        .find(|(candidate, _, _)| *candidate == name)
-        .and_then(|(_, _, authority)| authority)
+    match name {
+        "alpha.eth" => Some("ens_v0"),
+        "beta.eth" | "gamma.eth" => Some("ens_v1"),
+        "shared-two.eth" => Some("ens_v2"),
+        _ => None,
+    }
 }
 
 /// Every page of `uri`, following `next_cursor`.
@@ -80,9 +34,14 @@ async fn all_address_name_rows(database: &TestDatabase, uri: &str) -> Result<Vec
 #[tokio::test]
 async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    seed_v2_resolves_to_records(&database).await?;
-    stamp_ens_v0_selections(&database).await?;
+    // The routes read both public namespaces; the Base index is published and empty.
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"base": {
+            "chain_id": "base-mainnet", "block_number": 1, "block_hash": "0xcount-base-empty",
+            "timestamp": "2024-01-01T00:00:00Z"
+        }}))
+        .await?;
+    seed_authority_shape_names(&database, V2_ADDRESS).await?;
 
     for base in [
         format!("/v1/addresses/{V2_ADDRESS}/names?page_size=1"),
@@ -126,24 +85,13 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
     .await?;
     assert_eq!(names(v1["data"].as_array().unwrap()), vec!["beta.eth"]);
     assert_eq!(v1["page"]["total_count"], json!(2));
-    // The filter applies before grouping: a registration shared by an ownerless name and an
-    // ENSv2 name is represented by the ENSv2 member under `authority=ens_v2`.
+    // The filter applies before grouping.
     let grouped = all_address_name_rows(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=registration&authority=ens_v2"),
     )
     .await?;
     assert_eq!(names(&grouped), vec!["shared-two.eth"]);
-    let grouped_all = all_address_name_rows(
-        &database,
-        &format!("/v1/addresses/{V2_ADDRESS}/names?dedupe=registration"),
-    )
-    .await?;
-    assert!(
-        grouped_all
-            .iter()
-            .any(|row| row["name"] == "shared-one.eth" && row.get("authority").is_none())
-    );
     let resolved_v0 = all_address_name_rows(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v0"),
@@ -192,26 +140,10 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
 async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
     let database = TestDatabase::new_migrated().await?;
-    for (index, (name, _, _)) in ens_v0_selections().into_iter().enumerate() {
-        let index = index as u128;
-        seed_identity_name(
-            &database,
-            &format!("ens:{name}"),
-            name,
-            name,
-            &format!("namehash:{name}"),
-            Uuid::from_u128(0x7170_0100 + index),
-            Uuid::from_u128(0x7170_0200 + index),
-            Uuid::from_u128(0x7170_0300 + index),
-            HOLDER,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            38,
-        )
-        .await?;
-    }
-    stamp_ens_v0_selections(&database).await?;
+    seed_authority_shape_names(&database, HOLDER).await?;
 
-    for (name, _, expected) in ens_v0_selections() {
+    for name in AUTHORITY_SHAPE_NAMES {
+        let expected = expected_authority(name);
         let detail = v2_get_json(&database, &format!("/v1/names/{name}")).await?;
         assert_eq!(
             detail["data"].get("authority").and_then(Value::as_str),
@@ -223,16 +155,17 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
         &database,
         json!({
             "profile": "detail",
-            "inputs": ens_v0_selections()
+            "inputs": AUTHORITY_SHAPE_NAMES
                 .iter()
-                .map(|(name, _, _)| json!({"id": name, "name": name}))
+                .map(|name| json!({"id": name, "name": name}))
                 .chain([json!({"id": "reverse", "address": HOLDER})])
                 .collect::<Vec<_>>(),
         }),
     )
     .await?;
     let results = lookup["data"].as_array().expect("lookup results");
-    for (index, (name, _, expected)) in ens_v0_selections().into_iter().enumerate() {
+    for (index, name) in AUTHORITY_SHAPE_NAMES.into_iter().enumerate() {
+        let expected = expected_authority(name);
         let record = &results[index]["record"];
         assert_eq!(
             record.get("authority").and_then(Value::as_str),
@@ -241,10 +174,20 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
         );
         assert!(record.get("migrated_at").is_none(), "{name}: {record}");
     }
-    let reverse = results[ens_v0_selections().len()]["records"]
+    let reverse = results[AUTHORITY_SHAPE_NAMES.len()]["records"]
         .as_array()
         .expect("reverse detail records");
-    assert_eq!(reverse.len(), ens_v0_selections().len(), "{lookup}");
+    // The ownerless name has no selected binding, so the holder has no relation to it.
+    let mut listed = reverse
+        .iter()
+        .map(|record| record["name"].as_str().expect("reverse record name"))
+        .collect::<Vec<_>>();
+    listed.sort_unstable();
+    assert_eq!(
+        listed,
+        ["alpha.eth", "beta.eth", "gamma.eth", "shared-two.eth"],
+        "{lookup}"
+    );
     for record in reverse {
         let name = record["name"].as_str().expect("reverse record name");
         assert_eq!(
