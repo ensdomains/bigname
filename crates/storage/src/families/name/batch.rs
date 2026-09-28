@@ -63,28 +63,36 @@ pub async fn load_family_publication(
     publication(&mut conn, chain_id).await
 }
 
-/// Refuses with [`FamilyPublicationUnavailable`] unless every chain of `chain_ids` has a
-/// servable marker. A read that may find no name to compose (an empty walk, a name with no
-/// surface) checks the chains it was asked about with it, so a rebuild answers stale rather than
-/// an empty or missing result.
-pub(crate) async fn ensure_published(conn: &mut PgConnection, chain_ids: &[String]) -> Result<()> {
+/// The servable publications of `chain_ids`, refusing with [`FamilyPublicationUnavailable`]
+/// unless every chain has one. A read that may find no name to compose (an empty walk, a name
+/// with no surface) checks the chains it was asked about with it, so a rebuild answers stale
+/// rather than an empty or missing result.
+pub(crate) async fn ensure_published(
+    conn: &mut PgConnection,
+    chain_ids: &[String],
+) -> Result<Vec<FamilyPublication>> {
+    let mut out = Vec::with_capacity(chain_ids.len());
     for chain_id in chain_ids {
-        if publication(conn, chain_id).await?.is_none() {
+        let Some(publication) = publication(conn, chain_id).await? else {
             return Err(FamilyPublicationUnavailable {
                 chain_id: chain_id.clone(),
             }
             .into());
-        }
+        };
+        out.push(publication);
     }
-    Ok(())
+    Ok(out)
 }
 
 /// [`ensure_published`] on its own snapshot, for a caller holding a pool.
-pub async fn ensure_family_publications(pool: &PgPool, chain_ids: &[String]) -> Result<()> {
+pub async fn ensure_family_publications(
+    pool: &PgPool,
+    chain_ids: &[String],
+) -> Result<Vec<FamilyPublication>> {
     let mut snapshot = read_snapshot(pool).await?;
-    ensure_published(&mut snapshot, chain_ids).await?;
+    let publications = ensure_published(&mut snapshot, chain_ids).await?;
     snapshot.commit().await?;
-    Ok(())
+    Ok(publications)
 }
 
 /// The chain's servable marker, by the fence's rule (`servable_family_marker`).
@@ -295,11 +303,19 @@ pub(super) async fn load_chain(
     let mut contested: BTreeSet<(String, String)> = BTreeSet::new();
     for facts in &facts {
         let name = &facts.input.logical_name_id;
+        // The binding candidates' and events' resources, and the registry node's (where an
+        // ownerless name's retained pointer sits).
+        let node_resources = facts
+            .registry_node
+            .iter()
+            .flat_map(|node| node.owner_events.iter())
+            .filter_map(|e| e.resource_id.as_deref());
         let resources = facts
             .candidates
             .iter()
             .map(|c| c.resource_id.as_str())
-            .chain(facts.events.iter().filter_map(|e| e.resource_id.as_deref()));
+            .chain(facts.events.iter().filter_map(|e| e.resource_id.as_deref()))
+            .chain(node_resources);
         for resource in resources {
             if pointers
                 .get(resource)
@@ -312,6 +328,13 @@ pub(super) async fn load_chain(
     let contested: Vec<(String, String)> = contested.into_iter().collect();
     let named_pointers =
         named_resource_pointers(conn, chain_id, publication.block_number, &contested).await?;
+    // A name's own latest pointer on a resource: F5's when it is the name's, else the name's own.
+    let own_pointer = |resource: &str, name: &str| {
+        pointers
+            .get(resource)
+            .filter(|pointer| pointer.logical_name_id.as_deref() == Some(name))
+            .or_else(|| named_pointers.get(&(resource.to_owned(), name.to_owned())))
+    };
     let node_pointers = node_pointers(conn, chain_id, &nodes).await?;
     let root_resources: Vec<String> = roots
         .values()
@@ -358,7 +381,7 @@ pub(super) async fn load_chain(
                 let resource = transfer.resource_id.as_deref()?;
                 ownerless_serving(
                     name,
-                    pointers.get(resource),
+                    own_pointer(resource, name),
                     readable
                         .get(resource)
                         .is_some_and(|(token, _)| token.is_some()),
@@ -400,12 +423,8 @@ pub(super) async fn load_chain(
                 selection: &decided,
                 history,
                 serving: serving.as_ref(),
-                resource_pointer: resolver_resource.and_then(|resource| {
-                    pointers
-                        .get(resource)
-                        .filter(|pointer| pointer.logical_name_id.as_deref() == Some(name))
-                        .or_else(|| named_pointers.get(&(resource.to_owned(), name.to_owned())))
-                }),
+                resource_pointer: resolver_resource
+                    .and_then(|resource| own_pointer(resource, name)),
                 node_pointer: node_pointers.get(&node),
                 heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),

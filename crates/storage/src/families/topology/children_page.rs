@@ -147,7 +147,8 @@ pub(crate) async fn require_publication(
     .fetch_all(&mut *conn)
     .await
     .context("failed to read the chains of the child reads' parents")?;
-    ensure_published(conn, &chains).await
+    ensure_published(conn, &chains).await?;
+    Ok(())
 }
 
 /// The exact unfiltered child count of one parent, or of the labels its registry `registry`
