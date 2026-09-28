@@ -425,9 +425,21 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
 }
 
 #[tokio::test]
-async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavailable(
-) -> Result<()> {
-    let payload = v2_name_record_payload("/v1/names/Alice.eth?source=verified").await?;
+async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavailable() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_verified_inputs(
+        &database,
+        AliceInputState::Wrapped,
+        &[family_fixture_record_write(
+            "addr:60",
+            Some(json!("0x0000000000000000000000000000000000000def")),
+        )],
+    )
+    .await?;
+    let payload =
+        v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth?source=verified")
+            .await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(payload["data"]["status"], json!("stale"));
@@ -437,7 +449,12 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
     );
     assert_eq!(
         payload["data"]["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
+        json!([
+            "addresses",
+            "content_hash",
+            "primary_address",
+            "text_records"
+        ])
     );
     assert!(payload["data"].get("addresses").is_none());
     assert!(payload["data"].get("text_records").is_none());
@@ -450,7 +467,7 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
         }))
     );
 
-    Ok(())
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -483,43 +500,13 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
 async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name() -> Result<()> {
     for admits_ens_v2 in [false, true] {
         let database = TestDatabase::new_with_schemas(false, true).await?;
-        let execution_block_hash =
-            "0x1111111111111111111111111111111111111111111111111111111111111111";
-        let lookup_pool = database.lookup_pool().await?;
-        seed_schema_v2_ens_lookup_head(
-            &lookup_pool,
-            21_000_003,
-            execution_block_hash,
-            "2026-04-17T00:00:03Z",
-        )
-        .await?;
-        let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
-        seed_v2_alice_name_record_fixture(
+        seed_alice_verified_inputs(
             &database,
-            |row| {
-                row.namehash = namehash;
-                row.provenance["authority_selection"] = json!({"authority_arm": "ens_v2"});
-                row.chain_positions = json!({
-                    "ethereum": {
-                        "chain_id": "ethereum-mainnet",
-                        "block_number": 21_000_003,
-                        "block_hash": execution_block_hash,
-                        "timestamp": "2026-04-17T00:00:03Z"
-                    }
-                });
-            },
-            |_, _, inventory| {
-                inventory.record_version_boundary["chain_position"]["block_hash"] =
-                    json!(execution_block_hash);
-                inventory.chain_positions = json!({
-                    "ethereum-mainnet": {
-                        "chain_id": "ethereum-mainnet",
-                        "block_number": 21_000_003,
-                        "block_hash": execution_block_hash,
-                        "timestamp": "2026-04-17T00:00:03Z"
-                    }
-                });
-            },
+            AliceInputState::Registry,
+            &[family_fixture_record_write(
+                "addr:60",
+                Some(json!("0x0000000000000000000000000000000000000def")),
+            )],
         )
         .await?;
         if admits_ens_v2 {
@@ -566,7 +553,10 @@ async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name
                 json!({"status": "ok", "value": executed_address}),
                 "{payload}"
             );
-            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+            assert_eq!(
+                join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
+                1
+            );
         } else {
             assert_eq!(
                 payload["data"]["records"]["addr:60"],
@@ -593,98 +583,36 @@ async fn v2_verified_reads_follow_the_declared_authority_arms_for_an_ens_v2_name
                 json!("exact_name_authority_not_verifiable"),
                 "{detail}"
             );
-            assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 0);
+            assert_eq!(
+                join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
+                0
+            );
         }
 
-        lookup_pool.close().await;
         database.cleanup().await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_serving() -> Result<()> {
+async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_serving() -> Result<()>
+{
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    let execution_block_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
-    let lookup_pool = database.lookup_pool().await?;
-    seed_schema_v2_ens_lookup_head(
-        &lookup_pool,
-        21_000_003,
-        execution_block_hash,
-        "2026-04-17T00:00:03Z",
-    )
-    .await?;
-    let namehash = bigname_lookup::ens_namehash_hex("alice.eth")?;
-
-    seed_v2_alice_name_record_fixture(
+    seed_alice_verified_inputs(
         &database,
-        |row| {
-            row.namehash = namehash;
-            row.serving_resource_id = row.resource_id.take();
-            row.surface_binding_id = None;
-            row.token_lineage_id = None;
-            row.binding_kind = None;
-            row.declared_summary["registration"]["status"] = json!("unregistered");
-            row.declared_summary["control"]["status"] = json!("unregistered");
-            row.provenance["read_reachability"] = json!({
-                "basis": "retained_registry_resolver_pointer"
-            });
-            row.chain_positions = json!({
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
-        |_, _, inventory| {
-            inventory.selectors = json!([{
-                "record_key": "addr:2147483648",
-                "record_family": "addr",
-                "selector_key": "2147483648",
-                "cacheable": true
-            }]);
-            inventory.entries = json!([{
-                "record_key": "addr:2147483648",
-                "record_family": "addr",
-                "selector_key": "2147483648",
-                "status": "success",
-                "value": {
-                    "coin_type": "2147483648",
-                    "value": "0x0000000000000000000000000000000000000def"
-                }
-            }]);
-            inventory.provenance["read_rules"] = json!([{
-                "kind": "ensip19_default_address",
-                "source_record_key": "addr:2147483648"
-            }]);
-            inventory.record_version_boundary["chain_position"]["block_hash"] =
-                json!(execution_block_hash);
-            inventory.chain_positions = json!({
-                "ethereum-mainnet": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
+        AliceInputState::Ownerless,
+        &[family_fixture_record_write(
+            "addr:2147483648",
+            Some(json!("0x0000000000000000000000000000000000000def")),
+        )],
     )
     .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.resources SET token_lineage_id = NULL
-         WHERE resource_id = $1",
-    )
-    .bind(Uuid::from_u128(0x2200))
-    .execute(&database.pool)
-    .await?;
-    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
-    let projected = bigname_storage::load_name_current(&database.pool, &logical_name_id)
-        .await
-        .context("ownerless fixture must remain readable through name_current storage")?;
-    assert!(projected.is_some());
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+    assert!(
+        bigname_storage::load_name_current(&database.pool, &logical)
+            .await?
+            .is_some()
+    );
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         resolution_universal_resolver_multicoin_response(executed_address),
@@ -713,9 +641,11 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(payload["data"]["status"], json!("ok"));
     assert_eq!(payload["data"]["addresses"]["60"], json!(executed_address));
-    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+    assert_eq!(
+        join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
+        2
+    );
 
-    lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
@@ -4818,6 +4748,29 @@ async fn seed_alice_state_inputs(database: &TestDatabase, state: AliceInputState
         AliceInputState::Unbound => unreachable!(),
     }
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
+}
+
+async fn seed_alice_verified_inputs(
+    database: &TestDatabase,
+    state: AliceInputState,
+    writes: &[Value],
+) -> Result<()> {
+    seed_alice_state_inputs(database, state).await?;
+    replace_alice_record_inputs(database, writes).await?;
+    enable_alice_ensip19_inputs(database).await?;
+    const HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    seed_schema_v2_ens_lookup_head(&database.pool, 21_000_004, HASH, "2026-04-17T00:00:04Z")
+        .await?;
+    seed_schema_v2_ens_manifest(
+        &database.pool,
+        "ens_execution",
+        "universal_resolver",
+        "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        Uuid::from_u128(0xc301),
+        true,
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_004, HASH).await
 }
 
 async fn v2_alice_state_payload(uri: &str, state: AliceInputState) -> Result<Value> {
