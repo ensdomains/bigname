@@ -124,6 +124,7 @@ pub(crate) async fn get_subnames(
         snapshot
             .ensure_families_published(&state, super::SnapshotReadResource::Name)
             .await?;
+        snapshot.finish(&state).await?;
         return Err(V2Error::not_found(format!(
             "name {} was not found in namespace {namespace}",
             normalized.normalized_name
