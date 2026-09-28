@@ -109,9 +109,6 @@ BEGIN
 
     -- Bind every input to the captured family publication and hold its row through commit.
     compared_family_publication := compared_execution_authority -> 'family_publication';
-    IF compared_family_publication IS NULL THEN
-        RETURN 'invalid_comparison';
-    END IF;
         -- Redo begins by locking this chain's phase rows in phase-name order. Hold
         -- the same rows through the caller's commit, without comparing ordinary row
         -- versions, so a redo cannot start after admission but before a ledger mutation.
