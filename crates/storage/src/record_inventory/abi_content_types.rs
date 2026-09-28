@@ -13,6 +13,8 @@
 //! classification is read in the statement that confirms the held row (same resource, record
 //! version boundary key, chain positions, and recompute time) is still published; a replaced row
 //! answers `abi_observations_stale` instead of pairing the older row with a newer classification.
+//! Family inventories instead carry the classification captured in their own read snapshot;
+//! their ABI admission does not reread a mutable classification after inventory assembly.
 //! The public meaning is documented under `GET /v1/names/{name}/records` in
 //! `docs/api-v1-routes.md`.
 
@@ -188,10 +190,10 @@ pub async fn load_record_inventory_abi_content_types(
 }
 
 /// [`load_record_inventory_abi_content_types`] for family inventory rows (TYR-36 step 7b, the
-/// records route under the publication switch): a family row is assembled in one snapshot at the
-/// family publication and has no `record_inventory_current` row to confirm, so the held-row check
-/// is not made. The classification is still the served resolver row until the resolver reads
-/// move.
+/// records route under the publication switch): ABI admission uses the resolver classification
+/// captured while assembling the inventory in its read snapshot. A later reset or reclassification
+/// cannot turn that held inventory into an unsupported-observations answer. Referenced events
+/// still have to be retained as canonical, activated evidence.
 pub async fn load_family_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
@@ -205,7 +207,32 @@ async fn load_abi_content_types(
     confirm_published: bool,
 ) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
-    let classifications = load_classifications(pool, inputs, &plans, confirm_published).await?;
+    let classifications = if confirm_published {
+        load_classifications(pool, inputs, &plans).await?
+    } else {
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let admitted = input
+                    .provenance
+                    .get("abi_observation_classification")
+                    .ok_or(AbiContentTypesUnavailable::ObservationsStale)
+                    .map(|classification| {
+                        classification
+                            .get("source_family")
+                            .and_then(Value::as_str)
+                            .is_some_and(|family| {
+                                admits_abi_observations(
+                                    family,
+                                    classification.get("role").and_then(Value::as_str),
+                                )
+                            })
+                    });
+                (index, admitted)
+            })
+            .collect()
+    };
 
     let mut answers = Vec::with_capacity(plans.len());
     let mut pending = Vec::new();
@@ -311,7 +338,7 @@ fn content_types_from_evidence(
 /// so while the held row is still published the resolver row read here is the one it was built on.
 const ABI_CLASSIFICATION_QUERY: &str = r#"
     SELECT requested.ordinal,
-           $8 OR EXISTS (
+           EXISTS (
                SELECT 1
                FROM bigname_phase.record_inventory_current inventory
                WHERE inventory.resource_id = requested.resource_id
@@ -328,7 +355,7 @@ const ABI_CLASSIFICATION_QUERY: &str = r#"
     LEFT JOIN LATERAL (
         SELECT resolver.declared_summary #>> '{classification,source_family}' AS source_family,
                resolver.declared_summary #>> '{classification,role}' AS role
-        FROM {RESOLVER_CLASSIFICATION_RELATION} resolver
+        FROM bigname_phase.resolver_current resolver
         WHERE resolver.chain_id = requested.chain_id
           AND resolver.resolver_address = requested.resolver_address
           {DEFAULT_RESOLVER_CURRENT_READ_FILTER}
@@ -341,7 +368,6 @@ async fn load_classifications(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
     plans: &[Plan],
-    confirm_published: bool,
 ) -> Result<BTreeMap<usize, std::result::Result<bool, AbiContentTypesUnavailable>>> {
     let mut ordinals = Vec::new();
     let mut resource_ids = Vec::new();
@@ -370,19 +396,10 @@ async fn load_classifications(
     if ordinals.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let query = ABI_CLASSIFICATION_QUERY
-        .replace(
-            "{RESOLVER_CLASSIFICATION_RELATION}",
-            &crate::families::topology::resolver_classification_relation(),
-        )
-        .replace(
-            "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
-            if crate::publication_source::serve_from_families() {
-                ""
-            } else {
-                DEFAULT_RESOLVER_CURRENT_READ_FILTER
-            },
-        );
+    let query = ABI_CLASSIFICATION_QUERY.replace(
+        "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
+        DEFAULT_RESOLVER_CURRENT_READ_FILTER,
+    );
     let rows = sqlx::query(&query)
         .bind(ordinals)
         .bind(resource_ids)
@@ -391,7 +408,6 @@ async fn load_classifications(
         .bind(recomputed_at)
         .bind(chain_ids)
         .bind(addresses)
-        .bind(!confirm_published)
         .fetch_all(pool)
         .await
         .context("failed to load resolver classifications for ABI content types")?;
