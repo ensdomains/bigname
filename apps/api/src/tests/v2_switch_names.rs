@@ -767,3 +767,85 @@ async fn v2_expiring_names_walk_a_wrapper_expiry_past_bigint() -> Result<()> {
     }
     database.cleanup().await
 }
+
+// The primary-name claim gate reads the claimed name's row. alice claims alpha.eth, whose
+// authority arm is ENSv1, and the execution manifest admits only ENSv2, so the verified answer is
+// the gate's in-band refusal (no provider call): the same with the switch off and on, and the
+// stale 409 when a rebuild starts after the route's fence or is already in flight.
+#[tokio::test]
+async fn v2_primary_name_gate_is_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    // The declared Universal Resolver at the publication, so the gate reads the admitted arms.
+    let (hash, timestamp): (String, String) = sqlx::query_as(
+        "SELECT block_hash,
+                to_char(block_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+         FROM bigname_phase.chain_lineage WHERE chain_id = $1 AND block_number = 240",
+    )
+    .bind(SWITCH_CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+    seed_schema_v2_ens_primary_name_authority(&database.pool, 240, &hash, &timestamp).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.manifest_versions
+         SET manifest_payload = manifest_payload
+             || '{\"verified_authority_arms\": [\"ens_v2\"]}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(&database.pool)
+    .await?;
+    seed_phase_primary_name_snapshot(
+        &database,
+        SWITCH_ALICE,
+        "ens",
+        "60",
+        bigname_storage::PrimaryNameClaimStatus::Success,
+        Some("alpha.eth"),
+        true,
+    )
+    .await?;
+    let uri = format!("/v1/addresses/{SWITCH_ALICE}/primary-name?source=verified");
+    let (status, body) = assert_switch_differential(&database, &uri).await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let verified = body["data"]["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|answer| answer["source"] == json!("verified"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        (&verified["status"], &verified["unsupported_reason"]),
+        (&json!("unsupported"), &json!("exact_name_authority_not_verifiable")),
+        "the gate refused in band: {body:#}"
+    );
+    // A rebuild starting after the route's fence reaches the gate's composed read (the pause
+    // fires there), which answers the stale 409; the route words every stale answer for its
+    // resource.
+    let (status, body) = v2_get_with_marker_flip_after_fence(
+        &database,
+        &uri,
+        "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+    )
+    .await?;
+    assert_eq!(
+        (status, &body["error"]["code"], &body["error"]["message"]),
+        (
+            StatusCode::CONFLICT,
+            &json!("stale"),
+            &json!("requested snapshot is not available for resource")
+        ),
+        "{body:#}"
+    );
+    // A rebuild already in flight is refused by the route's fence first.
+    sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+        .execute(&database.pool)
+        .await?;
+    let (status, body) = with_serve_on(&database, &uri).await?;
+    assert_eq!(
+        (status, &body["error"]["code"]),
+        (StatusCode::CONFLICT, &json!("stale")),
+        "{body:#}"
+    );
+    database.cleanup().await
+}
