@@ -95,8 +95,8 @@ COMMENT ON INDEX child_registration_events_parent_history_idx IS
 COMMENT ON INDEX child_registration_events_chain_block_idx IS
     'This bounded index lets Project replace one chain''s rows by block range.';
 
--- Owned key families (TYR-36 step 2): Project-owned shadow tables filled block by block after
--- each batch commits and read by no served path yet. docs/projections.md, "Owned key families".
+-- Owned key families: the Project-owned tables the API serves, written block by block.
+-- docs/projections.md, "Owned key families".
 
 CREATE TABLE IF NOT EXISTS project_family_marker (
     chain_id text NOT NULL,
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS project_family_marker (
     CHECK (sequence >= 0)
 );
 COMMENT ON TABLE project_family_marker IS
-    'Project-owned shadow marker of the owned key families: the last block the family loop applied on each chain, the generation every family block and family undo advances, and the input revision it read. It is not the served marker; chain_phase_state keeps that role. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned marker of the owned key families: the last block the family loop applied on each chain, the generation every family block and family undo advances, and the input revision it read. Readers serve the publication it names; chain_phase_state keeps the Project phase progress.';
 COMMENT ON COLUMN project_family_marker.chain_id IS
     'This value is the chain the marker belongs to.';
 COMMENT ON COLUMN project_family_marker.current_block_number IS
@@ -138,7 +138,7 @@ COMMENT ON COLUMN project_family_marker.interpret_input_content_hash IS
 COMMENT ON COLUMN project_family_marker.interpret_redo_attempt IS
     'This value is the Interpret row''s redo_attempt_generation the last block read inside its own transaction, the second half of the input revision.';
 COMMENT ON COLUMN project_family_marker.state IS
-    'This value is live when the marker follows the served publication and bootstrap_pending while a rebuild is populating the families.';
+    'This value is live when the families hold a complete publication and bootstrap_pending while a rebuild is populating the families.';
 COMMENT ON COLUMN project_family_marker.interpret_redo_in_progress IS
     'This value is the Interpret row''s redo_in_progress the last block read; always false after a block, since no block applies while Interpret is in redo, and null on a reset marker.';
 COMMENT ON COLUMN project_family_marker.project_redo_attempt IS
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS project_family_undo (
     CHECK (btrim(block_hash) <> '')
 );
 COMMENT ON TABLE project_family_undo IS
-    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images. Rows are kept back to the lowest of 256 blocks below the marker, the finalized block, the safe block and an active repair''s floor; with no finalized or safe head nothing is pruned, so the journal grows by every block until the heads appear and is then pruned in one delete. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images. Rows are kept back to the lowest of 256 blocks below the marker, the finalized block, the safe block and an active repair''s floor; with no finalized or safe head nothing is pruned, so the journal grows by every block until the heads appear and is then pruned in one delete.';
 COMMENT ON COLUMN project_family_undo.chain_id IS
     'This value is the chain of the block.';
 COMMENT ON COLUMN project_family_undo.block_number IS
@@ -209,7 +209,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
         CHECK (state <> 'undoing' OR NOT prefix_recorded)
 );
 COMMENT ON TABLE project_repair_record IS
-    'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it.';
 COMMENT ON COLUMN project_repair_record.chain_id IS
     'This value is the chain under repair.';
 COMMENT ON COLUMN project_repair_record.attempt IS
@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS project_name_state (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_name_state IS
-    'Project-owned name facts of family F1: the latest MigrationApplied of a name and the latest authority epoch start per authority arm (docs/projections.md, Owned key families). Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned name facts of family F1: the latest MigrationApplied of a name and the latest authority epoch start per authority arm (docs/projections.md, Owned key families).';
 COMMENT ON COLUMN project_name_state.namespace IS
     'This value is the name''s namespace.';
 COMMENT ON COLUMN project_name_state.logical_name_id IS
@@ -331,7 +331,7 @@ CREATE TABLE IF NOT EXISTS project_binding_candidate (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_binding_candidate IS
-    'Project-owned binding candidates of family F1: every surface binding of a name, selected or not, with the registry-only handoff facts and the wrapper facts the authority admission reads at publication. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned binding candidates of family F1: every surface binding of a name, selected or not, with the registry-only handoff facts and the wrapper facts the authority admission reads at publication.';
 COMMENT ON COLUMN project_binding_candidate.surface_binding_id IS
     'This value identifies the surface binding. It orders candidates only after the whole position: two bindings of one name at the same position with no transaction or log (synthesised) order by event_identity and then this id, where the served selection orders equal (block, transaction, log) by surface_binding_id descending without the identity.';
 COMMENT ON COLUMN project_binding_candidate.logical_name_id IS
@@ -431,7 +431,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_key_state (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_lifecycle_key_state IS
-    'Project-owned lifecycle state of family F2a per resource: membership-only maxima over the resource''s own lifecycle events in the canonical event order. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned lifecycle state of family F2a per resource: membership-only maxima over the resource''s own lifecycle events in the canonical event order.';
 COMMENT ON COLUMN project_lifecycle_key_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_lifecycle_key_state.resource_id IS
@@ -489,7 +489,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_triple_summary (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_lifecycle_triple_summary IS
-    'Project-owned lifecycle state of family F2a per (name, registry, token) triple: the same maxima over the triple''s null-resource ENSv2 lifecycle events only; a read merges it into the resource its association row targets. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned lifecycle state of family F2a per (name, registry, token) triple: the same maxima over the triple''s null-resource ENSv2 lifecycle events only; a read merges it into the resource its association row targets.';
 COMMENT ON COLUMN project_lifecycle_triple_summary.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_lifecycle_triple_summary.logical_name_id IS
@@ -541,7 +541,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_association (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_lifecycle_association IS
-    'Project-owned lifecycle association of family F2a: per triple, the resource of the latest resource-bearing RegistrationGranted or RegistrationReserved in the canonical event order. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned lifecycle association of family F2a: per triple, the resource of the latest resource-bearing RegistrationGranted or RegistrationReserved in the canonical event order.';
 COMMENT ON COLUMN project_lifecycle_association.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_lifecycle_association.logical_name_id IS
@@ -606,7 +606,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_event (
     CHECK (state_kind IN ('resource', 'triple'))
 );
 COMMENT ON TABLE project_lifecycle_event IS
-    'Project-owned retained lifecycle events of family F2a: every RegistrationGranted, RegistrationRenewed, RegistrationReleased, RegistrationReserved, ExpiryChanged and TokenControlTransferred of a resource or triple, keyed by position, with the reader fields and admission evidence the authority-admitted readers consume. Unpruned; a row leaves only when undo removes its block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned retained lifecycle events of family F2a: every RegistrationGranted, RegistrationRenewed, RegistrationReleased, RegistrationReserved, ExpiryChanged and TokenControlTransferred of a resource or triple, keyed by position, with the reader fields and admission evidence the authority-admitted readers consume. Unpruned; a row leaves only when undo removes its block.';
 COMMENT ON COLUMN project_lifecycle_event.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_lifecycle_event.state_kind IS
@@ -705,7 +705,7 @@ CREATE TABLE IF NOT EXISTS project_child_registration_state (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_child_registration_state IS
-    'Project-owned per-registry child registration row of family F2a: the latest RegistrationGranted, RegistrationRenewed or RegistrationReleased of a name for one registry contract instance, and whether any reservation, grant or renewal exists there. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned per-registry child registration row of family F2a: the latest RegistrationGranted, RegistrationRenewed or RegistrationReleased of a name for one registry contract instance, and whether any reservation, grant or renewal exists there.';
 COMMENT ON COLUMN project_child_registration_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_child_registration_state.logical_name_id IS
@@ -752,7 +752,7 @@ CREATE TABLE IF NOT EXISTS project_wrapper_state (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_wrapper_state IS
-    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses, the latest wrapper expiry, and the newest wrapper lifecycle event with the latest unwrap, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses, the latest wrapper expiry, and the newest wrapper lifecycle event with the latest unwrap, unmasked; masks are applied at read against the block clock.';
 COMMENT ON COLUMN project_wrapper_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_wrapper_state.resource_id IS
@@ -815,7 +815,7 @@ CREATE TABLE IF NOT EXISTS project_registry_node_state (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_registry_node_state IS
-    'Project-owned registry ownership of family F2c per ENSv1 or Basenames registry node: the latest owner with the zero-owner override facts, and the registry generation facts. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned registry ownership of family F2c per ENSv1 or Basenames registry node: the latest owner with the zero-owner override facts, and the registry generation facts.';
 COMMENT ON COLUMN project_registry_node_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_node_state.namespace IS
@@ -881,7 +881,7 @@ CREATE TABLE IF NOT EXISTS project_registry_owner_event (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_registry_owner_event IS
-    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block.';
 COMMENT ON COLUMN project_registry_owner_event.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_owner_event.namespace IS
@@ -953,7 +953,7 @@ CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     CHECK (attributed_via IN ('own', 'name'))
 );
 COMMENT ON TABLE project_registry_binding_observation IS
-    'Project-owned registry binding observations of family F2c: per observation identity (the name, else the resource; permission_resources.rs:10-11), the latest AuthorityTransferred, SubregistryChanged, SurfaceBound or SurfaceUnbound observation with the resource it reaches. The resource summary takes, per target resource, the latest row that reaches it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned registry binding observations of family F2c: per observation identity (the name, else the resource; permission_resources.rs:10-11), the latest AuthorityTransferred, SubregistryChanged, SurfaceBound or SurfaceUnbound observation with the resource it reaches. The resource summary takes, per target resource, the latest row that reaches it.';
 COMMENT ON COLUMN project_registry_binding_observation.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_binding_observation.observation_identity IS
@@ -1019,7 +1019,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_classification (
     CHECK (support_status IN ('supported', 'unsupported'))
 );
 COMMENT ON TABLE project_resolver_classification IS
-    'Project-owned resolver classification of family F3, pinned to the block that last classified it: resolver_current without its sampled sections, from the candidate accumulators the row keeps and the discovery edges, declarations and manifests active at that block. A resolver is classified again when an event names it, a pointer moves to or from it, a resolver edge, its address or a declaration of it starts or stops, and when the active manifest set changes. Edge and address activity also honours deactivated_at, a wall-clock time as in the served build, so a classification can differ from a later rebuild once an edge is deactivated. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver classification of family F3, pinned to the block that last classified it: resolver_current without its sampled sections, from the candidate accumulators the row keeps and the discovery edges, declarations and manifests active at that block. A resolver is classified again when an event names it, a pointer moves to or from it, a resolver edge, its address or a declaration of it starts or stops, and when the active manifest set changes. Edge and address activity also honours deactivated_at, a wall-clock time as in the served build, so a classification can differ from a later rebuild once an edge is deactivated.';
 COMMENT ON COLUMN project_resolver_classification.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_classification.resolver_address IS
@@ -1074,7 +1074,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
 );
 CREATE INDEX IF NOT EXISTS project_registry_pointer_resolver_idx ON project_registry_pointer (chain_id, resolver_address);
 COMMENT ON TABLE project_registry_pointer IS
-    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_pointer.namespace IS
@@ -1121,7 +1121,7 @@ CREATE TABLE IF NOT EXISTS project_resource_pointer (
 );
 CREATE INDEX IF NOT EXISTS project_resource_pointer_resolver_idx ON project_resource_pointer (chain_id, resolver_address, resource_id);
 COMMENT ON TABLE project_resource_pointer IS
-    'Project-owned resource resolver pointer of family F5: the current pointer with clears, the latest non-zero pointer and the record version boundary of a resource. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resource resolver pointer of family F5: the current pointer with clears, the latest non-zero pointer and the record version boundary of a resource.';
 COMMENT ON COLUMN project_resource_pointer.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resource_pointer.resource_id IS
@@ -1217,7 +1217,7 @@ CREATE TABLE IF NOT EXISTS project_node_record_partition (
     CHECK (arm IN ('named', 'native', 'guarded'))
 );
 COMMENT ON TABLE project_node_record_partition IS
-    'Project-owned node record partitions of family F6: per resolver, attribution arm and arm identity, the latest record version event. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned node record partitions of family F6: per resolver, attribution arm and arm identity, the latest record version event.';
 COMMENT ON COLUMN project_node_record_partition.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_node_record_partition.resolver_address IS
@@ -1287,7 +1287,7 @@ CREATE TABLE IF NOT EXISTS project_node_record_value (
     CHECK (arm IN ('named', 'native', 'guarded'))
 );
 COMMENT ON TABLE project_node_record_value IS
-    'Project-owned node record values of family F6: per partition and record key, the latest record in the canonical event order, with its coin-60 compatibility sibling. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned node record values of family F6: per partition and record key, the latest record in the canonical event order, with its coin-60 compatibility sibling.';
 COMMENT ON COLUMN project_node_record_value.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_node_record_value.resolver_address IS
@@ -1382,7 +1382,7 @@ CREATE TABLE IF NOT EXISTS project_record_id_value (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_record_id_value IS
-    'Project-owned record-id values of family F7: per resolver, record id and record key, the latest RecordChanged with storage model resolver_record_id. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned record-id values of family F7: per resolver, record id and record key, the latest RecordChanged with storage model resolver_record_id.';
 COMMENT ON COLUMN project_record_id_value.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_record_id_value.resolver_address IS
@@ -1443,7 +1443,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_link (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_resolver_link IS
-    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. A link whose payload carries no resolver is kept, where the served links.sql requires the payload resolver to be present and equal to the emitter. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. A link whose payload carries no resolver is kept, where the served links.sql requires the payload resolver to be present and equal to the emitter.';
 COMMENT ON COLUMN project_resolver_link.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_link.resolver_address IS
@@ -1491,7 +1491,7 @@ CREATE TABLE IF NOT EXISTS project_grant (
 CREATE INDEX IF NOT EXISTS project_grant_subject_idx ON project_grant (subject);
 CREATE INDEX IF NOT EXISTS project_grant_scope_idx ON project_grant (chain_id, scope);
 COMMENT ON TABLE project_grant IS
-    'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read.';
 COMMENT ON COLUMN project_grant.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_grant.resource_id IS
@@ -1544,7 +1544,7 @@ CREATE TABLE IF NOT EXISTS project_resource_admin_aggregate (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_resource_admin_aggregate IS
-    'Project-owned admin aggregate of family F8: per resource, the admin powers any subject holds through a registry or root scope grant. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned admin aggregate of family F8: per resource, the admin powers any subject holds through a registry or root scope grant.';
 COMMENT ON COLUMN project_resource_admin_aggregate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resource_admin_aggregate.resource_id IS
@@ -1587,7 +1587,7 @@ CREATE TABLE IF NOT EXISTS project_account_approval (
 CREATE INDEX IF NOT EXISTS project_account_approval_subject_idx
     ON project_account_approval (subject, authority_kind);
 COMMENT ON TABLE project_account_approval IS
-    'Project-owned account approvals of family F9: the latest AccountPermissionChanged per authority contract, owner, subject and relation; an explicit false stays as a row. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned account approvals of family F9: the latest AccountPermissionChanged per authority contract, owner, subject and relation; an explicit false stays as a row.';
 COMMENT ON COLUMN project_account_approval.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_account_approval.authority_kind IS
@@ -1646,7 +1646,7 @@ CREATE TABLE IF NOT EXISTS project_name_alias (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_name_alias IS
-    'Project-owned name aliases of family F10: per source name, the latest AliasChanged with its event-carried target. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned name aliases of family F10: per source name, the latest AliasChanged with its event-carried target.';
 COMMENT ON COLUMN project_name_alias.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_name_alias.logical_name_id IS
@@ -1702,7 +1702,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_alias (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_resolver_alias IS
-    'Project-owned per-resolver alias state of family F10: per resolver and alias identity, the latest AliasChanged. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned per-resolver alias state of family F10: per resolver and alias identity, the latest AliasChanged.';
 COMMENT ON COLUMN project_resolver_alias.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_alias.resolver_address IS
@@ -1757,7 +1757,7 @@ CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_child_edge_candidate IS
-    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per parent, child and arm, kept while ineligible. Candidates are retained per parent: a later edge for the child under another parent adds a row and leaves the earlier parent''s row in place, so the reader selects the latest per child and arm. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per parent, child and arm, kept while ineligible. Candidates are retained per parent: a later edge for the child under another parent adds a row and leaves the earlier parent''s row in place, so the reader selects the latest per child and arm.';
 COMMENT ON COLUMN project_child_edge_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_child_edge_candidate.namespace IS
@@ -1800,7 +1800,7 @@ CREATE TABLE IF NOT EXISTS project_parent_subregistry (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_parent_subregistry IS
-    'Project-owned ENSv2 parent subregistry of family F11: per parent name, the latest SubregistryChanged address, clears included. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv2 parent subregistry of family F11: per parent name, the latest SubregistryChanged address, clears included.';
 COMMENT ON COLUMN project_parent_subregistry.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_parent_subregistry.logical_name_id IS
@@ -1845,7 +1845,7 @@ CREATE TABLE IF NOT EXISTS project_reverse_tuple (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_reverse_tuple IS
-    'Project-owned reverse tuples of family F12: per address, coin type and namespace, the latest ReverseChanged and the latest direct claim, with the hydration result once hydration moves into the block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned reverse tuples of family F12: per address, coin type and namespace, the latest ReverseChanged and the latest direct claim, with the hydration result once hydration moves into the block.';
 COMMENT ON COLUMN project_reverse_tuple.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_reverse_tuple.coin_type IS
@@ -1907,7 +1907,7 @@ CREATE TABLE IF NOT EXISTS project_reverse_node_claim (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_reverse_node_claim IS
-    'Project-owned node-selected claim facts of family F12: per node and resolver, the latest name record or version change, the claim a ReverseClaimed tuple selects through the node''s current resolver. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned node-selected claim facts of family F12: per node and resolver, the latest name record or version change, the claim a ReverseClaimed tuple selects through the node''s current resolver.';
 COMMENT ON COLUMN project_reverse_node_claim.namespace IS
     'This value is the namespace.';
 COMMENT ON COLUMN project_reverse_node_claim.reverse_node IS
@@ -1948,7 +1948,7 @@ CREATE TABLE IF NOT EXISTS project_claim_normalization (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_claim_normalization IS
-    'Project-owned claim normalization of family F12: the normalization result of each claim event, stored once. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned claim normalization of family F12: the normalization result of each claim event, stored once.';
 COMMENT ON COLUMN project_claim_normalization.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_claim_normalization.claim_event_identity IS
@@ -1994,7 +1994,7 @@ CREATE TABLE IF NOT EXISTS project_address_name_fold (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_address_name_fold IS
-    'Project-owned per-name address fold of family F13: the ordered controller fold, the token holder and the registrant read from the name''s retained F2a rows, unmasked. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned per-name address fold of family F13: the ordered controller fold, the token holder and the registrant read from the name''s retained F2a rows, unmasked.';
 COMMENT ON COLUMN project_address_name_fold.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_address_name_fold.logical_name_id IS
@@ -2044,7 +2044,7 @@ CREATE TABLE IF NOT EXISTS project_address_controller_candidate (
     CHECK (action IN ('set', 'revoke'))
 );
 COMMENT ON TABLE project_address_controller_candidate IS
-    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283). Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283).';
 COMMENT ON COLUMN project_address_controller_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_address_controller_candidate.logical_name_id IS
@@ -2078,7 +2078,7 @@ CREATE TABLE IF NOT EXISTS project_address_name_index (
     PRIMARY KEY (address, logical_name_id, relation)
 );
 COMMENT ON TABLE project_address_name_index IS
-    'Project-owned address-to-name index of family F13, re-derived from the controller candidates, the fold''s token holder and the retained F2a rows of each touched name and never journalled. It holds every address a relation can take under some admission and mask, so reads only remove rows. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned address-to-name index of family F13, re-derived from the controller candidates, the fold''s token holder and the retained F2a rows of each touched name and never journalled. It holds every address a relation can take under some admission and mask, so reads only remove rows.';
 COMMENT ON COLUMN project_address_name_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_name_index.logical_name_id IS
@@ -2100,7 +2100,7 @@ CREATE TABLE IF NOT EXISTS project_address_record_node_index (
     PRIMARY KEY (address, coin_type, chain_id, resolver_address, node, logical_name_id)
 );
 COMMENT ON TABLE project_address_record_node_index IS
-    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. It holds every successful EVM-shaped addr value whatever its partition''s version, with the name it was written under; readers apply the version and link boundary. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. It holds every successful EVM-shaped addr value whatever its partition''s version, with the name it was written under; readers apply the version and link boundary.';
 COMMENT ON COLUMN project_address_record_node_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_record_node_index.coin_type IS
@@ -2128,7 +2128,7 @@ CREATE TABLE IF NOT EXISTS project_address_record_id_index (
     PRIMARY KEY (address, coin_type, chain_id, resolver_address, record_id)
 );
 COMMENT ON TABLE project_address_record_id_index IS
-    'Project-owned inverse address record index of family F14 for record-id values, re-derived from project_record_id_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned inverse address record index of family F14 for record-id values, re-derived from project_record_id_value and never journalled.';
 COMMENT ON COLUMN project_address_record_id_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_record_id_index.coin_type IS
@@ -2224,7 +2224,7 @@ CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
 
--- The composed expiring listing's candidate indexes (TYR-36 step 7b).
+-- The composed expiring listing's candidate indexes.
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx
     ON project_lifecycle_event (expiry_seconds)
     WHERE expiry_seconds IS NOT NULL;

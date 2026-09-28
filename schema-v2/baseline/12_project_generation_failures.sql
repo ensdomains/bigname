@@ -1,1 +1,2 @@
--- Retired in TYR-36 step 7c. Family repair diagnostics live in project_repair_record.
+-- The project generation failure audit table was removed. Family repair diagnostics live in
+-- project_repair_record.
