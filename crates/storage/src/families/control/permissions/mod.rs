@@ -1,20 +1,26 @@
 //! F8 and F9, raw permissions: the shadow of `permissions_current`, the restriction block and
 //! registry binding of `permissions_current_resource_summary`, `account_permission_state_current`
 //! and the registry-operator rows the effective-permission reader adds (permissions/effective.rs
-//! :63-72).
+//! :63-72). Under the publication switch `page.rs` serves the effective-permission pages and the
+//! resource summaries of `GET /v1/permissions` from these readers (TYR-36 step 7b).
+mod facts;
 mod grants;
+mod operators;
+pub mod page;
 mod summary;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 pub use grants::{
     GrantRow, ServedGrant, WrapperApproval, masked_grants, masked_powers, with_operators,
 };
 pub use summary::{admin_powers, locked_roles, resource_restrictions, wrapper_unwrapped};
+
+pub(crate) use facts::resolver_grant_evidence;
 
 use super::{
     lifecycle::{Clock, membership::maxima_of, view::registration_lapsed},
@@ -43,7 +49,7 @@ pub struct ShadowPermissions {
 }
 
 async fn rows_for(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     sql: &str,
     chain_id: &str,
     resources: &[String],
@@ -54,7 +60,7 @@ async fn rows_for(
     sqlx::query_scalar(sql)
         .bind(chain_id)
         .bind(resources)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
@@ -79,6 +85,22 @@ pub async fn load_shadow_permissions_in(
     resources: &[ResourceInput],
     order: &EventOrder,
 ) -> Result<BTreeMap<String, ShadowPermissions>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for the permission reads")?;
+    load_shadow_permissions_on(&mut conn, chain_id, clock, resources, order).await
+}
+
+/// [`load_shadow_permissions_in`] on one connection, so a caller holding a snapshot reads every
+/// statement in it.
+pub(crate) async fn load_shadow_permissions_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    clock: &Clock,
+    resources: &[ResourceInput],
+    order: &EventOrder,
+) -> Result<BTreeMap<String, ShadowPermissions>> {
     let mut ids: BTreeSet<String> = resources
         .iter()
         .map(|input| input.resource_id.clone())
@@ -90,7 +112,7 @@ pub async fn load_shadow_permissions_in(
     );
     let ids: Vec<String> = ids.into_iter().collect();
     let grants: Vec<GrantRow> = rows_for(
-        pool,
+        &mut *conn,
         "/* storage:families.control.permissions.grants */ SELECT to_jsonb(grant_row)
          FROM bigname_phase.project_grant grant_row
          WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])",
@@ -102,7 +124,7 @@ pub async fn load_shadow_permissions_in(
     .filter_map(GrantRow::from_row)
     .collect();
     let aggregates: BTreeMap<String, Value> = rows_for(
-        pool,
+        &mut *conn,
         "/* storage:families.control.permissions.admin_aggregates */ SELECT to_jsonb(aggregate)
          FROM bigname_phase.project_resource_admin_aggregate aggregate
          WHERE aggregate.chain_id = $1 AND aggregate.resource_id = ANY($2::uuid[])",
@@ -114,7 +136,7 @@ pub async fn load_shadow_permissions_in(
     .filter_map(|row| Some((text(row, "resource_id")?, row.get("admin_powers")?.clone())))
     .collect();
     let key_states: BTreeMap<String, Maxima> = rows_for(
-        pool,
+        &mut *conn,
         "/* storage:families.control.permissions.key_states */ SELECT to_jsonb(state)
          FROM bigname_phase.project_lifecycle_key_state state
          WHERE state.chain_id = $1 AND state.resource_id = ANY($2::uuid[])",
@@ -128,9 +150,9 @@ pub async fn load_shadow_permissions_in(
     let key_states = if *order == EventOrder::Canonical {
         key_states
     } else {
-        refolded(pool, chain_id, &ids, order).await?
+        refolded(&mut *conn, chain_id, &ids, order).await?
     };
-    let wrappers: BTreeMap<String, _> = load_wrapper_rows(pool, chain_id, &ids)
+    let wrappers: BTreeMap<String, _> = load_wrapper_rows(&mut *conn, chain_id, &ids)
         .await?
         .into_iter()
         .map(|row| (row.resource_id.clone(), row))
@@ -149,7 +171,7 @@ pub async fn load_shadow_permissions_in(
         .into_iter()
         .collect();
     let approvals: Vec<WrapperApproval> = rows_for(
-        pool,
+        &mut *conn,
         "/* storage:families.control.permissions.wrapper_approvals */ SELECT to_jsonb(approval)
          FROM bigname_phase.project_account_approval approval
          WHERE approval.chain_id = $1 AND approval.authority_kind = 'wrapper'
@@ -234,13 +256,13 @@ pub async fn load_shadow_permissions_in(
 
 /// The key states of `resources` folded from their retained events in `order`.
 async fn refolded(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resources: &[String],
     order: &EventOrder,
 ) -> Result<BTreeMap<String, Maxima>> {
     let events: Vec<LifecycleEvent> = rows_for(
-        pool,
+        conn,
         "/* storage:families.control.permissions.key_events */ SELECT to_jsonb(event)
          FROM bigname_phase.project_lifecycle_event event
          WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = ANY($2)",

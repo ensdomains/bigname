@@ -32,7 +32,7 @@ use crate::{
 /// A read-only REPEATABLE READ transaction on `pool`: its snapshot is taken at its first
 /// statement and holds for every statement after it, so a composed read cannot mix two family
 /// blocks. The caller commits it (nothing is written) once the read is done.
-pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+pub(crate) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut transaction = pool
         .begin()
         .await
@@ -58,7 +58,10 @@ pub async fn load_family_publication(
     publication(&mut conn, chain_id).await
 }
 
-async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
+pub(crate) async fn publication(
+    conn: &mut PgConnection,
+    chain_id: &str,
+) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(
         "/* storage:families.name.publication */
          SELECT chain_id, current_block_number, current_block_hash, block_timestamp,
@@ -161,7 +164,7 @@ pub async fn load_family_names_by_resource_ids(
 
 /// The composed rows of `logical_name_ids` read on `conn`, which the caller holds in one
 /// [`read_snapshot`].
-pub(super) async fn load(
+pub(crate) async fn load(
     conn: &mut PgConnection,
     logical_name_ids: &[String],
     shape: CoverageShape,

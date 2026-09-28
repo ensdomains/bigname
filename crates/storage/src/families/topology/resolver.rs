@@ -19,12 +19,9 @@ use crate::{
 pub enum ClassificationSource {
     /// The `project_resolver_classification` row.
     Family,
-    /// No row for the address (step 2 fills the table block by block, so this covers a resolver
-    /// the families have not classified yet): the latest active declaration manifest that names
-    /// the address as a contract. This is a partial stand-in, not the resolver builder's classification: it
-    /// gives the source family, role and mirror only, and does not reproduce declaration
-    /// precedence, discovery admission, start blocks, upgrade implementations, proxy kinds or
-    /// support status.
+    /// The former fallback for a resolver with no row: the latest active declaration manifest
+    /// naming the address. No reader produces it since TYR-36 step 7b slice 4 deleted the
+    /// fallback; the variant stays for the harness's source count until step 7c.
     DeclarationManifest,
 }
 
@@ -54,8 +51,7 @@ impl FamilyResolverClassification {
     }
 }
 
-/// The overview's classification: the `project_resolver_classification` row, else the
-/// declaration manifest.
+/// The overview's classification: the `project_resolver_classification` row, none without one.
 pub async fn load_resolver_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -105,70 +101,10 @@ pub async fn load_resolver_shadow(
             summary_version,
         }));
     }
-    // The latest readable update of each manifest at or below the family marker's block, in
-    // the order today's manifest staging uses (crates/project/src/stage.rs,
-    // `create_manifests`: latest written first); only then is it asked whether it is active.
-    let declared: Option<(Value, Option<i64>, String)> = sqlx::query_as(
-        "WITH clock AS (
-             SELECT current_block_number AS block_number
-             FROM bigname_phase.project_family_marker WHERE chain_id = $1
-         ), latest AS (
-             SELECT DISTINCT ON (event.source_manifest_id)
-                    event.source_manifest_id, event.normalized_event_id, event.namespace,
-                    event.source_family, event.after_state
-             FROM bigname_phase.normalized_events event
-             LEFT JOIN bigname_phase.chain_lineage lineage
-               ON lineage.chain_id = event.chain_id
-              AND lineage.block_hash = event.block_hash
-              AND lineage.block_number = event.block_number
-             WHERE event.chain_id = $1
-               AND event.event_kind = 'SourceManifestUpdated'
-               AND event.source_manifest_id IS NOT NULL
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND (event.block_hash IS NULL
-                    OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-               AND (event.block_number IS NULL
-                    OR event.block_number <= (SELECT block_number FROM clock))
-             ORDER BY event.source_manifest_id, event.normalized_event_id DESC
-         )
-         SELECT jsonb_strip_nulls(jsonb_build_object(
-                    'source_family', manifest.source_family,
-                    'role', declaration ->> 'role',
-                    'mirror', CASE WHEN declaration ->> 'role' = 'ensv1_mirror_resolver'
-                        THEN jsonb_strip_nulls(jsonb_build_object(
-                            'mirrored_source_family', 'ens_v1_resolver_l1',
-                            'mirrored_registry_source_family', 'ens_v1_registry_l1',
-                            'mirrored_registry_address', lower(manifest.after_state
-                                #>> '{manifest_payload,correlation_addresses,ens_v1_registry}')))
-                        END)),
-                manifest.source_manifest_id, manifest.namespace
-         FROM latest manifest
-         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
-             manifest.after_state #> '{manifest_payload,contracts}', '[]'::jsonb)) declaration
-         WHERE manifest.after_state ->> 'rollout_status' = 'active'
-           AND lower(declaration ->> 'address') = $2
-         ORDER BY manifest.normalized_event_id DESC
-         LIMIT 1",
-    )
-    .bind(chain_id)
-    .bind(&address)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load the declaration of {chain_id}:{address}"))?;
-    Ok(declared.map(
-        |(classification, manifest_id, namespace)| FamilyResolverClassification {
-            source: ClassificationSource::DeclarationManifest,
-            chain_id: chain_id.to_owned(),
-            resolver_address: address,
-            classification,
-            support_status: None,
-            unsupported_reason: None,
-            manifest_id,
-            manifest_event_id: None,
-            admission_namespace: Some(namespace),
-            summary_version: None,
-        },
-    ))
+    // No classification row: the resolver is not classified at this publication. The former
+    // declaration-manifest fallback is gone (TYR-36 step 7b slice 4): F3 is complete once the
+    // families have caught up, which the harness requires (`classification_sources`).
+    Ok(None)
 }
 
 /// The names bound to a resolver: resources whose current pointer names it, through
