@@ -190,10 +190,13 @@ pub(crate) async fn get_events(
         &logical_name_ids,
     )
     .await
-    .map_err(|error| {
-        tracing::error!(error = ?error, "failed to load event names from phase projections");
-        V2Error::internal_error("failed to load events")
-    })?;
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::Resource,
+        |error| {
+            tracing::error!(error = ?error, "failed to load event names from phase projections");
+            V2Error::internal_error("failed to load events")
+        },
+    ))?;
     if let Some(fence) = storage_page.interpret_redo_fence.as_ref() {
         bigname_storage::revalidate_interpret_redo_fence(&state.pool, fence)
             .await

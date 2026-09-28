@@ -12,9 +12,12 @@ pub(super) async fn load_current_name_row(
     let logical_name_id = bigname_storage::logical_name_id_for_name(namespace, normalized_name);
     bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to resolve current resource for name {namespace}/{normalized_name}"
-            ))
-        })
+        .map_err(crate::v2::name_rows_error(
+            crate::v2::SnapshotReadResource::Resource,
+            |_| {
+                V2Error::internal_error(format!(
+                    "failed to resolve current resource for name {namespace}/{normalized_name}"
+                ))
+            },
+        ))
 }

@@ -52,6 +52,35 @@ pub use batch::{
     load_family_publication,
 };
 
+/// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
+/// rebuild is still populating the families) or written by another interpreter build. The rule
+/// is the publication fence's (snapshot_selection/project.rs), so a caller that did not fence
+/// first, or whose fence passed before a rebuild began, still cannot compose from half-built
+/// families. API callers answer it with the stale 409 (docs/api-v1.md, "Publication switch").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FamilyPublicationUnavailable {
+    pub chain_id: String,
+}
+
+impl std::fmt::Display for FamilyPublicationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "chain {} owned key families are not published for this build",
+            self.chain_id
+        )
+    }
+}
+
+impl std::error::Error for FamilyPublicationUnavailable {}
+
+/// Whether `error` is, or was caused by, a [`FamilyPublicationUnavailable`].
+pub fn is_publication_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<FamilyPublicationUnavailable>())
+}
+
 /// The publication the composed rows describe: a chain's family marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyPublication {

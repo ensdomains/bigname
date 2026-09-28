@@ -68,6 +68,12 @@ async fn family_name_for_snapshot(
     let row = crate::families::name::load_family_name(pool, logical_name_id)
         .await
         .map_err(|error| {
+            if crate::families::name::is_publication_unavailable(&error) {
+                // A rebuild in flight: the stale answer the fence gives.
+                return SnapshotSelectionError::stale(format!(
+                    "name data is unavailable while the families rebuild: {error}"
+                ));
+            }
             SnapshotSelectionError::internal(format!(
                 "failed to compose the name row for logical_name_id {logical_name_id}: {error}"
             ))

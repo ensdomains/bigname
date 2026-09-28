@@ -133,3 +133,48 @@ async fn a_composed_load_reads_one_snapshot_across_a_family_commit() -> Result<(
     );
     fixture.cleanup().await
 }
+
+/// A marker that is not servable (a rebuild populating the families, or written by another
+/// interpreter build) makes the composed read refuse rather than compose from half-built
+/// families: the fence's rule (snapshot_selection/project.rs).
+#[tokio::test]
+async fn a_composed_load_refuses_an_unservable_marker() -> Result<()> {
+    let fixture = Fixture::new("families_name_unservable", 20).await?;
+    let lease = uuid(1);
+    fixture
+        .binding(&uuid(100), NAME, &lease, "ens_v1", 9, 0, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(NAME),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                   "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    let outcome = fixture.apply(12, FamilyMode::Normal).await;
+    ensure!(outcome.skipped.is_none(), "families at 12: {outcome:?}");
+    ensure!(load_family_name(&fixture.pool, NAME).await?.is_some());
+    for (state, hash) in [
+        ("bootstrap_pending", CONTENT_HASH),
+        ("live", "another-interpreter-build"),
+    ] {
+        sqlx::query("UPDATE project_family_marker SET state = $1, input_content_hash = $2")
+            .bind(state)
+            .bind(hash)
+            .execute(&fixture.pool)
+            .await?;
+        let read = load_family_name(&fixture.pool, NAME).await;
+        assert!(
+            read.as_ref()
+                .is_err_and(bigname_storage::families::name::is_publication_unavailable),
+            "a {state} marker of {hash} must not serve a composed row: {read:?}"
+        );
+    }
+    fixture.cleanup().await
+}

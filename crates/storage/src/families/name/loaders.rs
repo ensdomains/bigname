@@ -21,10 +21,8 @@ pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<
          FROM bigname_phase.name_surfaces surface
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
-         JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
          WHERE surface.logical_name_id = ANY($1::text[])
            AND surface.visibility_state = 'active' AND surface.raw_name <> ''
-           AND surface.block_number <= marker.current_block_number
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )

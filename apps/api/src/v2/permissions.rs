@@ -201,7 +201,10 @@ pub(crate) async fn get_permissions(
     let current_names =
         bigname_storage::load_current_names_by_resource_ids(&state.pool, &support_resource_ids)
             .await
-            .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Resource,
+                |_| V2Error::internal_error("failed to load permission names"),
+            ))?;
     let nameless_resource_ids = support_resource_ids
         .iter()
         .copied()

@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
 pub const CHAIN: &str = "ethereum-sepolia";
-pub const CONTENT_HASH: &str = "families-fixture-hash";
+/// The interpreter hash of this build: the composed name reader serves only a marker written by
+/// it, as the publication fence does.
+pub const CONTENT_HASH: &str = bigname_test_support::INTERPRETER_CONTENT_HASH;
 
 pub fn hash(block: i64) -> String {
     format!("0x{block:064x}")

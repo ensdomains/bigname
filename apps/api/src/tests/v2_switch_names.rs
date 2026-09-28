@@ -270,3 +270,44 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
     .await?;
     database.cleanup().await
 }
+
+// A family rebuild in flight (the marker `bootstrap_pending`) leaves the families half built, so
+// no composed row is servable: every route whose name rows are composed answers a stale 409 with
+// the switch on, with its fence's wording when the fence refuses first (the collection routes
+// say the collection publication is not available) and with the name wording when the composed
+// read refuses.
+#[tokio::test]
+async fn v2_composed_name_reads_answer_409_while_the_families_rebuild() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+        .execute(&database.pool)
+        .await?;
+    let mut messages = Vec::new();
+    for uri in [
+        "/v1/names/alpha.eth",
+        "/v1/names/alpha.eth/history",
+        "/v1/names/alpha.eth/subnames",
+        "/v1/permissions?name=alpha.eth",
+    ] {
+        let response = bigname_storage::publication_source::with_serve_from_families(
+            true,
+            v2_get_response(&database, uri),
+        )
+        .await?;
+        let status = response.status();
+        let body: Value = read_json(response).await?;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (StatusCode::CONFLICT, &json!("stale")),
+            "{uri}: {body:#}"
+        );
+        messages.push((uri, body["error"]["message"].clone()));
+    }
+    assert_eq!(
+        messages[0].1,
+        json!("requested snapshot is not available for name"),
+        "{messages:#?}"
+    );
+    database.cleanup().await
+}

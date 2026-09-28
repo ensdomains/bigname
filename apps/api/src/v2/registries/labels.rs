@@ -132,7 +132,10 @@ pub(crate) async fn get_registry_labels(
     let child_name_rows =
         bigname_storage::load_name_current_by_logical_name_ids(&state.pool, &child_ids)
             .await
-            .map_err(|_| internal_error())?;
+            .map_err(crate::v2::name_rows_error(
+                crate::v2::SnapshotReadResource::Registry,
+                |_| internal_error(),
+            ))?;
     let child_summaries = if include_counts {
         bigname_storage::load_children_current_summaries(&state.pool, &child_ids)
             .await

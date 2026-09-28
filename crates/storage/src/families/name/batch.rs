@@ -13,7 +13,7 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, types::time::Offset
 use uuid::Uuid;
 
 use super::{
-    CoverageShape, FamilyPublication,
+    CoverageShape, FamilyPublication, FamilyPublicationUnavailable,
     compose::{Parts, Surface, compose},
     heads::{Heads, load_heads},
     loaders::{
@@ -44,8 +44,9 @@ pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, 
     Ok(transaction)
 }
 
-/// The family marker of `chain_id`, the publication a composed row describes. None when the
-/// chain has no marker.
+/// The family marker of `chain_id`, the publication a composed row describes, when it is
+/// servable: `live` and written by this build's interpreter, the fence's rule
+/// (snapshot_selection/project.rs). None otherwise.
 pub async fn load_family_publication(
     pool: &PgPool,
     chain_id: &str,
@@ -62,9 +63,12 @@ async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<F
         "/* storage:families.name.publication */
          SELECT chain_id, current_block_number, current_block_hash, block_timestamp,
                 to_jsonb(block_timestamp) AS block_timestamp_json
-         FROM bigname_phase.project_family_marker WHERE chain_id = $1",
+         FROM bigname_phase.project_family_marker
+         WHERE chain_id = $1 AND state = 'live' AND input_content_hash = $2
+           AND current_block_number IS NOT NULL",
     )
     .bind(chain_id)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .fetch_optional(conn)
     .await
     .with_context(|| format!("failed to load the family marker of {chain_id}"))?;
@@ -175,9 +179,17 @@ pub(super) async fn load(
     }
     for (chain_id, surfaces) in by_chain {
         let Some(publication) = publication(conn, &chain_id).await? else {
-            continue;
+            return Err(FamilyPublicationUnavailable { chain_id }.into());
         };
         super::seams::after_publication().await;
+        // A surface written after the publication is not part of it.
+        let surfaces: Vec<Surface> = surfaces
+            .into_iter()
+            .filter(|surface| surface.block_number <= publication.block_number)
+            .collect();
+        if surfaces.is_empty() {
+            continue;
+        }
         out.extend(load_chain(conn, &publication, &surfaces, shape).await?);
     }
     Ok(out)
