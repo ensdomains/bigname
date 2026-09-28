@@ -4798,7 +4798,7 @@ async fn assert_switch_on_ignores_served_tables(
 }
 
 /// Walk every page of `uri` (which must carry `page_size`) with the switch off and on, following
-/// each side's own cursors; each page's status, data and `has_more` must be equal. A cursor binds
+/// each side's own cursors; each page's status, data, `has_more` and `total_count` must be equal. A cursor binds
 /// its side's served generation, so the cursors themselves differ. Returns the switch-off pages.
 async fn assert_switch_differential_pages(
     database: &TestDatabase,
@@ -4835,7 +4835,8 @@ async fn assert_switch_differential_pages_in(
                 .pointer(holder)
                 .with_context(|| format!("{page_uri}: no {holder} in {body:#}"))?;
             next = held["page"]["next_cursor"].as_str().map(str::to_owned);
-            pages.push(json!({"data": held["data"], "has_more": held["page"]["has_more"]}));
+            pages.push(json!({"data": held["data"], "has_more": held["page"]["has_more"],
+                              "total_count": held["page"]["total_count"]}));
             if next.is_none() {
                 break;
             }

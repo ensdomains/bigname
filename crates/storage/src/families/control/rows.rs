@@ -253,6 +253,17 @@ impl BindingCandidate {
             && self.active_to_seconds.is_none_or(|to| to >= cutoff)
     }
 
+    /// The clock seconds after `clock_seconds` at which [`Self::open_at`] can change: the first
+    /// second the interval's start admits, and the first second its end excludes.
+    pub fn clock_boundaries(&self, clock_seconds: i64) -> impl Iterator<Item = i64> {
+        [self.active_from_seconds, self.active_to_seconds]
+            .into_iter()
+            .flatten()
+            .filter(|value| value.is_finite())
+            .map(|value| value.floor() as i64)
+            .filter(move |boundary| *boundary > clock_seconds)
+    }
+
     pub(crate) fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             surface_binding_id: text(row, "surface_binding_id")?,

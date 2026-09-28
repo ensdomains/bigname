@@ -309,11 +309,14 @@ pub(crate) async fn get_address_names(
     let subname_counts_by_name = if include.counts {
         bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name subname counts for {normalized_address}"
-                ))
-            })?
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Resource,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load address-name subname counts for {normalized_address}"
+                    ))
+                },
+            ))?
             .into_iter()
             .map(|summary| {
                 (

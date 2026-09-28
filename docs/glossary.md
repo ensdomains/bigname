@@ -2533,6 +2533,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
 | F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
 | F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+| F15, name summary | `project_name_summary` | `derived/summary.rs` |
 
 ## Family marker
 
@@ -2575,7 +2576,8 @@ batch.
 
 a `name_current`-shaped row that `bigname_storage::families::name` builds for
 one name at read, from the [owned key families](#owned-key-family) and the
-identity input tables, with no stored per-name row: the selection among the
+identity input tables, with no stored per-name row besides the [name
+summary](#name-summary) the child lists read: the selection among the
 name's binding candidates, its registration and control, NameWrapper state,
 serving pointer and resolver, history heads and coverage. It describes the
 [family marker](#family-marker)'s publication. With the
@@ -2586,6 +2588,28 @@ block, and none is served unless the marker is servable by the publication
 fence's rule (`live`, this build's, on the readable lineage). The name
 comparison of the fixture-corpus harness checks every composed row against the
 served row.
+
+## Name summary
+
+`project_name_summary`, family F15: per name, the fields the subnames page, the
+child counts and the registry labels filter, sort and count by inside one
+statement, which a list cannot compose at read for every child: the selected
+authority arm, whether the name has a serving resource, its registration
+status, expiry and registration times, and whether the latest registry
+Transfer attributed to it names the zero owner. Each but the last is the value
+the [composed name row](#composed-name-row) carries, from the same selection
+code; the zero-owner flag attributes a Transfer as the served child build does
+(by the name it carries, else the latest named registry event of any kind of its
+resource, else an active surface at its node), which is not the name row's rule. Every
+name with a surface has a row, empty but for that flag when the composed reader
+serves no row for it. The family step writes it for every
+name a block touches and for every name whose `recompose_at`, the first second
+(in Unix seconds, kept even when the name composes no row) its composition can
+change with no fact changing, the block's time has reached;
+it is journalled like every other family
+([projections](projections.md#owned-key-families)). With the [publication
+switch](#publication-switch) on, the child lists read it
+([API](api-v1.md#tier-2-product-reads)).
 
 ## Family undo journal
 

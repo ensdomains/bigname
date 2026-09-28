@@ -430,6 +430,8 @@ include!("tests/api_storage_quick_wins.rs");
 include!("tests/v2_publication_bindings.rs");
 include!("tests/v2_family_marker_fence.rs");
 include!("tests/v2_switch_names.rs");
+include!("tests/v2_switch_children.rs");
 include!("tests/v2_switch_name_publication_changes.rs");
 include!("tests/v2_switch_name_recompute.rs");
 include!("tests/v2_switch_resolver_history.rs");
+include!("tests/v2_switch_child_authority.rs");

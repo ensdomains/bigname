@@ -664,6 +664,7 @@ for migration_file in \
     "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -974,6 +975,8 @@ for migration_file in \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
@@ -4287,6 +4290,7 @@ BEGIN
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),
             ('project_name_history'),
+            ('project_name_summary'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -4393,6 +4397,7 @@ BEGIN
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),
             ('project_name_history'),
+            ('project_name_summary'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
