@@ -1,7 +1,7 @@
 //! F2a through the family loop: the decoder's resource and triple keys, the association that
 //! moves a triple between resources without touching either side's state, the retained
 //! per-kind events with their immutable original name, the membership maxima and the child row.
-//! The fixtures assert stored rows only; the reads that consume them come with step 3. Each case
+//! The fixtures assert stored rows only; the storage readers' tests cover the reads. Each case
 //! undoes its last block byte for byte and equals a rebuild.
 mod families_support;
 

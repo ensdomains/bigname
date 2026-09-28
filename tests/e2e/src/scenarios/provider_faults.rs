@@ -8,7 +8,7 @@ use crate::harness::{
     anvil::Anvil,
     db::HarnessDb,
     ens_v1::{self, EnsV1Deployment},
-    facts,
+    facts, families,
     fault_proxy::{FaultKind, FaultProxy, FaultSpec},
     manifests::{self, LocalProfile},
     pipeline, repo_root,
@@ -243,16 +243,14 @@ fn ensure_raw_rows_match_control(faulted: &Value, control: &Value, stage: &str) 
 }
 
 async fn projected_text(pool: &sqlx::PgPool, name: &str) -> Result<Value> {
-    let entries: Value = sqlx::query_scalar(
-        "SELECT inventory.entries FROM name_current name \
-         JOIN record_inventory_current inventory USING (resource_id) \
-         WHERE name.namespace = 'ens' AND name.raw_name = $1 \
-         ORDER BY inventory.inserted_at DESC LIMIT 1",
-    )
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("load projected records for {name}"))?;
+    let row = families::required_name_by_raw(pool, "ens", name).await?;
+    let resource_id = row
+        .resource_id
+        .with_context(|| format!("published {name} has no resource"))?;
+    let entries = families::record_inventory(pool, resource_id)
+        .await?
+        .with_context(|| format!("load projected records for {name}"))?
+        .entries;
     entries
         .as_array()
         .into_iter()

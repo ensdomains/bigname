@@ -15,8 +15,7 @@ impl bigname_storage::VerifiedResolutionRecord for ResolutionRecordKey {
 }
 
 /// The record inventory at the mainnet-profile lookup key: name detail's verified source and the
-/// records diagnostic. It is the family inventory at the family
-/// publication (TYR-36 step 7b); the diagnostic keeps serving under the switch.
+/// records diagnostic. It is the family inventory at the family publication.
 pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -45,7 +44,7 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     .await
 }
 
-/// The record inventory `GET /v1/names/{name}/records` reads for every source: the served row at
+/// The record inventory `GET /v1/names/{name}/records` reads for every source: the inventory at
 /// the selected snapshot on whichever chain the deployment indexes, with the binding,
 /// serving-resource, chain-position, version-boundary, and snapshot checks of the any-chain
 /// readback. It feeds the default key set, indexed answers, and `include=inventory`. It does not
@@ -54,8 +53,7 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
 ///
 /// The inventory is the family inventory of the resource the name
 /// serves records through, at the family publication
-/// (`bigname_storage::families::records::load_family_record_inventory_for_snapshot`); the
-/// verified lookup engine keeps reading the served row until the flip (TYR-36 step 7b).
+/// (`bigname_storage::families::records::load_family_record_inventory_for_snapshot`).
 pub(crate) async fn load_records_route_inventory(
     pool: &PgPool,
     row: &NameCurrentRow,

@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::support;
 use crate::harness::responses::{pointer, selector_keys};
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -277,23 +277,20 @@ async fn label_preimage_revealed_later_upgrades_child_listing() -> Result<()> {
             .await?;
     assert!(revealed_preimages >= 1, "label preimage row missing");
 
-    let (projected_name, projected_labelhash, projected_owner, provenance): (
-        String,
-        String,
-        String,
-        Value,
-    ) = sqlx::query_as(
-        "SELECT decoded_name, labelhash, owner, provenance FROM children_current \
-         WHERE parent_logical_name_id = 'ens:0x4a08b95a7407d015fdf628ce1dd0dcb003725023ea2d7de870651c05d897adb4' \
-         AND namehash = $1",
+    let projected = families::children(
+        &second.db.pool,
+        "ens:0x4a08b95a7407d015fdf628ce1dd0dcb003725023ea2d7de870651c05d897adb4",
     )
-    .bind(&child_node)
-    .fetch_one(&second.db.pool)
-    .await?;
-    assert_eq!(projected_name, "later.preimage.eth");
-    assert_eq!(projected_labelhash, later_labelhash);
-    assert_eq!(projected_owner, format!("{bob:#x}"));
-    assert_eq!(provenance["derivation_kind"], "children_current_rebuild");
+    .await?
+    .into_iter()
+    .find(|child| child.namehash == child_node)
+    .context("later.preimage.eth is not served under preimage.eth")?;
+    assert_eq!(projected.canonical_display_name, "later.preimage.eth");
+    assert_eq!(
+        projected.labelhash.as_deref(),
+        Some(later_labelhash.as_str())
+    );
+    assert_eq!(projected.owner, Some(format!("{bob:#x}")));
 
     let child_surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")

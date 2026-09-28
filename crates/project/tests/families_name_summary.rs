@@ -1,8 +1,8 @@
-//! The name summary family (TYR-36 step 7b slice 2b, `project_name_summary`): the per-name fields
+//! The name summary family (`project_name_summary`): the per-name fields
 //! the child and label lists read inside one statement, written by the family step for the names
 //! a block touches and journalled like every other family. A block that touches one name rewrites
 //! that name's row and no other, undo puts the previous row back, and a rebuild writes the same
-//! rows as the incremental follow. Every row carries the fields of the name's served row, and a
+//! rows as the incremental follow. Every row carries the fields of the name's composed row, and a
 //! name whose composition the clock changes is composed again at the first block past it.
 #[path = "families_support/mod.rs"]
 mod support;

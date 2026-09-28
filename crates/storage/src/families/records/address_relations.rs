@@ -1,28 +1,24 @@
-//! The address relations of one composed name at its publication (F13): the served builder's
-//! rules (crates/project/src/builders/address_names.rs) applied to the name's controller
-//! candidates, its composed row and its NameWrapper row.
+//! The address relations of one composed name at its publication (F13), from the name's
+//! controller candidates, its composed row and its NameWrapper row.
 //!
 //! - The controller is the fold, in the canonical event order, of the candidates the served
-//!   admission keeps (name_authority/authority_events.sql:9-24 for the controller kinds: no
-//!   unsupported reason, and the selected resource, or no resource on the selected arm), plus the
-//!   registry-only predecessor window (address_names.rs:115-211): AuthorityTransferred events on
-//!   the resource of the binding a registry-only selected binding replaced, from that binding's
-//!   block up to the selected binding's position. An AuthorityTransferred or state-derived
-//!   SurfaceBound sets the controller; a PermissionChanged acts only on the name's resource, sets
-//!   it when its powers hold `resource_control` and the NameWrapper mask allows, and otherwise
-//!   revokes it from its subject only (address_names.rs:228-283).
+//!   admission keeps (for the controller kinds: no unsupported reason, and the selected resource,
+//!   or no resource on the selected arm), plus the registry-only predecessor window:
+//!   AuthorityTransferred events on the resource of the binding a registry-only selected binding
+//!   replaced, from that binding's block up to the selected binding's position. An
+//!   AuthorityTransferred or state-derived SurfaceBound sets the controller; a PermissionChanged
+//!   acts only on the name's resource, sets it when its powers hold `resource_control` and the
+//!   NameWrapper mask allows, and otherwise revokes it from its subject only.
 //! - The registrant is the composed `registration.registrant`, for a name with a token lineage.
-//! - The token holder is the registrant, where the NameWrapper mask allows (address_names.rs:
-//!   the token_holder relation). A transfer supplies the registrant's recipient before an owner
-//!   lapse. The lapse also removes wrapper_state, so both readers then withhold the token-holder
-//!   relation under the same modifier mask.
+//! - The token holder is the registrant, where the NameWrapper mask allows. A transfer supplies the
+//!   registrant's recipient before an owner lapse. The lapse also removes wrapper_state, so both
+//!   readers then withhold the token-holder relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder or
-//!   registrant, where the mask allows (address_names.rs:440-476).
+//!   registrant, where the mask allows.
 //!
 //! The mask reads the NameWrapper row of the name's resource: whether a PermissionScopeChanged
 //! ever set it (`scope_modifiers`), the composed `wrapper_state`, and the grace test at the
-//! publication clock, which is unknown (and so not false) when the fuses or expiry are
-//! (address_names.rs:62-91).
+//! publication clock, which is unknown (and so not false) when the fuses or expiry are.
 use std::collections::BTreeSet;
 
 use serde_json::Value;

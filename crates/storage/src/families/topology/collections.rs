@@ -6,8 +6,8 @@
 //! and paged in SQL so the database's collation orders both alike. The readers take a keyset
 //! position and nothing else, no publication token, generation or height: each reads in one
 //! read-only REPEATABLE READ snapshot at the block the family marker names, and fails with
-//! [`FamilyPublicationUnavailable`] when the marker is not servable. Under the publication
-//! switch the resolver routes serve them (TYR-36 step 7b slice 4).
+//! [`FamilyPublicationUnavailable`] when the marker is not servable. The resolver routes serve
+//! them.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -19,7 +19,6 @@ use crate::families::{
     control::{
         lifecycle::Clock,
         permissions::{ResourceInput, load_shadow_permissions_on, resolver_grant_evidence},
-        position::EventOrder,
     },
     name::{
         CoverageShape, FamilyPublication, FamilyPublicationUnavailable, load_names_on,
@@ -47,8 +46,8 @@ async fn marker(conn: &mut PgConnection, chain_id: &str) -> Result<FamilyPublica
 /// `/aliases`: the binding arm (names whose selected binding is an alias-path binding whose
 /// resource's current pointer is this resolver) then the event arm (active
 /// `project_resolver_alias` rows). A name's selected binding, raw name and namehash, and whether
-/// it is served at all, come from its composed row (`families::name`), which stands where the
-/// served statement reads `name_current` under the current-name read filter.
+/// it is served at all, come from its composed row (`families::name`) under the current-name read
+/// filter.
 pub async fn load_resolver_aliases_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -131,9 +130,7 @@ pub async fn load_resolver_aliases_shadow(
 /// per node (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @
 /// ens_v2@a971bd64) and each `Linked` overwrites it (upstream:
 /// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
-/// `storage_model` is an annotation and plays no part (see `load_family_link_selection`). Today's
-/// `/links` drops a link not annotated `resolver_record_id` and serves an older one; no producer
-/// writes such a link, so on real data that filter keeps every link.
+/// `storage_model` is an annotation and plays no part (see `load_family_link_selection`).
 pub async fn load_resolver_links_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -204,13 +201,11 @@ pub async fn load_resolver_links_shadow(
 /// `/roles`: the served permission rows of this resolver's scope with non-empty powers, each
 /// resource's rows computed from its F8 grants as `GET /v1/permissions` computes them
 /// (`load_shadow_permissions_on`: the wrapper fuse and grace masks at the publication's block
-/// time, the ENSv2 path-expiry drop and the empty-row drop), on resources that are readable, the
-/// resource predicate of the served read filter (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`).
-/// The filter's other two predicates, the row's own canonicality and its publication lineage,
-/// are not checked: the family undo removes the grants of a dropped block (ruling J13).
-/// `event_ids` are the grant's evidence events read by key from `normalized_events`
-/// (`resolver_grant_evidence`), the served row's `provenance.normalized_event_ids` permission
-/// events, from which the route picks the `grant_event` it attaches.
+/// time, the ENSv2 path-expiry drop and the empty-row drop), on resources that are readable. No
+/// per-row canonicality or lineage check is needed: the family undo removes the grants of a
+/// dropped block. `event_ids` are the grant's evidence events read by key from
+/// `normalized_events` (`resolver_grant_evidence`), from which the route picks the `grant_event`
+/// it attaches.
 pub async fn load_resolver_roles_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -254,14 +249,7 @@ pub async fn load_resolver_roles_shadow(
         block_number: publication.block_number,
         timestamp_seconds: publication.timestamp_seconds(),
     };
-    let shadows = load_shadow_permissions_on(
-        &mut snapshot,
-        chain_id,
-        &clock,
-        &inputs,
-        &EventOrder::Canonical,
-    )
-    .await?;
+    let shadows = load_shadow_permissions_on(&mut snapshot, chain_id, &clock, &inputs).await?;
     let evidence = resolver_grant_evidence(
         &mut snapshot,
         chain_id,

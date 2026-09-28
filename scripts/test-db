@@ -22,6 +22,18 @@ Defaults:
 
 Set BIGNAME_TEST_DATABASE_URL to use an already-running PostgreSQL server
 instead of starting the test container.
+
+Template databases:
+  Some suites (bigname-api, bigname-lookup) copy each test database from a
+  template built once per server: bigname_tpl_<key>_<sha256 prefix of the
+  schema text and migration checksums>. A changed baseline or migration gets
+  a new template; old ones are not dropped automatically, and a killed build
+  can leave a bigname_tpl_scratch_* database. With no tests running, drop
+  them all (they are rebuilt on next use):
+    psql "$BIGNAME_TEST_DATABASE_URL" -Atc "SELECT format('ALTER DATABASE %I
+      IS_TEMPLATE false; DROP DATABASE %I;', datname, datname) FROM
+      pg_database WHERE datname LIKE 'bigname\_tpl\_%'" |
+      psql "$BIGNAME_TEST_DATABASE_URL"
 USAGE
 }
 

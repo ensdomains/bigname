@@ -38,6 +38,15 @@ fn strip_corpus_minted(value: &mut Value) {
             {
                 *value = Value::String("<normalized_event_id>".to_owned());
             }
+            // An event identity's second segment is the corpus-minted source
+            // manifest id; everything else in it is chain-derived.
+            if let Some(Value::String(identity)) = map.get_mut("event_identity") {
+                let mut parts: Vec<&str> = identity.split(':').collect();
+                if parts.len() > 2 {
+                    parts[1] = "N";
+                    *identity = parts.join(":");
+                }
+            }
             // authority_key's third segment is the corpus-minted contract
             // instance ordinal; everything else in it is chain-derived.
             if let Some(Value::String(key)) = map.get_mut("authority_key") {
@@ -304,15 +313,23 @@ async fn locked_parent_publishes_only_migratable_ens_v1_children() -> Result<()>
     );
     let bridged = tested[0];
     assert_eq!(bridged["normalized_name"], "bridged.locked-migration.eth");
-    let manifest_versions = bridged
-        .pointer("/provenance/manifest_versions")
-        .and_then(Value::as_array)
-        .context("bridged child lacks provenance manifest versions")?;
+    // The served child comes from a published ENSv1 registry edge under the locked parent.
+    let edge_sources: Vec<String> = sqlx::query_scalar(
+        "SELECT source_family FROM project_child_edge_candidate \
+         WHERE parent_node = $1 AND child_node = $2",
+    )
+    .bind(format!("{:#x}", ens_v1::namehash("locked-migration.eth")))
+    .bind(format!(
+        "{:#x}",
+        ens_v1::namehash("bridged.locked-migration.eth")
+    ))
+    .fetch_all(&run.db.pool)
+    .await?;
     assert!(
-        manifest_versions
+        edge_sources
             .iter()
-            .any(|version| version["source_family"] == "ens_v1_registry_l1"),
-        "bridged child lost ENSv1 provenance: {bridged}"
+            .any(|source| source == "ens_v1_registry_l1"),
+        "bridged child lost its ENSv1 registry edge: {bridged} {edge_sources:?}"
     );
     assert!(
         children
@@ -424,6 +441,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
         &ens_deployment,
         &base,
         &basenames_deployment,
+        &std::collections::HashMap::new(),
         Some(ready_sql),
     )
     .await?;
@@ -674,6 +692,7 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         &root,
         &ens_deployment.manifest_targets(),
         &basenames_deployment.manifest_targets(),
+        &std::collections::HashMap::new(),
     )?;
     profile.retarget_chain("ethereum-mainnet", ETH_REORG_CHAIN)?;
     profile.retarget_chain("base-mainnet", BASE_REORG_CHAIN)?;

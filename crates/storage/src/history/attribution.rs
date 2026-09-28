@@ -2,18 +2,13 @@
 //! the evidence at or below a read's published block.
 //!
 //! Node-keyed `RecordChanged` and `RecordVersionChanged` rows carry no logical name or resource, so
-//! only a resolver pointer ties them to a registration. Project publishes that attribution in
-//! `record_inventory_current.provenance.attributed_event_ids`, computed from every pointer up to its
-//! own target. A history read bound to an earlier block cannot use that row: a pointer recorded
-//! after the bound attributes writes made before it. This reader evaluates the producer's rules
-//! over the pointers, record links and writes at or below the bound instead, so a pointer or link
-//! above the bound neither attributes an older write nor closes an earlier pointer's window.
-//!
-//! The rules mirror `crates/project/src/builders/record_inventory/history.rs`,
-//! `crates/project/src/builders/linked_records/history.rs`, the node-keyed arms of
-//! `crates/project/src/builders/record_inventory.rs`, and the mirror substitution in
-//! `crates/project/src/builders/record_inventory/mirror.rs`. The Project test
-//! `bounded_record_attribution_equivalence` checks that the two agree at the current publication.
+//! only a resolver pointer ties them to a registration. This reader evaluates that attribution over
+//! the pointers, record links and writes at or below a bound, so a pointer or link above the bound
+//! neither attributes an older write nor closes an earlier pointer's window. At a resource's
+//! current publication the result is the family record inventory's
+//! `provenance.attributed_event_ids` (`families::records`, `FamilyAttribution::Load`); a history
+//! read bound to an earlier block evaluates it at that block, because a pointer recorded after the
+//! bound attributes writes made before it.
 
 mod mirror;
 mod sql;
@@ -132,7 +127,7 @@ pub(in crate::history) async fn load_attributed_records(
 
 /// The writes attributed to each of `resource_ids` at `published`, or through every readable
 /// pointer and write when `published` is `None`. At a resource's current publication this is the
-/// set Project publishes in `record_inventory_current.provenance.attributed_event_ids`.
+/// set the family record inventory serves in `provenance.attributed_event_ids`.
 pub async fn load_bounded_record_attribution(
     pool: &sqlx::PgPool,
     resource_ids: &[Uuid],
@@ -171,8 +166,8 @@ pub(crate) async fn load_attribution_map(
     }
 
     // A resource whose latest pointer is a mirror resolver serves, and attributes, the writes of
-    // the ENSv1 resolver the mirror would call. When Project cannot follow the mirror it publishes
-    // the resource's row with no attributed writes at all, superseded pointers included.
+    // the ENSv1 resolver the mirror would call. When the mirror cannot be followed, the resource
+    // has no attributed writes at all, superseded pointers included.
     let mirrored = mirror::load_mirror_attribution(connection, resource_ids, published).await?;
     for (resource_id, substitution) in mirrored {
         match substitution {

@@ -2165,8 +2165,8 @@ mod numeric_short_lease_connected {
         Ok(())
     }
 
-    // Interpret-to-Project coverage for a migrated name that is then released on ENSv2 (Pro review
-    // of PR 953, question 5). The captured registration, TokenResource and migration receipts and a
+    // Interpret-to-Project coverage for a migrated name that is then released on ENSv2. The
+    // captured registration, TokenResource and migration receipts and a
     // synthetic `LabelUnregistered` go through the adapter and the writer, and nothing rewrites the
     // normalized rows. The successor identifiers, the predecessor closure, the successor binding
     // position and the release closure are checked in the written rows before Project runs.

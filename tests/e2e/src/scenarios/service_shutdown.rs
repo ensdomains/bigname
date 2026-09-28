@@ -86,7 +86,7 @@ async fn api_signals_drain_accepted_indexed_name_read() -> Result<()> {
         let api_pool = PgPool::connect(api_url.as_str()).await?;
         for query in [
             "SELECT * FROM bigname_phase.raw_logs LIMIT 0",
-            "UPDATE bigname_phase.name_current SET raw_name=raw_name WHERE false",
+            "UPDATE bigname_phase.project_name_history SET chain_id=chain_id WHERE false",
         ] {
             let error = sqlx::query(query)
                 .execute(&api_pool)
@@ -323,14 +323,14 @@ async fn drain(
         ensure!(baseline["data"]["name"] == "alice.eth" && baseline["meta"]["source"] == "indexed", "wrong indexed identity");
         save(evidence, &format!("{name}-baseline"), &baseline)?;
         let mut gate = pool.begin().await?;
-        sqlx::query("LOCK TABLE bigname_phase.name_current IN ACCESS EXCLUSIVE MODE").execute(&mut *gate).await?;
+        sqlx::query("LOCK TABLE bigname_phase.project_name_history IN ACCESS EXCLUSIVE MODE").execute(&mut *gate).await?;
         let owner: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await?;
         let started: String = sqlx::query_scalar("SELECT clock_timestamp()::text").fetch_one(pool).await?;
         let request = response(url);
         tokio::pin!(request);
         let deadline = Instant::now() + Duration::from_secs(10);
         let waiting: Value = loop {
-            let waiting: Value = sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]') FROM (SELECT a.pid,a.application_name,a.query_start,a.wait_event_type,a.wait_event,l.relation::regclass::text,l.mode,l.granted FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND a.application_name='bigname-api' AND a.query_start >= $1::text::timestamptz AND l.relation='bigname_phase.name_current'::regclass AND NOT l.granted) r")
+            let waiting: Value = sqlx::query_scalar("SELECT coalesce(jsonb_agg(to_jsonb(r)),'[]') FROM (SELECT a.pid,a.application_name,a.query_start,a.wait_event_type,a.wait_event,l.relation::regclass::text,l.mode,l.granted FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND a.application_name='bigname-api' AND a.query_start >= $1::text::timestamptz AND l.relation='bigname_phase.project_name_history'::regclass AND NOT l.granted) r")
                 .bind(&started).fetch_one(pool).await?;
             if waiting.as_array().is_some_and(|v| !v.is_empty()) { break waiting; }
             ensure!(Instant::now() < deadline, "request never entered real relation lock");

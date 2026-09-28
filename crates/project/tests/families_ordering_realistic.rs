@@ -1,7 +1,7 @@
 //! Realistic same-log shapes where the emission ordinal (docs/glossary.md#emission-ordinal) and
-//! the old identity-byte order disagree, one fixture per adapter shape found by the TYR-36 D12
-//! survey (outputs/tyr36/d12-ordinal-vs-bytes-realistic-cases-2026-09-26.md). Each fixture writes
-//! the facts one adapter log emits, in the adapter's write order, with the adapter's own identity
+//! the old identity-byte order disagree, one fixture per adapter shape found by a survey of
+//! the adapters. Each fixture writes the facts one adapter log emits, in the adapter's write
+//! order, with the adapter's own identity
 //! `{derivation}:{manifest}:{chain}:{block hash}:{tx hash}:{log}:{suffix}:{ordinal}`
 //! (adapters schema_v2/normalized.rs:118-131; derivation kinds common.rs:266-294). Facts the
 //! adapter writes at the same log that no asserted family reads are left out, so some ordinals

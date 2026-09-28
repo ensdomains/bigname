@@ -1,10 +1,8 @@
 //! The resource facts the served permission reads take beside the F8 and F9 rows, read from the
 //! identity and event input tables because no family stores them: whether a resource is
 //! readable, the authority kind the resource summary derives from the resource's whole event
-//! history (builders/permissions/resource_summary.rs, `resource_event_summaries` and
-//! `resource_authority`), its ENSv2 registry root (`registry_roots`), namespace membership
-//! (permissions/effective.rs `push_namespace_filter`) and the evidence events of a
-//! resolver-scoped grant (builders/permissions.rs, the `evidence` window). Every read is by key.
+//! history, its ENSv2 registry root (`registry_roots`), namespace membership and the evidence
+//! events of a resolver-scoped grant. Every read is by key.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -65,12 +63,11 @@ pub(super) struct AuthorityFacts {
     pub root_resource_id: Option<Uuid>,
 }
 
-/// The authority kind and registry root of each of `ids` on `chain_id` at `block_number`, by the
-/// resource summary's rule: the latest readable event of the resource carrying an authority kind,
-/// else the latest resource-scoped permission event whose grant or revocation source carries
-/// one, else the identity row's, else `ens_v2_registry` for an ENSv2 root or registry resource;
-/// `name_wrapper` reads as `wrapper`. The latest is by block, transaction index, log index, then
-/// generated event id, each descending with nulls last, as the served summary orders them.
+/// The authority kind and registry root of each of `ids` on `chain_id` at `block_number`: the
+/// latest readable event of the resource carrying an authority kind, else the latest
+/// resource-scoped permission event whose grant or revocation source carries one, else
+/// `ens_v2_registry` for an ENSv2 root or registry resource. The latest is by block, transaction
+/// index, log index, then generated event id, each descending with nulls last.
 pub(super) async fn authority_facts(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -113,7 +110,6 @@ pub(super) async fn authority_facts(
                            AND event.after_state -> 'scope' ->> 'kind' = 'resource'
                            AND {scoped} IS NOT NULL
                          {latest}),
-                        resource.provenance ->> 'authority_kind',
                         CASE WHEN COALESCE(resource.provenance ->> 'source_family',
                                            resource.provenance ->> 'binding_source_family')
                                   IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
@@ -123,8 +119,7 @@ pub(super) async fn authority_facts(
              WHERE resource.resource_id = ANY($3::uuid[])
          )
          SELECT kinds.resource_id,
-                CASE kinds.raw_kind WHEN 'name_wrapper' THEN 'wrapper' ELSE kinds.raw_kind END
-                    AS authority_kind,
+                kinds.raw_kind AS authority_kind,
                 root.resource_id AS root_resource_id
          FROM kinds
          LEFT JOIN LATERAL (

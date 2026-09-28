@@ -1,21 +1,20 @@
-//! F2a with the F1 facts it reads: the shadow of `name_current.declared_summary.registration`
-//! and `.control` (name_current/build.sql:16-140).
+//! F2a with the F1 facts it reads: the composed name's `declared_summary.registration` and
+//! `.control`.
 //!
 //! The F1 selection is an input, not a recomputation: the reader takes the authority selection
-//! the served row carries in `provenance.authority_selection` (build.sql:235-252), plus the
+//! the composed row carries in `provenance.authority_selection`, plus the
 //! selected binding's registry-only handoff facts from `project_binding_candidate`. The name
-//! authority selection is plan step 6's contract, so taking it as input keeps the lifecycle proof
+//! authority selection is its own contract, so taking it as input keeps the lifecycle proof
 //! apart from the selection proof. The one selection output the row does not carry, the fact
 //! that decided a released ENSv2 tombstone, is found again from the retained events and the
 //! binding candidates with their identity rows' open windows, by the rules that chose it
-//! (`tombstone.rs`, name_authority/build.sql:48-271).
+//! (`tombstone.rs`).
 //!
 //! Membership (the registration candidate and the ENSv2 latest kind) reads the F2a maxima merged
 //! across the key and the triples associated with it, or the key's retained events folded again
 //! when they hold another name's event or a reservation expired when written. Every other value
-//! reads the retained events of the name through the authority admission, as the laterals of
-//! build.sql read `project_authority_events`, ordered by the canonical order instead of the
-//! code's orderings.
+//! reads the retained events of the name through the authority admission (`admission.rs`),
+//! ordered by the canonical order.
 mod admission;
 mod control;
 mod laterals;
@@ -31,14 +30,14 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::{Map, Value};
 
 use super::{
-    position::{EventOrder, Position, bound_of},
+    position::{Position, bound_of},
     registry::RegistryNode,
     rows::{self, BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
-pub use load::{load_name_facts, load_name_facts_on, load_shadow_names, namespace_of};
+pub use load::{load_name_facts, load_name_facts_on, namespace_of};
 
-/// The F1 selection outputs the admission reads (name_authority/build.sql:561-603), as the
+/// The F1 selection outputs the admission reads, as the
 /// served row's `provenance.authority_selection` carries them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthoritySelection {
@@ -47,9 +46,8 @@ pub struct AuthoritySelection {
     pub resource_id: Option<String>,
     /// `authority_epoch_start_position` as a three-part bound.
     pub epoch_start: Option<(i64, i64, i64)>,
-    /// Whether an authority proof event exists. Selection history only: since TYR-36 step 6
-    /// (de24ff32) no admission rule reads it, and only the migrated-name fixture
-    /// (crates/project/tests/families_shadow_order.rs) checks it.
+    /// Whether an authority proof event exists. Selection history only: no admission rule
+    /// reads it.
     pub has_proof: bool,
     pub unsupported_reason: Option<String>,
     pub ownerless_registry: bool,
@@ -58,7 +56,7 @@ pub struct AuthoritySelection {
 }
 
 impl AuthoritySelection {
-    /// Read from a served `name_current.provenance`.
+    /// Read from a composed name's `provenance`.
     pub fn from_provenance(provenance: &Value) -> Self {
         let selection = provenance
             .get("authority_selection")
@@ -87,7 +85,7 @@ impl AuthoritySelection {
         }
     }
 
-    /// `COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'` (build.sql:362).
+    /// `COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'`.
     pub fn is_v2(&self) -> bool {
         self.authority_arm.as_deref().unwrap_or("ens_v2") == "ens_v2"
     }
@@ -103,7 +101,7 @@ pub struct NameInput {
 }
 
 /// The publication the read is for: its block and the block's timestamp, the clock every
-/// wrapper mask uses (D6).
+/// wrapper mask uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Clock {
     pub block_number: i64,
@@ -122,13 +120,13 @@ pub struct TripleFacts {
 }
 
 impl TripleFacts {
-    /// The retained-event key of the triple (step 2 families/lifecycle.rs, `StateKey::text`).
+    /// The retained-event key of the triple (Project families/lifecycle.rs, `StateKey::text`).
     pub fn state_key(&self) -> String {
         Value::from(self.key.to_vec()).to_string()
     }
 
-    /// The lifecycle key today's decoder gives an unassociated triple, `registry:token`, null
-    /// when both are empty (v2_lifecycle_events.sql:25-27).
+    /// The lifecycle key the decoder gives an unassociated triple, `registry:token`, null
+    /// when both are empty.
     pub fn unassociated_key(&self) -> Option<String> {
         let key = format!("{}:{}", self.key[1], self.key[2]);
         (key != ":").then_some(key)
@@ -152,7 +150,7 @@ pub struct NameFacts {
     /// loaded once per batch and shared by every name of it.
     pub block_timestamps: Arc<BTreeMap<i64, Value>>,
     /// Each canonical block's timestamp in whole seconds, which a reservation's expiry is
-    /// compared with (v2_lifecycle_events.sql:28-36).
+    /// compared with.
     pub block_seconds: Arc<BTreeMap<i64, i64>>,
     /// `to_jsonb(to_timestamp(seconds))` per registrar snapshot registration time.
     pub snapshot_timestamps: Arc<BTreeMap<i64, Value>>,
@@ -161,9 +159,6 @@ pub struct NameFacts {
     pub authority_starts: Value,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
-    /// The order the read takes its "latest" in: canonical in every read, today's generated-id
-    /// order only in the harness's same-block counterfactual.
-    pub order: EventOrder,
 }
 
 /// The shadow of one name's registration and control blocks.
@@ -210,7 +205,7 @@ pub fn evaluate(facts: &NameFacts, clock: &Clock) -> anyhow::Result<ShadowName> 
 /// The released ENSv2 tombstone of a name whatever arm its input selection names: the
 /// resource the name was last bound to under ENSv2 and the identity of the release that decided
 /// it, none when an ENSv2 binding is open at `clock` or the latest lifecycle fact is not a
-/// release (name_authority/build.sql:48-271). The composed name read decides the arm with it.
+/// release. The composed name read decides the arm with it.
 pub(crate) fn released_v2(
     facts: &NameFacts,
     clock: &Clock,
@@ -224,7 +219,7 @@ pub(crate) fn released_v2(
 }
 
 /// Whether `event` carries the name once the two staging passes have run: emitted with it, or
-/// an unnamed `.eth` registrar row the passes give it (name_authority/stage.rs:149-198). The
+/// an unnamed `.eth` registrar row the passes give it. The
 /// passes read the lease candidates only, not the selection.
 pub(crate) fn staged_as_own(facts: &NameFacts, event: &rows::LifecycleEvent) -> bool {
     served::authority_of(facts).staged_name(event) == admission::StagedName::Ours

@@ -1,5 +1,4 @@
-//! Assemble one composed name row from what `batch.rs` loaded and decided
-//! (name_current/build.sql, the SELECT list).
+//! Assemble one composed name row from what `batch.rs` loaded and decided.
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -56,7 +55,7 @@ fn uuid(text: Option<&str>) -> Result<Option<Uuid>> {
         .transpose()
 }
 
-/// The chain positions slot of a chain (build.sql:263-281).
+/// The chain positions slot of a chain.
 fn slot(chain_id: &str) -> &str {
     match chain_id {
         "ethereum-mainnet" => "ethereum",
@@ -65,7 +64,7 @@ fn slot(chain_id: &str) -> &str {
     }
 }
 
-/// The authority a released ENSv1 lease had when it lapsed (build.sql:439-457): the latest
+/// The authority a released ENSv1 lease had when it lapsed: the latest
 /// grant or authority epoch with a kind on the lapsed resource.
 fn lapsed_authority(parts: &Parts<'_>) -> (Value, Value) {
     let shadow = parts.shadow;
@@ -121,16 +120,15 @@ fn lapsed_authority(parts: &Parts<'_>) -> (Value, Value) {
     }
     candidates
         .into_iter()
-        .max_by(|left, right| parts.facts.order.lateral(&left.0, &right.0))
+        .max_by(|left, right| left.0.cmp(&right.0))
         .map_or((Value::Null, Value::Null), |(_, kind, key)| {
             (json!(kind), json!(key))
         })
 }
 
-/// The block time of the name's first event (build.sql, the `created` lateral): the history's
-/// first block, or an earlier unnamed registrar row the staging passes give the name, which the
-/// history cannot know when the row was written, since the binding that names it can arrive
-/// later.
+/// The block time of the name's first event: the history's first block, or an earlier unnamed
+/// registrar row the staging passes give the name, which the history cannot know when the row was
+/// written, since the binding that names it can arrive later.
 fn created_at(parts: &Parts<'_>) -> Value {
     let staged = parts
         .facts
@@ -183,7 +181,7 @@ fn wrapper_fields(summary: &mut Map<String, Value>, row: Option<&WrapperRow>, cl
     );
 }
 
-/// The declared coverage (build.sql:176-202).
+/// The declared coverage.
 fn declared_coverage(parts: &Parts<'_>) -> Value {
     let selection = &parts.selection.selection;
     let ens_v2 = match selection.authority_arm.as_deref() {

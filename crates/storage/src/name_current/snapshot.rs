@@ -17,7 +17,7 @@ use super::NameCurrentRow;
 /// The row is composed from the owned key families and describes
 /// the family marker's publication only, so a selected position on the name's chain other than
 /// the publication (an `at` below it) is stale: no per-row position is kept to prove an older
-/// read (ruling J5).
+/// read.
 pub async fn load_name_current_for_snapshot(
     pool: &PgPool,
     logical_name_id: &str,

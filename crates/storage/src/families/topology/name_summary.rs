@@ -1,8 +1,8 @@
-//! The child lists' per-child reads of the name summary family (`project_name_summary`, TYR-36
-//! step 7b slice 2b): the fields the family step stores for every name a block touches, from the
+//! The child lists' per-child reads of the name summary family (`project_name_summary`): the
+//! fields the family step stores for every name a block touches, from the
 //! composed name reader's own selection (`families::name::compose_name_summaries`). A child with
-//! no summary row is one the composed reader serves no name row for, which the served lists
-//! treat as having no name row: no arm, no serving resource, no zero-owner transfer, and no
+//! no summary row is one the composed reader serves no name row for, which the lists treat as
+//! having no name row: no arm, no serving resource, no zero-owner transfer, and no
 //! registration status or timestamps.
 
 /// The child's selected authority arm (`ens_v1`, `basenames` or `ens_v2`), null when none is
@@ -15,8 +15,7 @@ pub(super) fn selected_authority_arm(chain: &str, child: &str) -> String {
     )
 }
 
-/// Whether the child has a serving resource, which admits an ownerless child
-/// (crates/project/src/builders/children.rs, the `project_name_serving` eligibility).
+/// Whether the child has a serving resource, which admits an ownerless child.
 pub(super) fn serving(chain: &str, child: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM bigname_phase.project_name_summary serving_summary

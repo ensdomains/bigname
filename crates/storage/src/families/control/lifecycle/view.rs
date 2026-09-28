@@ -1,10 +1,9 @@
-//! Lifecycle membership read from the F2a maxima (design, note "F2a lifecycle key" and "F2a
-//! reader summaries and reducer state"). A resource's lifecycle is the field-wise merge of its
-//! key state with the summary of every triple whose association currently targets it; the
+//! Lifecycle membership read from the F2a maxima. A resource's lifecycle is the field-wise merge of
+//! its key state with the summary of every triple whose association currently targets it; the
 //! candidate of a key and the retirement of a resource are computed from positions alone, so a
 //! reassociation changes them without any write to the events it moves.
 use crate::families::control::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::{Mark, Maxima},
 };
 
@@ -33,7 +32,7 @@ fn later(left: &Option<Mark>, right: &Option<Mark>) -> Option<Mark> {
     }
 }
 
-/// Per field the later of the stored values under the canonical order (design:40). The key
+/// Per field the later of the stored values under the canonical order. The key
 /// state's own events and the triples' null-resource events are disjoint sets, so the later
 /// maximum is the maximum of the union. `last_revival` never merges: retirement reads the key
 /// state alone.
@@ -79,10 +78,9 @@ pub struct Candidate {
 }
 
 /// The candidate of one key: candidate_active, candidate_path and candidate_explicit with the
-/// witness rule, latest of the three (design:63, restating build.sql:322-341 under D12). Every
-/// comparison is the name-membership order (`EventOrder::name_membership`).
-pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
-    let after = |left: &Position, right: &Position| order.name_membership(left, right).is_gt();
+/// witness rule, latest of the three. Every comparison is the canonical order.
+pub fn candidate(view: &MergedView) -> Option<Candidate> {
+    let after = |left: &Position, right: &Position| left.cmp(right).is_gt();
     let active = view.last_active.as_ref();
     let mut found: Vec<Candidate> = Vec::new();
     if let Some(active) = active {
@@ -123,17 +121,16 @@ pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
     }
     found
         .into_iter()
-        .max_by(|left, right| order.name_membership(&left.position, &right.position))
+        .max_by(|left, right| left.position.cmp(&right.position))
 }
 
-/// The cross-key preference of build.sql:342-346 over one candidate per key: the binding
+/// The cross-key preference over one candidate per key: the binding
 /// resource's non-released candidate, then any non-released one, then the binding key's, then
-/// the latest in the name-membership order. `keys` pairs each key with its candidate; the result
+/// the latest in the canonical order. `keys` pairs each key with its candidate; the result
 /// is the index of the winner.
 pub fn preferred<'a>(
     keys: impl IntoIterator<Item = (&'a str, &'a Candidate)>,
     binding_resource: Option<&str>,
-    order: &EventOrder,
 ) -> Option<usize> {
     keys.into_iter()
         .enumerate()
@@ -145,15 +142,14 @@ pub fn preferred<'a>(
             };
             rank(left_key, left)
                 .cmp(&rank(right_key, right))
-                .then_with(|| order.name_membership(&left.position, &right.position))
+                .then_with(|| left.position.cmp(&right.position))
         })
         .map(|(index, _)| index)
 }
 
-/// Expiry retirement of one resource, from its key state alone (design:63, restating
-/// expiry_retirement.rs:44-93): the latest path-expiry release is retired unless a grant,
-/// reservation or qualifying revival of the same key state is positioned after it. A later
-/// explicit release restores nothing.
+/// Expiry retirement of one resource, from its key state alone: the latest path-expiry release is
+/// retired unless a grant, reservation or qualifying revival of the same key state is positioned
+/// after it. A later explicit release restores nothing.
 pub fn retirement(key_state: &Maxima) -> Option<Position> {
     let path = key_state.last_path_expiry.as_ref()?;
     let restored = [&key_state.last_active, &key_state.last_revival]
@@ -163,18 +159,17 @@ pub fn retirement(key_state: &Maxima) -> Option<Position> {
     (!restored).then(|| path.position.clone())
 }
 
-/// The permissions builder's drop rule (permissions.rs:111-133, :391-398) read from the key
-/// state: a resource whose latest ENSv2 registration event (grant, reservation, qualifying
-/// revival or path-expiry release) is a path-expiry release serves no grants. `order` is the
-/// membership order the key state was folded in.
-pub fn registration_lapsed(key_state: &Maxima, order: &EventOrder) -> bool {
+/// The permission drop rule read from the key state: a resource whose latest ENSv2 registration
+/// event (grant, reservation, qualifying revival or path-expiry release) is a path-expiry release
+/// serves no grants.
+pub fn registration_lapsed(key_state: &Maxima) -> bool {
     let Some(path) = &key_state.last_path_expiry else {
         return false;
     };
     ![&key_state.last_active, &key_state.last_revival]
         .into_iter()
         .flatten()
-        .any(|mark| order.membership(&mark.position, &path.position).is_gt())
+        .any(|mark| mark.position.cmp(&path.position).is_gt())
 }
 
 #[cfg(test)]
@@ -205,7 +200,7 @@ mod tests {
             last_explicit_release: mark(30, None),
             ..MergedView::default()
         };
-        let chosen = candidate(&view, &EventOrder::Canonical).expect("a candidate");
+        let chosen = candidate(&view).expect("a candidate");
         assert_eq!(chosen.kind, CandidateKind::PathExpiry);
         assert_eq!(chosen.position.block_number, 20);
     }
@@ -218,7 +213,7 @@ mod tests {
             last_explicit_release: mark(30, None),
             ..MergedView::default()
         };
-        let chosen = candidate(&view, &EventOrder::Canonical).expect("a candidate");
+        let chosen = candidate(&view).expect("a candidate");
         assert_eq!(chosen.kind, CandidateKind::Explicit);
     }
 
@@ -231,14 +226,14 @@ mod tests {
             ..Maxima::default()
         };
         assert_eq!(retirement(&revived), None);
-        assert!(!registration_lapsed(&revived, &EventOrder::Canonical));
+        assert!(!registration_lapsed(&revived));
         let renewed = Maxima {
             last_path_expiry: mark(10, None),
             last_renewal: mark(30, None),
             ..Maxima::default()
         };
         assert_eq!(retirement(&renewed).map(|at| at.block_number), Some(10));
-        assert!(registration_lapsed(&renewed, &EventOrder::Canonical));
+        assert!(registration_lapsed(&renewed));
     }
 
     #[test]
@@ -255,14 +250,11 @@ mod tests {
         };
         let keys = [("k1", &released), ("k2", &live)];
         assert_eq!(
-            preferred(keys, Some("k1"), &EventOrder::Canonical),
+            preferred(keys, Some("k1")),
             Some(1),
             "a live key beats a released binding key"
         );
         let both_released = [("k1", &released), ("k2", &released)];
-        assert_eq!(
-            preferred(both_released, Some("k2"), &EventOrder::Canonical),
-            Some(1)
-        );
+        assert_eq!(preferred(both_released, Some("k2")), Some(1));
     }
 }

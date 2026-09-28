@@ -1,12 +1,12 @@
-//! The name summary (TYR-36 step 7b slice 2b, the stored `project_name_summary` family): the
+//! The name summary (the stored `project_name_summary` family): the
 //! per-name fields the child and label lists filter, sort and count by inside one statement,
 //! which the lists cannot compose at read for every child of a parent. The family step writes
 //! them for the names each block touches, from the same composition as the composed name row
 //! (`batch.rs`, `load_chain`), so the rules have one copy. Except for `authority_arm` and
-//! `zero_owner`, these are the fields the served lists read from the name's `name_current` row:
+//! `zero_owner`, these are fields of the composed name row:
 //!
-//! - `authority_arm`: the child's independently selected arm, which the served children builder
-//!   reads from `project_name_authority` even when token readability withholds the name row;
+//! - `authority_arm`: the child's independently selected arm, which the children relation reads
+//!   even when token readability withholds the name row;
 //! - `serving`: whether `provenance.read_reachability.serving_resource_id` is set, which admits
 //!   an ownerless child;
 //! - `registration_status`: `declared_summary.registration.status`, whose `released` the expiry
@@ -14,14 +14,12 @@
 //! - `expires_at` and `registered_at`: the timestamp reads of the subnames sorts and fence, the
 //!   same SQL expressions (`address_names::query`) over the composed summary;
 //! - `zero_owner`: whether the latest ENSv1 or Basenames registry Transfer attributed to the name
-//!   names the zero owner, which zeroes a registry child's owner. The served child builder
-//!   attributes a Transfer as `project_latest_registry_owner` does
-//!   (crates/project/src/builders/name_authority/stage.rs): by the name it carries, else by the
-//!   latest named event of its resource and family, of any kind, else by an active, readable
-//!   surface at its node. That is not the composed name row's rule (its node's latest Transfer),
-//!   so this field is the child builder's attribution: the Transfers are the registry owner
-//!   events (`project_registry_owner_event`), and the named events that link a resource are read
-//!   from the readable interpreted events, as the served stage reads them;
+//!   names the zero owner, which zeroes a registry child's owner. A Transfer is attributed by
+//!   the name it carries, else by the latest named event of its resource and family, of any
+//!   kind, else by an active, readable surface at its node. That is not the composed name row's
+//!   rule (its node's latest Transfer), so this field keeps the child list's own attribution:
+//!   the Transfers are the registry owner events (`project_registry_owner_event`), and the named
+//!   events that link a resource are read from the readable interpreted events;
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
 //!   expiry or grace boundary), in Unix seconds, since a NameWrapper expiry can lie past the last
@@ -172,8 +170,7 @@ pub async fn compose_name_summary_publication(
 /// attributed by its name, else the latest named event of its resource and family, else an
 /// active, readable surface at its node; the latest one attributed to the name decides, in the
 /// served order (block, transaction index, log index with nulls lowest, then event identity).
-/// The named events are the ones the served stage reads (`project_events`,
-/// crates/project/src/stage/events.rs): activated, readable and at or below the block.
+/// The named events are the activated, readable interpreted events at or below the block.
 fn zero_owner() -> String {
     let own = readable_event("own");
     let latest = readable_event("latest");

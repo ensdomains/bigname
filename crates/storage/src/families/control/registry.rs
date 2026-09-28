@@ -1,7 +1,6 @@
-//! F2c, registry ownership: the registry generation of an ENSv1 name (the pull request 947
-//! fold, name_authority/build.sql:522-560 and :592-596), the zero-owner facts the ownerless
-//! registry profile reads (name_authority/stage.rs:201-268), and the per-resource registry
-//! binding the permission summary serves (permission_resources.rs:10-79).
+//! F2c, registry ownership: the registry generation of an ENSv1 name, the zero-owner facts the
+//! ownerless registry profile reads, and the per-resource registry binding the permission
+//! summary serves.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -9,7 +8,7 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 
 use super::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::{flag, lower, text},
 };
 
@@ -72,7 +71,7 @@ impl OwnerEvent {
         })
     }
 
-    /// The owner this event reports to the served control block (build.sql:668-681): null when
+    /// The owner this event reports to the served control block: null when
     /// its owner word is unmasked, else its registry_owner, else its owner.
     pub fn reported_owner(&self) -> Option<String> {
         if self.owner_word_unmasked == Some(true) {
@@ -85,7 +84,7 @@ impl OwnerEvent {
 
 impl RegistryNode {
     /// The node's latest AuthorityTransferred in the canonical order, the event the served
-    /// ownerless-registry profile reads (name_authority/stage.rs:201-268).
+    /// ownerless-registry profile reads.
     pub fn latest_transfer(&self) -> Option<&OwnerEvent> {
         self.owner_events
             .iter()
@@ -106,12 +105,11 @@ impl RegistryNode {
     }
 }
 
-/// The registry generation and handoff block of an ENS name (name_authority/build.sql
-/// :592-596): `old` when the 2017 registry recorded the node and the current registry has not,
-/// under arm ens_v1; the handoff block is the first current-registry record. The served fold
-/// reads ENS registry records only and leaves the all-zero root node out
-/// (name_authority/build.sql:542-558), so a node of another namespace, such as a Basenames node
-/// F2c also keeps, and the root node have no records and no handoff block.
+/// The registry generation and handoff block of an ENS name: `old` when the 2017 registry recorded
+/// the node and the current registry has not, under arm ens_v1; the handoff block is the first
+/// current-registry record. The fold reads ENS registry records only and leaves the all-zero root
+/// node out, so a node of another namespace, such as a Basenames node F2c also keeps, and the root
+/// node have no records and no handoff block.
 pub fn registry_generation(
     node: Option<&RegistryNode>,
     authority_arm: Option<&str>,
@@ -127,16 +125,11 @@ pub fn registry_generation(
     )
 }
 
-/// Whether the ownerless-registry profile applies (name_authority/build.sql:609-613): the
-/// node's latest AuthorityTransferred reports the zero address as its owner getter
-/// (stage.rs:201-268 reads AuthorityTransferred only), no binding is selected and the arm is not
-/// ENSv2. Today's stage keys the transfers by name: the event's name, else the latest named
-/// event of its resource and family, else the active surface of its node. The families key them
-/// by node, which is the name's namehash. The node-keyed and name-keyed latest transfer can
-/// therefore differ, for example for an unnamed transfer whose resource another name's events
-/// carry, for one whose node has no active surface, or when names share a node; where they
-/// differ the comparison fails rather than passing silently. The comparison checks this boolean
-/// only, not the other details of the ownerless-registry profile.
+/// Whether the ownerless-registry profile applies: the
+/// node's latest AuthorityTransferred reports the zero address as its owner getter, no binding
+/// is selected and the arm is not ENSv2. Only AuthorityTransferred counts. The families key the
+/// transfers by node, which is the name's namehash, so an unnamed transfer counts for the node
+/// it addresses.
 pub fn ownerless_registry(
     node: Option<&RegistryNode>,
     selected_binding: Option<&str>,
@@ -261,15 +254,14 @@ impl Observation {
 }
 
 /// The name facts the attribution reads: the name's current resource and its authority arm,
-/// both from the served name row (permission_resources.rs:38-42 joins the name row being built).
+/// both from the composed name row.
 #[derive(Clone, Debug, Default)]
 pub struct NameAttribution {
     pub current_resource_id: Option<String>,
     pub authority_arm: Option<String>,
 }
 
-/// What the permission summary serves for one resource's registry binding
-/// (permission_resources.rs:71-79).
+/// What the permission summary serves for one resource's registry binding.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegistryBinding {
     pub registry_owner: Option<String>,
@@ -284,27 +276,17 @@ pub struct RegistryBinding {
     pub normalized_event_id: Option<i64>,
 }
 
-/// The registry binding of every resource the observations reach. Today's builder keys the
-/// observations by `COALESCE(logical_name_id, resource_id)`, takes the latest per key, moves a
-/// name-addressed AuthorityTransferred or SubregistryChanged to the name's current resource under
-/// arm ens_v1 or basenames, then takes the latest per resource. Step 2 keeps one row per that
-/// key with the resource it reaches under the name's ENSv1 or Basenames binding. The served
-/// move reads the served name row's selection, so a name `names` carries is moved by that
+/// The registry binding of every resource the observations reach. The observations are keyed by
+/// `COALESCE(logical_name_id, resource_id)` and the latest per key is taken; a name-addressed
+/// AuthorityTransferred or SubregistryChanged moves to the name's current resource under arm
+/// ens_v1 or basenames, and the latest per resource is then taken. F2c keeps one row per that
+/// key with the resource it reaches under the name's ENSv1 or Basenames binding. The move reads
+/// the composed name's selection, so a name `names` carries is moved by that
 /// selection (a name whose arm is ENSv2 stays on the event's own resource), and any other row
 /// reaches its stored target.
 pub fn registry_bindings(
     observations: &[Observation],
     names: &BTreeMap<String, NameAttribution>,
-) -> BTreeMap<String, RegistryBinding> {
-    registry_bindings_in(observations, names, &EventOrder::Canonical)
-}
-
-/// `registry_bindings` with the latest observation per resource taken in `order`: the harness
-/// reads it in today's (block, transaction, log, generated id) order for its same-block check.
-pub fn registry_bindings_in(
-    observations: &[Observation],
-    names: &BTreeMap<String, NameAttribution>,
-    order: &EventOrder,
 ) -> BTreeMap<String, RegistryBinding> {
     let mut per_resource: BTreeMap<String, &Observation> = BTreeMap::new();
     for observation in observations {
@@ -323,10 +305,7 @@ pub fn registry_bindings_in(
             None => observation.target_resource_id.clone(),
         };
         let entry = per_resource.entry(resource).or_insert(observation);
-        if order
-            .lateral(&observation.position, &entry.position)
-            .is_gt()
-        {
+        if observation.position > entry.position {
             *entry = observation;
         }
     }
@@ -369,22 +348,6 @@ impl RegistryBinding {
             })
         })
     }
-}
-
-/// Every registry-binding observation of the chain. A resource's binding can come from a row
-/// keyed by any name whose target it is, which no column indexes, so the read takes the table
-/// whole; it serves the harness only.
-pub async fn load_observations(pool: &PgPool, chain_id: &str) -> Result<Vec<Observation>> {
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.registry.observations */ SELECT to_jsonb(observation)
-         FROM bigname_phase.project_registry_binding_observation observation
-         WHERE observation.chain_id = $1",
-    )
-    .bind(chain_id)
-    .fetch_all(pool)
-    .await
-    .context("failed to load registry-binding observations")?;
-    Ok(rows.iter().filter_map(Observation::from_row).collect())
 }
 
 #[cfg(test)]
@@ -492,7 +455,7 @@ mod tests {
         );
     }
 
-    /// The served records leave the all-zero root node out (name_authority/build.sql:558): an
+    /// The served records leave the all-zero root node out: an
     /// old-only or current-registry root record gives no records and no handoff block.
     #[test]
     fn the_root_node_has_no_registry_records() {

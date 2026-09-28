@@ -1,5 +1,6 @@
 //! The served registration and control values of one name, from its loaded facts. Each function
-//! restates one lateral of name_current/build.sql over the retained events; every "latest" is
+//! derives one part of the composed registration or control block from the retained events;
+//! every "latest" is
 //! the latest under the facts' order, the canonical order in every read.
 use std::collections::BTreeMap;
 
@@ -18,7 +19,7 @@ use super::{
     tombstone::deciding_fact,
 };
 use crate::families::control::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::LifecycleEvent,
     wrapper::{effective_wrapper, servable_expiry},
 };
@@ -28,11 +29,11 @@ pub(super) struct Tagged<'a> {
     pub(super) event: &'a LifecycleEvent,
     pub(super) staged: StagedName,
     pub(super) admitted: bool,
-    /// The ENSv2 lifecycle key (v2_lifecycle_events.sql:13-27), for an ENSv2-family event.
+    /// The ENSv2 lifecycle key, for an ENSv2-family event.
     pub(super) key: Option<String>,
 }
 
-/// The registration the name serves (build.sql:319-364): the event whose kind and payload it
+/// The registration the name serves: the event whose kind and payload it
 /// serves, its lifecycle key, the resource it serves the registration on, which for a released
 /// tombstone is the tombstone's and not the deciding event's own, and whether it is a released
 /// tombstone's deciding fact (`is_released_v2`).
@@ -58,16 +59,14 @@ impl Selected<'_> {
     }
 }
 
-/// The latest item under the laterals' order: the canonical order in a read, today's order in
-/// the harness's same-block counterfactual.
+/// The latest item in the canonical order.
 pub(super) fn latest<T>(
-    order: &EventOrder,
     items: impl IntoIterator<Item = T>,
     position: impl for<'b> Fn(&'b T) -> &'b Position,
 ) -> Option<T> {
     items
         .into_iter()
-        .max_by(|left, right| order.lateral(position(left), position(right)))
+        .max_by(|left, right| position(left).cmp(position(right)))
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -136,7 +135,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
 
     let mut trace = Map::new();
     // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
-    // every other ENSv2 name the registration fold (build.sql:349-364).
+    // every other ENSv2 name the registration fold.
     let tombstone = deciding_fact(facts, clock)?;
     trace.insert("released_v2".into(), json!(tombstone.is_some()));
     let selected = if let Some(tombstone) = tombstone {
@@ -150,7 +149,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         select_v2(facts, &tagged, binding_resource, &mut trace)?
     } else {
         let event = latest(
-            &facts.order,
             tagged.iter().filter(|tagged| {
                 tagged.staged == StagedName::Ours
                     && tagged.admitted
@@ -198,9 +196,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     trace.insert("event_resource".into(), opt_text(event_resource));
     trace.insert("selected_kind".into(), opt_text(selected.kind()));
     // A release emitted without a name that the registration fold selected: the path-expiry
-    // release the interpreter synthesises, which today's name-scoped fold never sees. The harness
-    // reads these to check that the shadow serves the release. A released tombstone's deciding
-    // fact is served by both sides (build.sql:349-364), so it is not one.
+    // release the interpreter synthesises. The trace records whether one was selected, and its
+    // times. A released tombstone's deciding fact is not one.
     let unnamed_release = selected.event.filter(|event| {
         !selected.released
             && event.original_logical_name_id.is_none()
@@ -240,7 +237,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     );
 
     // The summary laterals' input: the name's admitted events, restricted to the selected
-    // lifecycle key for an ENSv2 selection (build.sql:404, :415, :466, :525, :660, :684).
+    // lifecycle key for an ENSv2 selection.
     let in_scope: Vec<&Tagged<'_>> = tagged
         .iter()
         .filter(|tagged| {
@@ -254,7 +251,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         .collect();
 
     let grant = latest(
-        &facts.order,
         in_scope
             .iter()
             .filter(|tagged| tagged.event.event_kind == "RegistrationGranted"),
@@ -268,28 +264,27 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let owner_lapsed = effective
         .as_ref()
         .is_some_and(|wrapper| wrapper.owner_lapsed);
-    // A wrapped ENSv1 name with no registrar lease expires with its NameWrapper entry
-    // (build.sql:57-62, :126-129).
+    // A wrapped ENSv1 name with no registrar lease expires with its NameWrapper entry.
     let wrapper_fallback = wrapper_row
         .filter(|row| row.wrapper_state.is_some() && !is_v2)
         .and_then(servable_expiry);
 
     let selected_kind = selected.kind();
-    let expiry_seconds = expiry_candidate(&facts.order, &in_scope);
+    let expiry_seconds = expiry_candidate(&in_scope);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     let selected_expiry = || {
         selected
             .event
             .map_or(Value::Null, |event| event.expiry.clone())
     };
-    // The registration expiry, the CASE of build.sql:40-63 branch by branch. First, an ENSv2
+    // The registration expiry, branch by branch. First, an ENSv2
     // path-expiry release serves its own expiry, and the expiry lateral only when the release
-    // carries none (build.sql:45-49): a renewal after the path was cut is written without a
+    // carries none: a renewal after the path was cut is written without a
     // name, so the name's expiry rows can be older than the release. Then, with an identity
-    // mismatch, the selected event's own expiry (build.sql:50-53). Otherwise the expiry lateral
+    // mismatch, the selected event's own expiry. Otherwise the expiry lateral
     // (`expiry_candidate`: the latest admitted grant of the name on the selected key, or its
     // latest admitted renewal, release or ExpiryChanged with a numeric expiry), else the selected
-    // ENSv2 event's own expiry, else for ENSv1 the NameWrapper expiry (build.sql:54-62).
+    // ENSv2 event's own expiry, else for ENSv1 the NameWrapper expiry.
     let path_release = is_v2
         && selected_kind == Some("RegistrationReleased")
         && selected
@@ -311,7 +306,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     };
 
     let registrant = registrant(
-        &facts.order,
         &authority,
         &tagged,
         &in_scope,
@@ -377,9 +371,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         opt_text(latest_event_kind.as_deref()),
     );
     // One resolved arm decides both the selection and its presentation: a missing arm reads as
-    // ENSv2 (build.sql:362), so a release it selects is presented as an ENSv2 release. Today's
-    // presentation compares the raw arm with 'ens_v2' (build.sql:99, :104, :113), which a missing
-    // arm fails; the harness reports that difference under its own cause.
+    // ENSv2, so a release it selects is presented as an ENSv2 release. Comparing the raw arm
+    // with 'ens_v2' instead would not present it, because a missing arm fails that comparison;
+    // the trace records that difference under its own cause.
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
     if selection.ownerless_registry {
@@ -407,18 +401,13 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     }
 
-    // A wrapper grant's control is built like any other grant's: TYR-36 step 6 (de24ff32,
-    // "serve the control owner of a wrapper grant") removed the served "ENSv1 wrapper effective
-    // control is not yet projected" section from name_current/build.sql (the control CASE,
-    // :105-108 before that commit) and from the API's declared control section
-    // (declared_state.rs:91-100 before it).
+    // A wrapper grant's control is built like any other grant's.
     let live_control = || {
         let mut control = Map::new();
         let status = if selected_kind == Some("RegistrationReserved") {
             selected.event.and_then(|event| event.status.clone())
         } else {
             latest(
-                &facts.order,
                 in_scope
                     .iter()
                     .filter(|tagged| tagged.event.status.is_some()),
@@ -454,8 +443,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     } else {
         live_control()
     };
-    // With no selected arm, today's presentation does not clear the release (build.sql:99, :104,
-    // :113 compare the raw arm): the harness reads what it serves instead from here.
+    // With no selected arm, a presentation that compared the raw arm would not clear the
+    // release; the trace records what that would have served.
     if let Some(unreleased) = unreleased.filter(|_| selection.authority_arm.is_none()) {
         trace.insert(
             "raw_arm_presentation".into(),

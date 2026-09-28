@@ -5292,9 +5292,8 @@ async fn served_after_one_batch(
 // then renews the detached token in the same block, from 2 to 3. When that expiry passes, the
 // token has no name any more, so Interpret writes a second, block-boundary release with the
 // resource and no name. Project keeps the name as a released ENSv2 tombstone on that resource
-// (product ruling of 2026-09-25: an expired ENSv2 registration stays with ENSv2), and the
-// registration section serves the same latest fact as authority selection (product ruling of
-// 2026-09-26): the nameless release at block 3, not the named path-cut release at block 1. So it
+// (an expired ENSv2 registration stays with ENSv2), and the registration section serves the
+// same latest fact as authority selection: the nameless release at block 3, not the named path-cut release at block 1. So it
 // serves that release's time and its expiry, 3, not the grant's 2, and the control section is
 // unregistered.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
@@ -5540,7 +5539,7 @@ async fn a_detached_renewal_serves_the_same_fields_resumed_and_in_one_batch() ->
 // At block 2 the reservation is the name's latest fact and the name reads as reserved. From block
 // 3 the name is served as the released tombstone of the registration it was last bound to, A's
 // `leaf`, with that lapse's time and expiry, though B's reservation is still live on chain (ADR
-// 0007, a ruling applied by the reviewer on 2026-09-26): the registration section shows the
+// 0007): the registration section shows the
 // lifecycle fact of the registration the name was last bound to, and the registry state is per
 // entry, so A's lapse does not end B's reservation.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)

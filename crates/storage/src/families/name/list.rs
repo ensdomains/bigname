@@ -1,4 +1,4 @@
-//! The composed name listings (TYR-36 step 7b): the /v1/search page (ruling J8) and the
+//! The composed name listings: the /v1/search page and the
 //! expiring listing of /v1/names, served from composed name rows at family publication.
 //!
 //! Both page through a `filtered_names` CTE populated from composed rows, with shared predicates
@@ -221,7 +221,7 @@ async fn search_candidates(
         .collect()
 }
 
-/// The composed expiring page of /v1/names (`load_name_current_expiring_page`'s contract).
+/// The composed expiring page of /v1/names.
 /// `chains` are the chains the request selected for `filter.namespace`: their markers are read
 /// before the walk, which reads family tables a rebuild empties, so a rebuild refuses rather than
 /// answers an empty page. Only names of `filter.namespace` are walked and composed.

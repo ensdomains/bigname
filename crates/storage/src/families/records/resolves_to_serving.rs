@@ -1,17 +1,15 @@
 //! `GET /v1/addresses/{address}/resolves_to` (both the single coin type and `coin_type=evm`) over
 //! the families at the family publication.
 //!
-//! The candidate resources come from the derived inverse address index (F14) alone,
-//! with mirror resolvers from the family classification alone (`candidates.rs`,
-//! `CandidateSource::Index`). The retained-value scan the harness adds stays a harness check:
-//! the switch requires `address_index_misses` 0 first. Each candidate's family record inventory
-//! is assembled (`inventory.rs`) and its entries that resolve to the address become
-//! `address_records_current`-shaped rows, one per name the resource serves records for. Those
-//! names are composed at read (`families::name`) and kept under the served builder's rule
-//! (address_records.rs: the record resource is the serving resource, else the bound resource of a
-//! bound, registered name). The rows are bound into the served page statements
-//! (`address_names::source`), so the coin-type match, the ENSIP-19 default-address fallback,
-//! dedupe, the authority filter, sorts, cursors and the EVM aggregation are the served SQL.
+//! The candidate resources come from the derived inverse address index (F14) alone, with mirror
+//! resolvers from the family classification alone (`candidates.rs`, `candidate_resources_from`).
+//! Each candidate's family record inventory is assembled (`inventory.rs`) and its entries that
+//! resolve to the address become `address_records_current`-shaped rows, one per name the resource
+//! serves records for. Those names are composed at read (`families::name`) and kept when the record
+//! resource is the name's serving resource, else the bound resource of a bound, registered name.
+//! The rows are bound into the served page statements (`address_names::source`), so the coin-type
+//! match, the ENSIP-19 default-address fallback, dedupe, the authority filter, sorts, cursors and
+//! the EVM aggregation are the served SQL.
 //!
 //! A page is read in one snapshot (`read_snapshot`).
 use std::collections::{BTreeMap, BTreeSet};
@@ -203,8 +201,8 @@ async fn compose_address_record_rows(
     Ok((Value::Array(rows), Value::Array(names)))
 }
 
-/// The resource a composed name serves records through, under the served builder's rule
-/// (address_records.rs, `names`).
+/// The resource a composed name serves records through: its serving resource, else the bound
+/// resource of a bound, registered name.
 fn serves_records_through(row: &NameCurrentRow) -> Option<Uuid> {
     let bound = row.surface_binding_id.is_some()
         && row.resource_id.is_some()

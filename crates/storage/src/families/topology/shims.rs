@@ -1,59 +1,13 @@
-//! Reads these readers need that are not yet computed from the family tables. The ones in this
-//! file are one small function each, so the family read that replaces one replaces exactly one
-//! function; every function names the interim source it reads today. Several other interim reads
-//! stay inline in the reader queries and are listed after them, so not every interim dependency
-//! is one replaceable function.
+//! SQL fragments the topology readers share: the canonical event order over a family row's
+//! position columns, as a row value or read from a JSON position, and a child's effective
+//! NameWrapper fuses at the publication clock.
 //!
-//! - [`effective_child_fuses`]: the child's wrapper fuses masked at the family marker's block
-//!   time over `project_wrapper_state`, the mask `effective_wrapper_state` applies in
-//!   crates/project/src/builders/children.rs, until a shared wrapper mask read exists.
-//!
-//! The child's selected arm, serving resource and zero-owner transfer, and the registration
-//! status and times the subnames page sorts and fences by, are no longer interim: they come from
-//! the name summary family (`name_summary.rs`, TYR-36 step 7b slice 2b).
-//!
-//! Inline reads of served projection tables. Each must be replaced by a family read before step 7
-//! serves the reader that holds it:
-//!
-//! - `load_bound_names_shadow` (`resolver.rs`): only the resolver match comes from
-//!   `project_resource_pointer`. The name's eligibility, the registration, release and control
-//!   checks, the namespace filter and the page order are `name_current` columns, the same
-//!   predicate block as `load_phase_resolver_bound_name_rows`, and the returned rows are the
-//!   served rows, hydrated through `load_phase_name_current_rows_by_ids`. A serving-only name is
-//!   admitted through `resolver_current.declared_summary.bindings.status`, which the F3
-//!   classification row does not replace.
-//! - `load_bound_names_shadow` takes a name's selected resource from `name_current.resource_id`,
-//!   else its serving resource, to pick the one pointer that counts. Today's name row instead
-//!   takes the latest of the selected authority's pointer and the serving pointer, by block,
-//!   transaction index and log index, then normalized event id, descending with nulls last (the
-//!   `resolver` lateral of name_current/build.sql). So a name with a non-null selected resource A
-//!   and a distinct serving resource B differs when B's pointer wins that order and names another
-//!   resolver: the served row follows B, the shadow follows A. It also differs when A has no
-//!   pointer and B has an eligible serving pointer, since the non-null A blocks the fallback to
-//!   B. No fixture covers either case.
-//!
-//! Inline reads of `normalized_events`:
-//!
-//! - `/links` (`collections.rs`) looks up each link's event by identity for its block hash and
-//!   transaction hash, and the wildcard arm of `load_name_topology_shadow` (`name_topology.rs`)
-//!   looks up the boundary event for its id and block hash. These are metadata lookups by key
-//!   and are intended to stay as inputs.
-//!
-//! The identity and lineage tables the readers join (`name_surfaces`, `resources`,
-//! `surface_bindings`, `token_lineages`, `chain_lineage`) and the label and discovery tables are
-//! inputs, not served projections, and are intended to stay.
-//!
-//! Known gaps outside this file:
-//!
-//! - The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
-//!   surface is unreadable. Today's `DEFAULT_CHILDREN_CURRENT_READ_FILTER` also keeps such a child
-//!   when `provenance.label.source = 'label_preimage'`. No current writer sets that key: the only
-//!   `children_current` writer (crates/project/src/builders/children.rs) builds its provenance
-//!   without a `label` object, so the branch is unreachable today and the family rows carry no
-//!   label source to mirror it with. If a writer starts setting it, the shadow must learn it.
+//! The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
+//! surface is unreadable; no writer records a label-preimage exception for an unreadable
+//! surface.
 
 /// The canonical event order over a family row's own position columns
-/// (docs/glossary.md#canonical-event-order; D12 as amended on 2026-09-26), as a row value that
+/// (docs/glossary.md#canonical-event-order), as a row value that
 /// compares later-is-greater: block number, transaction index, log index, the emission ordinal
 /// (docs/glossary.md#emission-ordinal), then the event identity as bytes. A synthesised event
 /// (no transaction or log index) sorts before every transaction of its block and has no ordinal,
@@ -111,8 +65,7 @@ pub(super) fn json_position(expression: &str) -> String {
 /// The child's effective NameWrapper fuses at the block clock `epoch` (seconds): the wrapper
 /// row whose latest PermissionScopeChanged is the name's latest, its fuses when the wrapper state
 /// is known and its expiry is not behind the clock, else 0; null when the name has no wrapper
-/// row. The 32-bit fuse bound and the expiry mask are those of
-/// crates/project/src/builders/children.rs.
+/// row. Fuses outside the 32-bit range read as 0.
 pub(super) fn effective_child_fuses(chain: &str, child: &str, epoch: &str) -> String {
     let position = json_position("wrapper.wrapper_state_position");
     format!(

@@ -55,9 +55,6 @@ BEGIN
 
     -- Bind every input to the captured family publication and hold its row through commit.
     compared_family_publication := compared_execution_authority -> 'family_publication';
-    IF compared_family_publication IS NULL THEN
-        RETURN 'invalid_comparison';
-    END IF;
         -- Redo begins by locking this chain's phase rows in phase-name order. Hold
         -- the same rows through the caller's commit, without comparing ordinary row
         -- versions, so a redo cannot start after admission but before a ledger mutation.
@@ -553,5 +550,37 @@ BEGIN
     IF to_regclass('bigname_phase.project_name_summary') IS NOT NULL THEN
         COMMENT ON TABLE bigname_phase.project_name_summary IS
             'Project-owned name summary: fields the child and label lists filter, sort and count inside one statement. The family writer refreshes touched names from the shared name composition and journals every change for undo. Every name surface has a row. A name without a composed row has no serving resource or registration, while its selected authority arm and next clock boundary can remain. No composed name row is persisted.';
+    END IF;
+END $comment$;
+
+-- The family tables are the serving path now; their comments stop describing them as a
+-- shadow beside the dropped tables.
+DO $comment$
+DECLARE
+    target record;
+    retired constant text :=
+        ' Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+BEGIN
+    FOR target IN
+        SELECT class.oid::regclass AS relation, description.description
+        FROM pg_catalog.pg_description description
+        JOIN pg_catalog.pg_class class ON class.oid = description.objoid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
+        WHERE description.classoid = 'pg_catalog.pg_class'::regclass
+          AND description.objsubid = 0
+          AND namespace.nspname = 'bigname_phase'
+          AND right(description.description, length(retired)) = retired
+    LOOP
+        EXECUTE format(
+            'COMMENT ON TABLE %s IS %L',
+            target.relation,
+            left(target.description, length(target.description) - length(retired))
+        );
+    END LOOP;
+    IF to_regclass('bigname_phase.project_family_marker') IS NOT NULL THEN
+        COMMENT ON TABLE bigname_phase.project_family_marker IS
+            'Project-owned marker of the owned key families: the last block the family loop applied on each chain, the generation every family block and family undo advances, and the input revision it read. Readers serve the publication it names; chain_phase_state keeps the Project phase progress.';
+        COMMENT ON COLUMN bigname_phase.project_family_marker.state IS
+            'This value is live when the families hold a complete publication and bootstrap_pending while a rebuild is populating the families.';
     END IF;
 END $comment$;

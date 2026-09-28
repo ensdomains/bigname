@@ -1,17 +1,16 @@
 //! The serving pointer and the resolver block of a composed name row.
 //!
-//! The serving pointer (name_authority/stage.rs, `project_name_serving`) is the resolver a name
-//! is read through when it has no selected binding: an ownerless registry node's retained
-//! registry pointer, or an ENSv2 root-registry TLD's pointer whose registration was never
-//! observed. The resolver block (name_current/build.sql, the `resolver` lateral) is the latest
-//! of the name's admitted `ResolverChanged` and the serving pointer.
+//! The serving pointer is the resolver a name is read through when it has no selected binding: an
+//! ownerless registry node's retained registry pointer, or an ENSv2 root-registry TLD's pointer
+//! whose registration was never observed. The resolver block is the latest of the name's admitted
+//! `ResolverChanged` and the serving pointer.
 //!
 //! Both read the F5 resource pointer (`project_resource_pointer`) and the F4 registry-node
 //! pointer (`project_registry_pointer`), which keep each key's latest pointer. The name each
 //! pointer event carried is read back from `normalized_events` by its identity, a metadata
 //! lookup by key. The F5 named pointer (`project_named_resource_pointer`) also retains each
 //! name's latest admitted pointer on a resource, so another name's later write on the same
-//! resource does not displace it (`families_shadow_names` covers that comparison).
+//! resource does not displace it.
 use serde_json::Value;
 
 use crate::families::records::FamilyPosition;
@@ -54,7 +53,7 @@ impl Serving {
         self.pointer.resource_id.as_deref()
     }
 
-    /// `provenance.read_reachability` with its nulls stripped (build.sql:253-259).
+    /// `provenance.read_reachability` with its nulls stripped.
     pub fn read_reachability(serving: Option<&Self>) -> Value {
         let mut out = serde_json::Map::new();
         if let Some(serving) = serving {
@@ -77,7 +76,7 @@ impl Serving {
     }
 }
 
-/// The ownerless registry node's serving pointer (stage.rs:290-315): the latest registry
+/// The ownerless registry node's serving pointer: the latest registry
 /// `ResolverChanged` of the name on the resource of the node's zero-getter transfer, when it
 /// names a resolver and the resource has no token lineage.
 pub fn ownerless_serving(
@@ -98,7 +97,7 @@ pub fn ownerless_serving(
         })
 }
 
-/// The ENSv2 root-registry TLD serving pointer (stage.rs:316-395): the latest root-registry
+/// The ENSv2 root-registry TLD serving pointer: the latest root-registry
 /// pointer on a token resource the name's root pointers name, when it names a resolver and no
 /// root-registry release of that resource is at or after it. `released_at` gives the latest
 /// root release position of each resource.
@@ -146,12 +145,11 @@ pub struct ResolverScope<'a> {
     /// pointer).
     pub admits: bool,
     /// Whether ENSv2 is the selected arm with a released or reserved registration, or the name
-    /// is a released ENSv1 tombstone: its admitted pointer is kept but not served
-    /// (build.sql:141-169).
+    /// is a released ENSv1 tombstone: its admitted pointer is kept but not served.
     pub withholds: bool,
 }
 
-/// The resolver block and the pointer's source family (build.sql:141-171, :726-759).
+/// The resolver block and the pointer's source family.
 pub fn resolver_block(
     scope: &ResolverScope<'_>,
     resource_pointer: Option<&PointerRow>,

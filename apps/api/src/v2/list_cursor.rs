@@ -1,4 +1,4 @@
-//! The continuation cursor of a current-state list (TYR-36 D10).
+//! The continuation cursor of a current-state list.
 //!
 //! A cursor holds what the list is (its sort and filters), the position of the last row it
 //! returned, and the request's `at` token when the request pinned `at`. It holds no publication,

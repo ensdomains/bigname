@@ -6,6 +6,7 @@ pub mod ens_v1;
 pub mod ens_v2;
 pub mod ens_v2_migration;
 pub mod facts;
+pub mod families;
 pub mod fault_proxy;
 pub mod manifests;
 pub mod perturb;

@@ -1,4 +1,4 @@
-//! F2b, the NameWrapper masks at the publication block's clock (TYR-36 D6): the served state and
+//! F2b, the NameWrapper masks at the publication block's clock: the served state and
 //! fuses past the wrapper expiry, the owner lapse of an emancipated or locked name, and the
 //! `.eth` grace period. The clock is the publication block's timestamp, passed in, never the
 //! request time.
@@ -8,10 +8,10 @@ use sqlx::PgExecutor;
 
 use super::rows::WrapperRow;
 
-/// The fuse the NameWrapper burns on a `.eth` second-level name (permissions.rs:25).
+/// The fuse the NameWrapper burns on a `.eth` second-level name.
 /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
 pub const IS_DOT_ETH: i64 = 131072;
-/// The `.eth` registrar grace period in seconds (permissions.rs:25).
+/// The `.eth` registrar grace period in seconds.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
 pub const GRACE_PERIOD_SECONDS: i128 = 7_776_000;
 
@@ -19,23 +19,22 @@ pub const GRACE_PERIOD_SECONDS: i128 = 7_776_000;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EffectiveWrapper {
     /// Null when the state, fuses or expiry is unknown, and for an emancipated or locked name
-    /// past its wrapper expiry (build.sql:618-626, permissions.rs:319-327).
+    /// past its wrapper expiry.
     pub wrapper_state: Option<String>,
-    /// Zero past the wrapper expiry; null when the state, fuses or expiry is unknown
-    /// (permissions.rs:311-318, resource_summary.rs:400-407).
+    /// Zero past the wrapper expiry; null when the state, fuses or expiry is unknown.
     pub fuses: Option<i64>,
     /// Past its own expiry the NameWrapper reports no owner for an emancipated or locked name,
-    /// and zero fuses for any name (build.sql:627-641).
+    /// and zero fuses for any name.
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
     pub owner_lapsed: bool,
-    /// A `.eth` name (the effective fuses carry IS_DOT_ETH) whose clock is inside the last
-    /// grace period before its wrapper expiry: `expiry - GRACE_PERIOD < clock`
-    /// (permissions.rs:329-335). The NameWrapper expiry of a `.eth` name already includes the
-    /// grace period: every path that sets it adds the wrapper's own 90-day `GRACE_PERIOD` to the
-    /// registrar expiry (wrapETH2LD, registerAndWrapETH2LD, renew, onERC721Received), and the
-    /// wrapper's grace test is `expiry - GRACE_PERIOD < block.timestamp`. So the grace window
-    /// ends at the wrapper expiry itself; past it `getData` clears the fuses, IS_DOT_ETH with
-    /// them, and the name is never in grace.
+    /// A `.eth` name (the effective fuses carry IS_DOT_ETH) whose clock is inside the last grace
+    /// period before its wrapper expiry: `expiry - GRACE_PERIOD < clock`. The NameWrapper expiry of
+    /// a `.eth` name already includes the grace period: every path that sets it adds the wrapper's
+    /// own 90-day `GRACE_PERIOD` to the registrar expiry (wrapETH2LD, registerAndWrapETH2LD, renew,
+    /// onERC721Received), and the wrapper's grace test is
+    /// `expiry - GRACE_PERIOD < block.timestamp`. So the grace window ends at the wrapper expiry
+    /// itself; past it `getData` clears the fuses, IS_DOT_ETH with them, and the name is never in
+    /// grace.
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L270 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L304 @ ens_v1@91c966f)
@@ -98,16 +97,15 @@ pub fn clock_boundaries(row: &WrapperRow, clock_seconds: i64) -> impl Iterator<I
 }
 
 /// The wrapper expiry a wrapped name with no registrar lease serves: an integral word between
-/// 1 and 253402300799 (build.sql:586-592).
+/// 1 and 253402300799.
 pub fn servable_expiry(row: &WrapperRow) -> Option<i64> {
     expiry(row)
         .filter(|expiry| (1..=253_402_300_799).contains(expiry))
         .map(|expiry| expiry as i64)
 }
 
-/// The wrapper restriction block `permissions_current_resource_summary` serves for a wrapper
-/// resource that is still wrapped (resource_summary.rs:306-315); `None` when the effective
-/// state is null.
+/// The wrapper restriction block the permission resource summary serves for a wrapper resource
+/// that is still wrapped; `None` when the effective state is null.
 pub fn restrictions(row: &WrapperRow, clock_seconds: i64) -> Option<Value> {
     let effective = effective_wrapper(row, clock_seconds);
     let state = effective.wrapper_state?;

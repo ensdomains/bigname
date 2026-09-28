@@ -1,4 +1,4 @@
-//! The name summary family (`project_name_summary`, TYR-36 step 7b slice 2b): after a block (or a
+//! The name summary family (`project_name_summary`): after a block (or a
 //! rebuild range) writes its family rows, the summaries of the names it touched are composed
 //! again from the families as they now stand, by the composed name reader's own code
 //! (`bigname_storage::families::name::compose_name_summaries`) on the block's transaction, and

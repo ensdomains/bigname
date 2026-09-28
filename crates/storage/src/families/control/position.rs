@@ -1,10 +1,10 @@
-//! The canonical event order (TYR-36 D12 as amended on 2026-09-26, the project crate's
+//! The canonical event order (docs/glossary.md#canonical-event-order, the project crate's
 //! families/position.rs): block number, transaction index, log index, then, when the event has
 //! both a transaction and a log index, the emission ordinal its identity ends with, then the
 //! event identity compared as a byte string. `None` sorts first at each step, so an event with
 //! no transaction or log position (a block-boundary event the interpreter synthesises) sorts
 //! before every transaction of its block. Generated normalized event ids never take part.
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::cmp::Ordering;
 
 use serde_json::Value;
 
@@ -73,83 +73,17 @@ impl Position {
         Self::from_json(row)
     }
 
-    /// The three-part bound the authority admission compares against (authority_events.sql
-    /// :200-217, :264-276): block, then transaction and log with a missing one read as -1. For
-    /// nonnegative transaction and log indexes, it agrees with the canonical order except that it
-    /// ignores both the emission ordinal and the identity, which only matter between two
-    /// positions the bound treats as equal; a negative index would sort after a missing one in
-    /// the canonical order but not in the bound.
+    /// The three-part bound the authority admission compares against: block, then transaction and
+    /// log with a missing one read as -1. For nonnegative transaction and log indexes, it agrees
+    /// with the canonical order except that it ignores both the emission ordinal and the identity,
+    /// which only matter between two positions the bound treats as equal; a negative index would
+    /// sort after a missing one in the canonical order but not in the bound.
     pub fn bound(&self) -> (i64, i64, i64) {
         (
             self.block_number,
             self.transaction_index.unwrap_or(-1),
             self.log_index.unwrap_or(-1),
         )
-    }
-}
-
-/// The order a read takes its "latest" in. The readers read in the canonical order. The
-/// shadow harness reads the same facts again in the orders today's builders use, which break a
-/// tie inside a block by the generated normalized event id, to show that a same-block difference
-/// is only an ordering difference (brief section 4.3). The positions themselves never change,
-/// so the admission's three-part bounds read the same in every order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum EventOrder {
-    #[default]
-    Canonical,
-    /// The generated normalized event id of each event identity.
-    Generated(BTreeMap<String, i64>),
-}
-
-impl EventOrder {
-    fn generated(&self, position: &Position) -> Option<i64> {
-        match self {
-            Self::Canonical => None,
-            Self::Generated(ids) => ids.get(&position.event_identity).copied(),
-        }
-    }
-
-    /// The order the resource-permission fold and the wrapped-lease selector read in: today's
-    /// builders take block, then generated id, with no transaction or log (permissions.rs:132,
-    /// name_current/build.sql:373-374); an event without a generated id falls back to the
-    /// canonical order. ENSv2 name membership reads `name_membership` instead.
-    pub fn membership(&self, left: &Position, right: &Position) -> Ordering {
-        match (self.generated(left), self.generated(right)) {
-            (Some(left_id), Some(right_id)) => left
-                .block_number
-                .cmp(&right.block_number)
-                .then(left_id.cmp(&right_id)),
-            _ => left.cmp(right),
-        }
-    }
-
-    /// The order ENSv2 name membership reads in. Since TYR-36 step 6 (de24ff32) today's builders
-    /// compare block, then transaction and log with a missing one read as -1, then the generated
-    /// id, for every step of the name's registration fold (name_current/build.sql:319-347) and
-    /// for the deciding fact of a released tombstone (name_authority/build.sql:57-245); an event
-    /// without a generated id falls back to the canonical order.
-    pub fn name_membership(&self, left: &Position, right: &Position) -> Ordering {
-        match (self.generated(left), self.generated(right)) {
-            (Some(left_id), Some(right_id)) => left
-                .bound()
-                .cmp(&right.bound())
-                .then(left_id.cmp(&right_id)),
-            _ => left.cmp(right),
-        }
-    }
-
-    /// The order the summary laterals read in. Today's builders take block, transaction and
-    /// log, a missing one first, then the generated id (build.sql:307-308, :388-390).
-    pub fn lateral(&self, left: &Position, right: &Position) -> Ordering {
-        match (self.generated(left), self.generated(right)) {
-            (Some(left_id), Some(right_id)) => left
-                .block_number
-                .cmp(&right.block_number)
-                .then(left.transaction_index.cmp(&right.transaction_index))
-                .then(left.log_index.cmp(&right.log_index))
-                .then(left_id.cmp(&right_id)),
-            _ => left.cmp(right),
-        }
     }
 }
 
@@ -187,8 +121,8 @@ mod tests {
 
     #[test]
     fn transaction_and_log_decide_before_the_identity() {
-        // Two grants in one transaction with generated ids in the other order (design item 5):
-        // log order decides.
+        // Two grants in one transaction with generated ids in the other order: log order
+        // decides.
         assert!(at(5, Some((2, 5)), "b") < at(5, Some((3, 1)), "a"));
         assert!(at(5, Some((2, 1)), "z") < at(5, Some((2, 2)), "a"));
     }
@@ -209,7 +143,7 @@ mod tests {
 
     #[test]
     fn synthesised_identities_compare_as_text_not_as_ordinals() {
-        // ":10" sorts before ":9" (design, "Order among synthesised events").
+        // ":10" sorts before ":9": a synthesised event's trailing number is not an ordinal.
         assert!(
             at(5, None, "x:RegistrationReleased:expiry:r:1:10")
                 < at(5, None, "x:RegistrationReleased:expiry:r:1:9")
@@ -217,62 +151,11 @@ mod tests {
         assert!(at(5, None, "x:RegistrationReleased:a") < at(5, None, "x:ResolverChanged:a"));
     }
 
-    #[test]
-    fn the_generated_orders_keep_positions_and_break_ties_by_id() {
-        let grant = at(5, Some((0, 3)), "grant");
-        let release = at(5, None, "release");
-        let ids = EventOrder::Generated(
-            [("grant".to_owned(), 1), ("release".to_owned(), 2)]
-                .into_iter()
-                .collect(),
-        );
-        // Membership ignores transaction and log; the laterals keep them.
-        assert_eq!(ids.membership(&grant, &release), Ordering::Less);
-        assert_eq!(ids.lateral(&grant, &release), Ordering::Greater);
-        assert_eq!(
-            EventOrder::Canonical.membership(&grant, &release),
-            Ordering::Greater
-        );
-        let unknown = at(5, None, "unknown");
-        assert_eq!(ids.membership(&grant, &unknown), grant.cmp(&unknown));
-    }
-
-    #[test]
-    fn name_membership_compares_the_place_before_the_generated_id() {
-        let ids = EventOrder::Generated(BTreeMap::from([
-            ("release".to_owned(), 2),
-            ("grant".to_owned(), 1),
-            ("boundary".to_owned(), 3),
-            ("ordinal-1".to_owned(), 4),
-            ("ordinal-0".to_owned(), 5),
-        ]));
-        let (release, grant) = (
-            at(12, Some((0, 3)), "release"),
-            at(12, Some((0, 7)), "grant"),
-        );
-        assert_eq!(ids.membership(&grant, &release), Ordering::Less);
-        assert_eq!(ids.name_membership(&grant, &release), Ordering::Greater);
-        // A block-boundary fact reads as transaction and log -1, first in its block.
-        let boundary = at(12, None, "boundary");
-        assert_eq!(ids.name_membership(&boundary, &release), Ordering::Less);
-        // One place: the generated id decides, where the canonical order takes the ordinal.
-        let (one, zero) = (
-            at(14, Some((0, 5)), "ordinal-1"),
-            at(14, Some((0, 5)), "ordinal-0"),
-        );
-        assert_eq!(ids.name_membership(&one, &zero), Ordering::Less);
-        assert_eq!(
-            EventOrder::Canonical.name_membership(&one, &zero),
-            one.cmp(&zero)
-        );
-    }
-
     // The shared vectors. Their twin, the same three lists asserted against the project crate's
     // comparator and reader (`Ord` and `of_row`), is in
-    // crates/project/src/families/position_tests.rs (step 2, PR 952). At step 2's bbb7d0ab the
-    // two copies' literal lists and their order and partial tests are identical; keep them so,
-    // since a drift between the comparators moves the shadow read and the canonical excuse read
-    // together.
+    // crates/project/src/families/position_tests.rs. The two copies' literal lists and their
+    // order and partial tests are identical; keep them so, since a drift between the comparators
+    // moves the storage reads away from the families they read.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
     /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
     /// decimal point, and far past `u32::MAX`: no ordinal.

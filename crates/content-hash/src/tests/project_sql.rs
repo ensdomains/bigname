@@ -319,12 +319,8 @@ fn current_tree_keeps_computed_includes_in_test_code() {
         "{:#?}",
         inventory.unparsable
     );
-    // Project tests load migrations through include_str!(concat!(env!(...), ...)), which the
-    // guard cannot read; they must all be recognized as test code.
-    assert!(
-        !inventory.unsupported.is_empty(),
-        "expected the computed migration includes in Project tests to be reported"
-    );
+    // A computed include (include_str!(concat!(env!(...), ...))) cannot be read by the guard; any
+    // such include must be in test code.
     for (message, test) in &inventory.unsupported {
         eprintln!("unsupported (test code: {test}): {message}");
         assert!(test, "{message}");
@@ -493,17 +489,15 @@ fn include_scanner_reports_an_include_inside_an_opaque_macro() {
 }
 
 #[test]
-fn raw_identifier_spelling_of_the_real_mirror_loader_still_counts() {
-    let source = fs::read_to_string(workspace_root().join("crates/project/src/scope/mirror.rs"))
-        .expect("mirror.rs must be readable");
-    assert!(source.contains("include_str!(\"mirror.sql\")"));
-    let mutated = source.replace(
-        "include_str!(\"mirror.sql\")",
-        "r#include_str!(\"mirror.sql\")",
-    );
+fn raw_identifier_spelling_of_a_real_sql_loader_still_counts() {
+    let source =
+        fs::read_to_string(workspace_root().join("crates/project/src/families/hydrate/text.rs"))
+            .expect("text.rs must be readable");
+    assert!(source.contains("include_str!(\"text.sql\")"));
+    let mutated = source.replace("include_str!(\"text.sql\")", "r#include_str!(\"text.sql\")");
     assert!(
-        include_sites(&mutated).contains(&("mirror.sql".to_owned(), false)),
-        "r#include_str! must still load mirror.sql from production code"
+        include_sites(&mutated).contains(&("text.sql".to_owned(), false)),
+        "r#include_str! must still load text.sql from production code"
     );
 }
 

@@ -12,12 +12,10 @@ mod name_summary;
 mod name_topology;
 mod overview;
 mod pointers;
-mod resolver;
 mod shims;
 
 pub use children_page::{
     FamilyChildRow, FamilyChildrenPage, count_children_shadow, load_children_shadow_page,
-    load_registry_children_shadow_page,
 };
 pub(crate) use children_page::{
     count as count_children_on, counts as count_children_of_parents_on, page as children_page_on,
@@ -38,4 +36,3 @@ pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
-pub use resolver::{ClassificationSource, FamilyResolverClassification, load_resolver_shadow};

@@ -1,4 +1,4 @@
-//! The name authority selection over the owned key families (name_authority/build.sql), computed
+//! The name authority selection over the owned key families, computed
 //! at read for one name from its F1 binding candidates and history, its F2a retained lifecycle
 //! events, its F2c registry node and the readable resources. It gives what the served row keeps
 //! in `provenance.authority_selection` and the selected binding the row is bound to.
@@ -53,7 +53,7 @@ pub struct NameSelection {
 }
 
 impl NameSelection {
-    /// `provenance.authority_selection` as the served row strips its nulls (build.sql:235-252).
+    /// `provenance.authority_selection` as the served row strips its nulls.
     pub fn provenance(&self) -> Value {
         let selection = &self.selection;
         let mut out = serde_json::Map::new();
@@ -118,7 +118,7 @@ fn latest_binding<'a>(
     candidates.max_by(|left, right| left.order().cmp(&right.order()))
 }
 
-/// The name's latest ENSv1 lifecycle fact (name_authority/build.sql, `latest_v1_lifecycle`).
+/// The name's latest ENSv1 lifecycle fact.
 fn latest_v1_lifecycle(facts: &NameFacts) -> Option<&LifecycleEvent> {
     facts
         .events
@@ -129,10 +129,10 @@ fn latest_v1_lifecycle(facts: &NameFacts) -> Option<&LifecycleEvent> {
                 && LIFECYCLE_KINDS.contains(&event.event_kind.as_str())
                 && staged_as_own(facts, event)
         })
-        .max_by(|left, right| facts.order.lateral(&left.position, &right.position))
+        .max_by(|left, right| left.position.cmp(&right.position))
 }
 
-/// Whether a NameWrapper candidate stands for the released lease `lease` (build.sql:354-380):
+/// Whether a NameWrapper candidate stands for the released lease `lease`:
 /// its wrap recorded the lease, or a named grant of the lease shares the wrap's transaction.
 fn wrapper_stands_for(facts: &NameFacts, candidate: &BindingCandidate, lease: &str) -> bool {
     candidate.is_wrapper()
@@ -147,9 +147,8 @@ fn wrapper_stands_for(facts: &NameFacts, candidate: &BindingCandidate, lease: &s
             }))
 }
 
-/// The binding standing for a released ENSv1 lease that was not revived
-/// (build.sql, `released_v1_authority`), none when the latest ENSv1 lifecycle fact is not such a
-/// release.
+/// The binding standing for a released ENSv1 lease that was not revived, none when the latest
+/// ENSv1 lifecycle fact is not such a release.
 fn released_v1_binding<'a>(
     facts: &'a NameFacts,
     open: &[&'a BindingCandidate],
@@ -167,7 +166,7 @@ fn released_v1_binding<'a>(
             && bound(candidate) <= at
     }));
     // The registry-only binding a transfer without `reclaim` opened, when it is the name's only
-    // open binding and its lease lapsed after it opened (build.sql:303-323, :406-415).
+    // open binding and its lease lapsed after it opened.
     let handoff = match open {
         [only] if only.registry_only && only.authority_arm == "ens_v1" => Some(*only),
         _ => None,
@@ -181,8 +180,8 @@ fn released_v1_binding<'a>(
     handoff.or(binding.filter(|_| open.is_empty()))
 }
 
-/// The arms the name's authority events vote (build.sql, `event_arms`): the stored votes plus
-/// an ENSv2 root or registry release beside a matching ENSv2 binding at or before it.
+/// The arms the name's authority events vote: the stored votes plus an ENSv2 root or registry
+/// release beside a matching ENSv2 binding at or before it.
 fn event_arms(facts: &NameFacts, history: Option<&NameHistory>) -> BTreeSet<String> {
     let mut arms: BTreeSet<String> = history
         .map(|history| history.event_arms.iter().cloned().collect())
@@ -205,7 +204,7 @@ fn event_arms(facts: &NameFacts, history: Option<&NameHistory>) -> BTreeSet<Stri
         arms.insert("ens_v2".into());
     }
     // An unnamed `.eth` registrar row the staging passes give the name votes as the name's
-    // own (build.sql `event_arms` reads the staged name).
+    // own.
     if facts.events.iter().any(|event| {
         event.original_logical_name_id.is_none()
             && event.source_family == "ens_v1_registrar_l1"

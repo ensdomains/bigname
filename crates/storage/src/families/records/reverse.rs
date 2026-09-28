@@ -2,8 +2,8 @@
 //! `BUILD_PRIMARY_NAMES`): the tuple's latest `ReverseChanged`, the reverse node's current resolver
 //! from the registry-node pointer (F4) or a resource pointer (F5) at that node, and the claim a
 //! `ReverseClaimed` tuple selects through the node, else the tuple's direct claim, with the claim's
-//! stored normalization. Hydration stays with the served rows (D11), so the result is the
-//! pre-hydration claim.
+//! stored normalization. The result is the pre-hydration claim; the primary-name reader applies
+//! the hydration overlay (`primary.rs`).
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row};
@@ -16,8 +16,8 @@ use crate::{PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSna
 pub struct FamilyReverseClaim {
     pub snapshot: PrimaryNameCurrentSnapshot,
     /// For a `ReverseClaimed` tuple, no family claim row matches the selected resolver, but a
-    /// row exists for the same namespace, reverse node and chain at another resolver. This
-    /// diagnostic alone does not establish that today serves a claim missing from the family.
+    /// row exists for the same namespace, reverse node and chain at another resolver. A
+    /// diagnostic only: it does not establish that a claim is missing from the family.
     pub node_claim_at_other_resolver: bool,
 }
 
@@ -223,11 +223,10 @@ pub(crate) async fn load_family_reverse_claim_on(
 /// The reverse node's latest `ResolverChanged` by the family's derived node keys, clears
 /// included: the F4 row keyed to the node (child first, `pointer_node` in
 /// crates/project/src/families/keys.rs) or an F5 row whose pointer names the node, whichever is
-/// later. That is not necessarily the pointer today's raw `after_state ->> 'node'` predicate
-/// selects: a state-derived ENSv1 `ResolverChanged` with the parent in `node` and the reverse
-/// node in `child_node` is keyed here and skipped there, a declared difference pinned in
-/// crates/project/tests/primary_names_reverse_node/reclaim_after_unwrap.rs. Returns its event id
-/// and resolver.
+/// later. That is not necessarily the pointer a raw `after_state ->> 'node'` predicate would
+/// select: a state-derived ENSv1 `ResolverChanged` with the parent in `node` and the reverse
+/// node in `child_node` is keyed here and would be skipped there. Returns its event id and
+/// resolver.
 async fn node_pointer(
     conn: &mut PgConnection,
     chain_id: &str,

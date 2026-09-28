@@ -1,5 +1,5 @@
 //! A name's lifecycle membership of an ENSv2 key. The F2a key state of a resource counts every
-//! event on the resource (design:40, decoder rule 1), which is the name's membership as long as
+//! event on the resource, which is the name's membership as long as
 //! the resource carries one name's history. A subregistry rebind moves a resource from one name
 //! to another in one raw log: the adapter emits a named RegistrationReleased for the previous
 //! name and a named RegistrationGranted for the current one on the same resource
@@ -11,26 +11,22 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use super::{NameFacts, view};
-use crate::families::control::{
-    position::EventOrder,
-    rows::{LifecycleEvent, Mark, Maxima},
-};
+use crate::families::control::rows::{LifecycleEvent, Mark, Maxima};
 
 /// Whether `event` is a reservation already expired when written: its expiry is a JSON number
-/// at or before its own block's timestamp, so it is never live (v2_lifecycle_events.sql:28-36,
-/// the rule name_authority/build.sql:212-239 applies). Since TYR-36 step 6 such a reservation
-/// takes no part in a name's registration fold or ENSv2 latest kind (name_current/build.sql
-/// :322, :326, :331, :385); it stays among the retained events and in every other fold.
+/// at or before its own block's timestamp, so it is never live (the rule name authority
+/// selection applies). Such a reservation takes no part in a name's
+/// registration fold or ENSv2 latest kind; it stays among the retained events and in every
+/// other fold.
 ///
-/// The served rule compares the JSON number with the block's epoch as exact numeric
-/// (v2_lifecycle_events.sql:32-35). Block timestamps are whole seconds, so an integer expiry
-/// compares exactly here too; one past `i64` is never at or before a block. A JSON number that is
-/// not an integer (a fraction or an exponent literal) reached the families as an `f64`, which can
-/// round it onto the block's second, so the rule cannot be decided from it: the read is refused
-/// with an error naming the event and the value, never approximated. The adapter writes the
-/// chain's `uint64` expiry as a JSON integer, so no producer writes such a value today. A
-/// string, null or missing expiry is not a number, and the served rule does not filter it
-/// (`ELSE FALSE`).
+/// The rule compares the JSON number with the block's epoch as exact numeric. Block timestamps are
+/// whole seconds, so an integer expiry compares exactly here too; one past `i64` is never at or
+/// before a block. A JSON number that is not an integer (a fraction or an exponent literal) reached
+/// the families as an `f64`, which can round it onto the block's second, so the rule cannot be
+/// decided from it: the read is refused with an error naming the event and the value, never
+/// approximated. The adapter writes the chain's `uint64` expiry as a JSON integer, so no producer
+/// writes such a value today. A string, null or missing expiry is not a number, and the served rule
+/// does not filter it (`ELSE FALSE`).
 pub(super) fn expired_when_written(facts: &NameFacts, event: &LifecycleEvent) -> Result<bool> {
     if event.event_kind != "RegistrationReserved" {
         return Ok(false);
@@ -67,32 +63,16 @@ pub(super) fn without_expired<'a>(
     Ok(kept)
 }
 
-/// The membership maxima of one lifecycle key folded from retained events in `order`'s
-/// membership order (block and generated id, the resource-permission fold's), the fold of step
-/// 2's reducer (crates/project/src/families/lifecycle.rs:388-497). Every mark keeps its event's
-/// own position. `last_revival` is kept for a resource key only.
-pub fn maxima_of<'a>(
-    events: impl IntoIterator<Item = &'a LifecycleEvent>,
-    resource: bool,
-    order: &EventOrder,
-) -> Maxima {
+/// The membership maxima of one ENSv2 resource lifecycle key folded from retained events in the
+/// canonical order, the fold of the F2a reducer (crates/project/src/families/lifecycle.rs:388-497).
+/// Every mark keeps its event's own position.
+fn maxima_of<'a>(events: impl IntoIterator<Item = &'a LifecycleEvent>) -> Maxima {
     let mut own: Vec<&LifecycleEvent> = events.into_iter().collect();
-    own.sort_by(|left, right| order.membership(&left.position, &right.position));
-    fold(own, resource)
+    own.sort_by(|left, right| left.position.cmp(&right.position));
+    fold(own)
 }
 
-/// `maxima_of` in the name-membership order (`EventOrder::name_membership`), the order a name's
-/// registration fold reads in since TYR-36 step 6 (build.sql:322-347).
-pub fn name_maxima_of<'a>(
-    events: impl IntoIterator<Item = &'a LifecycleEvent>,
-    order: &EventOrder,
-) -> Maxima {
-    let mut own: Vec<&LifecycleEvent> = events.into_iter().collect();
-    own.sort_by(|left, right| order.name_membership(&left.position, &right.position));
-    fold(own, true)
-}
-
-fn fold(own: Vec<&LifecycleEvent>, resource: bool) -> Maxima {
+fn fold(own: Vec<&LifecycleEvent>) -> Maxima {
     let mark = |event: &LifecycleEvent| {
         Some(Mark {
             position: event.position.clone(),
@@ -119,10 +99,7 @@ fn fold(own: Vec<&LifecycleEvent>, resource: bool) -> Maxima {
                 }
             }
             "RegistrationRenewed" => {
-                if resource
-                    && event.revived_from_expiry == Some(true)
-                    && maxima.last_path_expiry.is_some()
-                {
+                if event.revived_from_expiry == Some(true) && maxima.last_path_expiry.is_some() {
                     maxima.last_revival = mark(event);
                 }
                 maxima.last_renewal = mark(event);
@@ -168,19 +145,17 @@ pub(super) fn members<'a>(facts: &'a NameFacts, key: &str, name: &str) -> Vec<&'
         .collect()
 }
 
-/// The merged view of one ENSv2 lifecycle key for `name`: the resource's key state, or its
-/// retained events without another name's when it holds any, merged with the summaries of the
-/// triples associated with it; or an unassociated triple's summary alone. When a member is a
-/// reservation expired when written, which the stored maxima count, the view is the members
-/// without it folded again. In the harness's same-block counterfactual the view is the members
-/// folded in today's name-membership order instead (block, transaction, log, generated id;
-/// build.sql:322-347), also without such a reservation. A reservation whose expiry cannot be
-/// compared exactly fails the read (`expired_when_written`).
+/// The merged view of one ENSv2 lifecycle key for `name`: the resource's key state, or its retained
+/// events without another name's when it holds any, merged with the summaries of the triples
+/// associated with it; or an unassociated triple's summary alone. When a member is a reservation
+/// expired when written, which the stored maxima count, the view is the members without it folded
+/// again. A reservation whose expiry cannot be compared exactly fails the read
+/// (`expired_when_written`).
 pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> Result<view::MergedView> {
     let members = members(facts, key, name);
     let live = without_expired(facts, members.iter().copied())?;
-    if facts.order != EventOrder::Canonical || live.len() != members.len() {
-        let folded = name_maxima_of(live, &facts.order);
+    if live.len() != members.len() {
+        let folded = maxima_of(live);
         return Ok(view::merged_view(Some(&folded), []));
     }
     let associated = facts
@@ -194,14 +169,11 @@ pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> Result<vie
             .iter()
             .any(|event| foreign_named(event, key, name))
         {
-            let own = name_maxima_of(
-                facts.events.iter().filter(|event| {
-                    event.state_kind == "resource"
-                        && event.state_key == key
-                        && !foreign_named(event, key, name)
-                }),
-                &EventOrder::Canonical,
-            );
+            let own = maxima_of(facts.events.iter().filter(|event| {
+                event.state_kind == "resource"
+                    && event.state_key == key
+                    && !foreign_named(event, key, name)
+            }));
             return Ok(view::merged_view(Some(&own), associated));
         }
         return Ok(view::merged_view(Some(state), associated));

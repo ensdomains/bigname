@@ -22,16 +22,15 @@ pub use summary::{admin_powers, locked_roles, resource_restrictions, wrapper_unw
 pub(crate) use facts::resolver_grant_evidence;
 
 use super::{
-    lifecycle::{Clock, membership::maxima_of, view::registration_lapsed},
-    position::EventOrder,
+    lifecycle::{Clock, view::registration_lapsed},
     registry::RegistryBinding,
-    rows::{LifecycleEvent, Maxima, flag, lower, text},
+    rows::{Maxima, flag, lower, text},
     wrapper::load_wrapper_rows,
 };
 
 /// One resource to read, with the summary facts the families do not hold: the authority kind
-/// today's summary derives from the resource's whole event history (resource_summary.rs:53-126,
-/// :218-237) and the registry root from the identity table.
+/// the summary derives from the resource's whole event history and the registry root from the
+/// identity table.
 #[derive(Clone, Debug, Default)]
 pub struct ResourceInput {
     pub resource_id: String,
@@ -64,43 +63,16 @@ async fn rows_for(
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
 
-/// Load and evaluate the permission shadow of `resources` at `clock`.
-pub async fn load_shadow_permissions(
-    pool: &PgPool,
-    chain_id: &str,
-    clock: &Clock,
-    resources: &[ResourceInput],
-) -> Result<BTreeMap<String, ShadowPermissions>> {
-    load_shadow_permissions_in(pool, chain_id, clock, resources, &EventOrder::Canonical).await
-}
-
-/// The permission shadow read in `order`. In the canonical order the path-expiry drop reads the
-/// stored F2a key states; in any other order it reads each key state folded again from the
-/// resource's retained events in that order (the harness's same-block counterfactual).
-pub async fn load_shadow_permissions_in(
-    pool: &PgPool,
-    chain_id: &str,
-    clock: &Clock,
-    resources: &[ResourceInput],
-    order: &EventOrder,
-) -> Result<BTreeMap<String, ShadowPermissions>> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection for the permission reads")?;
-    load_shadow_permissions_on(&mut conn, chain_id, clock, resources, order).await
-}
-
-/// [`load_shadow_permissions_in`] on one connection, so a caller holding a snapshot reads every
-/// statement in it.
+/// The permission rows and restriction block of `resources`, read on one connection so a caller
+/// holding a snapshot reads every statement in it. The path-expiry drop reads the stored F2a key
+/// states.
 pub(crate) async fn load_shadow_permissions_on(
     conn: &mut PgConnection,
     chain_id: &str,
     clock: &Clock,
     resources: &[ResourceInput],
-    order: &EventOrder,
 ) -> Result<BTreeMap<String, ShadowPermissions>> {
-    load_permissions_on(conn, chain_id, clock, resources, order, None).await
+    load_permissions_on(conn, chain_id, clock, resources, None).await
 }
 
 /// Evaluate only selected permission keys. Holder rows are retained when needed to derive
@@ -110,7 +82,6 @@ async fn load_permissions_on(
     chain_id: &str,
     clock: &Clock,
     resources: &[ResourceInput],
-    order: &EventOrder,
     keys: Option<&[candidates::Key]>,
 ) -> Result<BTreeMap<String, ShadowPermissions>> {
     let mut ids: BTreeSet<String> = resources
@@ -180,11 +151,6 @@ async fn load_permissions_on(
     .iter()
     .filter_map(|row| Some((text(row, "resource_id")?, Maxima::from_row(row))))
     .collect();
-    let key_states = if *order == EventOrder::Canonical {
-        key_states
-    } else {
-        refolded(&mut *conn, chain_id, &ids, order).await?
-    };
     let wrappers: BTreeMap<String, _> = load_wrapper_rows(&mut *conn, chain_id, &ids)
         .await?
         .into_iter()
@@ -241,16 +207,12 @@ async fn load_permissions_on(
             wrappers.get(resource),
             key_states.get(resource),
             clock.timestamp_seconds,
-            order,
         )
     };
     let admins = |resource: &str| -> Vec<String> {
         // The admin rows are served rows: a resource whose registration lapsed by path expiry
-        // serves none (resource_summary.rs:272-297 reads the staged permission rows).
-        if key_states
-            .get(resource)
-            .is_some_and(|state| registration_lapsed(state, order))
-        {
+        // serves none.
+        if key_states.get(resource).is_some_and(registration_lapsed) {
             return Vec::new();
         }
         aggregates
@@ -290,37 +252,8 @@ async fn load_permissions_on(
     Ok(out)
 }
 
-/// The key states of `resources` folded from their retained events in `order`.
-async fn refolded(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    resources: &[String],
-    order: &EventOrder,
-) -> Result<BTreeMap<String, Maxima>> {
-    let events: Vec<LifecycleEvent> = rows_for(
-        conn,
-        "/* storage:families.control.permissions.key_events */ SELECT to_jsonb(event)
-         FROM bigname_phase.project_lifecycle_event event
-         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = ANY($2)",
-        chain_id,
-        resources,
-    )
-    .await?
-    .iter()
-    .filter_map(LifecycleEvent::from_row)
-    .collect();
-    Ok(resources
-        .iter()
-        .filter(|resource| events.iter().any(|event| &event.state_key == *resource))
-        .map(|resource| {
-            let own = events.iter().filter(|event| &event.state_key == resource);
-            (resource.clone(), maxima_of(own, true, order))
-        })
-        .collect())
-}
-
-/// One served account approval (`account_permission_state_current`), in the columns the
-/// comparison reads; the whole-history evidence arrays are dropped (design F9 row).
+/// One served account approval (an F9 `project_account_approval` row), in the columns the
+/// comparison reads; the whole-history evidence arrays are dropped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServedApproval {
     pub authority_kind: String,
@@ -396,8 +329,8 @@ pub struct OperatorRow {
     pub transfer_behavior: Value,
 }
 
-/// The approved registry operators of a resource's registry binding (permissions/effective.rs
-/// :63-72): approvals of the binding's registry contract and owner, relation operator.
+/// The approved registry operators of a resource's registry binding: approvals of the binding's
+/// registry contract and owner, relation operator.
 pub fn effective_operator_rows(
     chain_id: &str,
     resource_id: &str,
@@ -438,20 +371,4 @@ pub fn effective_operator_rows(
         .collect();
     rows.sort_by(|left, right| (&left.subject, &left.scope).cmp(&(&right.subject, &right.scope)));
     rows
-}
-
-/// A served grant as the JSON the harness compares.
-pub fn grant_json(grant: &ServedGrant) -> Value {
-    json!({
-        "resource_id": grant.resource_id,
-        "subject": grant.subject,
-        "scope": grant.scope,
-        "scope_kind": grant.scope_kind,
-        "scope_detail": grant.scope_detail,
-        "effective_powers": grant.effective_powers,
-        "grant_source": grant.grant_source,
-        "revocation_source": grant.revocation_source,
-        "inheritance_path": grant.inheritance_path,
-        "transfer_behavior": grant.transfer_behavior,
-    })
 }

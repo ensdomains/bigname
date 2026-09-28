@@ -2,8 +2,11 @@
 
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. Most assertions read
-[projections](../../docs/glossary.md#projection) and phase state directly
-through the test-only `ProjectionReader`; the two zero-address scenarios, registry-operator lifecycle, subregistry-replacement scenario, and shutdown scenario start the production API.
+the published Project families and phase state through the test-only
+`ProjectionReader`, whose routes compose their answers from the same storage
+family readers the API serves from (`harness/families.rs`); the two
+zero-address scenarios, registry-operator lifecycle, subregistry-replacement
+scenario, and shutdown scenario start the production API.
 
 `ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale` also
 runs normal local RPC intake through Interpret, Project, and Live, then starts
@@ -223,9 +226,10 @@ facts independently. The fixture records the Anvil block, transaction, receipt,
 and log snapshot as raw facts, then runs the real Interpret and Project phases;
 it does not exercise provider selection or RPC log acquisition in Ingest.
 Serving assertions call the route-shaped `ProjectionReader`: exact-name paths
-read `name_current`, children paths read `children_current`, and a missing exact
-projection returns `404`. This is the established projection-serving seam; it
-does not exercise network transport or API-process startup.
+read the composed family name row, children paths read the family child page,
+and a name with no readable surface returns `404`. This is the established
+projection-serving seam; it does not exercise network transport or API-process
+startup.
 The unlocked scenario discriminates on the child's logical name identifier in
 the children response. It makes no exact-name-route assertion because this
 registry-created child remains in

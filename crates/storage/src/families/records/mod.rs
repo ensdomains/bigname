@@ -1,21 +1,17 @@
-//! Shadow readers for step 4 of TYR-36: the resource resolver pointer (F5), the registry-node
+//! Readers of the record families: the resource resolver pointer (F5), the registry-node
 //! pointer and the ENSv1 mirror walk over it (F4), the record inventory assembled from the
 //! node-keyed and record-id record families (F6, F7), the link selection, the inverse address
 //! index (F14) and the reverse claim (F12).
 //!
-//! Every reader returns the value today's reader serves for the same key, built from the family
-//! rows instead of the served tables, so the harness can compare the two field by field. Every
-//! production response is still served from today's tables; nothing outside the harness calls
-//! these readers. Events are ordered in the canonical event order of the families (block number,
-//! transaction index, log index, then the emission ordinal (docs/glossary.md#emission-ordinal)
-//! when both indexes are present, then the event identity as bytes, with a synthesised event's
-//! missing positions first; see `FamilyPosition`), so a same-position tie can resolve differently
-//! from today's readers, which break it by the generated event id.
+//! Every reader builds the served value for its key from the family rows. Events are ordered in the
+//! canonical event order of the families (block number, transaction index, log index, then the
+//! emission ordinal (docs/glossary.md#emission-ordinal) when both indexes are present, then the
+//! event identity as bytes, with a synthesised event's missing positions first; see
+//! `FamilyPosition`), never by the generated event id.
 mod address_names;
 mod address_relations;
 mod assemble;
 mod candidates;
-mod compare;
 mod facts;
 mod inventory;
 mod links;
@@ -37,16 +33,12 @@ use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
 pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
-pub use compare::{
-    Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
-    compare_primary_name, compare_record_inventory,
-};
 pub use facts::{
     ResolverClassification as FamilyResolverClassification,
     load_classification as load_family_resolver_classification,
 };
 pub use inventory::{
-    CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
+    FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
     load_family_record_inventory, load_family_record_inventory_detail,
     load_family_record_inventory_detail_on, load_family_record_inventory_for_snapshot,
     load_family_supported_record_inventory_for_snapshot,
@@ -72,8 +64,8 @@ pub(crate) fn is_cleared(address: Option<&str>) -> bool {
     address.is_none_or(|address| address.is_empty() || address == ZERO_ADDRESS)
 }
 
-/// A position in the canonical event order (D12 as amended on 2026-09-26; the project crate's
-/// families/position.rs): block number, transaction index, log index, then, when the event has
+/// A position in the canonical event order (docs/glossary.md#canonical-event-order; the project
+/// crate's families/position.rs): block number, transaction index, log index, then, when the event has
 /// both a transaction and a log index, the emission ordinal its identity ends with
 /// (docs/glossary.md#emission-ordinal), then the event identity by its bytes. `None` sorts first
 /// at each step. Equality is field equality; the order ends with the full identity, so two

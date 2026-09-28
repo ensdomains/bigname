@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer, primary_name};
-use crate::harness::{anvil::Anvil, basenames, repo_root};
+use crate::harness::{anvil::Anvil, basenames, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -285,19 +285,13 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "not_found",
         "blank Base primary claim should clear the declared candidate; body: {cleared_body}"
     );
-    let stored_clear_status: String = sqlx::query_scalar(
-        "SELECT claim_status::TEXT
-         FROM primary_names_current
-         WHERE address = $1
-           AND namespace = 'basenames'
-           AND coin_type = '2147492101'
-           AND claim_status = 'not_found'",
-    )
-    .bind(&alice_path)
-    .fetch_one(&cleared.db.pool)
-    .await
-    .context("cleared Basenames primary row should persist not_found status")?;
-    assert_eq!(stored_clear_status, "not_found");
+    let stored_clear_status =
+        families::primary_name(&cleared.db.pool, &alice_path, "basenames", "2147492101")
+            .await?
+            .context("cleared Basenames primary tuple should stay published with not_found status")?
+            .row
+            .claim_status;
+    assert_eq!(stored_clear_status.as_str(), "not_found");
 
     cleared.db.cleanup().await?;
     Ok(())

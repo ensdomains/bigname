@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{resolver_records, support};
 use crate::harness::{
-    anvil::Anvil, db::HarnessDb, ens_v1, manifests, perturb, pipeline, repo_root,
+    anvil::Anvil, db::HarnessDb, ens_v1, families, manifests, perturb, pipeline, repo_root,
 };
 
 const NAME: &str = "perturb.eth";
@@ -149,23 +149,13 @@ async fn pre_surface_event_snapshot(pool: &sqlx::PgPool, node: &str) -> Result<V
     .await?)
 }
 
-async fn pre_surface_projection_snapshot(
-    pool: &sqlx::PgPool,
-    logical_name_id: &str,
-) -> Result<Value> {
-    Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object(
-             'name_current', to_jsonb(name_row) - 'inserted_at' - 'last_recomputed_at',
-             'record_inventory_current',
-                 to_jsonb(inventory) - 'inserted_at' - 'last_recomputed_at'
-         )
-         FROM name_current name_row
-         JOIN record_inventory_current inventory USING (resource_id)
-         WHERE name_row.logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_one(pool)
-    .await?)
+/// The published record entries of the name's serving resource.
+async fn published_record_entries(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Value> {
+    let name = families::required_name(pool, logical_name_id).await?;
+    Ok(families::name_record_inventory(pool, &name)
+        .await?
+        .with_context(|| format!("no published record inventory for {logical_name_id}"))?
+        .entries)
 }
 
 #[tokio::test]
@@ -333,21 +323,27 @@ async fn pre_surface_records_converge_fresh_incremental_and_restored() -> Result
         assert_eq!(pre_surface_event_snapshot(pool, &node).await?, fresh_event);
     }
 
-    let fresh_projection =
-        pre_surface_projection_snapshot(&fresh.db.pool, &logical_name_id).await?;
+    let fresh_entries = published_record_entries(&fresh.db.pool, &logical_name_id).await?;
     assert!(
-        fresh_projection["record_inventory_current"]["entries"]
+        fresh_entries
             .as_array()
-            .is_some_and(|entries| entries.iter().any(|entry| {
-                entry["record_key"] == "text:description" && entry["value"] == "converged"
-            })),
-        "fresh replay must recover the pre-surface record: {fresh_projection}"
+            .is_some_and(|entries| entries
+                .iter()
+                .any(|entry| entry["record_key"] == "text:description"
+                    && entry["value"] == "converged")),
+        "fresh replay must recover the pre-surface record: {fresh_entries}"
     );
-    for pool in [&incremental.db.pool, &restored.db.pool] {
-        assert_eq!(
-            pre_surface_projection_snapshot(pool, &logical_name_id).await?,
-            fresh_projection
-        );
+    // Every family table, not only this name's rows, must match the single-pass derivation.
+    let fresh_families = families::family_rows(&fresh.db.pool).await?;
+    for (label, pool) in [
+        ("incremental", &incremental.db.pool),
+        ("restored", &restored.db.pool),
+    ] {
+        families::assert_family_rows_equal(
+            &fresh_families,
+            &families::family_rows(pool).await?,
+            &format!("{label} replay against the fresh one"),
+        )?;
     }
 
     let subjects = perturb::RouteSnapshotSubjects::new([name], [format!("{owner:#x}")]);
@@ -516,7 +512,10 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         "the lineage join must exclude losing normalized rows before stamped redo"
     );
     let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{NAME}"));
-    let production_history = bigname_storage::load_event_history(
+    // Until the stamped redo publishes again, the family marker still names the orphaned head,
+    // so the read may refuse as unpublished (409 stale on the API). If it answers, it must not
+    // expose a losing event.
+    match bigname_storage::load_event_history(
         &db.pool,
         bigname_storage::EventHistoryFilter {
             namespace: Some("ens".to_owned()),
@@ -528,13 +527,19 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         },
         true,
     )
-    .await?;
-    assert!(
-        production_history
-            .iter()
-            .all(|event| event.block_hash.as_deref() != Some(losing_hash.as_str())),
-        "the production canonical-history reader exposed a losing event through row-local canonicality after lineage orphaning"
-    );
+    .await
+    {
+        Ok(production_history) => assert!(
+            production_history
+                .iter()
+                .all(|event| event.block_hash.as_deref() != Some(losing_hash.as_str())),
+            "the production canonical-history reader exposed a losing event through row-local canonicality after lineage orphaning"
+        ),
+        Err(error) if bigname_storage::families::name::is_publication_unavailable(&error) => {}
+        Err(error) => {
+            return Err(error.context("history read after the rewind, before the stamped redo"));
+        }
+    }
     pipeline::run_rpc_ingest_redo(
         &root,
         &db.url,
@@ -586,7 +591,8 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         },
         true,
     )
-    .await?;
+    .await
+    .context("history read after the stamped redo")?;
     assert!(
         production_winning_history
             .iter()

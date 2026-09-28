@@ -494,6 +494,38 @@ async fn phase_primary_claim_provenance(
 }
 
 
+const PHASE_BASELINE: [&str; 14] = [
+    include_str!("../../../../schema-v2/baseline/01_chain.sql"),
+    include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
+    include_str!("../../../../schema-v2/baseline/03_identity.sql"),
+    include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
+    include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+    include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+    include_str!("../../../../schema-v2/baseline/07_labels.sql"),
+    include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
+    include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
+    include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
+    include_str!("../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+    include_str!("../../../../schema-v2/baseline/12_project_generation_failures.sql"),
+    include_str!("../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+    include_str!("../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+];
+
+async fn initialize_phase_schema(pool: &PgPool) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS bigname_phase")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for script in PHASE_BASELINE {
+        raw_sql(script).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 impl TestDatabase {
     async fn new(initialize_manifest_schema: bool) -> Result<Self> {
         Self::new_with_schemas(initialize_manifest_schema, false).await
@@ -503,13 +535,34 @@ impl TestDatabase {
         _initialize_manifest_schema: bool,
         _initialize_name_current_schema: bool,
     ) -> Result<Self> {
-        let database = bigname_test_support::TestDatabase::create(
+        let fingerprint = PHASE_BASELINE.map(str::as_bytes);
+        Self::from_template("api_phase", &fingerprint, |pool| async move {
+            initialize_phase_schema(&pool).await
+        })
+        .await
+    }
+
+    /// API fixtures start from the current phase baseline. Historical public-schema migrations
+    /// belong to the migration tests and cannot be replayed over that baseline.
+    async fn new_migrated() -> Result<Self> {
+        Self::new(false).await
+    }
+
+    async fn from_template<F, Fut>(key: &str, fingerprint: &[&[u8]], build: F) -> Result<Self>
+    where
+        F: FnOnce(PgPool) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let database = bigname_test_support::TestDatabase::create_from_template(
             TestDatabaseConfig::new("bigname_api_test")
                 .admin_database_from_url()
                 .pool_max_connections(1)
                 .parse_context("failed to parse database URL for API tests")
                 .admin_connect_context("failed to connect admin pool for API tests")
                 .pool_connect_context("failed to connect API test pool"),
+            key,
+            fingerprint,
+            build,
         )
         .await?;
         let pool = database.pool().clone();
@@ -521,46 +574,13 @@ impl TestDatabase {
             pool,
             database_name,
         };
-        database.initialize_lookup_schema().await?;
         database.lookup_pool = database.open_lookup_pool().await?;
         database.pool = database.lookup_pool.clone();
         Ok(database)
     }
 
-    async fn new_migrated() -> Result<Self> {
-        // API fixtures start from the current phase baseline. Historical public-schema
-        // migrations belong to migration tests and cannot be replayed after that baseline.
-        Self::new(false).await
-    }
-
     async fn initialize_lookup_schema(&self) -> Result<()> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS bigname_phase")
-            .execute(&mut *transaction)
-            .await?;
-        sqlx::query("SET LOCAL search_path TO bigname_phase, public")
-            .execute(&mut *transaction)
-            .await?;
-        for script in [
-            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
-            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
-            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
-            include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
-            include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
-            include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
-            include_str!("../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-            include_str!("../../../../schema-v2/baseline/12_project_generation_failures.sql"),
-            include_str!("../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
-            include_str!("../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
-        ] {
-            raw_sql(script).execute(&mut *transaction).await?;
-        }
-        transaction.commit().await?;
-        Ok(())
+        initialize_phase_schema(&self.pool).await
     }
 
     async fn lookup_pool(&self) -> Result<PgPool> {

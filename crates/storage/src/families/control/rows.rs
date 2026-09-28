@@ -1,5 +1,5 @@
 //! The family rows the control readers read, decoded from `to_jsonb(row)` so that the column
-//! types of the step 2 migrations (20260926100100 and 20260926100400) need no per-column
+//! types of the family tables need no per-column
 //! mapping. Every row keeps the canonical position of the event that last wrote it.
 use serde_json::Value;
 
@@ -27,7 +27,7 @@ pub(crate) fn json(row: &Value, field: &str) -> Value {
 
 /// One retained lifecycle event of `project_lifecycle_event`: an event of the six kinds the
 /// authority-admitted readers consume, kept per key and never pruned, with the name the adapter
-/// emitted (`original_logical_name_id`) beside the name step 2 decoded.
+/// emitted (`original_logical_name_id`) beside the name the family writer decoded.
 #[derive(Clone, Debug)]
 pub struct LifecycleEvent {
     pub state_kind: String,
@@ -39,10 +39,10 @@ pub struct LifecycleEvent {
     pub resource_id: Option<String>,
     pub source_family: String,
     /// `COALESCE(NULLIF(after_state ->> 'authority_kind', ''), 'registrar')`, the kind the
-    /// admission reads (authority_events.sql).
+    /// admission reads.
     pub authority_kind: String,
     /// `after_state ->> 'authority_kind'` as the row stores it, null when absent: the kind the
-    /// served name block reports (name_current/build.sql:30).
+    /// served name block reports.
     pub authority_kind_raw: Option<String>,
     /// `after_state ->> 'authority_key'`.
     pub authority_key: Option<String>,
@@ -108,7 +108,7 @@ impl LifecycleEvent {
         })
     }
 
-    /// The ENSv2 registry's path-expiry release (build.sql:324): source event
+    /// The ENSv2 registry's path-expiry release: source event
     /// RegistryPathExpired, derived from interpreter state, terminal reason
     /// registry_name_binding_expired.
     pub fn is_path_expiry(&self) -> bool {
@@ -118,7 +118,7 @@ impl LifecycleEvent {
             && self.terminal_reason.as_deref() == Some("registry_name_binding_expired")
     }
 
-    /// The authority arm the event's family belongs to (authority_events.sql:19-23).
+    /// The authority arm the event's family belongs to.
     pub fn family_arm(&self) -> Option<&'static str> {
         family_arm(&self.source_family)
     }
@@ -130,7 +130,7 @@ impl LifecycleEvent {
         )
     }
 
-    /// Whether `after_state -> 'expiry'` is a JSON number (build.sql:543-546).
+    /// Whether `after_state -> 'expiry'` is a JSON number.
     pub fn numeric_expiry(&self) -> bool {
         self.expiry.is_number()
     }
@@ -149,7 +149,7 @@ pub fn family_arm(source_family: &str) -> Option<&'static str> {
 }
 
 /// A membership maximum of a key state or triple summary: the position of the event that set it
-/// and the fields the reducer kept with it (step 2 families/lifecycle.rs, `maxima`).
+/// and the fields the reducer kept with it (Project families/lifecycle.rs, `maxima`).
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub position: Position,
@@ -215,7 +215,7 @@ pub struct BindingCandidate {
     pub canonicality_state: Option<String>,
     pub surface_namehash: Option<String>,
     /// The binding's place: its block and the transaction and log its provenance records, with
-    /// the binding id as the identity (stage.rs, `registry_only_handoffs`).
+    /// the binding id as the identity.
     pub block_number: i64,
     pub transaction_index: Option<i64>,
     pub log_index: Option<i64>,
@@ -223,7 +223,7 @@ pub struct BindingCandidate {
     pub authority_kind: Option<String>,
     /// The SurfaceBound's after-state authority key.
     pub authority_key: Option<String>,
-    /// The owner the SurfaceBound reports to the served control block (build.sql:668-689),
+    /// The owner the SurfaceBound reports to the served control block,
     /// positioned at `surface_bound_position`.
     pub bound_owner: Option<String>,
     pub registry_only: bool,
@@ -236,7 +236,7 @@ pub struct BindingCandidate {
     pub emitting_address: Option<String>,
     pub surface_bound_position: Option<Position>,
     /// The surface binding's `active_from` and `active_to` in seconds, read from the identity
-    /// row as the served name authority reads them (name_authority/build.sql:7-12); the lifecycle
+    /// row as name authority selection reads them; the lifecycle
     /// loader alone reads them, so they are none elsewhere.
     pub active_from_seconds: Option<f64>,
     pub active_to_seconds: Option<f64>,
@@ -245,7 +245,7 @@ pub struct BindingCandidate {
 impl BindingCandidate {
     /// Whether the binding is open at a publication whose block has timestamp `seconds`:
     /// `active_from < cutoff AND (active_to IS NULL OR active_to >= cutoff)` with the cutoff one
-    /// second after the block (name_authority/build.sql:3-12). A binding with no start is not
+    /// second after the block. A binding with no start is not
     /// open, as the comparison with NULL is not true there.
     pub fn open_at(&self, seconds: i64) -> bool {
         let cutoff = seconds as f64 + 1.0;
@@ -299,11 +299,10 @@ impl BindingCandidate {
         })
     }
 
-    /// A NameWrapper binding: step 2 records the transaction, the emitter, the wrapped registrar
+    /// A NameWrapper binding: the family writer records the transaction, the emitter, the wrapped registrar
     /// lease and the node only for a SurfaceBound from ens_v1_wrapper_l1
     /// (families/identity.rs, `candidate_row`), so any one of them marks it. A NameWrapper
-    /// SurfaceBound with none of the four is not recognised (step 2 retention follow-up: keep
-    /// the SurfaceBound's source family on the candidate).
+    /// SurfaceBound with none of the four is not recognised.
     pub fn is_wrapper(&self) -> bool {
         self.transaction_hash.is_some()
             || self.emitting_address.is_some()
@@ -311,11 +310,10 @@ impl BindingCandidate {
             || self.node.is_some()
     }
 
-    /// The order stage.rs compares candidates in: block, transaction and log with a missing one
-    /// read as -1, then the binding id. This is not the D12 event order: two candidates at the
-    /// same place break the tie by binding id, not by their SurfaceBound identities, as the
-    /// served stage does (fixture in admission.rs). The D12 claim covers event-derived latest
-    /// selections only.
+    /// The order binding candidates compare in: block, transaction and log with a missing one
+    /// read as -1, then the binding id. This is not the canonical event order: two candidates at
+    /// the same place break the tie by binding id, not by their SurfaceBound identities (fixture
+    /// in admission.rs). The canonical order covers event-derived latest selections only.
     pub fn order(&self) -> (i64, i64, i64, &str) {
         (
             self.block_number,

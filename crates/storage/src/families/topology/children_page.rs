@@ -1,5 +1,5 @@
 //! The subnames page, the registry labels page and the child counts over the family child
-//! relation, with today's page semantics (crates/storage/src/children/page.rs and reads.rs): the
+//! relation, with the page semantics of crates/storage/src/children/page.rs and reads.rs: the
 //! optional prefix, the expiry fence with its null treatment, the name and timestamp sorts, the
 //! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds. The total
 //! is an exact count over the same filtered relation, taken in the same statement as the page;
@@ -8,8 +8,8 @@
 //! `evaluated_at`, never the database's transaction time.
 //!
 //! The registration and expiry times the timestamp sorts and the fence use, and the released
-//! status the fence checks, are the child's name summary (`project_name_summary`), the same
-//! expressions today's page reads from the child's `name_current.declared_summary`.
+//! status the fence checks, are the child's name summary (`project_name_summary`), which the
+//! family step writes from the child's composed `declared_summary`.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -29,8 +29,8 @@ use super::{
 };
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
-/// The per-row provenance, chain positions and target blocks `children_current` stamps are not
-/// family facts and are not reproduced.
+/// The row carries no per-row provenance, chain positions or target blocks: those are not family
+/// facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyChildRow {
     pub parent_logical_name_id: String,
@@ -51,8 +51,8 @@ pub struct FamilyChildrenPage {
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
 }
 
-/// The shadow of `load_children_current_page_filtered`: the same rows in the same order with the
-/// same cursor semantics, read from the child edge families.
+/// One page of `parent_logical_name_id`'s children from the child edge families, with the
+/// children route's filters, order and cursor semantics.
 pub async fn load_children_shadow_page(
     pool: &PgPool,
     parent_logical_name_id: &str,
@@ -69,32 +69,6 @@ pub async fn load_children_shadow_page(
         parent_logical_name_id,
         filter,
         None,
-        cursor,
-        page_size,
-    )
-    .await
-}
-
-/// The shadow of `load_registry_children_current_page`: the ENSv2 children of
-/// `parent_logical_name_id` whose registration the registry `registry_address` holds, by name,
-/// with the exact count of every such child as the page total.
-pub async fn load_registry_children_shadow_page(
-    pool: &PgPool,
-    parent_logical_name_id: &str,
-    registry_address: &str,
-    cursor: Option<&ChildrenCurrentKeysetCursor>,
-    page_size: u64,
-) -> Result<FamilyChildrenPage> {
-    let registry = registry_address.to_ascii_lowercase();
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection")?;
-    page(
-        &mut conn,
-        parent_logical_name_id,
-        &ChildrenCurrentPageFilter::default(),
-        Some(&registry),
         cursor,
         page_size,
     )

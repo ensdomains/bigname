@@ -1,5 +1,5 @@
-// The continuation cursor of the current-state lists whose rows the composed name reader serves
-// (TYR-36 step 7b slice 5, D10): `/v1/search`, `/v1/names` and a resolver's bound names. A
+// The continuation cursor of the current-state lists whose rows the composed name reader serves:
+// `/v1/search`, `/v1/names` and a resolver's bound names. A
 // cursor holds the list's sort, its filters and the position of the last row it returned, plus
 // the `at` token when the request pinned `at`; no publication, generation or evaluation time. A
 // continuation reads what is published when it runs (`v2::list_cursor`), so it is portable
@@ -186,7 +186,7 @@ async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
 /// from still sits there. alpha.eth leaves the resolver's bound names and moves ahead of the
 /// descending expiry cursor that was issued on it; the continuation returns beta.eth, and the
 /// ascending walk meets alpha.eth at its new expiry. With `at` pinned to 240 the same
-/// continuation is refused as stale (ruling J5), and without it the pinned cursor is foreign.
+/// continuation is refused as stale, and without it the pinned cursor is foreign.
 #[tokio::test]
 async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

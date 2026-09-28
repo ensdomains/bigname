@@ -255,9 +255,9 @@ async fn nearest(
 /// The canonical event order, latest first, over the position columns of `alias`, a
 /// `project_registry_pointer` row: block, transaction and log (absent last), the emission
 /// ordinal (docs/glossary.md#emission-ordinal; absent last), then identity bytes, as
-/// `FamilyPosition` orders. Today it cannot decide a walk: the table's key is (chain_id,
-/// namespace, node) (schema-v2/baseline/06_projections.sql:2052), so every row at one depth is
-/// the same pointer row. It is kept so the walk states the same order as every other family
+/// `FamilyPosition` orders. It cannot decide a walk: the table's primary key is (chain_id,
+/// namespace, node) (schema-v2/baseline/06_projections.sql), so every row at one depth is the
+/// same pointer row. It is kept so the walk states the same order as every other family
 /// comparison.
 fn latest_registry_first(alias: &str) -> String {
     format!(
@@ -272,8 +272,8 @@ fn latest_registry_first(alias: &str) -> String {
 }
 
 /// The emission ordinal of the identity expression `identity` (docs/glossary.md, "Emission
-/// ordinal"), in the checked SQL form step 2 gives it (crates/project/tests/families_ordinal_sql.rs,
-/// checked there against the Rust parse; copied from PR 954's families/topology/shims.rs): strip
+/// ordinal"), in the checked SQL form the family writer uses
+/// (crates/project/tests/families_ordinal_sql.rs checks it against the Rust parse): strip
 /// leading zeros, check the significant length against the ten-digit bound, and only then cast,
 /// so no suffix errors where the Rust parse yields none. Absent is -1 rather than null so the row
 /// value stays decisive; every valid ordinal is at least 0, so -1 sorts last under `DESC`.

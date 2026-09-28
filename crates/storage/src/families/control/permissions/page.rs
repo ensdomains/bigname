@@ -1,8 +1,8 @@
-//! `GET /v1/permissions` from the owned key families (TYR-36 step 7b slice 4): the
-//! effective-permission page and the resource summaries the route reads, with the served
-//! readers' keyset, sort, filters and shapes (permissions/effective.rs, resource_summary.rs).
+//! `GET /v1/permissions` from the owned key families: the effective-permission page and the
+//! resource summaries the route reads, with the keyset, sort, filters and shapes of
+//! permissions/effective.rs and resource_summary.rs.
 //!
-//! - Direct rows are each resource's served permission rows computed from its F8 grants
+//! - Direct rows are each resource's permission rows computed from its F8 grants
 //!   ([`super::load_shadow_permissions_on`]: the wrapper fuse and grace masks at the publication's block
 //!   time, the ENSv2 path-expiry drop, the empty-row drop and the NameWrapper operator fan-out).
 //! - Registry-operator rows are the F9 approvals of the resource's F2c registry binding
@@ -13,9 +13,8 @@
 //! Each read runs in one read-only REPEATABLE READ snapshot and describes the family marker's
 //! publication of every chain it touches; a chain whose marker is not servable (a rebuild in
 //! flight, or another build's) fails the read with [`FamilyPublicationUnavailable`], which the
-//! API answers with the stale 409. The served filter's other two predicates, the row's own
-//! canonicality and its publication lineage, have no family counterpart: the family undo
-//! removes what a dropped block wrote (ruling J13).
+//! API answers with the stale 409. No per-row canonicality or lineage check is needed: the
+//! family undo removes what a dropped block wrote.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
@@ -34,7 +33,7 @@ use crate::{
     PermissionGrantRelation, PermissionScope, PermissionsCurrentAccountResourceCursor,
     PermissionsCurrentResourceSummary, ResourcePermissionCoverage,
     families::{
-        control::{lifecycle::Clock, position::EventOrder},
+        control::lifecycle::Clock,
         name::{FamilyPublication, FamilyPublicationUnavailable, publication_on, read_snapshot},
     },
     projection_helpers::{checked_page_limit_i64, checked_page_size_usize, split_keyset_page},
@@ -165,8 +164,8 @@ async fn page_rows(
     Ok(rows)
 }
 
-/// The served summaries of [`crate::load_permissions_current_resource_summaries`], read from the
-/// families: one per readable resource of `resource_ids` at or below its chain's publication.
+/// The permission summaries `load_serving_permission_summaries` serves, read from the families: one
+/// per readable resource of `resource_ids` at or below its chain's publication.
 pub async fn load_family_permission_summaries(
     pool: &PgPool,
     resource_ids: &[Uuid],
@@ -322,7 +321,6 @@ async fn effective_rows(
             &publication.chain_id,
             &clock(&publication),
             &inputs,
-            &EventOrder::Canonical,
             Some(keys),
         )
         .await?;

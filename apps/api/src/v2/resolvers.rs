@@ -142,7 +142,7 @@ pub(crate) async fn get_resolver(
         .as_deref()
         .map(|cursor| bound_names_storage_cursor(cursor, &cursor_binding))
         .transpose()?;
-    // A cursor pinned to `at` is tied to that block (ruling J5): once a later block is published,
+    // A cursor pinned to `at` is tied to that block: once a later block is published,
     // the continuation is stale, whatever rows the later block changed. A same-block rebuild is
     // not detected; the cursor holds no generation (`list_cursor`).
     if storage_cursor.is_some() && params.at.is_some() {

@@ -1,4 +1,4 @@
-//! Which family publication a composed name read answers from (TYR-36 step 7b). A composed read
+//! Which family publication a composed name read answers from. A composed read
 //! serves only from a servable marker: `live`, written by this interpreter build and on the
 //! readable lineage, the publication fence's rule (snapshot_selection/project.rs). A read checks
 //! the markers of the chains it was asked about even when it finds no name to compose, so a
