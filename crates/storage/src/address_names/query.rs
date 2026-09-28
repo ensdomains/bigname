@@ -551,7 +551,8 @@ fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&s
     builder.push(path_literal.as_str());
     builder.push(") = 'string' AND nc.declared_summary #>> ");
     builder.push(path_literal.as_str());
-    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' THEN (nc.declared_summary #>> ");
+    // Lifecycle timestamps serialized by PostgreSQL include a UTC offset, and may include fractions.
+    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN (nc.declared_summary #>> ");
     builder.push(path_literal.as_str());
     builder.push(")::TIMESTAMPTZ ELSE NULL END");
 }

@@ -137,47 +137,34 @@ async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Res
 
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
-    seed_v2_subnames_bound_child(
+    seed_subname_inputs(
         &database,
-        "ens:ᏣᎳᎩ.parent.eth",
         NORMALIZED_NAME,
-        "node:ᏣᎳᎩ.parent.eth",
         85,
         Uuid::from_u128(0x349_2001),
         Uuid::from_u128(0x349_2002),
         Uuid::from_u128(0x349_2003),
-        json!({
-            "registration": {"status": "active", "authority_kind": "registrar"},
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000034920"
-            }
-        }),
+        SubnameInput::RegistryOwner("0x0000000000000000000000000000000000034920"),
     )
     .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            "ens:parent.eth",
-            "ens:ᏣᎳᎩ.parent.eth",
-            NORMALIZED_NAME,
-            "node:ᏣᎳᎩ.parent.eth",
-            906,
-            85,
-        )],
-    )
-    .await?;
-    let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
-    )
-    .bind(NORMALIZED_NAME)
-    .fetch_one(&database.pool)
-    .await?;
-
-    let payload = v2_subnames_payload_for_database(
+    seed_subname_edge(
         &database,
-        "/v1/names/parent.eth/subnames?page_size=20",
+        "parent.eth",
+        "ᏣᎳᎩ".as_bytes(),
+        "0x0000000000000000000000000000000000034920",
+        85,
     )
     .await?;
+    publish_subname_inputs(&database).await?;
+    let stored_raw_name: String =
+        sqlx::query_scalar("SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1")
+            .bind(NORMALIZED_NAME)
+            .fetch_one(&database.pool)
+            .await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=20")
+            .await?;
     let row = payload["data"]
         .as_array()
         .expect("subnames data must be an array")
@@ -3393,14 +3380,18 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
 async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> Result<()> {
     let (database, payload) =
         v2_subnames_payload("/v1/names/Parent.eth/subnames?page_size=3").await?;
-    let stored_owner: Option<String> = sqlx::query_scalar(
-        "SELECT owner FROM bigname_phase.children_current
-         WHERE decoded_name = 'gamma.parent.eth'",
+    let page = bigname_storage::load_children_current_page(
+        &database.pool,
+        &bigname_storage::logical_name_id_for_name("ens", "parent.eth"),
+        None,
+        10,
     )
-    .fetch_one(&database.pool)
     .await?;
     assert_eq!(
-        stored_owner.as_deref(),
+        page.rows
+            .iter()
+            .find(|row| row.normalized_name == "gamma.parent.eth")
+            .and_then(|row| row.owner.as_deref()),
         Some("0x00000000000000000000000000000000000000cc")
     );
 
@@ -3432,13 +3423,27 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     );
     assert_eq!(
         data[0]["registrant"],
-        json!("0x00000000000000000000000000000000000000ab")
+        json!("0x00000000000000000000000000000000000000aa")
     );
-    assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T03:04:05Z"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T03:04:05Z"));
+    assert_eq!(data[0]["registration_status"], json!("registered"));
+    assert_eq!(
+        parse_rfc3339_utc_timestamp(
+            data[0]["registered_at"]
+                .as_str()
+                .context("registration timestamp")?
+        )?,
+        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z")?
+    );
+    assert_eq!(
+        parse_rfc3339_utc_timestamp(
+            data[0]["created_at"]
+                .as_str()
+                .context("creation timestamp")?
+        )?,
+        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z")?
+    );
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T03:04:05Z"));
-    assert_eq!(data[1]["registration_status"], json!("released"));
+    assert_eq!(data[1]["registration_status"], json!("unregistered"));
     assert_eq!(data[2]["registration_status"], json!("unregistered"));
     assert!(
         data[2].get("owner").is_none(),
@@ -3459,39 +3464,68 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
 async fn v2_get_subnames_keeps_zero_owner_for_ownerless_resolver_child() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
-    let child_updated = sqlx::query(
-        "UPDATE bigname_phase.children_current
-         SET owner = '0x0000000000000000000000000000000000000000', registrant = NULL
-         WHERE decoded_name = 'gamma.parent.eth'",
+    let logical = bigname_storage::logical_name_id_for_name("ens", "gamma.parent.eth");
+    let resource = Uuid::from_u128(0x4030);
+    let hash = seed_subname_block(&database, 90).await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = NULL WHERE resource_id = $1")
+        .bind(resource)
+        .execute(&database.pool)
+        .await?;
+    let mut events = Vec::new();
+    for (log, kind, after) in [
+        (
+            0,
+            "AuthorityTransferred",
+            json!({"source_event":"Transfer", "node":bigname_lookup::ens_namehash_hex("gamma.parent.eth")?,
+            "owner":"0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e", "owner_getter":"0x0000000000000000000000000000000000000000",
+            "registry_owner":"0x0000000000000000000000000000000000000000", "owner_getter_reason":"registry_self"}),
+        ),
+        (
+            1,
+            "ResolverChanged",
+            json!({"source_event":"NewResolver", "node":bigname_lookup::ens_namehash_hex("gamma.parent.eth")?,
+            "resolver":"0x0000000000000000000000000000000000000abc"}),
+        ),
+    ] {
+        let mut event = history_event(
+            &format!("ownerless-child-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some("ethereum-mainnet"),
+            Some(90),
+            Some(&hash),
+            Some("0xownerless-child"),
+            Some(log),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = kind.into();
+        event.source_family = "ens_v1_registry_l1".into();
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    declare_family_fixture_resolver(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        "0x0000000000000000000000000000000000000abc",
     )
-    .execute(&database.pool)
     .await?;
-    assert_eq!(child_updated.rows_affected(), 1);
-    let name_updated = sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET surface_binding_id = NULL, resource_id = NULL, token_lineage_id = NULL,
-             binding_kind = NULL,
-             serving_resource_id = (SELECT resource_id FROM bigname_phase.name_current
-                                    WHERE raw_name = 'alpha.parent.eth'),
-             declared_summary = jsonb_build_object(
-                 'registration', jsonb_build_object('status', 'unregistered'),
-                 'control', jsonb_build_object('status', 'unregistered'),
-                 'coverage', jsonb_build_object(
-                     'status', 'projected',
-                     'exhaustiveness', 'not_asserted',
-                     'enumeration_basis', 'event_linked_registry_resolver',
-                     'unsupported_reason', NULL))
-         WHERE raw_name = 'gamma.parent.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
-    assert_eq!(name_updated.rows_affected(), 1);
-
-    let payload = v2_subnames_payload_for_database(
+    seed_subname_edge(
         &database,
-        "/v1/names/parent.eth/subnames?page_size=10",
+        "parent.eth",
+        b"gamma",
+        "0x0000000000000000000000000000000000000000",
+        90,
     )
     .await?;
+    publish_subname_inputs(&database).await?;
+
+    let payload =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=10")
+            .await?;
     let child = payload["data"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["name"] == "gamma.parent.eth"))
@@ -3553,32 +3587,70 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
     let child_name = format!("child.{V2_SEPOLIA_SNAPSHOT_NAME}");
-    let child_logical_name_id = format!("ens:{child_name}");
-    seed_v2_snapshot_profile_name(&database, &child_name, "Child.Sepolia-Pin.eth",
-        "namehash:child.sepolia-pin.eth", Uuid::from_u128(0x7e23),
-        Uuid::from_u128(0x7e24), Uuid::from_u128(0x7e25),
-        "ethereum-sepolia", "ethereum-sepolia", V2_SEPOLIA_SNAPSHOT_BLOCK,
-        V2_SEPOLIA_SNAPSHOT_HASH, V2_SEPOLIA_SNAPSHOT_TIMESTAMP).await?;
-    let mut child = v2_subnames_declared_child_row(
-        &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"), &child_logical_name_id,
-        "Child.Sepolia-Pin.eth", "namehash:child.sepolia-pin.eth", 905, 10);
-    child.chain_positions = json!({"ethereum-sepolia": {
-        "chain_id": "ethereum-sepolia", "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
-        "block_hash": V2_SEPOLIA_SNAPSHOT_HASH, "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
-    }});
-    child.canonicality_summary = json!({"state":"canonical_lineage"});
-    upsert_phase_children_current_rows(&database.pool, &[child]).await?;
-    database.insert_manifest("ens", "ens_v2_registry_l1", "ethereum-sepolia",
-        "ens_v2_sepolia_20260915", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
-    let state = AppState::new_with_rpc_urls(database.lookup_pool.clone(),
-        bigname_lookup::ChainRpcUrls::default());
-    let response = app_router(state).oneshot(Request::builder()
-        .uri(format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"))
-        .body(Body::empty()).expect("request must build")).await?;
+    seed_v2_snapshot_profile_name(
+        &database,
+        &child_name,
+        "Child.Sepolia-Pin.eth",
+        "namehash:child.sepolia-pin.eth",
+        Uuid::from_u128(0x7e23),
+        Uuid::from_u128(0x7e24),
+        Uuid::from_u128(0x7e25),
+        "ethereum-sepolia",
+        "ethereum-sepolia",
+        V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH,
+        V2_SEPOLIA_SNAPSHOT_TIMESTAMP,
+    )
+    .await?;
+    let label = insert_family_label_preimage(&database.pool, b"child").await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-sepolia",
+        V2_SEPOLIA_SNAPSHOT_NAME,
+        &label,
+        "0x0000000000000000000000000000000000000001",
+        V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH,
+    )
+    .await?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-sepolia",
+        V2_SEPOLIA_SNAPSHOT_BLOCK,
+        V2_SEPOLIA_SNAPSHOT_HASH,
+    )
+    .await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v2_registry_l1",
+            "ethereum-sepolia",
+            "ens_v2_sepolia_20260915",
+            1,
+            "active",
+            "ensip15@ens-normalize-0.1.1",
+        )
+        .await?;
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "{payload}");
-    assert_eq!(payload["meta"]["as_of"]["11155111"]["block_number"], json!(V2_SEPOLIA_SNAPSHOT_BLOCK));
+    assert_eq!(
+        payload["meta"]["as_of"]["11155111"]["block_number"],
+        json!(V2_SEPOLIA_SNAPSHOT_BLOCK)
+    );
     assert!(payload["meta"]["as_of"].get("1").is_none());
     assert_eq!(payload["data"][0]["name"], json!(child_name));
     database.cleanup().await
@@ -3588,58 +3660,38 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
 async fn v2_get_subnames_rejects_cursor_reused_for_different_parent() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
-    seed_v2_subnames_bound_child(
-        &database,
-        "ens:other.eth",
-        "other.eth",
-        "node:other.eth",
-        79,
-        Uuid::from_u128(0x4030),
-        Uuid::from_u128(0x5030),
-        Uuid::from_u128(0x6030),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar"
-            },
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000000002"
-            }
-        }),
-    )
-    .await?;
-    seed_v2_subnames_bound_child(
-        &database,
-        "ens:one.other.eth",
-        "one.other.eth",
-        "node:one.other.eth",
-        80,
-        Uuid::from_u128(0x4040),
-        Uuid::from_u128(0x5040),
-        Uuid::from_u128(0x6040),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar"
-            },
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000000003"
-            }
-        }),
-    )
-    .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            "ens:other.eth",
-            "ens:one.other.eth",
+    for (name, base, owner) in [
+        (
+            "other.eth",
+            0x7010,
+            "0x0000000000000000000000000000000000000002",
+        ),
+        (
             "one.other.eth",
-            "node:one.other.eth",
-            905,
-            80,
-        )],
+            0x7020,
+            "0x0000000000000000000000000000000000000003",
+        ),
+    ] {
+        seed_subname_inputs(
+            &database,
+            name,
+            85,
+            Uuid::from_u128(base),
+            Uuid::from_u128(base + 1),
+            Uuid::from_u128(base + 2),
+            SubnameInput::RegistryOwner(owner),
+        )
+        .await?;
+    }
+    seed_subname_edge(
+        &database,
+        "other.eth",
+        b"one",
+        "0x0000000000000000000000000000000000000003",
+        85,
     )
     .await?;
+    publish_subname_inputs(&database).await?;
 
     let first_page =
         v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?page_size=2")
@@ -3684,8 +3736,7 @@ async fn v2_get_subnames_include_counts_adds_child_subname_count_only_when_reque
 }
 
 #[tokio::test]
-async fn v2_subname_collections_filter_orphaned_phase_lineage_and_keep_preimage_rows()
--> Result<()> {
+async fn v2_subname_collections_filter_orphaned_observations_and_surfaces() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
@@ -3695,46 +3746,20 @@ async fn v2_subname_collections_filter_orphaned_phase_lineage_and_keep_preimage_
     .fetch_one(&database.pool)
     .await?;
 
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES
-            ('ethereum-mainnet', '0xreorg-beta-child', 1003, '2026-04-17T01:00:03Z',
-             'canonical'::bigname_phase.canonicality_state),
-            ('ethereum-mainnet', '0xreorg-gamma-child', 1004, '2026-04-17T01:00:04Z',
-             'canonical'::bigname_phase.canonicality_state);
-        UPDATE bigname_phase.name_surfaces
-        SET block_hash = CASE raw_name
-                WHEN 'beta.parent.eth' THEN '0xreorg-beta-child'
-                ELSE '0xreorg-gamma-child'
-            END,
-            block_number = CASE raw_name
-                WHEN 'beta.parent.eth' THEN 1003
-                ELSE 1004
-            END,
-            canonicality_state = 'canonical'::bigname_phase.canonicality_state
-        WHERE raw_name IN ('beta.parent.eth', 'gamma.parent.eth');
-        UPDATE bigname_phase.chain_lineage lineage
-        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
-        FROM bigname_phase.name_surfaces surface
-        WHERE surface.raw_name IN ('beta.parent.eth', 'gamma.parent.eth')
-          AND lineage.chain_id = surface.chain_id
-          AND lineage.block_hash = surface.block_hash
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
+    // Rebuild after the beta observation loses canonical lineage. Gamma has a preimage and
+    // canonical edge, but its existing orphaned surface must also be withheld.
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-mainnet' AND block_number = 82")
+        .execute(&database.pool).await?;
     sqlx::query(
-        r#"
-        UPDATE bigname_phase.children_current
-        SET provenance = jsonb_set(provenance, '{label}',
-            '{"source":"label_preimage"}'::jsonb)
-        WHERE decoded_name = 'gamma.parent.eth'
-        "#,
+        "UPDATE name_surfaces SET canonicality_state = 'orphaned' WHERE logical_name_id = $1",
     )
+    .bind(bigname_storage::logical_name_id_for_name(
+        "ens",
+        "gamma.parent.eth",
+    ))
     .execute(&database.pool)
     .await?;
+    publish_subname_inputs(&database).await?;
 
     let page = bigname_storage::load_children_current_page(
         &database.pool,
@@ -3748,9 +3773,9 @@ async fn v2_subname_collections_filter_orphaned_phase_lineage_and_keep_preimage_
             .iter()
             .map(|row| row.normalized_name.as_str())
             .collect::<Vec<_>>(),
-        vec!["alpha.parent.eth", "gamma.parent.eth"]
+        vec!["alpha.parent.eth"]
     );
-    assert_eq!(page.summary.child_count, 2);
+    assert_eq!(page.summary.child_count, 1);
 
     database.cleanup().await?;
     Ok(())
@@ -3764,20 +3789,28 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     // that row with every name column null and no child name surface — the shape most historical
     // labels have — and the page must name it by the documented placeholder rather than decoding
     // a null into a mandatory field.
-    seed_v2_subnames_topology_only_child(&database, "parent.eth", "0xfeed0001").await?;
+    seed_v2_subnames_topology_only_child(
+        &database,
+        "parent.eth",
+        "0x00000000000000000000000000000000000000000000000000000000feed0001",
+    )
+    .await?;
 
     let mut seen = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..5 {
         let uri = match cursor.as_deref() {
-            Some(cursor) => format!(
-                "/v1/names/parent.eth/subnames?page_size=2&cursor={cursor}"
-            ),
+            Some(cursor) => format!("/v1/names/parent.eth/subnames?page_size=2&cursor={cursor}"),
             None => "/v1/names/parent.eth/subnames?page_size=2".to_owned(),
         };
         let payload = v2_subnames_payload_for_database(&database, &uri).await?;
         for row in payload["data"].as_array().expect("subnames data") {
-            seen.push(row["name"].as_str().expect("row name must be a string").to_owned());
+            seen.push(
+                row["name"]
+                    .as_str()
+                    .expect("row name must be a string")
+                    .to_owned(),
+            );
         }
         match payload["page"]["next_cursor"].as_str() {
             Some(next) => cursor = Some(next.to_owned()),
@@ -3788,12 +3821,23 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
     let mut deduped = seen.clone();
     deduped.sort();
     deduped.dedup();
-    assert_eq!(deduped.len(), seen.len(), "no row may be served twice: {seen:?}");
+    assert_eq!(
+        deduped.len(),
+        seen.len(),
+        "no row may be served twice: {seen:?}"
+    );
     assert!(
-        seen.contains(&"[feed0001].parent.eth".to_owned()),
+        seen.contains(
+            &"[00000000000000000000000000000000000000000000000000000000feed0001].parent.eth"
+                .to_owned()
+        ),
         "the unobserved-label child must be named by its placeholder: {seen:?}"
     );
-    assert_eq!(seen.len(), 4, "every child must be paged exactly once: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        4,
+        "every child must be paged exactly once: {seen:?}"
+    );
 
     // A preimage whose label bytes do not decode is stored raw with no decoded form; the read
     // escape-encodes it. It is equally not an addressable name, and equally must not fail the page.
@@ -3811,7 +3855,7 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
         .as_array()
         .expect("subnames data")
         .iter()
-        .find(|row| row["labelhash"] == "0xfeed0002")
+        .find(|row| row["labelhash"] == format!("{:#x}", alloy_primitives::keccak256(b"\xff\tBad")))
         .unwrap_or_else(|| panic!("an undecodable label must be served, not dropped: {names:?}"));
     assert_eq!(escaped_row["name"], "\\377\tBad.parent.eth");
     assert_eq!(escaped_row["display_name"], "\\377\tBad.parent.eth");
@@ -3893,103 +3937,36 @@ async fn seed_v2_subnames_preimage_child(
     database: &TestDatabase,
     parent_name: &str,
     label: &str,
-    verdict_true: bool,
+    _verdict_true: bool,
 ) -> Result<()> {
-    let parent_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    seed_subname_edge(
+        database,
+        parent_name,
+        label.as_bytes(),
+        "0x00000000000000000000000000000000000000cc",
+        90,
     )
-    .bind(parent_name)
-    .fetch_one(&database.pool)
     .await?;
-    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
-        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
-         WHERE parent_logical_name_id = $1 LIMIT 1",
-    )
-    .bind(&parent_logical_name_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let mut labels = vec![label.as_bytes()];
-    labels.extend(parent_name.split('.').map(str::as_bytes));
-    let namehash = format!("{:#x}", bigname_storage::ens_namehash_label_bytes(&labels));
-    let labelhash = format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()));
-    let raw_name = format!("{label}.{parent_name}");
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.children_current (
-            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
-            raw_name, decoded_name, raw_label, decoded_label, namehash, labelhash,
-            provenance, chain_positions, canonicality_summary, manifest_version
-        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $3, $4, $5, $6, $2, $7,
-                  jsonb_build_object('chain_id', 'ethereum-mainnet',
-                                     'derivation_kind', 'children_current_rebuild'),
-                  $8, $9, 1)
-        "#,
-    )
-    .bind(&parent_logical_name_id)
-    .bind(&namehash)
-    .bind(verdict_true.then_some(raw_name.as_bytes()))
-    .bind(verdict_true.then_some(raw_name.as_str()))
-    .bind(label.as_bytes())
-    .bind(verdict_true.then_some(label))
-    .bind(&labelhash)
-    .bind(chain_positions)
-    .bind(canonicality_summary)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    publish_subname_inputs(database).await
 }
 
 #[tokio::test]
-async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned() -> Result<()> {
+async fn v2_subname_counts_agree_with_the_page_after_a_child_observation_is_orphaned() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
-    let counted = v2_subnames_payload_for_database(
-        &database,
-        "/v1/names/parent.eth/subnames?include=counts",
-    )
-    .await?;
+    let counted =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?include=counts")
+            .await?;
     assert_eq!(counted["data"][0]["name"], json!("alpha.parent.eth"));
     assert_eq!(counted["data"][0]["subname_count"], json!(1));
 
-    // Move only the grandchild row onto an orphaned projection target. Its parent and child
-    // identity anchors stay canonical, so nothing but the target fence can exclude it.
-    let child_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces \
-         WHERE raw_name = 'delta.alpha.parent.eth'",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES (
-            'ethereum-mainnet', '0xorphaned-grandchild-target', 2011,
-            '2026-04-17T02:00:11Z', 'orphaned'::bigname_phase.canonicality_state
-        );
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.children_current \
-         SET chain_positions = jsonb_build_object( \
-                 'block_number', 2011, \
-                 'block_hash', '0xorphaned-grandchild-target', \
-                 'target_block_number', 2011, \
-                 'target_block_hash', '0xorphaned-grandchild-target' \
-             ), \
-             canonicality_summary = jsonb_build_object( \
-                 'state', 'canonical', \
-                 'target_block_number', 2011, \
-                 'target_block_hash', '0xorphaned-grandchild-target' \
-             ) \
-         WHERE child_logical_name_id = $1",
-    )
-    .bind(&child_logical_name_id)
-    .execute(&database.pool)
-    .await?;
+    // The grandchild's registry observation is removed by a reorg while its identity and
+    // parent remain. Page rows and the composed parent's child count share the new publication.
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-mainnet' AND block_number = 84")
+        .execute(&database.pool).await?;
+    publish_subname_inputs(&database).await?;
 
     let page = v2_subnames_payload_for_database(
         &database,
@@ -3998,11 +3975,9 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
     .await?;
     assert_eq!(page["data"], json!([]));
 
-    let recounted = v2_subnames_payload_for_database(
-        &database,
-        "/v1/names/parent.eth/subnames?include=counts",
-    )
-    .await?;
+    let recounted =
+        v2_subnames_payload_for_database(&database, "/v1/names/parent.eth/subnames?include=counts")
+            .await?;
     assert_eq!(recounted["data"][0]["name"], json!("alpha.parent.eth"));
     assert_eq!(recounted["data"][0]["subname_count"], json!(0));
 
@@ -4029,7 +4004,7 @@ async fn v2_get_subnames_parent_with_zero_children_returns_empty_page() -> Resul
 #[tokio::test]
 async fn v2_get_subnames_missing_parent_returns_not_found() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    publish_subname_inputs(&database).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -5458,10 +5433,9 @@ async fn v2_get_subnames_q_filters_by_normalized_label_prefix() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order() -> Result<()> {
-    let (database, payload) = v2_subnames_payload(
-        "/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1",
-    )
-    .await?;
+    let (database, payload) =
+        v2_subnames_payload("/v1/names/Parent.eth/subnames?sort=expires_at&order=asc&page_size=1")
+            .await?;
     assert_eq!(v2_subname_names(&payload), vec!["alpha.parent.eth"]);
     assert_eq!(payload["page"]["total_count"], json!(3));
     assert_eq!(payload["page"]["has_more"], json!(true));
@@ -5536,6 +5510,24 @@ async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order
         vec!["gamma.parent.eth", "beta.parent.eth", "alpha.parent.eth"]
     );
 
+    let mut uri =
+        "/v1/names/parent.eth/subnames?sort=registered_at&order=desc&page_size=1".to_owned();
+    let mut registered_walk = Vec::new();
+    loop {
+        let page = v2_subnames_payload_for_database(&database, &uri).await?;
+        registered_walk.extend(v2_subname_names(&page));
+        let Some(cursor) = page["page"]["next_cursor"].as_str() else {
+            break;
+        };
+        uri = format!(
+            "/v1/names/parent.eth/subnames?sort=registered_at&order=desc&page_size=1&cursor={cursor}"
+        );
+    }
+    assert_eq!(
+        registered_walk,
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"]
+    );
+
     for uri in [
         format!("/v1/names/Parent.eth/subnames?sort=name&page_size=1&cursor={first_cursor}"),
         format!(
@@ -5562,45 +5554,61 @@ async fn v2_get_subnames_sorts_by_timestamps_and_binds_cursors_to_sort_and_order
 }
 
 #[tokio::test]
-async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_rows() -> Result<()>
-{
+async fn v2_get_subnames_include_expired_false_omits_released_registrar_child() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_parent(&database, "ens:eth", "eth", "unused", 80).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Released).await?;
+    let label = insert_family_label_preimage(&database.pool, b"alice").await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "eth",
+        &label,
+        "0x00000000000000000000000000000000000000aa",
+        21_000_003,
+        "0xbinding",
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let all = v2_subnames_payload_for_database(&database, "/v1/names/eth/subnames").await?;
+    assert_eq!(v2_subname_names(&all), vec!["alice.eth"]);
+    assert_eq!(all["data"][0]["registration_status"], "released");
+    let live =
+        v2_subnames_payload_for_database(&database, "/v1/names/eth/subnames?include_expired=false")
+            .await?;
+    assert!(v2_subname_names(&live).is_empty());
+    assert_eq!(live["page"]["total_count"], 0);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_subnames_include_expired_false_omits_past_expiry_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
-    seed_v2_subnames_bound_child(
+    seed_subname_inputs(
         &database,
-        "ens:epsilon.parent.eth",
         "epsilon.parent.eth",
-        "node:epsilon.parent.eth",
         85,
-        Uuid::from_u128(0x4030),
-        Uuid::from_u128(0x5030),
-        Uuid::from_u128(0x6030),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar",
-                "registrant": "0x00000000000000000000000000000000000000eB",
-                "registered_at": "2019-01-02T03:04:05Z",
-                "expiry": "2020-01-02T03:04:05Z"
-            },
-            "control": {
-                "registry_owner": "0x00000000000000000000000000000000000000eA"
-            }
-        }),
+        Uuid::from_u128(0x7050),
+        Uuid::from_u128(0x7051),
+        Uuid::from_u128(0x7052),
+        SubnameInput::Lease {
+            owner: "0x00000000000000000000000000000000000000ea",
+            registrant: "0x00000000000000000000000000000000000000eb",
+            expiry: parse_rfc3339_utc_timestamp("2025-01-02T03:04:05Z")?.unix_timestamp(),
+        },
     )
     .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            "ens:parent.eth",
-            "ens:epsilon.parent.eth",
-            "epsilon.parent.eth",
-            "node:epsilon.parent.eth",
-            905,
-            85,
-        )],
+    seed_subname_edge(
+        &database,
+        "parent.eth",
+        b"epsilon",
+        "0x00000000000000000000000000000000000000ea",
+        85,
     )
     .await?;
+    publish_subname_inputs(&database).await?;
 
     let payload =
         v2_subnames_payload_for_database(&database, "/v1/names/Parent.eth/subnames").await?;
@@ -5612,13 +5620,16 @@ async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_ro
             "epsilon.parent.eth",
             "gamma.parent.eth"
         ],
-        "the default keeps released and past-expiry rows"
+        "the default keeps past-expiry rows"
     );
     assert_eq!(payload["page"]["total_count"], json!(4));
-    assert_eq!(payload["data"][2]["registration_status"], json!("active"));
+    assert_eq!(
+        payload["data"][2]["registration_status"],
+        json!("registered")
+    );
     assert_eq!(
         payload["data"][2]["expires_at"],
-        json!("2020-01-02T03:04:05Z")
+        json!("2025-01-02T03:04:05Z")
     );
 
     let payload = v2_subnames_payload_for_database(
@@ -5636,10 +5647,10 @@ async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_ro
     .await?;
     assert_eq!(
         v2_subname_names(&payload),
-        vec!["alpha.parent.eth", "gamma.parent.eth"],
-        "released rows and rows whose expires_at has passed are omitted; unregistered rows stay"
+        vec!["alpha.parent.eth", "beta.parent.eth", "gamma.parent.eth"],
+        "rows whose expires_at has passed are omitted; unregistered rows stay"
     );
-    assert_eq!(payload["page"]["total_count"], json!(2));
+    assert_eq!(payload["page"]["total_count"], json!(3));
 
     let payload = v2_subnames_payload_for_database(
         &database,
@@ -5648,7 +5659,7 @@ async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_ro
     .await?;
     assert_eq!(
         v2_subname_names(&payload),
-        vec!["gamma.parent.eth", "alpha.parent.eth"]
+        vec!["beta.parent.eth", "gamma.parent.eth", "alpha.parent.eth"]
     );
 
     let payload = v2_subnames_payload_for_database(
@@ -5667,8 +5678,8 @@ async fn v2_get_subnames_include_expired_false_omits_released_and_past_expiry_ro
         &format!("/v1/names/Parent.eth/subnames?include_expired=false&page_size=1&cursor={cursor}"),
     )
     .await?;
-    assert_eq!(v2_subname_names(&payload), vec!["gamma.parent.eth"]);
-    assert_eq!(payload["page"]["has_more"], json!(false));
+    assert_eq!(v2_subname_names(&payload), vec!["beta.parent.eth"]);
+    assert_eq!(payload["page"]["has_more"], json!(true));
 
     for uri in [
         format!("/v1/names/Parent.eth/subnames?page_size=1&cursor={cursor}"),
@@ -5698,8 +5709,10 @@ async fn v2_subnames_payload(uri: &str) -> Result<(TestDatabase, Value)> {
 async fn v2_subnames_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_subnames_response_for_database(database, uri).await?;
 
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    Ok(payload)
 }
 
 async fn v2_subnames_response_for_database(
@@ -5717,147 +5730,288 @@ async fn v2_subnames_response_for_database(
         .context("v2 subnames request failed")
 }
 
+#[derive(Clone, Copy)]
+enum SubnameInput {
+    RegistryOwner(&'static str),
+    Lease {
+        owner: &'static str,
+        registrant: &'static str,
+        expiry: i64,
+    },
+    Unbound,
+}
+
+async fn seed_subname_block(database: &TestDatabase, block: i64) -> Result<String> {
+    let hash = format!("0xsubname{block}");
+    let timestamp = if block == 10 {
+        parse_rfc3339_utc_timestamp("2023-01-02T03:04:05Z")?
+    } else if block >= 95 {
+        parse_rfc3339_utc_timestamp("2026-02-03T04:05:06Z")? + time::Duration::seconds(block - 95)
+    } else {
+        parse_rfc3339_utc_timestamp("2024-01-02T03:04:04Z")? + time::Duration::seconds(block - 80)
+    };
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            &hash,
+            None,
+            block,
+            timestamp.unix_timestamp(),
+        )],
+    )
+    .await?;
+    Ok(hash)
+}
+
+async fn publish_subname_inputs(database: &TestDatabase) -> Result<()> {
+    database.seed_snapshot_selector_chain_positions(&json!({"ethereum": {
+        "chain_id":"ethereum-mainnet", "block_number":100, "block_hash":"0xsubnames-published", "timestamp":"2026-04-17T00:00:20Z"
+    }})).await?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-mainnet",
+        100,
+        "0xsubnames-published",
+    )
+    .await
+}
+
+async fn seed_subname_registry(database: &TestDatabase, parent: &str) -> Result<(Uuid, String)> {
+    let digest = alloy_primitives::keccak256(parent.as_bytes());
+    let instance = Uuid::from_slice(&digest[..16])?;
+    let address = format!("0x{}", alloy_primitives::hex::encode(&digest[..20]));
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind) VALUES ($1, 'ethereum-mainnet', 'contract') ON CONFLICT DO NOTHING")
+        .bind(instance).execute(&database.pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number)
+        SELECT $1, 'ethereum-mainnet', $2, 80 WHERE NOT EXISTS (SELECT 1 FROM contract_instance_addresses WHERE contract_instance_id = $1)")
+        .bind(instance).bind(&address).execute(&database.pool).await?;
+    let hash = seed_subname_block(database, 80).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", parent);
+    let mut events = Vec::new();
+    for (log, kind, name, after) in [
+        (
+            8,
+            "RegistryCreated",
+            None,
+            json!({"source_event":"RegistryCreated", "registry":address}),
+        ),
+        (
+            9,
+            "SubregistryChanged",
+            Some(logical.as_str()),
+            json!({"source_event":"SubregistryUpdated", "subregistry":address}),
+        ),
+    ] {
+        let mut event = history_event(
+            &format!("subname-registry-{instance}-{kind}"),
+            name,
+            None,
+            Some("ethereum-mainnet"),
+            Some(80),
+            Some(&hash),
+            Some("0xsubregistry"),
+            Some(log),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = kind.into();
+        event.source_family = "ens_v2_registry_l1".into();
+        event.raw_fact_ref = json!({"kind":"raw_log", "emitting_address":address});
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok((instance, address))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_subname_inputs(
+    database: &TestDatabase,
+    name: &str,
+    block: i64,
+    resource: Uuid,
+    token: Uuid,
+    binding: Uuid,
+    state: SubnameInput,
+) -> Result<()> {
+    let name = bigname_domain::normalization::normalize_name(name)?.normalized_name;
+    let created_hash = seed_subname_block(database, 10).await?;
+    let hash = seed_subname_block(database, block).await?;
+    let is_v2 = matches!(state, SubnameInput::Lease { .. });
+    let registry = if is_v2 {
+        Some(
+            seed_subname_registry(database, name.split_once('.').context("subname parent")?.1)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        &name,
+        "ethereum-mainnet",
+        10,
+        &created_hash,
+        resource,
+        token,
+        binding,
+        if is_v2 { "ens_v2" } else { "ens_v1" },
+    )
+    .await?;
+    if matches!(state, SubnameInput::Unbound) {
+        sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1")
+            .bind(binding)
+            .execute(&database.pool)
+            .await?;
+        return Ok(());
+    }
+    let mut facts = Vec::new();
+    match state {
+        SubnameInput::RegistryOwner(owner) => {
+            facts.push(("AuthorityTransferred", "ens_v1_registry_l1", json!({
+                "source_event":"Transfer", "node":bigname_lookup::ens_namehash_hex(&name)?, "owner":owner
+            })));
+            facts.push(("AuthorityEpochChanged", "ens_v1_registry_l1", json!({
+                "authority_kind":"registry_only", "authority_key":format!("registry:{logical}"), "owner":owner
+            })));
+        }
+        SubnameInput::Lease {
+            owner,
+            registrant,
+            expiry,
+            ..
+        } => {
+            facts.push(("RegistrationGranted", "ens_v2_registry_l1", json!({
+                "source_event":"LabelRegistered", "authority_kind":"ens_v2_registry", "registrant":registrant,
+                "owner":registrant, "expiry":expiry
+            })));
+            facts.push(("TokenControlTransferred", "ens_v2_registry_l1", json!({
+                "source_event":"TransferSingle", "from":"0x0000000000000000000000000000000000000000", "to":owner
+            })));
+        }
+        SubnameInput::Unbound => unreachable!(),
+    }
+    let mut events = Vec::new();
+    for (log, (kind, family, mut after)) in facts.into_iter().enumerate() {
+        let mut event = history_event(
+            &format!("subname-{resource}-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some("ethereum-mainnet"),
+            Some(block),
+            Some(&hash),
+            Some("0xsubname"),
+            Some(log as i64),
+            CanonicalityState::Canonical,
+        );
+        if let Some((instance, address)) = &registry {
+            after["registry_contract_instance_id"] = json!(instance.to_string());
+            event.raw_fact_ref = json!({"kind":"raw_log", "emitting_address":address});
+        }
+        event.event_kind = kind.into();
+        event.source_family = family.into();
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok(())
+}
+
+async fn seed_subname_edge(
+    database: &TestDatabase,
+    parent: &str,
+    label: &[u8],
+    owner: &str,
+    block: i64,
+) -> Result<()> {
+    let hash = seed_subname_block(database, block).await?;
+    let labelhash = insert_family_label_preimage(&database.pool, label).await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        parent,
+        &labelhash,
+        owner,
+        block,
+        &hash,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
-    seed_v2_subnames_parent(database, "ens:parent.eth", "parent.eth", "node:parent.eth", 80)
-        .await?;
-    seed_v2_subnames_bound_child(
+    seed_v2_subnames_parent(
         database,
-        "ens:alpha.parent.eth",
-        "Alpha.Parent.eth",
-        "node:alpha.parent.eth",
+        "ens:parent.eth",
+        "parent.eth",
+        "node:parent.eth",
+        80,
+    )
+    .await?;
+    seed_subname_inputs(
+        database,
+        "alpha.parent.eth",
         81,
         Uuid::from_u128(0x4010),
         Uuid::from_u128(0x5010),
         Uuid::from_u128(0x6010),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar",
-                "registrant": "0x00000000000000000000000000000000000000aB",
-                "registered_at": "2024-01-02T03:04:05Z",
-                "created_at": "2023-01-02T03:04:05Z",
-                "expiry": "2027-01-02T03:04:05Z"
-            },
-            "control": {
-                "registry_owner": "0x00000000000000000000000000000000000000aA"
-            }
-        }),
+        SubnameInput::Lease {
+            owner: "0x00000000000000000000000000000000000000aa",
+            registrant: "0x00000000000000000000000000000000000000ab",
+            expiry: 1798859045,
+        },
     )
     .await?;
-    seed_v2_subnames_bound_child(
+    seed_subname_inputs(
         database,
-        "ens:beta.parent.eth",
         "beta.parent.eth",
-        "node:beta.parent.eth",
         82,
         Uuid::from_u128(0x4020),
         Uuid::from_u128(0x5020),
         Uuid::from_u128(0x6020),
-        json!({
-            "registration": {
-                "status": "released",
-                "authority_kind": "registrar",
-                "released_at": "2026-02-03T04:05:06Z",
-                "registrant": "0x00000000000000000000000000000000000000bB"
-            },
-            "control": {
-                "registry_owner": "0x00000000000000000000000000000000000000bA"
-            }
-        }),
+        SubnameInput::Unbound,
     )
     .await?;
-
-    upsert_test_name_surfaces(
-        &database.pool,
-        &[collection_name_surface(
-            "ens:gamma.parent.eth",
-            "gamma.parent.eth",
-            "node:gamma.parent.eth",
-            83,
-        )],
+    seed_subname_inputs(
+        database,
+        "gamma.parent.eth",
+        83,
+        Uuid::from_u128(0x4030),
+        Uuid::from_u128(0x5030),
+        Uuid::from_u128(0x6030),
+        SubnameInput::Unbound,
     )
     .await?;
-    database
-        .insert_name_current_row(v2_subnames_name_current_row(
-            "ens:gamma.parent.eth",
-            "gamma.parent.eth",
-            "node:gamma.parent.eth",
-            83,
-            None,
-            None,
-            None,
-            json!({}),
-        ))
+    seed_subname_inputs(
+        database,
+        "delta.alpha.parent.eth",
+        84,
+        Uuid::from_u128(0x4040),
+        Uuid::from_u128(0x5040),
+        Uuid::from_u128(0x6040),
+        SubnameInput::Unbound,
+    )
+    .await?;
+    for (parent, label, block) in [
+        ("parent.eth", "alpha", 81),
+        ("parent.eth", "beta", 82),
+        ("parent.eth", "gamma", 83),
+        ("alpha.parent.eth", "delta", 84),
+    ] {
+        seed_subname_edge(
+            database,
+            parent,
+            label.as_bytes(),
+            "0x00000000000000000000000000000000000000cc",
+            block,
+        )
         .await?;
-
-    upsert_test_name_surfaces(
-        &database.pool,
-        &[collection_name_surface(
-            "ens:delta.alpha.parent.eth",
-            "delta.alpha.parent.eth",
-            "node:delta.alpha.parent.eth",
-            84,
-        )],
-    )
-    .await?;
-
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[
-            v2_subnames_declared_child_row(
-                "ens:parent.eth",
-                "ens:gamma.parent.eth",
-                "gamma.parent.eth",
-                "node:gamma.parent.eth",
-                903,
-                83,
-            ),
-            v2_subnames_declared_child_row(
-                "ens:parent.eth",
-                "ens:beta.parent.eth",
-                "beta.parent.eth",
-                "node:beta.parent.eth",
-                902,
-                82,
-            ),
-            v2_subnames_declared_child_row(
-                "ens:parent.eth",
-                "ens:alpha.parent.eth",
-                "Alpha.Parent.eth",
-                "node:alpha.parent.eth",
-                901,
-                81,
-            ),
-            v2_subnames_declared_child_row(
-                "ens:alpha.parent.eth",
-                "ens:delta.alpha.parent.eth",
-                "delta.alpha.parent.eth",
-                "node:delta.alpha.parent.eth",
-                904,
-                84,
-            ),
-        ],
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.children_current
-         SET owner = '0x00000000000000000000000000000000000000cc'
-         WHERE decoded_name = 'gamma.parent.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 80,
-                "block_hash": "0xname50",
-                "timestamp": "2026-04-17T00:00:20Z"
-            }
-        }))
-        .await?;
-
-    Ok(())
+    }
+    publish_subname_inputs(database).await
 }
 
 /// Seeds the shape Project writes for a preimage whose label bytes do not decode: raw bytes
@@ -5865,46 +6019,17 @@ async fn seed_v2_subnames_fixture(database: &TestDatabase) -> Result<()> {
 async fn seed_v2_subnames_undecodable_child(
     database: &TestDatabase,
     parent_name: &str,
-    labelhash: &str,
+    _labelhash: &str,
 ) -> Result<()> {
-    let parent_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    seed_subname_edge(
+        database,
+        parent_name,
+        b"\xff\tBad",
+        "0x00000000000000000000000000000000000000cc",
+        90,
     )
-    .bind(parent_name)
-    .fetch_one(&database.pool)
     .await?;
-    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
-        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
-         WHERE parent_logical_name_id = $1 AND raw_name IS NOT NULL LIMIT 1",
-    )
-    .bind(&parent_logical_name_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let namehash = format!("node:undecodable-{}", labelhash.trim_start_matches("0x"));
-    // A high-bit byte and a control byte: PostgreSQL's `escape` encoding octal-escapes the first
-    // and passes the second through, which is the half of the documented rule easiest to get wrong.
-    let raw_name = [&[0xffu8, 0x09][..], b"Bad.", parent_name.as_bytes()].concat();
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.children_current (
-            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
-            raw_name, namehash, labelhash, provenance, chain_positions,
-            canonicality_summary, manifest_version
-        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $3, $2, $4,
-                  jsonb_build_object('chain_id', 'ethereum-mainnet',
-                                     'derivation_kind', 'children_current_rebuild'),
-                  $5, $6, 1)
-        "#,
-    )
-    .bind(&parent_logical_name_id)
-    .bind(&namehash)
-    .bind(&raw_name)
-    .bind(labelhash)
-    .bind(chain_positions)
-    .bind(canonicality_summary)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    publish_subname_inputs(database).await
 }
 
 /// Seeds the shape Project writes for a registry edge whose label was never observed: every name
@@ -5914,72 +6039,39 @@ async fn seed_v2_subnames_topology_only_child(
     parent_name: &str,
     labelhash: &str,
 ) -> Result<()> {
-    let parent_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = $1",
+    let hash = seed_subname_block(database, 90).await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        parent_name,
+        labelhash,
+        "0x00000000000000000000000000000000000000cc",
+        90,
+        &hash,
     )
-    .bind(parent_name)
-    .fetch_one(&database.pool)
     .await?;
-    let (chain_positions, canonicality_summary): (Value, Value) = sqlx::query_as(
-        "SELECT chain_positions, canonicality_summary FROM bigname_phase.children_current \
-         WHERE parent_logical_name_id = $1 LIMIT 1",
-    )
-    .bind(&parent_logical_name_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let namehash = format!("node:unobserved-{}", labelhash.trim_start_matches("0x"));
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.children_current (
-            parent_logical_name_id, child_logical_name_id, surface_class, namespace,
-            namehash, labelhash, provenance, chain_positions, canonicality_summary,
-            manifest_version
-        ) VALUES ($1, 'ens:' || $2, 'declared', 'ens', $2, $3,
-                  jsonb_build_object('chain_id', 'ethereum-mainnet',
-                                     'derivation_kind', 'children_current_rebuild',
-                                     'coverage', jsonb_build_object(
-                                         'status', 'projected',
-                                         'exhaustiveness', 'not_asserted')),
-                  $4, $5, 1)
-        "#,
-    )
-    .bind(&parent_logical_name_id)
-    .bind(&namehash)
-    .bind(labelhash)
-    .bind(chain_positions)
-    .bind(canonicality_summary)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    publish_subname_inputs(database).await
 }
 
 async fn seed_v2_subnames_parent(
     database: &TestDatabase,
-    logical_name_id: &str,
+    _logical: &str,
     display_name: &str,
-    namehash: &str,
-    block_number: i64,
+    _namehash: &str,
+    block: i64,
 ) -> Result<()> {
-    seed_v2_subnames_bound_child(
+    seed_subname_inputs(
         database,
-        logical_name_id,
         display_name,
-        namehash,
-        block_number,
+        block,
         Uuid::from_u128(0x4000),
         Uuid::from_u128(0x5000),
         Uuid::from_u128(0x6000),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar"
-            },
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000000001"
-            }
-        }),
+        SubnameInput::RegistryOwner("0x0000000000000000000000000000000000000001"),
     )
-    .await
+    .await?;
+    publish_subname_inputs(database).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6608,7 +6700,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
     };
     let first = bigname_storage::load_children_current_page_filtered(
         &database.pool,
-        "ens:parent.eth",
+        &bigname_storage::logical_name_id_for_name("ens", "parent.eth"),
         &filter,
         None,
         1,
@@ -6616,7 +6708,7 @@ async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> 
     .await?;
     let next = bigname_storage::load_children_current_page_filtered(
         &database.pool,
-        "ens:parent.eth",
+        &bigname_storage::logical_name_id_for_name("ens", "parent.eth"),
         &filter,
         first.next_cursor.as_ref(),
         1,
