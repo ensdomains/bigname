@@ -3,13 +3,12 @@
 // cursor holds the list's sort, its filters and the position of the last row it returned, plus
 // the `at` token when the request pinned `at`; no publication, generation or evaluation time. A
 // continuation reads what is published when it runs (`v2::list_cursor`), so it is portable
-// across publications and across the publication switch, and only a publication that lands
+// across publications, and only a publication that lands
 // during one request's own read refuses it.
 
 const LIST_CURSOR_OTHER_RESOLVER: &str = "0x0000000000000000000000000000000000000def";
 const LIST_CURSOR_INVALID: &str = "cursor must be a valid pagination cursor";
-const LIST_CURSOR_RETRY: &str =
-    "collection publication changed during the read; retry the request";
+const LIST_CURSOR_RETRY: &str = "collection publication changed during the read; retry the request";
 
 /// The adopted lists over the switch fixture: each walks in two pages of one row.
 fn list_cursor_routes() -> Result<Vec<(String, &'static str)>> {
@@ -17,7 +16,10 @@ fn list_cursor_routes() -> Result<Vec<(String, &'static str)>> {
     let before = switch_timestamp(1_960_000_000)?;
     Ok(vec![
         ("/v1/search?q=eth&match=contains&page_size=1".to_owned(), ""),
-        ("/v1/search?q=eth&match=contains&namespace=ens&page_size=1".to_owned(), ""),
+        (
+            "/v1/search?q=eth&match=contains&namespace=ens&page_size=1".to_owned(),
+            "",
+        ),
         (
             format!(
                 "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
@@ -39,25 +41,18 @@ fn list_cursor_routes() -> Result<Vec<(String, &'static str)>> {
     ])
 }
 
-async fn list_cursor_get(database: &TestDatabase, on: bool, uri: &str) -> Result<(StatusCode, Value)> {
-    let response = bigname_storage::publication_source::with_serve_from_families(
-        on,
-        v2_get_response(database, uri),
-    )
-    .await?;
-    let status = response.status();
-    Ok((status, read_json(response).await?))
+async fn list_cursor_get(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
+    read_family_response(database, uri).await
 }
 
 /// The names of a page and its continuation, which must be a 200.
 async fn list_cursor_page(
     database: &TestDatabase,
-    on: bool,
     uri: &str,
     holder: &str,
 ) -> Result<(Vec<Value>, Option<String>)> {
-    let (status, body) = list_cursor_get(database, on, uri).await?;
-    anyhow::ensure!(status == StatusCode::OK, "{uri} (switch {on}): {body:#}");
+    let (status, body) = list_cursor_get(database, uri).await?;
+    anyhow::ensure!(status == StatusCode::OK, "{uri}: {body:#}");
     let held = body
         .pointer(holder)
         .with_context(|| format!("{uri}: no {holder} in {body:#}"))?;
@@ -88,19 +83,19 @@ fn list_cursor_at(cursor: &str, position: &[(&str, &str)]) -> String {
     payload.snapshot = None;
     payload.evaluated_at = None;
     for (key, value) in position {
-        assert!(payload.last_item.contains_key(*key), "{key} is a position key");
-        payload.last_item.insert((*key).to_owned(), (*value).to_owned());
+        assert!(
+            payload.last_item.contains_key(*key),
+            "{key} is a position key"
+        );
+        payload
+            .last_item
+            .insert((*key).to_owned(), (*value).to_owned());
     }
     crate::v2::encode(&payload)
 }
 
-async fn assert_list_cursor_refused(
-    database: &TestDatabase,
-    on: bool,
-    uri: &str,
-    label: &str,
-) -> Result<()> {
-    let (status, body) = list_cursor_get(database, on, uri).await?;
+async fn assert_list_cursor_refused(database: &TestDatabase, uri: &str, label: &str) -> Result<()> {
+    let (status, body) = list_cursor_get(database, uri).await?;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {uri}: {body:#}");
     assert_eq!(
         body["error"],
@@ -110,44 +105,31 @@ async fn assert_list_cursor_refused(
     Ok(())
 }
 
-/// Every page of every adopted list, walked with the switch off and on: the same rows, and the
-/// same cursor bytes, since a cursor no longer carries its side's generation. A cursor issued
-/// with the switch off then continues with it on, and the other way, to the same set.
+/// Every page of each current-state list follows its issued cursor exactly once. The cursor
+/// contains only the list position and filters, so a later publication remains independently read.
 #[tokio::test]
-async fn v2_list_cursors_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+async fn v2_list_cursors_walk_the_family_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     for (uri, holder) in list_cursor_routes()? {
-        let mut walks = Vec::new();
-        for on in [false, true] {
-            let mut rows = Vec::new();
-            let mut cursors = Vec::new();
-            let mut page_uri = uri.clone();
-            loop {
-                let (names, next) = list_cursor_page(&database, on, &page_uri, holder).await?;
-                rows.extend(names);
-                let Some(next) = next else { break };
-                page_uri = list_cursor_continue(&uri, &next);
-                cursors.push(next);
-                anyhow::ensure!(cursors.len() < 20, "{uri}: too many pages");
-            }
-            walks.push((rows, cursors));
+        let mut rows = Vec::new();
+        let mut cursors = Vec::new();
+        let mut page_uri = uri.clone();
+        loop {
+            let (names, next) = list_cursor_page(&database, &page_uri, holder).await?;
+            rows.extend(names);
+            let Some(next) = next else { break };
+            page_uri = list_cursor_continue(&uri, &next);
+            cursors.push(next);
+            anyhow::ensure!(cursors.len() < 20, "{uri}: too many pages");
         }
-        assert_eq!(walks[0], walks[1], "{uri}: switch off (left) and on (right)");
-        let (rows, cursors) = &walks[0];
-        assert_eq!(rows.len(), 2, "{uri}: {rows:?}");
+        let expected = if uri.starts_with("/v1/names") && uri.contains("order=asc") {
+            vec![json!("beta.eth"), json!("alpha.eth")]
+        } else {
+            vec![json!("alpha.eth"), json!("beta.eth")]
+        };
+        assert_eq!(rows, expected, "{uri}");
         assert_eq!(cursors.len(), 1, "{uri}");
-        for (issued, continued) in [(false, true), (true, false)] {
-            let (first, next) = list_cursor_page(&database, issued, &uri, holder).await?;
-            let next = next.context("a continuation")?;
-            let (rest, last) =
-                list_cursor_page(&database, continued, &list_cursor_continue(&uri, &next), holder)
-                    .await?;
-            assert_eq!(last, None, "{uri}");
-            let crossed = first.into_iter().chain(rest).collect::<Vec<_>>();
-            assert_eq!(&crossed, rows, "{uri}: issued with the switch {issued}");
-        }
-        // The issued cursor holds the list's position and binding and nothing else.
         let payload = crate::v2::decode(&cursors[0]).expect("issued cursor decodes");
         assert_eq!(payload.snapshot, None, "{uri}");
         assert_eq!(payload.evaluated_at, None, "{uri}");
@@ -159,12 +141,11 @@ async fn v2_list_cursors_are_the_same_with_the_switch_off_and_on() -> Result<()>
 /// alpha.eth moves to another resolver and is renewed to a later expiry at block 241.
 async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
     let (alpha, _) = phase_logical_identity("ens", "alpha.eth")?;
-    let (alpha_resource,): (Uuid,) = sqlx::query_as(
-        "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1",
-    )
-    .bind(&alpha)
-    .fetch_one(&database.pool)
-    .await?;
+    let (alpha_resource,): (Uuid,) =
+        sqlx::query_as("SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1")
+            .bind(&alpha)
+            .fetch_one(&database.pool)
+            .await?;
     let alpha_node = alpha.strip_prefix("ens:").expect("ens id").to_owned();
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
@@ -195,7 +176,7 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
     publish_list_cursor_block_241(database).await
 }
 
-/// Publishes block 241 for Project and the families over whatever events are stored.
+/// Publishes block 241 through the families over whatever events are stored.
 async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
     publish_test_families(database, 241).await
 }
@@ -214,38 +195,42 @@ async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() ->
     let at_240 = switch_timestamp(1_700_000_240)?;
     let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
-    for on in [false, true] {
+    {
         for (uri, holder) in &routes {
-            let (first, next) = list_cursor_page(&database, on, uri, holder).await?;
-            issued.push((on, uri.clone(), *holder, first, next.context("a continuation")?));
+            let (first, next) = list_cursor_page(&database, uri, holder).await?;
+            issued.push((uri.clone(), *holder, first, next.context("a continuation")?));
         }
-        let (first, next) = list_cursor_page(&database, on, &pinned, "/data/bound_names").await?;
+        let (first, next) = list_cursor_page(&database, &pinned, "/data/bound_names").await?;
         assert_eq!(first, [json!("alpha.eth")]);
-        issued.push((on, pinned.clone(), "/data/bound_names", first, next.context("pinned")?));
+        issued.push((
+            pinned.clone(),
+            "/data/bound_names",
+            first,
+            next.context("pinned")?,
+        ));
     }
 
     advance_list_cursor_fixture(&database).await?;
 
-    for (on, uri, holder, first, cursor) in &issued {
+    for (uri, holder, first, cursor) in &issued {
         let continued = list_cursor_continue(uri, cursor);
         if uri == &pinned {
-            let (status, body) = list_cursor_get(&database, *on, &continued).await?;
+            let (status, body) = list_cursor_get(&database, &continued).await?;
             assert_eq!(status, StatusCode::CONFLICT, "{continued}: {body:#}");
             assert_eq!(body["error"]["code"], json!("stale"), "{body:#}");
             let unpinned = continued.replace(&format!("&at={at_240}"), "");
-            assert_list_cursor_refused(&database, *on, &unpinned, "at-pinned cursor without at")
-                .await?;
+            assert_list_cursor_refused(&database, &unpinned, "at-pinned cursor without at").await?;
             continue;
         }
-        let (rest, last) = list_cursor_page(&database, *on, &continued, holder).await?;
-        assert_eq!(last, None, "{continued} (switch {on})");
+        let (rest, last) = list_cursor_page(&database, &continued, holder).await?;
+        assert_eq!(last, None, "{continued}");
         let expected = if first == &[json!("alpha.eth")] {
             [json!("beta.eth")]
         } else {
             [json!("alpha.eth")]
         };
-        assert_eq!(rest, expected, "{continued} (switch {on}), first page {first:?}");
-        let (_, body) = list_cursor_get(&database, *on, &continued).await?;
+        assert_eq!(rest, expected, "{continued}, first page {first:?}");
+        let (_, body) = list_cursor_get(&database, &continued).await?;
         let as_of = &body["meta"]["as_of"];
         assert!(
             as_of.as_object().is_some_and(|chains| !chains.is_empty()
@@ -264,17 +249,16 @@ async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors(
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     let routes = list_cursor_routes()?;
-    for on in [false, true] {
+    {
         let mut cursors = Vec::new();
         for (uri, holder) in &routes {
-            let (_, next) = list_cursor_page(&database, on, uri, holder).await?;
+            let (_, next) = list_cursor_page(&database, uri, holder).await?;
             cursors.push(next.context("a continuation")?);
         }
         for (index, (uri, _)) in routes.iter().enumerate() {
             for malformed in ["not-a-cursor", "7b7d", "00"] {
                 assert_list_cursor_refused(
                     &database,
-                    on,
                     &list_cursor_continue(uri, malformed),
                     "malformed",
                 )
@@ -286,7 +270,6 @@ async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors(
                 if other != index {
                     assert_list_cursor_refused(
                         &database,
-                        on,
                         &list_cursor_continue(uri, cursor),
                         "another list's cursor",
                     )
@@ -294,7 +277,9 @@ async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors(
                 }
             }
             let mut filtered = crate::v2::decode(&cursors[index]).expect("issued cursor decodes");
-            filtered.filters.insert("namespace".to_owned(), "basenames".to_owned());
+            filtered
+                .filters
+                .insert("namespace".to_owned(), "basenames".to_owned());
             let mut unknown = crate::v2::decode(&cursors[index]).expect("issued cursor decodes");
             unknown.last_item.insert("extra".to_owned(), "1".to_owned());
             let mut timed = crate::v2::decode(&cursors[index]).expect("issued cursor decodes");
@@ -314,7 +299,6 @@ async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors(
             ] {
                 assert_list_cursor_refused(
                     &database,
-                    on,
                     &list_cursor_continue(uri, &crate::v2::encode(&payload)),
                     label,
                 )
@@ -341,61 +325,91 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
     let desc_end_expiry = switch_timestamp(1_700_000_001)?;
     let namehash_00 = format!("0x{}", "00".repeat(32));
     let routes = list_cursor_routes()?;
-    for on in [false, true] {
+    {
         for (uri, holder) in &routes {
-            let (_, next) = list_cursor_page(&database, on, uri, holder).await?;
+            let (_, next) = list_cursor_page(&database, uri, holder).await?;
             let next = next.context("a continuation")?;
             let (past_end, gap, gap_expects): (ListCursorPosition, ListCursorPosition, &str) =
                 if uri.starts_with("/v1/search") {
                     (
-                        vec![("display_name", "zzzz.eth"), ("normalized_name", "zzzz.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
-                        vec![("display_name", "alz.eth"), ("normalized_name", "alz.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
+                        vec![
+                            ("display_name", "zzzz.eth"),
+                            ("normalized_name", "zzzz.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
+                        vec![
+                            ("display_name", "alz.eth"),
+                            ("normalized_name", "alz.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
                         "beta.eth",
                     )
                 } else if uri.starts_with("/v1/resolvers") {
                     (
-                        vec![("sort_value", "zzzz.eth"), ("normalized_name", "zzzz.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
-                        vec![("sort_value", "alz.eth"), ("normalized_name", "alz.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
+                        vec![
+                            ("sort_value", "zzzz.eth"),
+                            ("normalized_name", "zzzz.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
+                        vec![
+                            ("sort_value", "alz.eth"),
+                            ("normalized_name", "alz.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
                         "beta.eth",
                     )
                 } else if uri.contains("order=asc") {
                     (
-                        vec![("expires_at", &end_expiry), ("name", "zzzz.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
-                        vec![("expires_at", &gap_expiry), ("name", "gap.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_ff)],
+                        vec![
+                            ("expires_at", &end_expiry),
+                            ("name", "zzzz.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
+                        vec![
+                            ("expires_at", &gap_expiry),
+                            ("name", "gap.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_ff),
+                        ],
                         "alpha.eth",
                     )
                 } else {
                     (
-                        vec![("expires_at", &desc_end_expiry), ("name", "aaaa.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_00)],
-                        vec![("expires_at", &gap_expiry), ("name", "gap.eth"),
-                             ("namespace", "ens"), ("namehash", &namehash_00)],
+                        vec![
+                            ("expires_at", &desc_end_expiry),
+                            ("name", "aaaa.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_00),
+                        ],
+                        vec![
+                            ("expires_at", &gap_expiry),
+                            ("name", "gap.eth"),
+                            ("namespace", "ens"),
+                            ("namehash", &namehash_00),
+                        ],
                         "beta.eth",
                     )
                 };
             let (rows, last) = list_cursor_page(
                 &database,
-                on,
                 &list_cursor_continue(uri, &list_cursor_at(&next, &past_end)),
                 holder,
             )
             .await?;
-            assert!(rows.is_empty(), "{uri} past the end (switch {on}): {rows:?}");
+            assert!(rows.is_empty(), "{uri} past the end: {rows:?}");
             assert_eq!(last, None, "{uri} past the end");
             let (rows, last) = list_cursor_page(
                 &database,
-                on,
                 &list_cursor_continue(uri, &list_cursor_at(&next, &gap)),
                 holder,
             )
             .await?;
-            assert_eq!(rows, [json!(gap_expects)], "{uri} from a gap (switch {on})");
+            assert_eq!(rows, [json!(gap_expects)], "{uri} from a gap");
             assert_eq!(last, None, "{uri} from a gap");
         }
     }
@@ -405,8 +419,8 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
 /// A publication that lands while one continuation reads still refuses that request, but the
 /// cursor stays good: the 409 asks for a retry, and the same cursor then continues.
 #[tokio::test]
-async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the_read()
--> Result<()> {
+async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the_read() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     for (uri, holder) in list_cursor_routes()? {
@@ -414,12 +428,12 @@ async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the
             // Search admits its namespaces with its own recheck and has no collection finish.
             continue;
         }
-        let (_, next) = list_cursor_page(&database, false, &uri, holder).await?;
+        let (_, next) = list_cursor_page(&database, &uri, holder).await?;
         let continued = list_cursor_continue(&uri, &next.context("a continuation")?);
-        let message = resolver_publication_replaced_before_finish(&database, continued.clone())
-            .await?;
+        let message =
+            resolver_publication_replaced_before_finish(&database, continued.clone()).await?;
         assert_eq!(message, LIST_CURSOR_RETRY, "{continued}");
-        let (rows, last) = list_cursor_page(&database, false, &continued, holder).await?;
+        let (rows, last) = list_cursor_page(&database, &continued, holder).await?;
         assert_eq!(rows.len(), 1, "{continued}");
         assert_eq!(last, None, "{continued}");
     }
@@ -440,20 +454,19 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     let at_240 = switch_timestamp(1_700_000_240)?;
     let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
-    for on in [false, true] {
-        let (first, next) = list_cursor_page(&database, on, &pinned, "/data/bound_names").await?;
+    {
+        let (first, next) = list_cursor_page(&database, &pinned, "/data/bound_names").await?;
         assert_eq!(first, [json!("alpha.eth")]);
         let next = next.context("pinned continuation")?;
         // At the pinned publication the continuation pages.
         let (rest, _) = list_cursor_page(
             &database,
-            on,
             &list_cursor_continue(&pinned, &next),
             "/data/bound_names",
         )
         .await?;
         assert_eq!(rest, [json!("beta.eth")]);
-        issued.push((on, next));
+        issued.push(next);
     }
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
@@ -471,25 +484,28 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     )
     .await?;
     publish_list_cursor_block_241(&database).await?;
-    for (on, cursor) in issued {
+    for cursor in issued {
         let continued = list_cursor_continue(&pinned, &cursor);
-        let (status, body) = list_cursor_get(&database, on, &continued).await?;
-        assert_eq!(status, StatusCode::CONFLICT, "switch {on}: {body:#}");
+        let (status, body) = list_cursor_get(&database, &continued).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
         assert_eq!(
             body["error"],
             json!({"code": "stale", "details": {},
                    "message": "resolver data is unavailable at the selected historical position"}),
-            "switch {on}"
+            "family publication"
         );
         // Latest bound names are unchanged, so the refusal is the pin alone.
         let (latest, _) = list_cursor_page(
             &database,
-            on,
             &format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=5"),
             "/data/bound_names",
         )
         .await?;
-        assert_eq!(latest, [json!("alpha.eth"), json!("beta.eth")], "switch {on}");
+        assert_eq!(
+            latest,
+            [json!("alpha.eth"), json!("beta.eth")],
+            "family publication"
+        );
     }
     database.cleanup().await
 }
@@ -498,34 +514,42 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
 /// that does not exist, and on a database with no publication at all. Only the `at` pin waits for
 /// the snapshot.
 #[tokio::test]
-async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_reading()
--> Result<()> {
+async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_reading() -> Result<()>
+{
     let empty = TestDatabase::new_migrated().await?;
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let search = "/v1/search?q=eth&match=contains&page_size=1";
-    for on in [false, true] {
-        let (_, search_next) = list_cursor_page(&database, on, search, "").await?;
+    {
+        let (_, search_next) = list_cursor_page(&database, search, "").await?;
         let search_next = search_next.context("a search continuation")?;
         let search_structural = [
             list_cursor_raw(&search_next, |raw| raw["route"] = json!("search")),
             list_cursor_raw(&search_next, |raw| {
-                raw["last_item"].as_object_mut().expect("object").remove("namehash");
+                raw["last_item"]
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("namehash");
             }),
-            list_cursor_raw(&search_next, |raw| raw["snapshot"] = json!("legacy-snapshot")),
+            list_cursor_raw(&search_next, |raw| {
+                raw["snapshot"] = json!("legacy-snapshot")
+            }),
             list_cursor_raw(&search_next, |raw| raw["filters"]["q"] = json!("other")),
         ];
         // Cursors that decode but that this list could not have written: an unknown top-level
         // field, a missing position key, another resolver's filters.
-        let (_, next) = list_cursor_page(&database, on, &base, "/data/bound_names").await?;
+        let (_, next) = list_cursor_page(&database, &base, "/data/bound_names").await?;
         let next = next.context("a continuation")?;
         let structural = [
             list_cursor_raw(&next, |raw| raw["route"] = json!("resolver")),
             // A pin on a request that sends no `at`.
             list_cursor_raw(&next, |raw| raw["snapshot"] = json!("7b7d")),
             list_cursor_raw(&next, |raw| {
-                raw["last_item"].as_object_mut().expect("object").remove("namehash");
+                raw["last_item"]
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("namehash");
             }),
             list_cursor_raw(&next, |raw| {
                 raw["filters"]["resolver"] = json!(LIST_CURSOR_OTHER_RESOLVER);
@@ -533,13 +557,15 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
         ];
         for db in [&database, &empty] {
             for uri in [
-                format!("/v1/resolvers/1/{LIST_CURSOR_OTHER_RESOLVER}?page_size=1&cursor=not-a-cursor"),
+                format!(
+                    "/v1/resolvers/1/{LIST_CURSOR_OTHER_RESOLVER}?page_size=1&cursor=not-a-cursor"
+                ),
                 format!("{base}&cursor=7b7d"),
             ] {
-                assert_list_cursor_refused(db, on, &uri, "malformed").await?;
+                assert_list_cursor_refused(db, &uri, "malformed").await?;
             }
             for cursor in &structural {
-                assert_list_cursor_refused(db, on, &list_cursor_continue(&base, cursor), "structural")
+                assert_list_cursor_refused(db, &list_cursor_continue(&base, cursor), "structural")
                     .await?;
             }
             // Bare search reads the namespace set before it can compare the namespace anchor;
@@ -547,7 +573,6 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
             for cursor in &search_structural {
                 assert_list_cursor_refused(
                     db,
-                    on,
                     &list_cursor_continue(search, cursor),
                     "search structural",
                 )
@@ -579,24 +604,51 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
     seed_list_cursor_fixture(&database).await?;
     let asc = &list_cursor_routes()?[2];
     assert!(asc.0.contains("order=asc"));
-    for on in [false, true] {
-        let (_, next) = list_cursor_page(&database, on, &asc.0, asc.1).await?;
+    {
+        let (_, next) = list_cursor_page(&database, &asc.0, asc.1).await?;
         let next = next.context("a continuation")?;
         let defects: [(&str, RawCursorEdit); 8] = [
-            ("an unknown top-level field", Box::new(|raw| raw["route"] = json!("names"))),
-            ("a null position value", Box::new(|raw| raw["last_item"]["name"] = Value::Null)),
-            ("a numeric position value", Box::new(|raw| raw["last_item"]["name"] = json!(7))),
-            ("a missing position key", Box::new(|raw| {
-                raw["last_item"].as_object_mut().expect("object").remove("namehash");
-            })),
-            ("a whitespace-only value", Box::new(|raw| raw["last_item"]["name"] = json!("   "))),
-            ("a NUL in a value", Box::new(|raw| raw["last_item"]["name"] = json!("beta\u{0}.eth"))),
-            ("a null filters object", Box::new(|raw| raw["filters"] = Value::Null)),
-            ("an explicit null evaluation time", Box::new(|raw| raw["evaluated_at"] = Value::Null)),
+            (
+                "an unknown top-level field",
+                Box::new(|raw| raw["route"] = json!("names")),
+            ),
+            (
+                "a null position value",
+                Box::new(|raw| raw["last_item"]["name"] = Value::Null),
+            ),
+            (
+                "a numeric position value",
+                Box::new(|raw| raw["last_item"]["name"] = json!(7)),
+            ),
+            (
+                "a missing position key",
+                Box::new(|raw| {
+                    raw["last_item"]
+                        .as_object_mut()
+                        .expect("object")
+                        .remove("namehash");
+                }),
+            ),
+            (
+                "a whitespace-only value",
+                Box::new(|raw| raw["last_item"]["name"] = json!("   ")),
+            ),
+            (
+                "a NUL in a value",
+                Box::new(|raw| raw["last_item"]["name"] = json!("beta\u{0}.eth")),
+            ),
+            (
+                "a null filters object",
+                Box::new(|raw| raw["filters"] = Value::Null),
+            ),
+            (
+                "an explicit null evaluation time",
+                Box::new(|raw| raw["evaluated_at"] = Value::Null),
+            ),
         ];
         for (label, edit) in defects {
             let cursor = list_cursor_raw(&next, edit);
-            assert_list_cursor_refused(&database, on, &list_cursor_continue(&asc.0, &cursor), label)
+            assert_list_cursor_refused(&database, &list_cursor_continue(&asc.0, &cursor), label)
                 .await?;
         }
         let gap = list_cursor_raw(&next, |raw| {
@@ -604,8 +656,8 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
             raw["last_item"]["name"] = json!("gap.eth");
         });
         let (rows, last) =
-            list_cursor_page(&database, on, &list_cursor_continue(&asc.0, &gap), asc.1).await?;
-        assert_eq!(rows, [json!("alpha.eth")], "switch {on}");
+            list_cursor_page(&database, &list_cursor_continue(&asc.0, &gap), asc.1).await?;
+        assert_eq!(rows, [json!("alpha.eth")], "family publication");
         assert_eq!(last, None);
     }
     database.cleanup().await
@@ -622,21 +674,19 @@ async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let at_240 = switch_timestamp(1_700_000_240)?;
     let at_230 = switch_timestamp(1_700_000_230)?;
-    for on in [false, true] {
+    {
         let pinned = format!("{base}&at={at_240}");
-        let (_, pinned_next) =
-            list_cursor_page(&database, on, &pinned, "/data/bound_names").await?;
-        let (_, latest_next) = list_cursor_page(&database, on, &base, "/data/bound_names").await?;
+        let (_, pinned_next) = list_cursor_page(&database, &pinned, "/data/bound_names").await?;
+        let (_, latest_next) = list_cursor_page(&database, &base, "/data/bound_names").await?;
         // Block 230 is on the chain but below every row's position: read on its own it is stale.
-        let (status, _) = list_cursor_get(&database, on, &format!("{base}&at={at_230}")).await?;
-        assert_eq!(status, StatusCode::CONFLICT, "switch {on}: 230 alone is unavailable");
+        let (status, _) = list_cursor_get(&database, &format!("{base}&at={at_230}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "230 alone is unavailable");
         for (label, cursor) in [
             ("a cursor pinned to 240", pinned_next.context("pinned")?),
             ("an unpinned cursor", latest_next.context("latest")?),
         ] {
             assert_list_cursor_refused(
                 &database,
-                on,
                 &list_cursor_continue(&format!("{base}&at={at_230}"), &cursor),
                 label,
             )

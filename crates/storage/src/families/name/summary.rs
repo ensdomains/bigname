@@ -2,11 +2,11 @@
 //! per-name fields the child and label lists filter, sort and count by inside one statement,
 //! which the lists cannot compose at read for every child of a parent. The family step writes
 //! them for the names each block touches, from the same composition as the composed name row
-//! (`batch.rs`, `load_chain`), so the rules have one copy. Each field but `zero_owner` is the one the served
-//! lists read from the name's `name_current` row:
+//! (`batch.rs`, `load_chain`), so the rules have one copy. Except for `authority_arm` and
+//! `zero_owner`, these are the fields the served lists read from the name's `name_current` row:
 //!
-//! - `authority_arm`: `provenance.authority_selection.authority_arm`, the child's selected arm
-//!   (the served children builder's arm rule);
+//! - `authority_arm`: the child's independently selected arm, which the served children builder
+//!   reads from `project_name_authority` even when token readability withholds the name row;
 //! - `serving`: whether `provenance.read_reachability.serving_resource_id` is set, which admits
 //!   an ownerless child;
 //! - `registration_status`: `declared_summary.registration.status`, whose `released` the expiry
@@ -39,9 +39,8 @@ use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_ti
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
 /// `project_name_summary` row renders them, keyed by name. Every name with a surface of the chain
 /// at or below the block has one, since a Transfer is attributed to a name whatever its surface's
-/// state; a name the composed reader serves no row for has no arm, no serving resource and no
-/// registration, and keeps its clock boundary when it has a readable active surface (a bound name
-/// whose token lineage is not readable). `conn` may be the family block's own transaction, whose
+/// state; a bound name withheld for unreadable token lineage keeps its selected arm and clock
+/// boundary, but has no serving resource or registration. `conn` may be the family block's own transaction, whose
 /// writes the composition then reads.
 pub async fn compose_name_summaries(
     conn: &mut PgConnection,
@@ -74,6 +73,7 @@ pub async fn compose_name_summaries(
             .map(|(name, composed)| {
                 json!({
                     "logical_name_id": name,
+                    "authority_arm": composed.authority_arm,
                     "declared_summary": composed.row.as_ref().map(|row| &row.declared_summary),
                     "provenance": composed.row.as_ref().map(|row| &row.provenance),
                     "recompose_at": composed.recompose_at,
@@ -102,12 +102,12 @@ pub async fn compose_name_summaries(
     builder.push("::text[])) named LEFT JOIN jsonb_to_recordset(");
     builder.push_bind(&source);
     builder.push(
-        ") AS nc(logical_name_id text, declared_summary jsonb, provenance jsonb,
+        ") AS nc(logical_name_id text, authority_arm text, declared_summary jsonb, provenance jsonb,
                  recompose_at bigint)
            ON nc.logical_name_id = named.logical_name_id
          CROSS JOIN LATERAL (
              SELECT params.chain_id, named.logical_name_id, named.namespace,
-                nc.provenance #>> '{authority_selection,authority_arm}' AS authority_arm,
+                nc.authority_arm,
                 COALESCE(nc.provenance #>> '{read_reachability,serving_resource_id}' IS NOT NULL,
                          FALSE) AS serving,
                 nc.declared_summary #>> '{registration,status}' AS registration_status, ",
