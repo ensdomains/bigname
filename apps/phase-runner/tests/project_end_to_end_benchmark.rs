@@ -38,10 +38,14 @@
 //!
 //! Every test runs under the publication switch the binaries would hold
 //! (`BIGNAME_SERVE_FROM_FAMILIES` over the build's default; `project_end_to_end/families_mode.rs`).
-//! With it on, the served clock includes the family run and stops when the family marker is
-//! servable, the rebuild comparison reads the owned key families through the routes' readers, the
-//! shadow comparisons keep their served side on the served tables, and the listing walks' cost is
-//! printed in submitted rows.
+//! With it on, the Project batch is the family run, so the served clock is the family run and
+//! stops when the family marker is servable; the batch must write no served row, and the served
+//! tables the shadow comparisons read are published after the clock by the served engine and
+//! hydrator driven directly (`project_end_to_end/served_batch.rs`). The rebuild comparison reads
+//! the owned key families through the routes' readers, the shadow comparisons keep their served
+//! side on the served tables, and the listing walks' cost is printed in submitted rows. Either
+//! way each target prints the D3 line, `phase_runner_project_family_block_seconds` as the
+//! runner's metrics endpoint reports it.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
 #[path = "project_end_to_end/families_mode.rs"]
@@ -50,6 +54,8 @@ mod families_mode;
 mod name_shadow;
 #[path = "project_end_to_end/records_shadow.rs"]
 mod records_shadow;
+#[path = "project_end_to_end/served_batch.rs"]
+mod served_batch;
 #[path = "project_end_to_end/shadow.rs"]
 mod shadow;
 #[allow(dead_code)]
@@ -67,10 +73,12 @@ use bigname_storage::{
     PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, load_name_current, load_served_project_generation,
 };
 use phase_runner::{
-    INTERPRETER_CONTENT_HASH,
+    INTERPRETER_CONTENT_HASH, RunnerPhaseProgress,
     heads::{BlockMarker, HeadMarkers, publish_heads},
-    metrics::RunnerMetricsFeed,
-    phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+    metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
+    phase::{
+        AfterProgress, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume, RunMode,
+    },
     project_phase::{FamilySettings, ProjectPhase},
     state::PhaseStore,
 };
@@ -516,6 +524,24 @@ async fn run(
             ..FamilySettings::default()
         })
         .with_metrics_feed(metrics_feed.clone());
+    // The runner's metrics endpoint, scraped only for the D3 line after each target's families
+    // (`phase_runner_project_family_block_seconds`); the scrape is outside every clock.
+    let metrics_stop = tokio_util::sync::CancellationToken::new();
+    let metrics_address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        pool.clone(),
+        metrics_stop.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        metrics_feed.clone(),
+    )
+    .await?;
+    let _metrics_stop = metrics_stop.drop_guard();
+    let mut d3 = served_batch::D3::default();
+    // With the switch on the runner's batch no longer publishes the served tables; the shadow
+    // comparisons' served side is published here instead, outside the served clock.
+    let served_side = families_mode::on().then(|| served_batch::ServedBatch::new(pool));
     for &number in targets {
         let target = follow_head(pool, number).await?;
         let baseline = match compare {
@@ -526,18 +552,31 @@ async fn run(
             .fetch_one(pool)
             .await?;
         let started = Instant::now();
-        let outcome = project.run_batch(context(&target, Some(&resume))).await?;
-        store
-            .record_progress(
-                CHAIN,
-                PhaseName::Project,
-                &RunMode::Normal,
-                None,
-                outcome.progress(),
-            )
-            .await?;
-        // The runner notifies here too, after `confirm_progress`, which this test skips.
-        metrics_feed.batch_committed();
+        // With the switch on the batch is the family loop, which answers Continue while it spends
+        // its budget; the runner records each answer and calls again, and so does the harness.
+        let mut batch_resume = resume.clone();
+        loop {
+            let outcome = project
+                .run_batch(context(&target, Some(&batch_resume)))
+                .await?;
+            store
+                .record_progress(
+                    CHAIN,
+                    PhaseName::Project,
+                    &RunMode::Normal,
+                    None,
+                    outcome.progress(),
+                )
+                .await?;
+            // The runner notifies here too, after `confirm_progress`, which this test skips.
+            metrics_feed.batch_committed();
+            match outcome {
+                PhaseBatchOutcome::Continue(progress) => {
+                    batch_resume = progress.current.context("a continued batch has progress")?;
+                }
+                _ => break,
+            }
+        }
         // With the switch on the served publication is the family marker, so the family run is
         // inside the clock; with it off the families follow outside it, below.
         let families_in_clock = families_mode::on();
@@ -556,6 +595,26 @@ async fn run(
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let families_ms = families_in_clock.then(|| families_started.elapsed().as_millis());
+        let served_side_ms = match &served_side {
+            Some(served_side) => {
+                // The served batch stopped: nothing the batch did reached a served table.
+                let written: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM name_current
+                     WHERE last_recomputed_at >= $1::timestamptz",
+                )
+                .bind(&batch_started)
+                .fetch_one(pool)
+                .await?;
+                ensure!(
+                    written == 0,
+                    "the Project batch rewrote {written} served name rows under the switch"
+                );
+                let served_started = Instant::now();
+                served_side.publish(CHAIN, &target, Some(&resume)).await?;
+                Some(served_started.elapsed().as_millis())
+            }
+            None => None,
+        };
         let rewritten: Vec<String> = sqlx::query_scalar(
             "SELECT logical_name_id FROM name_current
              WHERE last_recomputed_at >= $1::timestamptz ORDER BY logical_name_id",
@@ -575,14 +634,17 @@ async fn run(
         let elapsed = started.elapsed();
         eprintln!(
             "SEPOLIA_END_TO_END target={number} elapsed_ms={} commit=included hydration=invoked \
-             marker=written read={read} rewritten_names={} served={}",
+             marker=written read={read} rewritten_names={} served={}{}",
             elapsed.as_millis(),
             rewritten.len(),
             if families_in_clock {
                 "families"
             } else {
                 "project"
-            }
+            },
+            served_side_ms.map_or_else(String::new, |ms| format!(
+                " served_batch=stopped comparison_side_ms={ms}"
+            ))
         );
         // The owned key families follow in their own transactions once progress is recorded,
         // as the runner calls them; with the switch off their time is outside the served clock.
@@ -602,6 +664,10 @@ async fn run(
         .await?
         .flatten();
         eprintln!("SEPOLIA_END_TO_END_FAMILIES target={number} families_ms={families_ms}");
+        metrics_feed.batch_committed();
+        let before = d3;
+        d3 = served_batch::D3::scrape(metrics_address, CHAIN, before).await?;
+        eprintln!("{}", d3.line(before, number));
         ensure!(
             family_marker == Some(number),
             "the owned key families stopped at {family_marker:?}, not at target {number}"
@@ -813,13 +879,30 @@ async fn compare_with_rebuild(
     let candidate = endpoint::Served::read(pool, children_page).await?;
     let incremental_families = families(pool).await?;
     let started = Instant::now();
-    project.run_batch(context(target, None)).await?;
+    // With the switch on this batch is the family rebuild itself, continued until it completes.
+    let mut resume = None;
+    while let PhaseBatchOutcome::Continue(progress) =
+        project.run_batch(context(target, resume.as_ref())).await?
+    {
+        resume = progress.current;
+    }
     let rebuild_ms = started.elapsed().as_millis();
     // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
     // families the incremental blocks left, row for row, the marker's sequence aside.
     let families_started = Instant::now();
     while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
-    let families_rebuild_ms = families_started.elapsed().as_millis();
+    let families_rebuild_ms = if families_mode::on() {
+        rebuild_ms
+    } else {
+        families_started.elapsed().as_millis()
+    };
+    // The served tables' own rebuild for the comparison side, which the switch-on batch no
+    // longer runs.
+    if families_mode::on() {
+        served_batch::ServedBatch::new(pool)
+            .publish(CHAIN, target, None)
+            .await?;
+    }
     let rebuilt_families = families(pool).await?;
     let differing: Vec<&str> = incremental_families
         .iter()

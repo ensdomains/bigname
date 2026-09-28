@@ -5,9 +5,12 @@
 //! mode the fixture brings the families to the previous publication before the first target; a
 //! disposable copy must already have live families, as a deployment would.
 //!
-//! With the switch on, three things change in `run`:
-//! - the served clock includes the family run, because the publication the API serves is the
-//!   family marker, and it stops when the marker's generation is servable;
+//! With the switch on, four things change in `run`:
+//! - the runner's Project batch is the family run (the served batch stops), so the served clock
+//!   is the family run and stops when the marker's generation is servable;
+//! - the served tables the shadow comparisons read are published outside that clock by the served
+//!   engine and hydrator driven directly (`served_batch.rs`), after the harness checked that the
+//!   batch itself wrote no served row;
 //! - the route readers (the name and subname readers of `endpoint.rs`, and the composed read in
 //!   the clock) serve the owned key families, so the rebuild comparison compares the families'
 //!   incremental and rebuilt answers through the routes' own readers;
