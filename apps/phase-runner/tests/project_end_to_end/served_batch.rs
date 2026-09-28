@@ -61,18 +61,22 @@ impl ServedBatch {
     }
 }
 
-/// The D3 measure (TYR-36 step 7a-1): `phase_runner_project_family_block_seconds`, the wall time
-/// of each family block the batch applied in a transaction of its own, read from the runner's own
-/// metrics endpoint. Cumulative; [`D3::line`] prints what one target added.
+/// `phase_runner_project_family_block_seconds`, the wall time of each family block the batch
+/// applied in a transaction of its own, read from the runner's own metrics endpoint. Cumulative;
+/// [`FamilyBlockSeconds::line`] prints what one target added.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct D3 {
+pub struct FamilyBlockSeconds {
     pub count: f64,
     pub sum: f64,
 }
 
-impl D3 {
+impl FamilyBlockSeconds {
     /// Scrapes until the histogram has more than `after.count` samples, or three seconds pass.
-    pub async fn scrape(address: SocketAddr, chain: &str, after: D3) -> Result<D3> {
+    pub async fn scrape(
+        address: SocketAddr,
+        chain: &str,
+        after: FamilyBlockSeconds,
+    ) -> Result<FamilyBlockSeconds> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             let body = tokio::task::spawn_blocking(move || get(address))
@@ -85,7 +89,7 @@ impl D3 {
                     .and_then(|line| line.rsplit_once(' '))
                     .and_then(|(_, value)| value.parse().ok())
             };
-            let read = D3 {
+            let read = FamilyBlockSeconds {
                 count: sample("phase_runner_project_family_block_seconds_count").unwrap_or(0.0),
                 sum: sample("phase_runner_project_family_block_seconds_sum").unwrap_or(0.0),
             };
@@ -100,7 +104,7 @@ impl D3 {
         }
     }
 
-    pub fn line(&self, before: D3, target: i64) -> String {
+    pub fn line(&self, before: FamilyBlockSeconds, target: i64) -> String {
         let blocks = self.count - before.count;
         let seconds = self.sum - before.sum;
         format!(

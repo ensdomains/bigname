@@ -44,7 +44,7 @@
 //! hydrator driven directly (`project_end_to_end/served_batch.rs`). The rebuild comparison reads
 //! the owned key families through the routes' readers, the shadow comparisons keep their served
 //! side on the served tables, and the listing walks' cost is printed in submitted rows. Either
-//! way each target prints the D3 line, `phase_runner_project_family_block_seconds` as the
+//! way each target prints the family block timing, `phase_runner_project_family_block_seconds` as the
 //! runner's metrics endpoint reports it.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
@@ -524,7 +524,7 @@ async fn run(
             ..FamilySettings::default()
         })
         .with_metrics_feed(metrics_feed.clone());
-    // The runner's metrics endpoint, scraped only for the D3 line after each target's families
+    // The runner's metrics endpoint, scraped only for the family block timing after each target's families
     // (`phase_runner_project_family_block_seconds`); the scrape is outside every clock.
     let metrics_stop = tokio_util::sync::CancellationToken::new();
     let metrics_address = phase_runner::metrics::start(
@@ -538,7 +538,7 @@ async fn run(
     )
     .await?;
     let _metrics_stop = metrics_stop.drop_guard();
-    let mut d3 = served_batch::D3::default();
+    let mut block_seconds = served_batch::FamilyBlockSeconds::default();
     // With the switch on the runner's batch no longer publishes the served tables; the shadow
     // comparisons' served side is published here instead, outside the served clock.
     let served_side = families_mode::on().then(|| served_batch::ServedBatch::new(pool));
@@ -670,9 +670,10 @@ async fn run(
         .flatten();
         eprintln!("SEPOLIA_END_TO_END_FAMILIES target={number} families_ms={families_ms}");
         metrics_feed.batch_committed();
-        let before = d3;
-        d3 = served_batch::D3::scrape(metrics_address, CHAIN, before).await?;
-        eprintln!("{}", d3.line(before, number));
+        let before = block_seconds;
+        block_seconds =
+            served_batch::FamilyBlockSeconds::scrape(metrics_address, CHAIN, before).await?;
+        eprintln!("{}", block_seconds.line(before, number));
         ensure!(
             family_marker == Some(number),
             "the owned key families stopped at {family_marker:?}, not at target {number}"
