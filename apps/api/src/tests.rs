@@ -432,6 +432,8 @@ include!("tests/v2_flip_readiness.rs");
 include!("tests/v2_switch_records.rs");
 include!("tests/v2_switch_reverse_page.rs");
 include!("tests/v2_switch_lookup.rs");
+#[path = "tests/v2_switch_lookup_redo.rs"]
+mod lookup_redo;
 include!("tests/v2_switch_permissions.rs");
 include!("tests/v2_switch_history_publication.rs");
 include!("tests/v2_switch_records_review.rs");

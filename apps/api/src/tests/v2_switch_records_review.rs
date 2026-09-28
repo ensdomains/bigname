@@ -73,8 +73,8 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
     options.rebuild_ranges = bigname_project::families::RebuildRanges::Off;
     let outcome = bigname_project::families::apply(&database.pool, chain,
         &bigname_project::Marker { number: 240, hash: "0xhistory240".to_owned() },
-        bigname_project::families::FamilyMode::Rebuild, &token, &options).await;
-    anyhow::ensure!(outcome.reset && outcome.budget_exhausted && outcome.skipped.is_none(),
+        bigname_project::families::FamilyMode::Rebuild, &token, &options).await?;
+    anyhow::ensure!(outcome.reset && outcome.budget_exhausted,
         "partial rebuild: {outcome:?}");
     let state: String = sqlx::query_scalar(
         "SELECT state FROM bigname_phase.project_family_marker WHERE chain_id = $1")

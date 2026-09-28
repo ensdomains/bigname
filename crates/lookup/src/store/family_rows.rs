@@ -105,7 +105,14 @@ pub(super) async fn publication(
             AND lineage.canonicality_state IN ('canonical','safe','finalized')
          WHERE marker.chain_id = $1 AND marker.state = 'live' AND marker.input_content_hash = $4
             AND $2 - marker.current_block_number BETWEEN 0 AND $5
-            AND (marker.current_block_number <> $2 OR marker.current_block_hash = $3)")
+            AND (marker.current_block_number <> $2 OR marker.current_block_hash = $3)
+            AND NOT EXISTS (
+                SELECT 1 FROM chain_phase_state input_phase
+                WHERE input_phase.chain_id = marker.chain_id
+                  AND input_phase.phase_name IN ('interpret', 'project')
+                  AND input_phase.redo_in_progress
+                  AND input_phase.redo_from_block_number <= marker.current_block_number
+            )")
         .bind(&head.chain_id).bind(head.block_number).bind(&head.block_hash)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
         .bind(bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
