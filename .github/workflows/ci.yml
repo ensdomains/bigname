@@ -1295,3 +1295,8 @@ jobs:
 
       - name: rollback smoke gate (no network)
         run: ./scripts/rollback-smoke --no-network
+
+      # The committed Caddyfile in front of a fixture upstream that already
+      # answers /openapi.json, which the API does not until TYR-18.
+      - name: OpenAPI edge regression (fixture upstream)
+        run: ./scripts/tests/openapi-edge-smoke

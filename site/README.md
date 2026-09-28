@@ -88,3 +88,8 @@ uploads `site/` as an artifact.
 The OpenAPI document will be served by the API at `/openapi.json` (TYR-18).
 The public edge already admits that path; until the document ships the API
 answers `404`.
+`scripts/tests/openapi-edge-smoke` runs the committed Caddyfile in front of a
+fixture upstream that does answer it, a `404` without a CORS header and a `200`
+with its own wildcard, and checks the edge keeps the status and body and sends
+exactly one wildcard `Access-Control-Allow-Origin`. It needs Docker, python3
+and the `caddy:2-alpine` image, and runs in CI's `artifacts-and-smoke` job.
