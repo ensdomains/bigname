@@ -15,17 +15,32 @@
 (function (root) {
   'use strict';
 
-  // A network with coming: true is listed but not selectable until its API exists.
+  // A network with coming: true is listed but not selectable until its API
+  // exists. `samples` are the name, address and contracts the pages prefill on
+  // that network; each must exist there, so a network needs its own before it
+  // is enabled (the tests check that every selectable network has them).
   const NETWORKS = [
-    { id: 'sepolia', label: 'sepolia', api: 'https://sepolia.api.bigname.sh' },
+    {
+      id: 'sepolia', label: 'sepolia', api: 'https://sepolia.api.bigname.sh',
+      samples: {
+        name: 'cognify.eth',
+        address: '0x5a0f5acccdc09d1e8eb567c40391cc410c0fd695',
+        resolver: { chain_id: '11155111', address: '0x27f229b925a5edbec1e6f697ed309eedef61f7a5' },
+        registry: { chain_id: '11155111', address: '0x657ea849311d3d5823348dded7c2aaafb3ede09e' },
+      },
+    },
     { id: 'mainnet', label: 'mainnet', api: 'https://api.bigname.sh', coming: true },
   ];
+  const SAMPLE_KEYS = ['name', 'address', 'resolver', 'registry'];
   const DEFAULT_NETWORK = 'sepolia';
   const CHAIN_NAMES = { '1': 'ethereum', '11155111': 'sepolia', '8453': 'base', '84532': 'base sepolia' };
   const STATUS_EVERY_MS = 30000;
   // A status request that has not answered by then is abandoned, so a host that
   // accepts the connection and never replies cannot hold the single slot.
   const STATUS_TIMEOUT_MS = 10000;
+  // A try-it request gets the API's own default request timeout; an answer
+  // slower than that is not coming, and the form must not stay frozen.
+  const TRY_TIMEOUT_MS = 30000;
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const selectable = id => NETWORKS.find(n => n.id === id && !n.coming) || null;
@@ -144,8 +159,32 @@
     };
   }
 
+  // One try-it request: fetch and read the body under one deadline. At the
+  // deadline the request is aborted and the promise rejects with
+  // err.timeout = true, even if the fetch ignores the abort, so the caller's
+  // finally always runs. Aborting the controller from outside rejects too.
+  function fetchText({ fetchImpl, url, init, controller, setTimer, clearTimer, timeoutMs }) {
+    const after = setTimer || ((fn, ms) => root.setTimeout(fn, ms));
+    const cancel = clearTimer || (t => root.clearTimeout(t));
+    let timer;
+    const deadline = new Promise((_, reject) => {
+      timer = after(() => {
+        const err = new Error('no answer in time');
+        err.timeout = true;
+        reject(err);
+        controller.abort();
+      }, timeoutMs || TRY_TIMEOUT_MS);
+    });
+    const work = Promise.resolve()
+      .then(() => fetchImpl(url, { ...init, signal: controller.signal }))
+      .then(res => res.text().then(text => ({ status: res.status, ok: res.ok, text })));
+    return Promise.race([work, deadline]).finally(() => cancel(timer));
+  }
+
+  const samplesOf = network => (network && network.samples) || {};
+
   const core = {
-    NETWORKS, DEFAULT_NETWORK, STATUS_TIMEOUT_MS, esc, selectable, parseApi, initialSelection, buildQuery, carryHref,
+    NETWORKS, DEFAULT_NETWORK, SAMPLE_KEYS, STATUS_TIMEOUT_MS, TRY_TIMEOUT_MS, fetchText, samplesOf, esc, selectable, parseApi, initialSelection, buildQuery, carryHref,
     hostOf, controlHtml, statusDetailHtml, createStatus,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = core;
@@ -235,7 +274,11 @@
   }
 
   root.BignameNetwork = {
-    NETWORKS, apiBase, apiHost, label, query, carry, refreshLinks, mount, statusPill, statusDetail,
+    NETWORKS, TRY_TIMEOUT_MS, apiBase, apiHost, label, query, carry, refreshLinks, mount, statusPill, statusDetail,
+    // The selected network's prefill values ({} when it has none); a custom
+    // API keeps the samples of the network it was chosen from.
+    samples: () => samplesOf(network),
+    fetchText: (url, init, controller) => fetchText({ fetchImpl: root.fetch.bind(root), url, init, controller }),
     onChange: cb => { changeHandlers.push(cb); },
   };
 

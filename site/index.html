@@ -414,8 +414,10 @@ const GLYPHS = {
   const mem = () => { try { return JSON.parse(localStorage.getItem(MEM_KEY) || '{}'); } catch (e) { return {}; } };
   const remember = (k, v) => { try { localStorage.setItem(MEM_KEY, JSON.stringify({ ...mem(), [k]: v })); } catch (e) {} };
   const tryForm = $('#try'), tryOut = $('#try-out');
-  let view = VIEWS[0], tryName = String(mem().name || 'cognify.eth');
-  const tryUrl = () => `${PREFIX}/names/${encodeURIComponent(tryName.trim() || 'cognify.eth')}${view.suffix}${view.query ? '?' + view.query : ''}`;
+  // The built-in name is the selected network's sample; a name you typed is remembered instead.
+  const sampleName = () => NET.samples().name || '';
+  let view = VIEWS[0], tryName = String(mem().name || sampleName());
+  const tryUrl = () => `${PREFIX}/names/${encodeURIComponent(tryName.trim() || sampleName())}${view.suffix}${view.query ? '?' + view.query : ''}`;
   const width = v => (Math.max(v.length, 4) + 2) + 'ch';
   // POSIX single-quote the whole URL, so an apostrophe in the name survives the shell
   const shq = s => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -469,14 +471,16 @@ const GLYPHS = {
     const t0 = performance.now(), ctl = new AbortController();
     tryAbort = ctl;
     try {
-      const res = await fetch(base + u, { headers: { accept: 'application/json' }, signal: ctl.signal });
-      const ms = Math.round(performance.now() - t0), text = await res.text();
+      // Aborted and rejected after NET.TRY_TIMEOUT_MS, so the line never stays frozen.
+      const res = await NET.fetchText(base + u, { headers: { accept: 'application/json' } }, ctl);
+      const ms = Math.round(performance.now() - t0), text = res.text;
       if (gen !== tryGen) return;
       let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
       tryOut.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${docs}</div><pre>${hlJson(pretty)}</pre>`;
     } catch (err) {
       if (gen !== tryGen) return;
-      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(base)}. Check the ${esc(lbl)} status in the header, or pick another network.</p>`;
+      const late = err && err.timeout ? ` within ${NET.TRY_TIMEOUT_MS / 1000} seconds` : '';
+      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(base)}${late}. Check the ${esc(lbl)} status in the header, or pick another network.</p>`;
     } finally { if (gen === tryGen) setTryBusy(false); if (tryAbort === ctl) tryAbort = null; }
   });
 
@@ -768,6 +772,8 @@ const GLYPHS = {
     tryGen++; netGen++;
     if (tryAbort) { tryAbort.abort(); tryAbort = null; }
     setTryBusy(false);
+    // An untouched name follows the network, since each has its own sample.
+    if (!mem().name) { tryName = sampleName(); renderTry(); }
     const box = $('.cmd', tryForm); if (box) { box.hidden = true; box.textContent = ''; }
     showExample();
   });

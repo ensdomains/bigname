@@ -65,17 +65,20 @@ for banned in \
   fi
 done
 
-# Every fetch in the pages goes to a base read from NET.apiBase() when the
-# request was made; network.js's status request uses the base it just read.
-if grep -nE 'fetch\(' "${pages[@]}" | grep -vE 'fetch\(base \+ '; then
+# Every fetch in the pages (plain, or the try-it NET.fetchText) goes to a base
+# read from NET.apiBase() when the request was made; network.js's status
+# request uses the base it just read, and its fetchText passes on the URL the
+# page gave it.
+if grep -nE 'fetch(Text)?\(' "${pages[@]}" | grep -vE 'fetch(Text)?\(base \+ '; then
   fail "a page fetch does not start from the captured API base"
 fi
 for page in "${pages[@]}"; do
-  if grep -qE 'fetch\(' "$page" && ! grep -qF 'base = NET.apiBase()' "$page"; then
+  if grep -qE 'fetch(Text)?\(' "$page" && ! grep -qF 'base = NET.apiBase()' "$page"; then
     fail "$page fetches without capturing base = NET.apiBase()"
   fi
 done
-if grep -nE 'fetch[A-Za-z]*\(' site/network.js | grep -vF "(base + '/v1/status'"; then
+if grep -nE 'fetch[A-Za-z]*\(' site/network.js | grep -vF "(base + '/v1/status'" |
+  grep -vE 'function fetchText\(\{ fetchImpl, url,|=> fetchText\(\{ fetchImpl: root\.fetch\.bind\(root\), url,|fetchImpl\(url, \{ \.\.\.init, signal'; then
   fail "a network.js fetch does not start from the selected base"
 fi
 

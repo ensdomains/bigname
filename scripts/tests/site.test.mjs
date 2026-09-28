@@ -251,3 +251,78 @@ test('the timeout of an aborted old request cannot touch the new one', async () 
   await b;
   assert.equal(status.cache.base, 'https://b.test');
 });
+
+// ---- try-it requests: one deadline over the fetch and the body ------------
+const tick = () => new Promise(r => setImmediate(r));
+
+test('a try-it request that never answers is aborted and rejects at the deadline', { timeout: 5000 }, async () => {
+  const clock = manualTimers();
+  let seen;
+  // Ignores its signal and never settles: the deadline alone must end the wait.
+  const fetchImpl = (url, init) => { seen = { url, init }; return new Promise(() => {}); };
+  const controller = new AbortController();
+  const p = net.fetchText({ fetchImpl, url: 'https://api.test/v1/names/x.eth', init: { headers: { accept: 'application/json' } }, controller, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  await tick();
+  assert.equal(seen.url, 'https://api.test/v1/names/x.eth');
+  assert.equal(seen.init.signal, controller.signal);
+  assert.equal(seen.init.headers.accept, 'application/json');
+  assert.deepEqual([...clock.timers.values()].map(t => t.ms), [net.TRY_TIMEOUT_MS]);
+  clock.fire();
+  await assert.rejects(p, err => err.timeout === true);
+  assert.equal(controller.signal.aborted, true);
+});
+
+test('a stalled body counts against the same deadline', { timeout: 5000 }, async () => {
+  const clock = manualTimers();
+  const fetchImpl = async () => ({ ok: true, status: 200, text: () => new Promise(() => {}) });
+  const controller = new AbortController();
+  const p = net.fetchText({ fetchImpl, url: 'u', init: {}, controller, setTimer: clock.setTimer, clearTimer: clock.clearTimer, timeoutMs: 50 });
+  await tick();
+  assert.deepEqual([...clock.timers.values()].map(t => t.ms), [50]);
+  clock.fire();
+  await assert.rejects(p, err => err.timeout === true);
+});
+
+test('an answer in time resolves with status and text and clears the deadline', async () => {
+  const clock = manualTimers();
+  const fetchImpl = async () => ({ ok: false, status: 404, text: async () => '{"error":{}}' });
+  const res = await net.fetchText({ fetchImpl, url: 'u', init: {}, controller: new AbortController(), setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  assert.deepEqual(res, { status: 404, ok: false, text: '{"error":{}}' });
+  assert.equal(clock.timers.size, 0);
+});
+
+test('aborting from outside (a newer request, a network switch) rejects without a timeout mark', async () => {
+  const clock = manualTimers();
+  const { calls, fetchImpl } = manualFetch();
+  const controller = new AbortController();
+  const p = net.fetchText({ fetchImpl, url: 'u', init: {}, controller, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  await tick();
+  controller.abort();
+  await assert.rejects(p, err => err.name === 'AbortError' && !err.timeout);
+  assert.equal(calls[0].aborted, true);
+  assert.equal(clock.timers.size, 0);
+});
+
+// ---- per-network prefills ------------------------------------------------
+test('every selectable network brings its own samples; a network without them prefills nothing', () => {
+  for (const n of net.NETWORKS.filter(x => !x.coming)) {
+    for (const key of net.SAMPLE_KEYS) assert.ok(n.samples && n.samples[key], `${n.id} has no ${key} sample`);
+  }
+  assert.deepEqual(net.samplesOf({ id: 'bare' }), {});
+  assert.equal(net.samplesOf(sepolia), sepolia.samples);
+});
+
+test('the pages hold no network-specific sample values of their own', async () => {
+  const { readFileSync } = await import('node:fs');
+  const pages = ['index.html', 'docs/index.html'].map(f => [f, readFileSync(new URL(`../../site/${f}`, import.meta.url), 'utf8')]);
+  const values = [];
+  for (const n of net.NETWORKS) {
+    for (const v of Object.values(n.samples || {})) {
+      if (typeof v === 'string') values.push(v); else values.push(v.address);
+    }
+  }
+  assert.ok(values.length > 0);
+  for (const [f, text] of pages) {
+    for (const v of values) assert.ok(!text.toLowerCase().includes(v.toLowerCase()), `site/${f} hard-codes ${v}; read it from NET.samples()`);
+  }
+});

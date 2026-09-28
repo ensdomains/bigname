@@ -140,7 +140,7 @@ fn try_it_line_is_single_flight_and_curl_is_safe() {
     // request and its failure message use the API chosen at submission.
     assert!(HOME.contains("tryGen++; netGen++;"));
     assert!(HOME.contains("if (tryAbort) { tryAbort.abort(); tryAbort = null; }"));
-    assert!(HOME.contains("await fetch(base + u,"));
+    assert!(HOME.contains("await NET.fetchText(base + u,"));
     assert!(HOME.contains("Nothing answered at ${esc(base)}"));
 
     assert!(HOME.contains("const curlCmd = () => `curl -s ${shq("));

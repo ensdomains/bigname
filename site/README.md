@@ -28,15 +28,20 @@ Google Fonts, as it did before.
 
 - Sepolia is the default: `https://sepolia.api.bigname.sh`.
 - Mainnet is listed as coming and cannot be selected until its API exists.
-  When it does, drop `coming: true` from its entry in `network.js`.
+  When it does, drop `coming: true` from its entry in `network.js` and give
+  the entry its own `samples` (a name, an address, a resolver and a registry
+  that exist on mainnet). The try-it forms prefill from the selected
+  network's samples; a network without them prefills nothing, and the
+  behaviour tests fail for a selectable network that has none.
 
 The selection lives in the URL, so a link says which network it means:
 
 - `?network=sepolia` or `?network=mainnet` picks from the table.
 - `?api=<absolute url>` points the site at any API and wins over the table;
   the switcher shows it as "custom". Use it for local development. A value
-  with a quote, backslash, whitespace, semicolon or angle bracket is rejected,
-  not cleaned, because the pages print the base into curl commands.
+  with a quote, backslash, whitespace, semicolon, angle bracket, `$` or
+  parenthesis is rejected, not cleaned, because the pages print the base into
+  curl commands.
 
 An unknown `?network=`, one still marked coming, or a rejected `?api=` falls
 back to Sepolia, and the address bar is rewritten to say so. Switching
@@ -46,8 +51,10 @@ preserves every other query parameter. Links between the two pages
 query, keeping their fragment.
 
 The status line asks `<api>/v1/status` every 30 seconds, with at most one
-request outstanding. Switching networks cancels the pending request, forgets
-the previous network's answer, and asks the new one.
+request outstanding, and gives up on a request after 10 seconds. Switching
+networks cancels the pending request, forgets the previous network's answer,
+and asks the new one. A try-it request gives up after 30 seconds (the API's
+own request timeout), shows "no answer", and gives the form back.
 
 ## Preview locally
 
