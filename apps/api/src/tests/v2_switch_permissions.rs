@@ -315,14 +315,35 @@ async fn v2_permissions_and_resolver_collections_read_no_served_row_with_the_swi
     database.cleanup().await
 }
 
-// J13: the families keep no lineage check at request time, but a grant on a resource whose row
-// is not readable is not served, on `/roles` or `/v1/permissions`, the same as the served
-// route's readability join.
+// J13: the families keep no lineage check at request time, so a role whose evidence event is
+// orphaned after the publication is still listed, with the earliest readable event as its grant
+// event; but a grant on a resource whose row is not readable is not served, on `/roles` or
+// `/v1/permissions`, the same as the served route's readability join.
 #[tokio::test]
 async fn v2_resolver_roles_leave_out_an_unreadable_resource_with_the_switch_off_and_on(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_permissions_fixture(&database).await?;
+    // Alice's first role change orphaned after the publication: her row is still listed (no
+    // lineage check at request time), and its grant event is the earliest one still readable.
+    sqlx::query(
+        "UPDATE bigname_phase.normalized_events SET canonicality_state = 'orphaned'
+         WHERE event_identity = 'switch-v2-alice'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let (_, roles) = assert_switch_differential(
+        &database,
+        &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
+    )
+    .await?;
+    let alice = roles["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|row| row["address"] == json!(SWITCH_ALICE))
+        .with_context(|| format!("no row for alice in {roles:#}"))?;
+    assert_eq!(alice["grant_event"]["block_number"], json!(213), "{roles:#}");
     sqlx::query(
         "UPDATE bigname_phase.resources SET canonicality_state = 'orphaned'
          WHERE resource_id = $1",
