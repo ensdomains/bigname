@@ -3840,9 +3840,13 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
     // the switch off whatever the build's default; `family_marker` scopes it where it tests the
     // family marker.
     bigname_storage::publication_source::hold_for_test_process(false);
-    let database =
-        TestDatabase::create(TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6))
-            .await?;
+    let database = TestDatabase::create_from_template(
+        TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6),
+        "lookup_phase",
+        &PHASE_BASELINE.map(str::as_bytes),
+        |pool| async move { install_baseline(&pool).await },
+    )
+    .await?;
     apply_baseline(database.pool()).await?;
     let (namespace, name, resolver_chain, resolver_hash, entrypoint, role, source_family) =
         match kind {
@@ -3982,38 +3986,46 @@ async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixt
     })
 }
 
-async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
-    let database_name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await?;
+const PHASE_BASELINE: [&str; 10] = [
+    include_str!("../../../schema-v2/baseline/01_chain.sql"),
+    include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+    include_str!("../../../schema-v2/baseline/03_identity.sql"),
+    include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+    include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+    include_str!("../../../schema-v2/baseline/06_projections.sql"),
+    include_str!("../../../schema-v2/baseline/07_labels.sql"),
+    include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+    include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+    include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+];
+
+/// Template contents: the phase schema and its baseline tables.
+async fn install_baseline(pool: &PgPool) -> AnyResult<()> {
     let mut transaction = pool.begin().await?;
     sqlx::query("CREATE SCHEMA bigname_phase")
         .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for script in PHASE_BASELINE {
+        raw_sql(script).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Per-copy settings: a database-level `search_path` is not copied from the template.
+async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
         .await?;
     raw_sql(&format!(
         "ALTER DATABASE {} SET search_path TO bigname_phase, public",
         quote_identifier(&database_name)
     ))
-    .execute(&mut *transaction)
+    .execute(pool)
     .await?;
-    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
-        .execute(&mut *transaction)
-        .await?;
-    for script in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-    ] {
-        raw_sql(script).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
 
     pool.set_connect_options(
         pool.connect_options()
