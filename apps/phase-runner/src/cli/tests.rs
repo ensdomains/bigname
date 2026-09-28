@@ -200,7 +200,7 @@ fn redo_cli_carries_progress_metrics_configuration() {
 }
 
 #[test]
-fn redo_finishes_each_family_run_the_supervised_run_does_not() {
+fn redo_takes_the_family_run_budget_and_keeps_family_integrity_failures_fatal() {
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -226,6 +226,7 @@ fn redo_finishes_each_family_run_the_supervised_run_does_not() {
         panic!("expected redo command");
     };
     assert_eq!(project_families.max_blocks_per_run, 10);
+    assert!(!project_families.retry_integrity_failures);
 }
 
 #[test]

@@ -1692,12 +1692,15 @@ waits for them, since it has committed before they run, but the Project phase
 does not finish a batch until the families reach its served marker. One family
 run applies or undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`); while a run spends that
-budget and applies or undoes at least one block, the phase starts another, in
+budget and applies or undoes at least one block, the runner starts another, in
 normal mode, so a rebuild or a long catch-up holds up the next batch until it
-ends. The one-shot `redo` command runs the same loop and returns with the
-families on the served marker. The hook is driven by served batches and its
-pending work is held in memory, so a restart at a stalled head does not run the
-families until the next batch. The families trail the served marker until the
+ends. Between runs the runner records the phase heartbeat and its loop progress
+as it does after a batch, so a catch-up that spans hours does not read as a
+stalled phase. The one-shot `redo` command runs the same loop and returns with
+the families on the served marker. The family work is driven by served batches
+and held in memory, but every Project run starts with a batch, an empty
+incremental one when the head has not moved, so after a restart the families
+run on the first Project run. The families trail the served marker until the
 loop catches up, and `phase_runner_project_family_lag_blocks` reports by how
 much. It reads 0 only when the family marker is the served block, hash
 included. A marker above a lowered served marker counts the blocks in between,
@@ -1711,11 +1714,18 @@ in redo, and an input token that did not read. The error names the family
 marker and the served marker, block and hash, and reaches the runner after the
 batch's progress is recorded: the batch and its progress stand, the failure is
 recorded on the Project row, and the restart loop retries with backoff. In
-follow the retry re-enters at the recorded head, so only the families run
-again; a failed redo stays in progress, and its retry runs the served redo
-again before the families. While the families are a shadow that nothing
-serves, a data-integrity family failure is retried like a transient one instead
-of stopping the phase, so the lag gauge shows the stall. A stop abandons a
+follow the retry runs a served batch again before the families: an empty
+incremental batch over the recorded head, which commits a publication as an
+idle cycle does. A failed redo stays in progress, and its retry runs the served
+redo again before the families. While the families are a shadow that nothing
+serves, the supervised runner retries a data-integrity family failure like a
+transient one instead of stopping the phase, so the lag gauge shows the stall;
+since Project runs inside the post-Live fence, a persistent failure also holds
+the chain's Live and Interpret cycle until it clears. The one-shot `redo`
+command keeps a family failure's own kind instead: a data-integrity failure
+ends the command with the family error recorded, the redo stays in progress
+and a rerun is admitted, where retrying would run the served redo again
+forever. A stop abandons a
 family run under way: its open transaction rolls back and the Project run ends
 as cancelled, so a redo stays in progress and rerunning it repairs the
 families. The Project phase reads the Interpret and Project rows of
@@ -2005,7 +2015,10 @@ reported as `phase_runner_project_families_seconds`,
 `phase_runner_project_family_block_seconds` (a histogram of each family block
 applied in a transaction of its own, from its first read to its commit; a
 rebuild range is not observed) and
-`phase_runner_project_family_duplicate_anomalies_total`.
+`phase_runner_project_family_duplicate_anomalies_total`. A run that fails still
+reports the blocks it committed before the failure, and its own wall time. The
+block times wait in memory for the metrics task, at most 65,536 per chain;
+blocks past that cap are not observed.
 
 The first readers of these tables live in the storage crate
 (`bigname_storage::families::control`) and run only in tests. They rebuild a

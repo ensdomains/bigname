@@ -559,12 +559,11 @@ impl PhaseRunner {
             .await?;
             self.record_loop_progress(&chain.chain_id);
             reserved_write_bytes = progress.estimated_write_bytes;
-            // Shadow work after the recorded progress: its error fails the run with the batch kept.
-            // Work ready at once finishes; a stop abandons waiting work and cancels the run.
-            tokio::select! {
-                biased;
-                result = phase.after_progress_recorded(&chain.chain_id) => result?,
-                () = cancellation.cancelled() => return Ok(PhaseLoopResult::Cancelled),
+            if !self
+                .follow_batch(chain, &*phase, &cancellation, heartbeat, phase_lock)
+                .await?
+            {
+                return Ok(PhaseLoopResult::Cancelled);
             }
 
             match outcome {

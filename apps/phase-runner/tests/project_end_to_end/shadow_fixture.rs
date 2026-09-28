@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     heads::{BlockMarker, HeadMarkers, publish_heads},
-    phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+    phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::ProjectPhase,
     state::PhaseStore,
 };
@@ -414,7 +414,7 @@ impl Fixture {
                 outcome.progress(),
             )
             .await?;
-        self.project.after_progress_recorded(CHAIN).await?;
+        while self.project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
         let family: Option<i64> = sqlx::query_scalar(
             "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
         )

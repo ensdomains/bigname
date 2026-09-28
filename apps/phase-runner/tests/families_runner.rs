@@ -199,7 +199,8 @@ fn default_project(scratch: &ScratchDatabase) -> Arc<dyn Phase> {
 
 /// Run a Project redo through `head` until its family run has failed and the failure is recorded
 /// on the Project row, then stop the command, which the restart loop would otherwise keep
-/// retrying. Returns the command's error and the recorded failure.
+/// retrying: the injected failures here are transient, which the one-shot command retries too.
+/// Returns the command's error and the recorded failure.
 async fn redo_until_family_error(
     scratch: &ScratchDatabase,
     project: Arc<dyn Phase>,

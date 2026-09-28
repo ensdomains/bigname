@@ -59,7 +59,7 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     metrics::RunnerMetricsFeed,
-    phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+    phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::{FamilySettings, ProjectPhase},
     state::PhaseStore,
 };
@@ -553,7 +553,7 @@ async fn run(
         // The owned key families follow in their own transactions once progress is recorded,
         // as the runner calls them; their time is outside the served clock above.
         let families_started = Instant::now();
-        project.after_progress_recorded(CHAIN).await?;
+        while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
         let families_ms = families_started.elapsed().as_millis();
         let family_marker: Option<i64> = sqlx::query_scalar(
             "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
@@ -701,7 +701,7 @@ async fn compare_with_rebuild(
     // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
     // families the incremental blocks left, row for row, the marker's sequence aside.
     let families_started = Instant::now();
-    project.after_progress_recorded(CHAIN).await?;
+    while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
     let families_rebuild_ms = families_started.elapsed().as_millis();
     let rebuilt_families = families(pool).await?;
     let differing: Vec<&str> = incremental_families

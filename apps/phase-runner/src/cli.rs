@@ -447,7 +447,11 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
-        project_families: args.project_families.into(),
+        // A one-shot command that retried a persistent family failure would never exit.
+        project_families: FamilySettings {
+            retry_integrity_failures: false,
+            ..args.project_families.into()
+        },
     })
 }
 

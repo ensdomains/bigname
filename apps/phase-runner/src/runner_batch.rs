@@ -7,14 +7,16 @@ use crate::{
     ingest_progress,
     metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{
-        PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress, RedoAttemptFence, RunMode,
-        VerificationLevel,
+        AfterProgress, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress,
+        RedoAttemptFence, RunMode, VerificationLevel,
     },
     phase_lock::PhaseLock,
     progress_monitor::{ProgressToken, RunnerPhaseProgress},
     runner_support::HeartbeatThrottle,
+    shutdown::until_cancelled,
     state_persistence::validate_progress,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::PhaseRunner;
 
@@ -190,5 +192,45 @@ impl PhaseRunner {
             .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase_name)
             .await?;
         Ok((outcome, progress))
+    }
+
+    /// The phase's shadow work after a recorded batch, call after call until it is done; its
+    /// error fails the run with the batch kept. Between calls the loop progress and the phase
+    /// heartbeat are recorded as a batch settlement records them, so a family catch-up that spans
+    /// hours stays visibly alive. A stop abandons waiting work: returns false when one did.
+    pub(super) async fn follow_batch(
+        &self,
+        chain: &ChainConfig,
+        phase: &dyn Phase,
+        cancellation: &CancellationToken,
+        heartbeat: &mut HeartbeatThrottle,
+        phase_lock: &mut PhaseLock,
+    ) -> RunnerResult<bool> {
+        loop {
+            let step = tokio::select! {
+                biased;
+                result = phase.after_progress_recorded(&chain.chain_id) => result?,
+                () = cancellation.cancelled() => return Ok(false),
+            };
+            if step == AfterProgress::Done {
+                return Ok(true);
+            }
+            self.record_loop_progress(&chain.chain_id);
+            let recorded = until_cancelled(cancellation, async {
+                phase_lock.check_alive().await?;
+                heartbeat
+                    .record_if_due(
+                        &self.store,
+                        &self.instance_id,
+                        &chain.chain_id,
+                        phase.name(),
+                    )
+                    .await
+            })
+            .await?;
+            if recorded.is_none() {
+                return Ok(false);
+            }
+        }
     }
 }

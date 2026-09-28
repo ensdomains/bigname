@@ -323,7 +323,8 @@ impl FamilyOutcome {
 /// continues. `session` is the input token the Project phase read before recording the batch,
 /// while a finished redo's session was still open; it names that redo's reason. Every block reads
 /// the token again inside its own transaction. An error, a refused fence included, stops the run
-/// at the last complete block and is returned; its kind says whether a retry can succeed.
+/// at the last complete block and is returned; its kind says whether a retry can succeed. See
+/// [`run`] for the outcome of a run that failed.
 pub async fn apply(
     pool: &PgPool,
     chain_id: &str,
@@ -332,6 +333,23 @@ pub async fn apply(
     session: &InputToken,
     options: &FamilyOptions,
 ) -> crate::Result<FamilyOutcome> {
+    match run(pool, chain_id, target, mode, session, options).await {
+        (outcome, None) => Ok(outcome),
+        (_, Some(error)) => Err(error),
+    }
+}
+
+/// [`apply`], handing back the outcome whether or not the run failed: a run that fails keeps
+/// what the blocks before the failure committed (their times, rows and anomalies), the marker
+/// it left and its own elapsed time, so a caller can report them beside the error.
+pub async fn run(
+    pool: &PgPool,
+    chain_id: &str,
+    target: &Marker,
+    mode: FamilyMode,
+    session: &InputToken,
+    options: &FamilyOptions,
+) -> (FamilyOutcome, Option<crate::ProjectError>) {
     let started = Instant::now();
     let mut outcome = FamilyOutcome {
         target: Some(target.clone()),
@@ -372,14 +390,11 @@ pub async fn apply(
         error = error.as_ref().map(tracing::field::display),
         "Project families applied"
     );
-    match error {
-        Some(error) => Err(error),
-        None => Ok(outcome),
-    }
+    (outcome, error)
 }
 
 /// Where the families stand against the served `target`, with nothing applied: the outcome a
-/// caller reports after a run returned an error, so the lag that run left still shows.
+/// caller reports when no run could start, so the lag still shows.
 pub async fn standing(pool: &PgPool, chain_id: &str, target: &Marker) -> FamilyOutcome {
     let (marker, marker_readable) = current_marker(pool, chain_id).await;
     FamilyOutcome {

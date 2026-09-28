@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
 use bigname_project::{
@@ -16,8 +15,8 @@ use crate::{
     heads::BlockMarker,
     metrics::RunnerMetricsFeed,
     phase::{
-        AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
-        PhaseProgress, RunMode,
+        AfterProgress, AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture,
+        PhaseName, PhaseProgress, RunMode,
     },
 };
 
@@ -33,6 +32,10 @@ pub struct FamilySettings {
     /// The most family blocks one family run applies or undoes. A batch starts runs one after
     /// another until the families reach its served marker, so this bounds a run, not the batch.
     pub max_blocks_per_run: u64,
+    /// Whether a family data-integrity failure fails the Project run as retryable. The supervised
+    /// runner retries it, so the lag gauge shows the stall; the one-shot `redo` command turns this
+    /// off, so the failure keeps its kind and the command exits instead of retrying forever.
+    pub retry_integrity_failures: bool,
     /// Which work blocks a family rebuild applies several to a transaction; production keeps the
     /// switch below the chain's safe block.
     pub rebuild_ranges: RebuildRanges,
@@ -43,6 +46,7 @@ impl Default for FamilySettings {
         Self {
             enabled: true,
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
+            retry_integrity_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
         }
     }
@@ -120,42 +124,75 @@ impl ProjectPhase {
         }
     }
 
-    /// Bring the families to the served `target` of a recorded batch, one budgeted run after
-    /// another, reporting each run. The first run takes the batch's mode; the rest continue in
-    /// normal mode, since in the batch's own mode an unfinished rebuild would start again. An
-    /// error stops the loop and is returned with the lag it left reported.
-    async fn follow_served_marker(
+    /// One budgeted family run toward the served `target` of a recorded batch, reported whether
+    /// or not it failed. While the run spent its budget and moved the families, the batch's work is
+    /// kept for another call, in normal mode, since in the batch's own mode an unfinished rebuild
+    /// would start again; the runner makes that call after recording the phase heartbeat.
+    async fn run_families_once(
         &self,
         chain_id: &str,
-        target: &Marker,
-        mut mode: FamilyMode,
-        token: Result<InputToken, ProjectError>,
-    ) -> RunnerResult<()> {
-        let started = Instant::now();
+        (target, mode, token): PendingFamilies,
+    ) -> RunnerResult<AfterProgress> {
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => {
+                let standing =
+                    bigname_project::families::standing(&self.pool, chain_id, &target).await;
+                self.report_families(chain_id, &standing);
+                return Err(self.family_error(chain_id, &target, &standing, &error));
+            }
+        };
         let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
             .with_max_blocks_per_run(self.families.max_blocks_per_run)
             .with_rebuild_ranges(self.families.rebuild_ranges);
-        let run = async {
-            let token = token?;
-            loop {
-                let outcome = bigname_project::families::apply(
-                    &self.pool, chain_id, target, mode, &token, &options,
-                )
-                .await?;
-                self.report_families(chain_id, &outcome);
-                if !outcome.budget_exhausted || outcome.blocks + outcome.undone_blocks == 0 {
-                    return Ok(());
-                }
-                mode = FamilyMode::Normal;
+        let (outcome, error) =
+            bigname_project::families::run(&self.pool, chain_id, &target, mode, &token, &options)
+                .await;
+        self.report_families(chain_id, &outcome);
+        if let Some(error) = error {
+            return Err(self.family_error(chain_id, &target, &outcome, &error));
+        }
+        if !outcome.budget_exhausted || outcome.blocks + outcome.undone_blocks == 0 {
+            return Ok(AfterProgress::Done);
+        }
+        self.pending_families
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(chain_id.to_owned(), (target, FamilyMode::Normal, Ok(token)));
+        Ok(AfterProgress::More)
+    }
+
+    /// A family failure as the error of the Project run. While the families are a shadow that
+    /// nothing serves, the supervised runner retries every failure short of a configuration
+    /// error, a data-integrity one included, and the family lag gauge shows the stall rather than
+    /// the served publication stopping for tables nothing reads. Under the one-shot `redo` command
+    /// a failure keeps its kind, so a persistent one ends the command.
+    fn family_error(
+        &self,
+        chain_id: &str,
+        target: &Marker,
+        standing: &FamilyOutcome,
+        error: &ProjectError,
+    ) -> RunnerError {
+        let kind = match error.kind() {
+            ProjectErrorKind::Configuration => ErrorKind::Configuration,
+            ProjectErrorKind::DataIntegrity if !self.families.retry_integrity_failures => {
+                ErrorKind::DataIntegrity
             }
+            ProjectErrorKind::Transient | ProjectErrorKind::DataIntegrity => ErrorKind::Transient,
         };
-        let Err(error) = run.await else {
-            return Ok(());
-        };
-        let mut standing = bigname_project::families::standing(&self.pool, chain_id, target).await;
-        standing.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.report_families(chain_id, &standing);
-        Err(family_error(chain_id, target, &standing, &error))
+        let marker = standing.marker.as_ref().map_or_else(
+            || "no block".to_owned(),
+            |marker| format!("block {} ({})", marker.number, marker.hash),
+        );
+        RunnerError::new(
+            kind,
+            format!(
+                "owned key families of chain {chain_id} stopped at {marker}, short of served \
+                 marker block {} ({}): {error}",
+                target.number, target.hash
+            ),
+        )
     }
 
     async fn redo_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {
@@ -211,11 +248,10 @@ impl Phase for ProjectPhase {
             .remove(chain_id);
         let chain_id = chain_id.to_owned();
         Box::pin(async move {
-            let Some((target, mode, token)) = pending else {
-                return Ok(());
+            let Some(pending) = pending else {
+                return Ok(AfterProgress::Done);
             };
-            self.follow_served_marker(&chain_id, &target, mode, token)
-                .await
+            self.run_families_once(&chain_id, pending).await
         })
     }
 
@@ -371,34 +407,6 @@ fn project_marker(marker: &BlockMarker) -> Marker {
 
 fn runner_marker(marker: Marker) -> RunnerResult<BlockMarker> {
     BlockMarker::new(marker.number, marker.hash)
-}
-
-/// A family failure as the error of the Project run. While the families are a shadow that nothing
-/// serves, every failure short of a configuration error is retryable, a data-integrity one
-/// included: the restart loop keeps retrying and the family lag gauge shows the stall, rather
-/// than stopping the served publication for tables nothing reads.
-fn family_error(
-    chain_id: &str,
-    target: &Marker,
-    standing: &FamilyOutcome,
-    error: &ProjectError,
-) -> RunnerError {
-    let kind = match error.kind() {
-        ProjectErrorKind::Configuration => ErrorKind::Configuration,
-        ProjectErrorKind::Transient | ProjectErrorKind::DataIntegrity => ErrorKind::Transient,
-    };
-    let marker = standing.marker.as_ref().map_or_else(
-        || "no block".to_owned(),
-        |marker| format!("block {} ({})", marker.number, marker.hash),
-    );
-    RunnerError::new(
-        kind,
-        format!(
-            "owned key families of chain {chain_id} stopped at {marker}, short of served marker \
-             block {} ({}): {error}",
-            target.number, target.hash
-        ),
-    )
 }
 
 fn runner_error(error: ProjectError) -> RunnerError {
