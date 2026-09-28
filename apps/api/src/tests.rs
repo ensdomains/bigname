@@ -439,3 +439,4 @@ include!("tests/v2_switch_name_publication_changes.rs");
 include!("tests/v2_switch_name_recompute.rs");
 include!("tests/v2_switch_resolver_history.rs");
 include!("tests/v2_switch_child_authority.rs");
+include!("tests/v2_switch_name_display.rs");
