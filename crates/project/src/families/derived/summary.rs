@@ -15,6 +15,15 @@
 //! NameWrapper expiry masks, and a binding can close at a time ahead of the event that set it
 //! (an ENSv2 path expiry), so each row stores the first second at which its composition can
 //! change with no fact changing, and the first block at or past it composes the name again.
+//! A registry event also adds every name a registry event of its resource carries, since it can
+//! move that resource's unnamed Transfers from one name to another.
+//!
+//! So a stored summary is refreshed when a block touches the name or its scheduled boundary
+//! passes, and the work list is deliberately no wider. An input that changes in place without
+//! either, such as a normalizer recompute of a surface's visibility or a lineage readability
+//! flip, is covered by the rebuild: a recompute only happens with a code change that rotates
+//! the interpreter fingerprint, which rebuilds the families. A reorg goes through undo, which
+//! restores the summaries from the journal.
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};

@@ -1708,6 +1708,14 @@ changed is journalled and written like any other family row, so an undo
 restores it from the journal and composes nothing; a rebuild composes every
 surfaced name.
 
+A stored summary is therefore refreshed only when a block touches the name or
+its scheduled boundary passes, and the work list is deliberately no wider.
+Inputs that change in place without either, such as a normalizer recompute of
+a surface's visibility or a lineage readability flip, are covered because a
+recompute only happens with a code change that rotates the interpreter
+fingerprint, which rebuilds the families. A reorg goes through undo, which
+restores the summaries from the journal.
+
 These tables are shadows today. No production serving reader reads them, and
 no served value depends on them; only the family reducers, the step 3
 [shadow readers](glossary.md#shadow-read) in the test harnesses, and tests do.
