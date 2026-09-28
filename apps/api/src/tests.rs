@@ -389,6 +389,7 @@ include!("tests/removed_graphql_route.rs");
 include!("tests/v2_name_record.rs");
 include!("tests/v2_name_records_default_set.rs");
 include!("tests/v2_lookup_detail_parity.rs");
+include!("tests/v2_verified_name_detail.rs");
 include!("tests/record_id_resolver.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");

@@ -14,8 +14,8 @@ impl bigname_storage::VerifiedResolutionRecord for ResolutionRecordKey {
     }
 }
 
-/// The record inventory at the mainnet-profile lookup key: name detail's verified source and the
-/// records diagnostic. It is the family inventory at the family publication.
+/// The record inventory at the mainnet-profile lookup key: the records diagnostic. It is the
+/// family inventory at the family publication.
 pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -29,7 +29,7 @@ pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     .await
 }
 
-/// The record inventory at the any-chain lookup key: name detail's indexed source and the records
+/// The record inventory at the any-chain lookup key: name detail (both sources) and the records
 /// route. It is the family inventory at the family publication.
 pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     pool: &PgPool,
@@ -48,8 +48,8 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
 /// the selected snapshot on whichever chain the deployment indexes, with the binding,
 /// serving-resource, chain-position, version-boundary, and snapshot checks of the any-chain
 /// readback. It feeds the default key set, indexed answers, and `include=inventory`. It does not
-/// admit verified execution, which the lookup engine checks separately; name detail and
-/// diagnostics keep their own loaders.
+/// admit verified execution, which the lookup engine checks separately. Name detail reads the
+/// same inventory for both sources; diagnostics keep the mainnet-profile loader.
 ///
 /// The inventory is the family inventory of the resource the name
 /// serves records through, at the family publication
