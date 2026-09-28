@@ -269,9 +269,8 @@ async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() ->
         let (_, body) = list_cursor_get(&database, *on, &continued).await?;
         let as_of = &body["meta"]["as_of"];
         assert!(
-            as_of
-                .as_object()
-                .is_some_and(|chains| chains.values().all(|at| at["block_number"] == json!(241))),
+            as_of.as_object().is_some_and(|chains| !chains.is_empty()
+                && chains.values().all(|at| at["block_number"] == json!(241))),
             "{continued}: the page reads 241: {as_of}"
         );
     }
@@ -451,7 +450,7 @@ async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the
     database.cleanup().await
 }
 
-/// With `at` pinned, a continuation is tied to that publication: once a newer one lands it
+/// With `at` pinned, a continuation is tied to that block: once a later one is published it
 /// answers 409 stale, even when the newer block changed nothing the page shows. gamma.eth, which
 /// no resolver serves, is registered at 241; the bound names are the same at 240 and 241.
 #[tokio::test]
@@ -539,5 +538,90 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
         }
     }
     empty.cleanup().await?;
+    database.cleanup().await
+}
+
+/// The raw cursor JSON of `cursor` with `edit` applied, re-encoded.
+fn list_cursor_raw(cursor: &str, edit: impl FnOnce(&mut Value)) -> String {
+    let mut raw: Value =
+        serde_json::from_slice(&hex::decode(cursor).expect("issued cursor is hex")).expect("json");
+    edit(&mut raw);
+    hex::encode(serde_json::to_vec(&raw).expect("json"))
+}
+
+/// Wire-level refusals: a cursor edited as raw JSON, not through the typed payload, answers the
+/// exact 400 whatever the defect, and a fabricated but well-formed position is still accepted.
+#[tokio::test]
+async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pages() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
+    let asc = &list_cursor_routes()?[2];
+    assert!(asc.0.contains("order=asc"));
+    for on in [false, true] {
+        let (_, next) = list_cursor_page(&database, on, &asc.0, asc.1).await?;
+        let next = next.context("a continuation")?;
+        let defects: [(&str, Box<dyn FnOnce(&mut Value)>); 7] = [
+            ("an unknown top-level field", Box::new(|raw| raw["route"] = json!("names"))),
+            ("a null position value", Box::new(|raw| raw["last_item"]["name"] = Value::Null)),
+            ("a numeric position value", Box::new(|raw| raw["last_item"]["name"] = json!(7))),
+            ("a missing position key", Box::new(|raw| {
+                raw["last_item"].as_object_mut().expect("object").remove("namehash");
+            })),
+            ("a whitespace-only value", Box::new(|raw| raw["last_item"]["name"] = json!("   "))),
+            ("a NUL in a value", Box::new(|raw| raw["last_item"]["name"] = json!("beta\u{0}.eth"))),
+            ("a null filters object", Box::new(|raw| raw["filters"] = Value::Null)),
+        ];
+        for (label, edit) in defects {
+            let cursor = list_cursor_raw(&next, edit);
+            assert_list_cursor_refused(&database, on, &list_cursor_continue(&asc.0, &cursor), label)
+                .await?;
+        }
+        let gap = list_cursor_raw(&next, |raw| {
+            raw["last_item"]["expires_at"] = json!(switch_timestamp(1_850_000_000).expect("time"));
+            raw["last_item"]["name"] = json!("gap.eth");
+        });
+        let (rows, last) =
+            list_cursor_page(&database, on, &list_cursor_continue(&asc.0, &gap), asc.1).await?;
+        assert_eq!(rows, [json!("alpha.eth")], "switch {on}");
+        assert_eq!(last, None);
+    }
+    database.cleanup().await
+}
+
+/// A continuation that sends a different `at` than the one its cursor was pinned to is a wrong
+/// cursor (400), checked before the route asks whether that other position is still servable;
+/// adding `at` to an unpinned cursor is the same. The unchanged pin after a later block is
+/// `v2_list_cursor_pinned_at_answers_409_after_any_newer_publication`.
+#[tokio::test]
+async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
+    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    let at_240 = switch_timestamp(1_700_000_240)?;
+    let at_230 = switch_timestamp(1_700_000_230)?;
+    for on in [false, true] {
+        let pinned = format!("{base}&at={at_240}");
+        let (_, pinned_next) =
+            list_cursor_page(&database, on, &pinned, "/data/bound_names").await?;
+        let (_, latest_next) = list_cursor_page(&database, on, &base, "/data/bound_names").await?;
+        // Block 230 is on the chain but below every row's position: read on its own it is stale.
+        let (status, _) = list_cursor_get(&database, on, &format!("{base}&at={at_230}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "switch {on}: 230 alone is unavailable");
+        for (label, cursor) in [
+            ("a cursor pinned to 240", pinned_next.context("pinned")?),
+            ("an unpinned cursor", latest_next.context("latest")?),
+        ] {
+            assert_list_cursor_refused(
+                &database,
+                on,
+                &list_cursor_continue(&format!("{base}&at={at_230}"), &cursor),
+                label,
+            )
+            .await?;
+        }
+    }
     database.cleanup().await
 }

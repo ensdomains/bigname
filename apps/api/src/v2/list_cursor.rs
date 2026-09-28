@@ -14,8 +14,10 @@
 //!   anything this contract does not write (the publication token, evaluation time or
 //!   generation that cursors issued before it carried) answers `400 invalid_input`.
 //! - With `at`, the cursor binds that `at` token: the continuation must send the same `at`
-//!   (else 400), and once a newer publication lands the route answers `409 stale` before
-//!   reading rows (the route compares the captured publication with the pinned position).
+//!   (else 400), and once a later block is published the route answers `409 stale` before
+//!   reading rows (the route compares the captured publication's block with the pinned one).
+//!   The pin is a chain position, not a publication generation: a same-block rebuild is not
+//!   detected, since holding a generation is the binding this contract dropped.
 //!
 //! Only a publication that lands during one request's own read refuses that request
 //! (`CollectionSnapshot::finish`, 409 asking for a retry); the same cursor then continues.
@@ -69,8 +71,10 @@ impl ListCursor {
     }
 
     /// The position `cursor` continues from, or `None` without a cursor. The cursor must be one
-    /// this list wrote: same sort, filters and `at`, exactly the `keys` as its position, each
-    /// non-empty, and nothing else; otherwise `400 invalid_input`.
+    /// this list wrote: no top-level field the format does not define, the same sort, filters
+    /// and `at`, exactly the `keys` as its position, each a non-blank string without a NUL
+    /// (which PostgreSQL text cannot hold), and nothing else; otherwise `400 invalid_input`. A
+    /// position no row holds is valid.
     pub(crate) fn read(
         &self,
         cursor: Option<&str>,
@@ -80,7 +84,8 @@ impl ListCursor {
             return Ok(None);
         };
         let payload = decode(cursor)?;
-        let matches = payload.sort == self.sort
+        let matches = only_known_fields(cursor)
+            && payload.sort == self.sort
             && payload.filters == self.filters
             && payload.snapshot == self.at
             && payload.evaluated_at.is_none()
@@ -89,7 +94,7 @@ impl ListCursor {
                 payload
                     .last_item
                     .get(*key)
-                    .is_some_and(|value| !value.trim().is_empty())
+                    .is_some_and(|value| !value.trim().is_empty() && !value.contains('\0'))
             });
         if !matches {
             return Err(invalid_cursor_error());
@@ -106,6 +111,28 @@ impl ListCursor {
             self.at.clone(),
         ))
     }
+}
+
+/// Whether the cursor's JSON object has only the fields `Payload` defines: the typed decode
+/// ignores unknown ones, and a list cursor must carry nothing it did not write.
+fn only_known_fields(cursor: &str) -> bool {
+    const FIELDS: [&str; 6] = [
+        "version",
+        "sort",
+        "filters",
+        "last_item",
+        "snapshot",
+        "evaluated_at",
+    ];
+    hex::decode(cursor)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|object| object.keys().all(|key| FIELDS.contains(&key.as_str())))
+        })
+        .unwrap_or(false)
 }
 
 impl ListPosition {
@@ -208,6 +235,15 @@ mod tests {
             .last_item
             .insert("generation".to_owned(), "1".to_owned());
         refused(&list(), &encode(&generation));
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&hex::decode(list().next(position())).unwrap()).unwrap();
+        raw["route"] = serde_json::json!("names");
+        refused(&list(), &hex::encode(serde_json::to_vec(&raw).unwrap()));
+        let nul = list().next(ListPosition::new([
+            ("name", "beta\0.eth".to_owned()),
+            ("namehash", "0xbeta".to_owned()),
+        ]));
+        refused(&list(), &nul);
         let empty = list().next(ListPosition::new([
             ("name", " ".to_owned()),
             ("namehash", "0xbeta".to_owned()),

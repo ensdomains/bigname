@@ -1496,13 +1496,19 @@ it runs and returns the rows that sort after that position:
   before this contract, and the snapshot field of `GET /v1/search` cursors
   issued before July 2026, so such a cursor is refused once.
 - With `at`, the continuation must send the same `at`, or it returns
-  `400 invalid_input`. The cursor then walks that one publication: once a newer
-  publication lands, the continuation returns `409 stale` with
+  `400 invalid_input`. The cursor is then pinned to that block: once a later
+  block is published, the continuation returns `409 stale` with
   `resolver data is unavailable at the selected historical position`, whatever
-  rows the newer block changed.
-- A publication that lands while one page is being read still returns
-  `409 stale` for that request, with a message asking to retry it; the same
-  cursor then continues.
+  rows the later block changed. The pin is a chain position, not a publication
+  generation: a rebuild that republishes the same block (same number and hash)
+  is not detected, and the continuation reads the rebuilt rows.
+- A publication that lands while one page is being read still refuses that
+  request with a retryable error, and retrying with the same cursor then
+  continues. The error is route-specific: `GET /v1/names` and `bound_names`
+  return `409 stale` with a message asking to retry; `GET /v1/search` keeps its
+  documented request-scope recheck, which returns `409 conflict` for a head,
+  publication, or readiness change and `409 stale` when an Interpret redo is
+  involved (see [`GET /v1/search`](api-v1-routes.md#get-v1search)).
 
 ### Lapsed registration
 

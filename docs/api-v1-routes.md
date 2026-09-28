@@ -65,11 +65,14 @@ historical projection is retained by a pagination token. Their cursors differ:
   message saying so; retrying the same request reads the new publication.
   Subnames' time-dependent expiry filtering retains the first page's
   evaluation time (with the [publication switch](glossary.md#publication-switch)
-  on, it is the published block's timestamp on every page). The binding conservatively covers
-the requested namespace, or all active public namespaces when none is selected.
-A count spanning namespaces requires readable publications for all of them;
-otherwise it returns `409 stale` rather than a misleading partial total. Registry and resolver collections use the same publication fence
-in addition to their documented selected-chain position.
+  on, it is the published block's timestamp on every page).
+
+The publication fence of these four lists conservatively covers the requested
+namespace, or all active public namespaces when none is selected. A count
+spanning namespaces requires readable publications for all of them; otherwise
+it returns `409 stale` rather than a misleading partial total. Registry and
+resolver collections use the same publication fence in addition to their
+documented selected-chain position.
 
 The history collections, `/v1/events`, name history (with or without
 `include=child_registrations`), and address history, are
@@ -127,9 +130,13 @@ These current-state and history collections still reject `at`,
 explicit `finality=latest` is accepted. `meta.as_of_token` is omitted because
 these collection publications cannot be replayed through `at`.
 
-Search and diagnostic-event cursors retain their existing latest-state behavior
-without a publication-validity claim; search cursors follow the
-[current-state list cursor](api-v1.md#current-state-list-cursors) contract. Search discloses request-scope `meta.as_of`
+Search and diagnostic-event cursors carry no publication-validity claim. Search
+cursors follow the
+[current-state list cursor](api-v1.md#current-state-list-cursors) contract; a
+search cursor issued before July 2026 that still carries a snapshot field, which
+search used to ignore, now returns `400 invalid_input`, and the client restarts
+from the first page. Diagnostic-event cursors keep their existing latest-state
+behavior. Search discloses request-scope `meta.as_of`
 and `meta.as_of_completeness`; diagnostic events omit snapshot metadata. The
 per-input `POST /v1/lookup` cursor contract is documented separately. Historical
 collection replay remains deferred.
@@ -3098,7 +3105,8 @@ For a registrar lease first identified by a later readable observation, registra
   binds the resolver and sort, and `at` when the request pinned it, and holds the last name's position; a continuation without `at` reads the
   current publication, so a name whose resolver changed between pages can be
   missed or appear again. A continuation with `at` returns `409 stale` once a
-  newer publication has landed, before any row is read. A malformed cursor
+  later block has been published, before any row is read (a rebuild of the
+  same block is not detected). A malformed cursor
   returns `400 invalid_input` before the resolver or publication is read (see
   [current-state list cursors](api-v1.md#current-state-list-cursors)).
 - Status semantics: only a request without `at` and with `finality=latest`
