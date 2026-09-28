@@ -6,7 +6,7 @@
 mod endpoint;
 #[path = "project_end_to_end/families_mode.rs"]
 mod families_mode;
-#[path = "project_end_to_end/served_batch.rs"]
+#[path = "project_end_to_end/family_metrics.rs"]
 mod family_metrics;
 #[allow(dead_code)]
 mod support;

@@ -23,16 +23,14 @@ use tokio_util::sync::CancellationToken;
 
 use support::{ScratchDatabase, seed_lineage};
 
-const CHAIN: &str = "families-runner-switch";
+const CHAIN: &str = "families-runner";
 const HEAD: i64 = 30;
 
-// A normal batch with the switch on: the families rebuild to the head in one run, the batch
-// completes with the family marker as its progress, and no statement reached a served table.
-// With the switch off the same batch runs the served engine, which the triggers refuse.
+// A normal batch: the families rebuild to the head in one run, and the batch completes with the
+// family marker as its progress.
 #[tokio::test]
-async fn a_project_batch_under_the_switch_writes_no_served_row_and_advances_the_marker_to_the_head()
--> Result<()> {
-    let scratch = ready("families_switch_batch").await?;
+async fn a_project_batch_advances_the_family_marker_to_the_head() -> Result<()> {
+    let scratch = ready("families_batch").await?;
     let head = head_marker(&scratch, HEAD).await?;
     let project = ProjectPhase::new(scratch.pool().clone());
 
@@ -68,7 +66,7 @@ async fn a_project_batch_under_the_switch_writes_no_served_row_and_advances_the_
 // starting it again, until the families reach the head.
 #[tokio::test]
 async fn a_budgeted_family_batch_continues_the_rebuild_from_its_marker() -> Result<()> {
-    let scratch = ready("families_switch_budget").await?;
+    let scratch = ready("families_budget").await?;
     let head = head_marker(&scratch, HEAD).await?;
     let project = ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
         max_blocks_per_run: 10,
@@ -103,13 +101,11 @@ async fn a_budgeted_family_batch_continues_the_rebuild_from_its_marker() -> Resu
     scratch.cleanup().await
 }
 
-// The one-shot redo under the switch, through the runner, with a budget shorter than the redo:
-// the redo's batches continue until the families reach the Project row's block, the redo
-// completes there, and no served table was written.
+// The one-shot redo through the runner, with a budget shorter than the redo: the redo's batches
+// continue until the families reach the Project row's block, and the redo completes there.
 #[tokio::test]
-async fn a_one_shot_redo_under_the_switch_replays_the_families_and_writes_no_served_row()
--> Result<()> {
-    let scratch = ready("families_switch_redo").await?;
+async fn a_one_shot_redo_replays_the_families_to_the_project_block() -> Result<()> {
+    let scratch = ready("families_redo").await?;
     let settings = FamilySettings {
         max_blocks_per_run: 10,
         retry_family_failures: false,
@@ -135,8 +131,7 @@ async fn a_one_shot_redo_under_the_switch_replays_the_families_and_writes_no_ser
 async fn redo(scratch: &ScratchDatabase, settings: FamilySettings) -> Result<()> {
     let project: Arc<dyn Phase> =
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(settings));
-    // A batch that reached the served engine is refused by the triggers and retried forever as
-    // a transient failure, so the redo is bounded.
+    // A failing batch is retried as a transient failure, so the redo is bounded.
     let stop = CancellationToken::new();
     let deadline = {
         let stop = stop.clone();
@@ -153,7 +148,7 @@ async fn redo(scratch: &ScratchDatabase, settings: FamilySettings) -> Result<()>
             project,
         )?,
         CapacityGuard::system(CapacityConfig::default()),
-        "families-runner-switch",
+        "families-runner",
         TimingConfig {
             initial_backoff: Duration::from_millis(1),
             maximum_backoff: Duration::from_millis(4),
