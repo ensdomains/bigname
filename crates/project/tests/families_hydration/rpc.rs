@@ -53,6 +53,7 @@ impl Rpc {
     pub fn calls(&self) -> Vec<(String, usize)> {
         self.responses.calls.lock().unwrap().clone()
     }
+    #[allow(dead_code)] // The text integration binary shares this helper without its race hook.
     pub fn before_reply(&self, pool: &sqlx::PgPool, sql: &str) {
         *self.responses.before_reply.lock().unwrap() = Some((pool.clone(), sql.to_owned()));
     }
