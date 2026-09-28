@@ -13,14 +13,7 @@ use super::{
 };
 use crate::families::records::FamilyPosition;
 
-/// The readable active surfaces of `ids`: at the family marker of their chain, or, with `at`, on
-/// that chain at or below that block (the summary writer, whose block has not moved the marker
-/// yet).
-pub(super) async fn surfaces(
-    conn: &mut PgConnection,
-    ids: &[String],
-    at: Option<(&str, i64)>,
-) -> Result<Vec<Surface>> {
+pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<Vec<Surface>> {
     let rows = sqlx::query(
         "/* storage:families.name.surfaces */
          SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash,
@@ -28,18 +21,12 @@ pub(super) async fn surfaces(
          FROM bigname_phase.name_surfaces surface
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
-         LEFT JOIN bigname_phase.project_family_marker marker
-           ON marker.chain_id = surface.chain_id
          WHERE surface.logical_name_id = ANY($1::text[])
            AND surface.visibility_state = 'active' AND surface.raw_name <> ''
-           AND CASE WHEN $2::text IS NULL THEN surface.block_number <= marker.current_block_number
-                    ELSE surface.chain_id = $2 AND surface.block_number <= $3 END
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(ids)
-    .bind(at.map(|(chain, _)| chain))
-    .bind(at.map(|(_, block)| block))
     .fetch_all(&mut *conn)
     .await
     .context("failed to load name surfaces")?;

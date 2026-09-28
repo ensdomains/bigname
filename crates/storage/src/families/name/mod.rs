@@ -1,7 +1,8 @@
 //! The composed name reader (TYR-36 step 7b, ruling J3): a `name_current`-shaped row assembled at
 //! read from the owned key families (docs/projections.md, "Owned key families") and the identity
-//! input tables, with no stored per-name row. It serves the fields the API and the verified
-//! lookup read from `name_current`:
+//! input tables, with no stored per-name row. It serves the fields the API routes read from
+//! `name_current`; the verified lookup (crates/lookup) stays on the served tables until the flip
+//! slice. The row carries:
 //!
 //! - identity: the surface (`name_surfaces`), the selected binding and its resource's token
 //!   lineage (`surface_bindings`, `resources`);
@@ -38,6 +39,7 @@ mod compose;
 mod heads;
 mod list;
 mod loaders;
+pub mod seams;
 pub mod selection;
 pub mod serving;
 mod summary;
@@ -48,10 +50,40 @@ pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 pub use summary::compose_name_summaries;
 
+pub(crate) use batch::read_snapshot;
 pub use batch::{
     load_family_name, load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,
     load_family_publication,
 };
+
+/// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
+/// rebuild is still populating the families) or written by another interpreter build. The rule
+/// is the publication fence's (snapshot_selection/project.rs), so a caller that did not fence
+/// first, or whose fence passed before a rebuild began, still cannot compose from half-built
+/// families. API callers answer it with the stale 409 (docs/api-v1.md, "Publication switch").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FamilyPublicationUnavailable {
+    pub chain_id: String,
+}
+
+impl std::fmt::Display for FamilyPublicationUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "chain {} owned key families are not published for this build",
+            self.chain_id
+        )
+    }
+}
+
+impl std::error::Error for FamilyPublicationUnavailable {}
+
+/// Whether `error` is, or was caused by, a [`FamilyPublicationUnavailable`].
+pub fn is_publication_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<FamilyPublicationUnavailable>())
+}
 
 /// The publication the composed rows describe: a chain's family marker.
 #[derive(Clone, Debug, Eq, PartialEq)]

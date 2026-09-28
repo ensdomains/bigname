@@ -30,7 +30,7 @@ persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase can compare Base's Coinbase-loaded range with dRPC
 through the `48,428,000` ingest seam and Ethereum Mainnet with local reth. Only a distinct [verification-only](glossary.md#source-role) reference earns an independent level, and the target-covering intake cursor records
-`quick_synced` without one. V2, GraphQL, and operational paths consume its
+`quick_synced` without one. V2 and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
 in the image. A release may also carry explicitly reviewed additive baseline
@@ -150,6 +150,15 @@ matching schema-migration on a large initialized database, and before starting a
 release that reads it; without the prebuild that schema-migration blocks writes to
 `normalized_events` while it builds.
 
+`20260928130000_project_families_name_history.sql` adds `project_name_history`
+to the [owned key families](glossary.md#owned-key-family) and, on a database
+whose families were built without it, resets every family table and the
+[family marker](glossary.md#family-marker), so the next family run rebuilds
+them. Apply it before `BIGNAME_SERVE_FROM_FAMILIES` is ever turned on: with the
+[publication switch](glossary.md#publication-switch) on, every fenced route
+answers `409 stale` until that rebuild finishes. It takes no marker lock, so a
+family run in flight when it applies fails once and the next run rebuilds.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -158,6 +167,33 @@ A directly launched API can configure its metrics listener with
 `BIGNAME_API_METRICS_BIND_ADDR`. The server Compose file instead fixes that
 container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 `BIGNAME_API_METRICS_PORT` change only its host port mapping.
+
+### Publication switch
+
+`BIGNAME_SERVE_FROM_FAMILIES` is the
+[publication switch](glossary.md#publication-switch). The server Compose file
+forwards it from the host environment or `.env.server` to both the `api` and
+the `phase-runner` services; Compose forwards only the variables it lists, so
+without that entry the containers would never see it. Unset or empty means
+off, and only `1` or `true` turns it on. Both binaries read it once at startup,
+so set it the same for both. To change it, edit `.env.server` (or the host
+environment) and recreate both containers:
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml up -d --force-recreate api phase-runner
+```
+
+`docker compose restart` does not reload changed environment configuration, so
+a restart alone keeps the old value.
+
+The direct `docker run` selectors under [Container contents](#container-contents)
+do not forward the variable: anyone running the binaries that way must pass
+`-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
+the `phases` invocations.
+
+Production leaves the switch off until the row and guard cutovers are complete:
+with it on, served-table reads can return inconsistent membership or counts
+(see [`api-v1.md`](api-v1.md), the publication switch paragraph).
 
 ## Phase-runner configuration
 
@@ -703,7 +739,7 @@ phase-state reset, rerun the normal pipeline instead.
 ## Surviving services
 
 The API uses one `bigname_phase` request pool plus a reserved readiness
-connection. GraphQL, `/v1/status`, snapshot selection,
+connection. `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
 phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by

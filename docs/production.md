@@ -17,61 +17,33 @@ are:
   product, and diagnostic route families in
   [`api-v1-routes.md`](api-v1-routes.md).
 - REST lookup: `POST /v1/lookup` and its `OPTIONS` browser preflight.
-- GraphQL: `POST /graphql` and its `OPTIONS` browser preflight. This is an
-  unauthenticated first-party ENS Manager compatibility subset governed by the
-  [committed SDL fixture](../apps/api/src/tests/fixtures/subgraph_schema.graphql),
-  separate from the REST contract.
-
-Deploying a GraphQL schema change is coordinated with the Manager operation
-declarations described in
-[`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
-The compatibility CI job pins any known declaration-only mismatch exactly and
-validates the complete operation set against a temporary declaration overlay;
-that overlay is review evidence, not a substitute for updating Manager before
-the schema is deployed.
 
 The former documentation-helper matchers (`/`, `/docs`, `/docs/`,
 `/openapi.json`) and the removed `POST /v1/identity:lookup` matcher were
-dropped with the flip; those paths now fall through to the edge's `404`.
-
-The Manager endpoint precondition was checked on 2026-07-21. The deployed
-`https://app.ens.dev` application loaded the hashed
-[`index-CKsYDyP0.js`](https://app.ens.dev/assets/index-CKsYDyP0.js) browser
-bundle (SHA-256
-`f45dd907511ae05efdf0fffa84ad0f53edab2b8b4530caf5cb95af9bf43b886b`),
-which constructs its GraphQL client with the public
-`https://graphql.ens.dev` endpoint. That is direct browser-to-indexer topology,
-so the replacement endpoint must retain public `POST` and preflight access. A
-same-day `OPTIONS` request to that endpoint with `Origin:
-https://app.ens.dev`, requested method `POST`, and requested header
-`content-type` returned `204` with permissive CORS headers; the edge smoke below
-replays that real browser origin against the candidate edge. Recheck this
-evidence before cutover: if Manager moves behind a private or same-origin
-backend, the public GraphQL matcher can be removed. Otherwise the compatibility
-endpoint sunsets when Manager migrates to the `/v1` REST contract; retaining
-it beyond that point requires an explicit decision to support the SDL
-independently.
+dropped with the flip; those paths now fall through to the edge's `404`. The
+GraphQL matcher (`POST /graphql` and its preflight) was dropped when the GraphQL
+compatibility surface was removed (TYR-19); the API itself now answers
+`/graphql` like any unknown route, and the edge returns `404`.
 
 Requests outside these method and path matcher groups return `404` at the edge.
 In particular, Caddy does not expose `/healthz`; the compose probe reaches it
 at `127.0.0.1` inside the API container, while the process listens on its
 configured bind address (`0.0.0.0:3000` by default in compose). This narrows the
 helper allowlist introduced by #203 and prevents public traffic from competing
-for the health-specific concurrency ceiling.
-`GET /graphql` is also denied, so GraphiQL is not exposed. `/v2/*` is not
-served by the binary and not admitted by the edge. Phase-runner and
-PostgreSQL control surfaces are not routed through Caddy.
+for the health-specific concurrency ceiling. `/v2/*` is not served by the
+binary and not admitted by the edge. Phase-runner and PostgreSQL control
+surfaces are not routed through Caddy.
 
 ### Internal-only versus public URLs
 
 Not every URL the API process answers is a public one. Keep the two sets
 apart when writing runbooks, dashboards, or smoke checks:
 
-- Public (through Caddy): `GET`/`HEAD /v1/*`, `POST /v1/lookup`, and
-  `POST /graphql`, plus the two `OPTIONS` preflights. Diagnostics under
+- Public (through Caddy): `GET`/`HEAD /v1/*` and `POST /v1/lookup`, plus
+  its `OPTIONS` preflight. Diagnostics under
   `/v1/diagnostics/*` are part of the public read surface by design (ADR 0006).
 - Internal only (reachable on the API listener, never through Caddy):
-  `GET /healthz`, GraphiQL (`GET /graphql`), process metrics, and any
+  `GET /healthz`, process metrics, and any
   phase-runner or PostgreSQL control surface. Internal URLs are reached from
   inside the compose network (`api:3000`) or on the host loopback when
   `BIGNAME_API_HOST=127.0.0.1` publishes the port.
@@ -116,7 +88,7 @@ recommended starting point before the public edge is undrained.
 
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
-| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, GraphQL, status, and health route; returns `408 request_timeout`. |
+| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every v2 REST, status, and health route; returns `408 request_timeout`. |
 | `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to both API request pools. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |

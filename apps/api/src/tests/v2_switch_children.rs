@@ -48,12 +48,14 @@ fn child_registry_event(
 /// keyed by name, so dave stays listed. one.alpha.eth holds an ENSv1 edge of its own (erin), so
 /// its subname count is one. Published at 240.
 async fn seed_switch_children_fixture(database: &TestDatabase) -> Result<()> {
-    seed_switch_children_fixture_expiring(database, 1_900_000_000).await
+    seed_switch_children_fixture_expiring(database, 1_900_000_000, 1_900_000_000).await
 }
 
-/// The fixture with two.alpha.eth's registration expiring at `two_expiry` seconds.
+/// The fixture with one.alpha.eth's and two.alpha.eth's registrations expiring at `one_expiry`
+/// and `two_expiry` seconds.
 async fn seed_switch_children_fixture_expiring(
     database: &TestDatabase,
+    one_expiry: i64,
     two_expiry: i64,
 ) -> Result<()> {
     seed_bounded_membership_blocks(database, 240).await?;
@@ -182,7 +184,7 @@ async fn seed_switch_children_fixture_expiring(
                 CHILD_ALPHA_REGISTRY,
                 json!({"source_event": "RegistryCreated", "registry": CHILD_ALPHA_REGISTRY}),
             ),
-            registration("children-one", &one, 205, 1_900_000_000),
+            registration("children-one", &one, 205, one_expiry),
             registration("children-two", &two, 206, two_expiry),
             edge("children-erin", &one_node, "erin", 207, 0),
             switch_event(
@@ -319,5 +321,77 @@ async fn v2_registry_labels_are_the_same_with_the_switch_off_and_on() -> Result<
         &["children_current"],
     )
     .await?;
+    database.cleanup().await
+}
+
+// A family rebuild that begins after a route's fence passed, or a marker another build wrote,
+// leaves no servable publication: the child reads under the switch fail with
+// `FamilyPublicationUnavailable`, the error the API answers with the stale 409, never an empty
+// list read against a half-built family.
+#[tokio::test]
+async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_children_fixture(&database).await?;
+    let parent = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
+    let registry = CHILD_ALPHA_REGISTRY.to_ascii_lowercase();
+    for (label, update) in [
+        (
+            "a rebuild in flight",
+            "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+        ),
+        (
+            "another build's marker",
+            "UPDATE bigname_phase.project_family_marker
+             SET state = 'live', input_content_hash = 'another-build'",
+        ),
+    ] {
+        sqlx::query(update).execute(&database.pool).await?;
+        let pool = &database.pool;
+        let parent = &parent;
+        let registry = &registry;
+        bigname_storage::publication_source::with_serve_from_families(true, async move {
+            let unavailable = |read: &str, result: Result<(), anyhow::Error>| {
+                let error = result.expect_err(&format!("{label}: {read} must refuse"));
+                assert!(
+                    bigname_storage::families::name::is_publication_unavailable(&error),
+                    "{label}: {read}: {error:#}"
+                );
+            };
+            unavailable(
+                "subnames page",
+                bigname_storage::load_children_current_page_filtered(
+                    pool,
+                    parent,
+                    &bigname_storage::ChildrenCurrentPageFilter::default(),
+                    None,
+                    5,
+                )
+                .await
+                .map(drop),
+            );
+            unavailable(
+                "registry labels page",
+                bigname_storage::load_registry_children_current_page(
+                    pool, parent, registry, None, 5,
+                )
+                .await
+                .map(drop),
+            );
+            unavailable(
+                "registry label count",
+                bigname_storage::count_registry_children_current(pool, parent, registry)
+                    .await
+                    .map(drop),
+            );
+            unavailable(
+                "child counts",
+                bigname_storage::load_children_current_summaries(pool, &[parent.clone()])
+                    .await
+                    .map(drop),
+            );
+            anyhow::Ok(())
+        })
+        .await?;
+    }
     database.cleanup().await
 }

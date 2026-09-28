@@ -8,7 +8,8 @@
 //! The other shadow suites run the same comparison over their fixtures; the cases here reach
 //! the shapes they do not: the resolver block from the resource pointer (F5) and the registry
 //! node pointer (F4), a clear, the ownerless node's retained pointer and the ENSv2 root-registry
-//! TLD pointer as serving pointers, a root release withdrawing it, and `registration.created_at`.
+//! TLD pointer as serving pointers, a root release withdrawing it, `registration.created_at`, and an
+//! ENSv2 reservation deferring to the ENSv1 registration.
 #[path = "families_shadow_support/mod.rs"]
 mod shadow_support;
 #[path = "families_support/mod.rs"]
@@ -420,6 +421,52 @@ async fn created_at_is_the_first_event_time() -> Result<()> {
     assert_eq!(
         served(&fixture, 1, "/declared_summary/registration/created_at").await?,
         first
+    );
+    fixture.cleanup().await
+}
+
+/// A name live on ENSv1 whose ENSv2 label is only RESERVED (no ENSv2 binding, as a premigration
+/// reservation is observed): the reservation defers to the ENSv1 registration, which wins the arm
+/// (ADR 0007, "follow the chain"), so the composed row serves the ENSv1 lease, its registrant and
+/// its resolver.
+#[tokio::test]
+async fn an_ensv2_reservation_defers_to_the_ensv1_registration() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_names_v2_reserved", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    pointer(&fixture, 11, 1, V1_REGISTRY, Some(&lease), RESOLVER).await?;
+    fixture
+        .write(
+            12,
+            1,
+            "RegistrationReserved",
+            V2_REGISTRY,
+            Some(&name(1)),
+            None,
+            json!({"status": "reserved"}),
+            REGISTRY,
+        )
+        .await?;
+    publish_and_compare(&fixture, 13).await?;
+    assert_eq!(
+        (
+            served(&fixture, 1, "/provenance/authority_selection/authority_arm").await?,
+            served(
+                &fixture,
+                1,
+                "/provenance/authority_selection/lifecycle_state"
+            )
+            .await?,
+        ),
+        (json!("ens_v1"), json!("registered"))
+    );
+    assert_eq!(
+        (
+            served(&fixture, 1, "/declared_summary/registration/status").await?,
+            served(&fixture, 1, "/declared_summary/registration/registrant").await?,
+            served(&fixture, 1, "/declared_summary/resolver/address").await?,
+        ),
+        (json!("active"), json!(OWNER), json!(RESOLVER))
     );
     fixture.cleanup().await
 }

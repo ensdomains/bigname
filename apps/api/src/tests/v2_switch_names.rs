@@ -9,6 +9,13 @@ const SWITCH_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
 /// alpha.eth granted at 201, pointed at a resolver at 202 and renewed at 203; beta.eth granted
 /// at 204 and pointed at the same resolver at 205; both published at 240.
 async fn seed_switch_names_fixture(database: &TestDatabase) -> Result<()> {
+    seed_switch_names_events(database).await?;
+    publish_project_and_families(database, 240).await
+}
+
+/// The events of `seed_switch_names_fixture`, unpublished. Returns alpha.eth's name id, node and
+/// resource.
+async fn seed_switch_names_events(database: &TestDatabase) -> Result<(String, String, Uuid)> {
     seed_bounded_membership_blocks(database, 240).await?;
     let (alpha, alpha_resource) = seed_switch_name(database, "alpha.eth", 0x5a1_0000, "ens_v1").await?;
     let (beta, beta_resource) = seed_switch_name(database, "beta.eth", 0x5b1_0000, "ens_v1").await?;
@@ -72,7 +79,7 @@ async fn seed_switch_names_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-    publish_project_and_families(database, 240).await
+    Ok((alpha, alpha_node, alpha_resource))
 }
 
 #[tokio::test]
@@ -221,12 +228,10 @@ async fn v2_search_is_the_same_with_the_switch_off_and_on() -> Result<()> {
 }
 
 
-#[tokio::test]
-async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    // The route's resolver overview still reads the served resolver row (its move is packet E5),
-    // which Project writes only for a declared resolver: seed one at the publication.
+/// The route's resolver overview still reads the served resolver row (its move is packet E5),
+/// which Project writes only for a declared resolver: seeds one for `SWITCH_RESOLVER` at the
+/// switch fixture's publication.
+async fn seed_switch_resolver_current(database: &TestDatabase) -> Result<()> {
     sqlx::query(
         "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
              declared_summary, support_status, chain_positions, canonicality_summary,
@@ -242,6 +247,14 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
     .bind(SWITCH_RESOLVER)
     .execute(&database.pool)
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
     let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let pages = assert_switch_differential_pages_in(&database, &uri, "/data/bound_names").await?;
     let names: Vec<&Value> = pages
@@ -268,5 +281,346 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
         &["name_current"],
     )
     .await?;
+    database.cleanup().await
+}
+
+// The composed listings walk candidates in batches of at least 200, which a fixture of two names
+// never fills; the test-only seam shrinks the batch so every page below straddles one (the
+// storage-level comparison with cursors is apps/phase-runner/tests/families_shadow_name_batches.rs).
+#[tokio::test]
+async fn v2_name_listings_are_the_same_across_candidate_batches() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
+             declared_summary, support_status, chain_positions, canonicality_summary,
+             manifest_version)
+         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
+                jsonb_build_object('target_block_number', lineage.block_number,
+                                   'target_block_hash', lineage.block_hash),
+                jsonb_build_object('state', 'canonical_lineage'), 1
+         FROM bigname_phase.chain_lineage lineage
+         WHERE lineage.chain_id = $1 AND lineage.block_number = 240",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_RESOLVER)
+    .execute(&database.pool)
+    .await?;
+    let after = switch_timestamp(1_700_000_000)?;
+    let before = switch_timestamp(1_960_000_000)?;
+    for batch in [1, 2] {
+        for uri in [
+            "/v1/search?q=eth&match=contains&page_size=1".to_owned(),
+            "/v1/search?q=a&match=prefix&page_size=1".to_owned(),
+            format!(
+                "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
+                 &order=asc&page_size=1"
+            ),
+            format!(
+                "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
+                 &order=desc&page_size=1"
+            ),
+        ] {
+            let pages = bigname_storage::families::name::seams::with_batch_size(
+                batch,
+                assert_switch_differential_pages(&database, &uri),
+            )
+            .await?;
+            assert!(
+                pages.iter().any(|page| page["data"].as_array().is_some_and(|rows| !rows.is_empty())),
+                "{uri}: {pages:#?}"
+            );
+        }
+        let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+        let pages = bigname_storage::families::name::seams::with_batch_size(
+            batch,
+            assert_switch_differential_pages_in(&database, &uri, "/data/bound_names"),
+        )
+        .await?;
+        assert_eq!(pages.len(), 2, "{pages:#?}");
+    }
+    database.cleanup().await
+}
+
+const SWITCH_BOB: &str = "0x0000000000000000000000000000000000000b0b";
+const SWITCH_REGISTRY: &str = "0x00000000000000000000000000000000000000f1";
+
+/// `seed_switch_names_fixture` with the rows the routes that read composed name rows beside
+/// their own served pages need: a child `sub.alpha.eth` under alpha.eth (an ENSv1 NewOwner edge
+/// at 206), a resolver role granted to bob on alpha.eth's resource at 207, an address record of
+/// alpha.eth resolving to alice at 208, and the resolver's served row the resolver routes read.
+async fn seed_switch_routes_fixture(database: &TestDatabase) -> Result<()> {
+    let (_, alpha_node, alpha_resource) = seed_switch_names_events(database).await?;
+    let (sub, _) = seed_switch_name(database, "sub.alpha.eth", 0x5c1_0000, "ens_v1").await?;
+    let sub_node = sub.strip_prefix("ens:").expect("ens id").to_owned();
+    let mut edge = switch_event(
+        "switch-sub-edge",
+        None,
+        None,
+        "SubregistryChanged",
+        "ens_v1_registry_l1",
+        206,
+        0,
+        json!({"source_event": "NewOwner", "node": alpha_node, "child_node": sub_node,
+               "labelhash": labelhash_for_display_name("sub.alpha.eth"),
+               "owner": SWITCH_ALICE}),
+    );
+    edge.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    let mut role = switch_event(
+        "switch-alpha-role",
+        None,
+        Some(alpha_resource),
+        "PermissionChanged",
+        "ens_v2_resolver_l1",
+        207,
+        0,
+        json!({
+            "subject": SWITCH_BOB,
+            "scope": {"kind": "resolver", "chain_id": SWITCH_CHAIN,
+                      "resolver_address": SWITCH_RESOLVER},
+            "effective_powers": ["set_text"],
+            "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged",
+                "upstream_resource": alpha_node, "root_resource": false,
+                "changed_powers": ["set_text"]},
+            "revocation_source": null,
+            "inheritance_path": [], "transfer_behavior": {},
+            "source_event": "EACRolesChanged", "upstream_resource": alpha_node,
+            "resource": alpha_node, "root_resource": false,
+            "storage_model": "resolver_record_id", "resolver": SWITCH_RESOLVER,
+            "resolver_record_id": "0", "record_key": "permission",
+        }),
+    );
+    role.derivation_kind = "ens_v2_permissions".to_owned();
+    role.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
+    // The resolver is declared, so Project indexes its address records.
+    let payload = json!({"deployment_epoch": "fixture", "contracts": [{
+        "role": "resolver", "address": SWITCH_RESOLVER, "proxy_kind": "none",
+        "start_block": 0, "read_features": []
+    }]});
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO bigname_phase.manifest_versions (manifest_version, namespace,
+             source_family, chain_id, deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v1_resolver_l1', $1, 'fixture', 'active', 'fixture',
+                 'fixture/switch-resolver.toml', $2)
+         RETURNING manifest_id",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(&payload)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.normalized_events (event_identity, namespace, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('switch-manifest', 'ens', 'SourceManifestUpdated', 'ens_v1_resolver_l1', 1,
+                 $1, $2, 'manifest_sync', 'canonical', $3)",
+    )
+    .bind(manifest_id)
+    .bind(SWITCH_CHAIN)
+    .bind(json!({"rollout_status": "active", "normalizer_version": "fixture",
+                 "manifest_payload": payload}))
+    .execute(&database.pool)
+    .await?;
+    let mut record = switch_event(
+        "switch-alpha-addr",
+        None,
+        None,
+        "RecordChanged",
+        "ens_v1_resolver_l1",
+        208,
+        0,
+        json!({"source_event": "AddressChanged", "node": alpha_node,
+               "resolver": SWITCH_RESOLVER, "record_key": "addr:60", "record_family": "addr",
+               "selector_key": "60", "value": SWITCH_ALICE}),
+    );
+    record.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
+    record.source_manifest_id = Some(manifest_id);
+    record.manifest_version = 1;
+    record.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    // An ENSv2 subregistry of alpha.eth at `SWITCH_REGISTRY` registering `two.alpha.eth` at
+    // 209, so the registry's labels list a child.
+    let registry_instance = Uuid::from_u128(0x5d1_0000);
+    sqlx::query(
+        "INSERT INTO bigname_phase.contract_instances (contract_instance_id, chain_id,
+             contract_kind)
+         VALUES ($1, $2, 'contract')",
+    )
+    .bind(registry_instance)
+    .bind(SWITCH_CHAIN)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.contract_instance_addresses (contract_instance_id, chain_id,
+             address, active_from_block_number)
+         VALUES ($1, $2, $3, 200)",
+    )
+    .bind(registry_instance)
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_REGISTRY)
+    .execute(&database.pool)
+    .await?;
+    let (two, _) = seed_switch_name(database, "two.alpha.eth", 0x5e1_0000, "ens_v2").await?;
+    let labels: Vec<String> = ["two", "alpha", "eth"]
+        .iter()
+        .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+        .collect();
+    sqlx::query("UPDATE bigname_phase.name_surfaces SET labelhashes = $2 WHERE logical_name_id = $1")
+        .bind(&two)
+        .bind(&labels)
+        .execute(&database.pool)
+        .await?;
+    let alpha_id = format!("ens:{alpha_node}");
+    let mut subregistry = switch_event(
+        "switch-alpha-subregistry",
+        Some(&alpha_id),
+        None,
+        "SubregistryChanged",
+        "ens_v2_registry_l1",
+        209,
+        0,
+        json!({"subregistry": SWITCH_REGISTRY}),
+    );
+    subregistry.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    subregistry.raw_fact_ref["emitting_address"] = json!("0x00000000000000000000000000000000000000e3");
+    let mut child = switch_event(
+        "switch-two-granted",
+        Some(&two),
+        None,
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        209,
+        1,
+        json!({"registry_contract_instance_id": registry_instance.to_string(),
+               "status": "registered", "registrant": SWITCH_BOB,
+               "expiry": 1_990_000_000i64, "authority_kind": "registrar"}),
+    );
+    child.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    child.raw_fact_ref["emitting_address"] = json!(SWITCH_REGISTRY);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[edge, role, record, subregistry, child],
+    )
+    .await?;
+    publish_project_and_families(database, 240).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
+             declared_summary, support_status, chain_positions, canonicality_summary,
+             manifest_version)
+         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
+                jsonb_build_object('target_block_number', lineage.block_number,
+                                   'target_block_hash', lineage.block_hash),
+                jsonb_build_object('state', 'canonical_lineage'), 1
+         FROM bigname_phase.chain_lineage lineage
+         WHERE lineage.chain_id = $1 AND lineage.block_number = 240
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_RESOLVER)
+    .execute(&database.pool)
+    .await?;
+    // The roles route lists grants only for a resolver whose served summary supports them.
+    sqlx::query(
+        "UPDATE bigname_phase.resolver_current
+         SET declared_summary = declared_summary
+             || '{\"role_holders\": {\"status\": \"supported\"}}'::jsonb
+         WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_RESOLVER)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
+// The routes whose own pages stay on the served tables this slice but whose name rows come from
+// the three switched loaders (`load_name_current`, `load_name_current_by_logical_name_ids`,
+// `load_current_names_by_resource_ids`): each answers the same body with the switch off and on,
+// `meta.as_of` excepted, and each lists at least one row, so the name rows are really read.
+#[tokio::test]
+async fn v2_routes_with_composed_name_rows_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_routes_fixture(&database).await?;
+    for (uri, rows) in [
+        // Parent row, then child rows (sub.alpha.eth by an ENSv1 edge, two.alpha.eth by the
+        // ENSv2 subregistry).
+        ("/v1/names/alpha.eth/subnames".to_owned(), "/data"),
+        ("/v1/names/alpha.eth/history".to_owned(), "/data"),
+        ("/v1/permissions?name=alpha.eth".to_owned(), "/data"),
+        (format!("/v1/resolvers/1/{SWITCH_RESOLVER}/roles"), "/data"),
+        (format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens"), "/data"),
+        (
+            format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&relation=resolves_to&coin_type=60"),
+            "/data",
+        ),
+        (format!("/v1/registries/1/{SWITCH_REGISTRY}/labels"), "/data"),
+        ("/v1/events?name=alpha.eth".to_owned(), "/data"),
+        (format!("/v1/events?address={SWITCH_ALICE}"), "/data"),
+        ("/v1/diagnostics/events?name=alpha.eth".to_owned(), "/data"),
+        (format!("/v1/addresses/{SWITCH_ALICE}/history"), "/data"),
+    ] {
+        let (status, body) = assert_switch_differential(&database, &uri).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
+        assert!(
+            body.pointer(rows)
+                .and_then(Value::as_array)
+                .is_some_and(|rows| !rows.is_empty()),
+            "{uri}: no rows in {body:#}"
+        );
+    }
+    let (_, subnames) = assert_switch_differential(&database, "/v1/names/alpha.eth/subnames").await?;
+    assert_eq!(
+        subnames["data"].as_array().map(Vec::len),
+        Some(2),
+        "{subnames:#}"
+    );
+    for uri in [
+        "/v1/names/alpha.eth/subnames".to_owned(),
+        format!("/v1/registries/1/{SWITCH_REGISTRY}/labels"),
+        format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens"),
+    ] {
+        assert_switch_on_ignores_served_tables(&database, &uri, &["name_current"]).await?;
+    }
+    database.cleanup().await
+}
+
+// A family rebuild in flight (the marker `bootstrap_pending`) leaves the families half built, so
+// no composed row is servable: every route whose name rows are composed answers a stale 409 with
+// the switch on, with its fence's wording when the fence refuses first (the collection routes
+// say the collection publication is not available) and with the name wording when the composed
+// read refuses.
+#[tokio::test]
+async fn v2_composed_name_reads_answer_409_while_the_families_rebuild() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+        .execute(&database.pool)
+        .await?;
+    let mut messages = Vec::new();
+    for uri in [
+        "/v1/names/alpha.eth",
+        "/v1/names/alpha.eth/history",
+        "/v1/names/alpha.eth/subnames",
+        "/v1/permissions?name=alpha.eth",
+    ] {
+        let response = bigname_storage::publication_source::with_serve_from_families(
+            true,
+            v2_get_response(&database, uri),
+        )
+        .await?;
+        let status = response.status();
+        let body: Value = read_json(response).await?;
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (StatusCode::CONFLICT, &json!("stale")),
+            "{uri}: {body:#}"
+        );
+        messages.push((uri, body["error"]["message"].clone()));
+    }
+    assert_eq!(
+        messages[0].1,
+        json!("requested snapshot is not available for name"),
+        "{messages:#?}"
+    );
     database.cleanup().await
 }

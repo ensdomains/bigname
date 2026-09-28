@@ -33,7 +33,9 @@ pub use children_page::{
     FamilyChildRow, FamilyChildrenPage, count_children_shadow, load_children_shadow_page,
     load_registry_children_shadow_page,
 };
-pub(crate) use children_page::{count as count_children_on, page as children_page_on};
+pub(crate) use children_page::{
+    count as count_children_on, page as children_page_on, require_publication,
+};
 pub use collections::{
     FamilyCollectionPage, load_resolver_aliases_shadow, load_resolver_links_shadow,
     load_resolver_roles_shadow,

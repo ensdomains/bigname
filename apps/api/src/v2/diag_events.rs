@@ -127,10 +127,13 @@ pub(crate) async fn get_diagnostic_events(
         &logical_name_ids,
     )
     .await
-    .map_err(|error| {
-        tracing::error!(error = ?error, "failed to load diagnostic event names from phase projections");
-        V2Error::internal_error("failed to load diagnostic events")
-    })?;
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::DiagnosticData,
+        |error| {
+            tracing::error!(error = ?error, "failed to load diagnostic event names from phase projections");
+            V2Error::internal_error("failed to load diagnostic events")
+        },
+    ))?;
     let data = storage_page
         .rows
         .iter()

@@ -157,11 +157,12 @@ pub async fn load_registry_nodes(
     let mut conn = pool
         .acquire()
         .await
-        .context("failed to acquire a connection")?;
+        .context("failed to acquire a connection for registry node states")?;
     load_registry_nodes_on(&mut conn, chain_id, keys).await
 }
 
-/// [`load_registry_nodes`] on one connection.
+/// [`load_registry_nodes`] on one connection, so a caller's transaction reads both statements
+/// in its snapshot.
 pub async fn load_registry_nodes_on(
     conn: &mut PgConnection,
     chain_id: &str,

@@ -18,6 +18,7 @@ use sqlx::{
 use crate::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
     ChildrenCurrentSort, ChildrenCurrentSortValue, address_names::escape_like_pattern,
+    families::name::FamilyPublicationUnavailable,
 };
 
 use super::{
@@ -122,6 +123,38 @@ pub async fn count_children_shadow(
         .await
         .context("failed to close the count snapshot")?;
     Ok(counts)
+}
+
+/// Fails with [`FamilyPublicationUnavailable`] when a surface of one of `parent_logical_name_ids`
+/// is on a chain whose family marker is not servable (missing, not `live`, or written by another
+/// build): the marker rule of the composed name reads (families/name/batch.rs `publication`),
+/// so a child read under the switch answers the stale 409 instead of an empty list while a
+/// rebuild populates the families. Run it in the caller's snapshot, before the reads.
+pub(crate) async fn require_publication(
+    conn: &mut PgConnection,
+    parent_logical_name_ids: &[String],
+) -> Result<()> {
+    let unavailable: Option<String> = sqlx::query_scalar(
+        "/* storage:families.topology.children_publication */
+         SELECT surface.chain_id FROM bigname_phase.name_surfaces surface
+         WHERE surface.logical_name_id = ANY($1)
+           AND NOT EXISTS (
+               SELECT 1 FROM bigname_phase.project_family_marker marker
+               WHERE marker.chain_id = surface.chain_id AND marker.state = 'live'
+                 AND marker.input_content_hash = $2
+                 AND marker.current_block_number IS NOT NULL)
+         ORDER BY surface.chain_id
+         LIMIT 1",
+    )
+    .bind(parent_logical_name_ids)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("failed to check the child family publication")?;
+    match unavailable {
+        Some(chain_id) => Err(FamilyPublicationUnavailable { chain_id }.into()),
+        None => Ok(()),
+    }
 }
 
 /// The exact unfiltered child count of one parent, or of the labels its registry `registry`

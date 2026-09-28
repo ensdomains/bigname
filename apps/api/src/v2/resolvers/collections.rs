@@ -102,7 +102,9 @@ async fn collection(
     let generations =
         crate::v2::lookup::head::load_selected_project_generations(&state.pool, &selected).await?;
     let token = encode_at_token(&selected);
-    let generation = serde_json::to_string(&generations).expect("generation map serializes");
+    let generation = crate::v2::support::publication_source_tagged(
+        serde_json::to_string(&generations).expect("generation map serializes"),
+    );
     let key = if let Some(cursor) = &cursor {
         if cursor.snapshot.as_ref() != Some(&token) {
             return Err(V2Error::invalid_input("cursor snapshot does not match at"));

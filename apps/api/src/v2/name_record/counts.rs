@@ -63,7 +63,10 @@ pub(super) async fn load_name_counts(
         std::slice::from_ref(&row.logical_name_id),
     )
     .await
-    .map_err(|_| V2Error::internal_error("failed to load subname counts"))?
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error("failed to load subname counts"),
+    ))?
     .into_iter()
     .next()
     .and_then(|summary| u64::try_from(summary.child_count).ok())

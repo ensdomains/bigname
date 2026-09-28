@@ -1,8 +1,10 @@
 //! The declared child reads under the publication switch (`serve_from_families`, TYR-36 step 7b
 //! slice 2b): the subnames page, the registry labels page and count, and the per-parent child
 //! counts, read from the family child relation (`families::topology`) with the children's name
-//! summaries, in the served readers' shapes. Every read that takes more than one statement runs
-//! in one read-only repeatable-read snapshot.
+//! summaries, in the served readers' shapes. Every read runs in one read-only repeatable-read
+//! snapshot that first checks the parents' chains have a servable family marker
+//! ([`require_publication`]): without one the read fails with `FamilyPublicationUnavailable`,
+//! which the API answers with the stale 409.
 //!
 //! A family child row carries the wire fields only: the provenance, chain positions,
 //! canonicality summary, manifest version and recompute time `children_current` stamps are not
@@ -11,7 +13,10 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction, types::time::OffsetDateTime};
 
-use crate::families::topology::{FamilyChildRow, children_page_on, count_children_on};
+use crate::families::{
+    name::read_snapshot,
+    topology::{FamilyChildRow, children_page_on, count_children_on, require_publication},
+};
 
 use super::{
     DECLARED_SURFACE_CLASS,
@@ -21,16 +26,21 @@ use super::{
     },
 };
 
-async fn snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open the children snapshot")?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .context("failed to fix the children snapshot")?;
+/// The snapshot a child read runs in, once its parents' publication is checked.
+async fn snapshot(
+    pool: &PgPool,
+    parent_logical_name_ids: &[String],
+) -> Result<Transaction<'static, Postgres>> {
+    let mut transaction = read_snapshot(pool).await?;
+    require_publication(&mut transaction, parent_logical_name_ids).await?;
     Ok(transaction)
+}
+
+async fn close(transaction: Transaction<'static, Postgres>) -> Result<()> {
+    transaction
+        .commit()
+        .await
+        .context("failed to close the children snapshot")
 }
 
 pub(super) async fn page(
@@ -40,7 +50,7 @@ pub(super) async fn page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<ChildrenCurrentPage> {
-    let mut transaction = snapshot(pool).await?;
+    let mut transaction = snapshot(pool, &[parent_logical_name_id.to_owned()]).await?;
     let page = children_page_on(
         &mut transaction,
         parent_logical_name_id,
@@ -55,10 +65,7 @@ pub(super) async fn page(
     } else {
         count_children_on(&mut transaction, parent_logical_name_id, None).await?
     };
-    transaction
-        .commit()
-        .await
-        .context("failed to close the children snapshot")?;
+    close(transaction).await?;
     Ok(ChildrenCurrentPage {
         total_count: page.total_count,
         rows: page.rows.into_iter().map(row).collect(),
@@ -75,12 +82,9 @@ pub(super) async fn registry_page(
     page_size: u64,
 ) -> Result<RegistryChildrenPage> {
     let registry = registry_address.to_ascii_lowercase();
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection")?;
+    let mut transaction = snapshot(pool, &[parent_logical_name_id.to_owned()]).await?;
     let page = children_page_on(
-        &mut conn,
+        &mut transaction,
         parent_logical_name_id,
         &ChildrenCurrentPageFilter::default(),
         Some(&registry),
@@ -88,6 +92,7 @@ pub(super) async fn registry_page(
         page_size,
     )
     .await?;
+    close(transaction).await?;
     Ok(RegistryChildrenPage {
         rows: page.rows.into_iter().map(row).collect(),
         next_cursor: page.next_cursor,
@@ -101,11 +106,10 @@ pub(super) async fn registry_count(
     registry_address: &str,
 ) -> Result<i64> {
     let registry = registry_address.to_ascii_lowercase();
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection")?;
-    let count = count_children_on(&mut conn, parent_logical_name_id, Some(&registry)).await?;
+    let mut transaction = snapshot(pool, &[parent_logical_name_id.to_owned()]).await?;
+    let count =
+        count_children_on(&mut transaction, parent_logical_name_id, Some(&registry)).await?;
+    close(transaction).await?;
     i64::try_from(count).context("registry label count overflow")
 }
 
@@ -113,16 +117,13 @@ pub(super) async fn summaries(
     pool: &PgPool,
     parent_logical_name_ids: &[String],
 ) -> Result<Vec<ChildrenCurrentSummary>> {
-    let mut transaction = snapshot(pool).await?;
+    let mut transaction = snapshot(pool, parent_logical_name_ids).await?;
     let mut out = Vec::with_capacity(parent_logical_name_ids.len());
     for parent in parent_logical_name_ids {
         let count = count_children_on(&mut transaction, parent, None).await?;
         out.push(summary(parent, count)?);
     }
-    transaction
-        .commit()
-        .await
-        .context("failed to close the children snapshot")?;
+    close(transaction).await?;
     Ok(out)
 }
 

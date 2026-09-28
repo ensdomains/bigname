@@ -1557,15 +1557,6 @@ Solidity-registry emitter stored as its own owner as zero for control selection.
 words that fail the existing masked-address check have no getter-visible owner.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
 
-<a id="graphql-claimed-compatibility-surface"></a> **GraphQL claimed compatibility surface** — exact schema paths and response cases promised compatible with a pin.
-
-<a id="graphql-dispositioned-remainder"></a> **GraphQL dispositioned remainder** — differences outside the claim, owned as deferred work or extensions.
-
-<a id="graphql-upstream-census"></a> **GraphQL upstream census** — one deployment's captured schema roots, types,
-fields, arguments, enums, interfaces, unions, and directive definitions, without claiming complete implementation.
-Directive repeatability is excluded at the [GraphQL compatibility oracle's schema-comparison
-boundary](graphql-compatibility-oracle.md#schema-comparison).
-
 ## Hash-pinned
 
 anchored to an exact block hash rather than a block number or
@@ -2302,9 +2293,7 @@ replay](storage.md#interpretation-replay).
 
 the current set of chain positions whose matching Project
 publication has completed and remains eligible for public reads. It is not the
-latest block reported by a provider. A GraphQL HTTP request selects this set
-once for all of its root fields and rechecks the Project publication before
-returning data.
+latest block reported by a provider.
 
 <a id="serving-resource"></a>
 **Serving resource** — the typed `resource_id` reference used to select resolver and record data
@@ -2556,12 +2545,14 @@ last block read. A block, range or undo applies only against the generation it
 planned from.
 
 While the [publication switch](#publication-switch) is on, the marker is also
-what the API serves from: snapshot selection, the verified lookup's admission
-and `/v1/status`'s generation check accept a chain's publication only while its
-marker is `live` (never `bootstrap_pending`, the state of a rebuild still
-populating the families), belongs to this build's interpreter, sits on readable
-lineage and trails the stored head by at most one block, and the marker's
-`sequence` is the served generation a same-request recheck compares.
+what the API serves from: snapshot selection and the verified lookup's
+admission accept a chain's publication only while its marker is `live` (never
+`bootstrap_pending`, the state of a rebuild still populating the families),
+belongs to this build's interpreter, sits on readable lineage and trails the
+stored head by at most one block, and the marker's `sequence` is the served
+generation a same-request recheck compares. `/v1/status` is mixed-source until
+the flip: its generation check applies the same rule to the marker, while its
+projected block and Project phase state still come from the Project row.
 
 ## Publication switch
 
@@ -2586,7 +2577,9 @@ name's binding candidates, its registration and control, NameWrapper state,
 serving pointer and resolver, history heads and coverage. It describes the
 [family marker](#family-marker)'s publication. With the
 [publication switch](#publication-switch) on, the names group serves these rows
-([API](api-v1.md#tier-2-product-reads)). The name comparison of the
+and every route that joins name rows takes them from here
+([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
+block, and none is served while the marker is not `live` for this build. The name comparison of the
 fixture-corpus harness checks every composed row against the served row.
 
 ## Name summary

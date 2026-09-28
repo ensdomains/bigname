@@ -111,12 +111,15 @@ pub(crate) async fn get_subnames(
     .await?;
     let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
         .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to load subnames for {}/{}",
-                namespace, normalized.normalized_name
-            ))
-        })?
+        .map_err(super::name_rows_error(
+            super::SnapshotReadResource::Name,
+            |_| {
+                V2Error::internal_error(format!(
+                    "failed to load subnames for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            },
+        ))?
         .ok_or_else(|| {
             V2Error::not_found(format!(
                 "name {} was not found in namespace {namespace}",
@@ -159,12 +162,15 @@ pub(crate) async fn get_subnames(
         params.page_size,
     )
     .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load subnames for {}/{}",
-            namespace, normalized.normalized_name
-        ))
-    })?;
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::Name,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load subnames for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        },
+    ))?;
 
     let child_logical_name_ids = storage_page
         .rows
@@ -176,21 +182,27 @@ pub(crate) async fn get_subnames(
         &child_logical_name_ids,
     )
     .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load subname registration summaries for {}/{}",
-            namespace, normalized.normalized_name
-        ))
-    })?;
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::Name,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load subname registration summaries for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        },
+    ))?;
     let child_summaries = if include_counts {
         bigname_storage::load_children_current_summaries(&state.pool, &child_logical_name_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load subname counts for {}/{}",
-                    namespace, normalized.normalized_name
-                ))
-            })?
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Name,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load subname counts for {}/{}",
+                        namespace, normalized.normalized_name
+                    ))
+                },
+            ))?
             .into_iter()
             .map(|summary| (summary.parent_logical_name_id.clone(), summary))
             .collect()

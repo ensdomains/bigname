@@ -105,7 +105,10 @@ pub(super) async fn ensure_project_at_head(
 /// The family marker's admission while the publication switch is on. The generation the lookup
 /// records (`row_xmin`) stays the Project row's `xmin`: the database guard
 /// `revalidate_resolution_lookup_state` rechecks it against `chain_phase_state`, and moving it to
-/// the marker's `sequence` needs that guard redefined by a schema-migration.
+/// the marker's `sequence` needs that guard redefined by a schema-migration. The lookup engine
+/// keeps reading the served tables, and that guard moves to the marker in the flip slice; no
+/// lookup input moves to the families before that, so the Project row's `xmin` still covers
+/// every input the lookup reads.
 const FAMILY_MARKER_ADMISSION: &str = r#"
         JOIN project_family_marker marker
           ON marker.chain_id = project.chain_id

@@ -247,23 +247,49 @@ async fn v2_collection_expiry_clock_is_the_published_block_time_with_the_switch_
 }
 
 /// With the switch on the subnames page reads the child families (TYR-36 step 7b slice 2b), so
-/// the fixture is built by Project and the families from events: two.alpha.eth expires after the
-/// published block's time but before the request time, live at the publication and expired by
-/// the wall clock.
+/// the fixture is built by Project and the families from events (`v2_switch_children.rs`).
+/// two.alpha.eth expires after the published block's time but before the request time: live at
+/// the publication, expired by the wall clock. one.alpha.eth expired before the published block:
+/// expired by either clock. carol and dave are ENSv1 edges with no registration, never expired.
+const TWO_EXPIRY: i64 = 1_750_000_000;
+const ONE_EXPIRY: i64 = 1_600_000_000;
+
 #[tokio::test]
 async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_block_time()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture_expiring(&database, 1_750_000_000).await?;
-    let filtered = "/v1/names/alpha.eth/subnames?include_expired=false&page_size=1";
+    seed_switch_children_fixture_expiring(&database, ONE_EXPIRY, TWO_EXPIRY).await?;
 
+    // Pin the fixture's clocks, so the assertions below mean what the names say.
+    let published: Vec<i64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM block_timestamp)::bigint
+         FROM bigname_phase.project_family_marker",
+    )
+    .fetch_all(&database.pool)
+    .await?;
+    let [published] = published[..] else {
+        anyhow::bail!("expected one family marker, found {}", published.len());
+    };
+    assert!(
+        ONE_EXPIRY < published
+            && published < TWO_EXPIRY
+            && TWO_EXPIRY < sqlx::types::time::OffsetDateTime::now_utc().unix_timestamp(),
+        "fixture: one's expiry < publication ({published}) < two's expiry < now"
+    );
+
+    let filtered = "/v1/names/alpha.eth/subnames?include_expired=false&page_size=1";
     bigname_storage::publication_source::with_serve_from_families(true, async {
         let mut names = Vec::new();
         let mut uri = filtered.to_owned();
         loop {
             let payload = v2_subnames_payload_for_database(&database, &uri).await?;
-            assert_eq!(payload["page"]["total_count"], json!(4), "{uri}");
-            names.extend(v2_subname_names(&payload));
+            assert_eq!(payload["page"]["total_count"], json!(3), "{uri}");
+            let page = v2_subname_names(&payload);
+            assert!(
+                !page.iter().any(|name| name == "one.alpha.eth"),
+                "{uri}: one expired before the published block"
+            );
+            names.extend(page);
             let Some(cursor) = payload["page"]["next_cursor"].as_str() else {
                 break;
             };
@@ -271,8 +297,19 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
         }
         assert_eq!(
             names,
-            vec!["carol.alpha.eth", "dave.alpha.eth", "one.alpha.eth", "two.alpha.eth"],
+            vec!["carol.alpha.eth", "dave.alpha.eth", "two.alpha.eth"],
             "two expires after the published block, so every page keeps it"
+        );
+        let unfiltered = v2_subnames_payload_for_database(
+            &database,
+            "/v1/names/alpha.eth/subnames?include_expired=true",
+        )
+        .await?;
+        assert!(
+            v2_subname_names(&unfiltered)
+                .iter()
+                .any(|name| name == "one.alpha.eth"),
+            "one is a child; only the expiry filter drops it"
         );
         anyhow::Ok(())
     })
@@ -286,8 +323,8 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
         .await?;
         assert_eq!(
             v2_subname_names(&payload),
-            vec!["carol.alpha.eth", "dave.alpha.eth", "one.alpha.eth"],
-            "switch off: two has expired by the request time"
+            vec!["carol.alpha.eth", "dave.alpha.eth"],
+            "switch off: two has expired by the request time, one long before"
         );
         anyhow::Ok(())
     })
@@ -317,59 +354,209 @@ async fn api_preflight_requires_the_family_marker_only_with_the_switch_on() -> R
     database.cleanup().await
 }
 
-/// Flipping the switch changes the generation a cursor's publication token is built from (the
-/// Project row's `xmin` or the marker's `sequence`), so an outstanding continuation is refused
-/// once with a restart in either direction; a fresh first page then paginates normally.
+/// Sets each family marker's `sequence` to its chain's Project row `xmin`, with both publications
+/// at the same position, so the two generations are the same string and only the publication
+/// source tells them apart. Asserts that precondition.
+async fn collide_marker_sequence_with_project_xmin(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.project_family_marker marker
+         SET sequence = project.xmin::text::bigint
+         FROM bigname_phase.chain_phase_state project
+         WHERE project.chain_id = marker.chain_id
+           AND project.phase_name = 'project'
+           AND project.current_block_number = marker.current_block_number
+           AND project.current_block_hash = marker.current_block_hash",
+    )
+    .execute(pool)
+    .await?;
+    let markers: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT chain_id, current_block_number, current_block_hash
+         FROM bigname_phase.project_family_marker",
+    )
+    .fetch_all(pool)
+    .await?;
+    anyhow::ensure!(!markers.is_empty(), "the fixture has a family marker");
+    for (chain_id, number, hash) in markers {
+        let generation = |on| {
+            bigname_storage::publication_source::with_serve_from_families(
+                on,
+                bigname_storage::load_served_project_generation(
+                    pool, &chain_id, number, &hash, true, true,
+                ),
+            )
+        };
+        let (families, project) = (generation(true).await?, generation(false).await?);
+        assert!(families.is_some(), "{chain_id}: the marker is servable");
+        assert_eq!(families, project, "{chain_id}: the generations collide");
+    }
+    Ok(())
+}
+
+/// A continuation issued with the switch at `issued` and continued with it at `continued` is
+/// refused with a restart, and stays refused on a second attempt; a fresh first page then
+/// paginates normally. `next` reads a page's continuation.
+async fn assert_flip_restarts(
+    database: &TestDatabase,
+    first_page: &str,
+    next: impl Fn(&Value) -> Option<String>,
+    (issued, continued): (bool, bool),
+) -> Result<()> {
+    let label = format!("{first_page}: issued with the switch {issued}, continued with it {continued}");
+    let page = bigname_storage::publication_source::with_serve_from_families(
+        issued,
+        v2_resolver_payload_for_database(database, first_page),
+    )
+    .await?;
+    let cursor = next(&page).context("the first page has a continuation")?;
+    bigname_storage::publication_source::with_serve_from_families(continued, async {
+        for attempt in ["first", "second"] {
+            let response = v2_resolver_response_for_database(
+                database,
+                &format!("{first_page}&cursor={cursor}"),
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}, {attempt} attempt");
+            let body: Value = read_json(response).await?;
+            assert_eq!(body["error"]["code"], json!("stale"), "{label}");
+            assert_eq!(body["error"]["message"], json!(RESTART_WITHOUT_CURSOR), "{label}");
+        }
+        let restarted = v2_resolver_payload_for_database(database, first_page).await?;
+        let cursor = next(&restarted).context("the restarted first page has a continuation")?;
+        v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={cursor}"))
+            .await?;
+        anyhow::Ok(())
+    })
+    .await
+}
+
+const SWITCH_FLIPS: [(bool, bool); 2] = [(false, true), (true, false)];
+
+fn collection_next_cursor(payload: &Value) -> Option<String> {
+    payload["page"]["next_cursor"].as_str().map(str::to_owned)
+}
+
+fn overview_next_cursor(payload: &Value) -> Option<String> {
+    payload["data"]["bound_names"]["page"]["next_cursor"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Flipping the switch changes the publication source a publication-bound cursor is tagged with,
+/// so an outstanding continuation is refused with a restart in either direction even when the
+/// Project row's `xmin` and the marker's `sequence` are the same number at the same position.
 #[tokio::test]
-async fn v2_a_cursor_restarts_once_when_the_switch_flips_either_way() -> Result<()> {
+async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     // The subnames page reads the child families with the switch on, so both publications are
     // built from events.
     seed_switch_children_fixture(&database).await?;
-    let first_page = "/v1/names/alpha.eth/subnames?page_size=1";
-    let next_cursor = |payload: &Value| {
-        payload["page"]["next_cursor"]
-            .as_str()
-            .map(str::to_owned)
-            .context("the first page has a continuation")
-    };
-
-    for (issued, continued) in [(false, true), (true, false)] {
-        let label = format!("issued with the switch {issued}, continued with it {continued}");
-        let cursor = bigname_storage::publication_source::with_serve_from_families(
-            issued,
-            v2_subnames_payload_for_database(&database, first_page),
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(
+            &database,
+            "/v1/names/alpha.eth/subnames?page_size=1",
+            collection_next_cursor,
+            flip,
         )
-        .await?;
-        let cursor = next_cursor(&cursor)?;
-
-        bigname_storage::publication_source::with_serve_from_families(continued, async {
-            let response = v2_subnames_response_for_database(
-                &database,
-                &format!("{first_page}&cursor={cursor}"),
-            )
-            .await?;
-            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
-            let body: Value = read_json(response).await?;
-            assert_eq!(body["error"]["code"], json!("stale"), "{label}");
-            assert_eq!(
-                body["error"]["message"],
-                json!(
-                    "collection publication is no longer available; restart pagination without \
-                     a cursor"
-                ),
-                "{label}"
-            );
-
-            let restarted = v2_subnames_payload_for_database(&database, first_page).await?;
-            let cursor = next_cursor(&restarted)?;
-            v2_subnames_payload_for_database(&database, &format!("{first_page}&cursor={cursor}"))
-                .await?;
-            anyhow::Ok(())
-        })
         .await?;
     }
     database.cleanup().await
+}
+
+/// The resolver overview's bound-names cursor carries the resolver generation beside the
+/// publication token; each is tagged with the publication source on its own. The second half
+/// splices the continuing mode's publication token into the flipped cursor, so only the
+/// resolver generation can refuse it. With the switch on the bound names are composed from the
+/// owned key families, so the fixture publishes both the served tables and the families from the
+/// same events (`seed_switch_names_fixture`), giving a second page in either mode.
+#[tokio::test]
+async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(&database, &base, overview_next_cursor, flip).await?;
+        assert_generation_alone_restarts(
+            &database,
+            &base,
+            overview_next_cursor,
+            "resolver_generation",
+            "resolver publication changed; restart pagination",
+            flip,
+        )
+        .await?;
+    }
+    database.cleanup().await
+}
+
+/// The resolver `/roles`, `/links` and `/aliases` cursors carry their own generation map beside
+/// the publication token, tagged the same way.
+#[tokio::test]
+async fn v2_a_resolver_collection_cursor_restarts_when_the_switch_flips_either_way() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_roles_pages(&database).await?;
+    seed_live_family_marker(&database.pool, 1).await?;
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(&database, &base, collection_next_cursor, flip).await?;
+        assert_generation_alone_restarts(
+            &database,
+            &base,
+            collection_next_cursor,
+            "generation",
+            "resolver collection changed; restart pagination",
+            flip,
+        )
+        .await?;
+    }
+    database.cleanup().await
+}
+
+/// Issues a continuation with the switch at `issued`, replaces its publication token with the
+/// one a first page issues with the switch at `continued`, and continues it there: the
+/// generation named `field` is then the only binding left to refuse it.
+async fn assert_generation_alone_restarts(
+    database: &TestDatabase,
+    first_page: &str,
+    next: impl Fn(&Value) -> Option<String>,
+    field: &str,
+    message: &str,
+    (issued, continued): (bool, bool),
+) -> Result<()> {
+    let label = format!("{first_page} {field}: issued with the switch {issued}, continued with it {continued}");
+    let page = bigname_storage::publication_source::with_serve_from_families(
+        issued,
+        v2_resolver_payload_for_database(database, first_page),
+    )
+    .await?;
+    let flipped = crate::v2::decode(&next(&page).context("a continuation")?)
+        .expect("the issued cursor decodes");
+    assert!(flipped.last_item.contains_key(field), "{label}: the cursor binds {field}");
+    bigname_storage::publication_source::with_serve_from_families(continued, async {
+        let fresh = v2_resolver_payload_for_database(database, first_page).await?;
+        let fresh = next(&fresh).context("a continuation")?;
+        let publication = crate::v2::decode(&fresh).expect("the fresh cursor decodes").last_item
+            ["publication"]
+            .clone();
+        let mut spliced = flipped.clone();
+        spliced.last_item.insert("publication".to_owned(), publication);
+        let response = v2_resolver_response_for_database(
+            database,
+            &format!("{first_page}&cursor={}", crate::v2::encode(&spliced)),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["message"], json!(message), "{label}");
+        v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={fresh}"))
+            .await?;
+        anyhow::Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

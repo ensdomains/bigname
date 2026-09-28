@@ -2,7 +2,7 @@
 //! per-name fields the child and label lists filter, sort and count by inside one statement,
 //! which the lists cannot compose at read for every child of a parent. The family step writes
 //! them for the names each block touches, from the same composition as the composed name row
-//! (`batch.rs`), so the rules have one copy. Each field but `zero_owner` is the one the served
+//! (`batch.rs`, `load_chain`), so the rules have one copy. Each field but `zero_owner` is the one the served
 //! lists read from the name's `name_current` row:
 //!
 //! - `authority_arm`: `provenance.authority_selection.authority_arm`, the child's selected arm
@@ -33,7 +33,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{CoverageShape, FamilyPublication, batch::compose_chain, loaders::surfaces};
+use super::{CoverageShape, FamilyPublication, batch::load_chain, loaders::surfaces};
 use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
@@ -50,13 +50,16 @@ pub async fn compose_name_summaries(
     if logical_name_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let surfaces = surfaces(
-        &mut *conn,
-        logical_name_ids,
-        Some((&publication.chain_id, publication.block_number)),
-    )
-    .await?;
-    let composed = compose_chain(
+    // The block's own surfaces and every earlier one; the marker has not moved to it yet.
+    let surfaces: Vec<_> = surfaces(&mut *conn, logical_name_ids)
+        .await?
+        .into_iter()
+        .filter(|surface| {
+            surface.chain_id == publication.chain_id
+                && surface.block_number <= publication.block_number
+        })
+        .collect();
+    let composed = load_chain(
         &mut *conn,
         publication,
         &surfaces,

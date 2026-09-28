@@ -6,6 +6,12 @@
 -- key family and the next family run rebuilds them. An empty schema-migration
 -- database has no phase baseline yet, so this migration is a no-op there and
 -- phase-runner init-schema installs the same table.
+--
+-- Apply it before BIGNAME_SERVE_FROM_FAMILIES is ever turned on: the reset
+-- deletes the family marker, so with the switch on every fenced route answers
+-- 409 stale until the family rebuild finishes. It takes no marker lock, so a
+-- family run in flight when it applies fails once on the missing marker and
+-- the next run rebuilds the families.
 DO $migration$
 BEGIN
 IF to_regclass('bigname_phase.name_current') IS NULL THEN

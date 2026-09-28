@@ -15,7 +15,7 @@ use crate::families::control::{
     position::{EventOrder, Position},
     registry::load_registry_nodes_on,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
-    wrapper::load_wrapper_rows_on,
+    wrapper::load_wrapper_rows,
 };
 
 async fn json_rows(
@@ -69,11 +69,12 @@ pub async fn load_name_facts(
     let mut conn = pool
         .acquire()
         .await
-        .context("failed to acquire a connection")?;
+        .context("failed to acquire a connection for the lifecycle facts")?;
     load_name_facts_on(&mut conn, chain_id, names).await
 }
 
-/// [`load_name_facts`] on one connection, which may be a transaction's.
+/// [`load_name_facts`] on one connection, so a caller's transaction reads every statement in
+/// its snapshot (the composed name reader, `families::name`).
 pub async fn load_name_facts_on(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -240,7 +241,7 @@ pub async fn load_name_facts_on(
     .filter_map(BindingCandidate::from_row)
     .collect();
 
-    let wrappers = load_wrapper_rows_on(&mut *conn, chain_id, &resource_list).await?;
+    let wrappers = load_wrapper_rows(&mut *conn, chain_id, &resource_list).await?;
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)

@@ -237,14 +237,19 @@ pub(crate) async fn get_address_names(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let name_rows =
-        bigname_storage::load_name_current_by_logical_name_ids(&state.pool, &logical_name_ids)
-            .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name registration summaries for {normalized_address}"
-                ))
-            })?;
+    let name_rows = bigname_storage::load_name_current_by_logical_name_ids(
+        &state.pool,
+        &logical_name_ids,
+    )
+    .await
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::Resource,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load address-name registration summaries for {normalized_address}"
+            ))
+        },
+    ))?;
     let migrated_logical_name_ids = name_rows
         .values()
         .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
@@ -304,11 +309,14 @@ pub(crate) async fn get_address_names(
     let subname_counts_by_name = if include.counts {
         bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name subname counts for {normalized_address}"
-                ))
-            })?
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Resource,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load address-name subname counts for {normalized_address}"
+                    ))
+                },
+            ))?
             .into_iter()
             .map(|summary| {
                 (

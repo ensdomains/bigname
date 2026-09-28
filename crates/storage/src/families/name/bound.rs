@@ -11,13 +11,16 @@
 //! (`BOUND_NAME_PREDICATES`), so the rows a batch admits are final and the walk stops once the
 //! page is full.
 //!
+//! A page is read in one snapshot (`batch::read_snapshot`).
+//!
 //! Interim: the serving-only capability gate still reads the resolver's served row
 //! (`resolver_current.declared_summary.bindings.status`), as the route's resolver overview does;
 //! both move with the resolver reads (packet E5).
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
+use super::{CoverageShape, batch};
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
     name_current::{COMPOSED_NC_COLUMNS, DEFAULT_NAME_CURRENT_LINEAGE_JOINS},
@@ -48,11 +51,16 @@ pub async fn load_family_bound_names(
         })
         .transpose()?;
     let wanted = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
-    let batch = limit.saturating_add(1).saturating_mul(4).max(BATCH_FLOOR);
+    let batch = i64::try_from(super::seams::batch_size(
+        usize::try_from(limit.saturating_add(1).saturating_mul(4).max(BATCH_FLOOR))
+            .unwrap_or(usize::MAX),
+    ))
+    .unwrap_or(i64::MAX);
+    let mut snapshot = batch::read_snapshot(pool).await?;
     let mut out = Vec::new();
     while out.len() < wanted {
         let candidates = candidates(
-            pool,
+            &mut snapshot,
             (chain_id, resolver_address, namespace),
             after.as_ref(),
             batch,
@@ -64,10 +72,17 @@ pub async fn load_family_bound_names(
         };
         after = Some((name.clone(), space.clone(), hash.clone()));
         let ids: Vec<String> = candidates.into_iter().map(|(id, ..)| id).collect();
-        let mut composed = super::load_family_names_by_logical_name_ids(pool, &ids).await?;
+        let mut composed = batch::load(&mut snapshot, &ids, CoverageShape::Plain).await?;
         let source = Value::Array(composed.values().map(super::list::source_row).collect());
         let remaining = i64::try_from(wanted - out.len()).unwrap_or(i64::MAX);
-        for id in admitted(pool, (chain_id, resolver_address), &source, remaining).await? {
+        for id in admitted(
+            &mut snapshot,
+            (chain_id, resolver_address),
+            &source,
+            remaining,
+        )
+        .await?
+        {
             out.push(
                 composed
                     .remove(&id)
@@ -78,13 +93,14 @@ pub async fn load_family_bound_names(
             break;
         }
     }
+    snapshot.commit().await?;
     Ok(out)
 }
 
 /// The next names after `after` in the page order that a pointer naming the resolver reaches:
 /// (logical_name_id, raw_name, namespace, namehash).
 async fn candidates(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     after: Option<&(String, String, String)>,
     limit: i64,
@@ -136,7 +152,7 @@ async fn candidates(
     .bind(after.map(|(_, namespace, _)| namespace.as_str()))
     .bind(after.map(|(.., namehash)| namehash.as_str()))
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .with_context(|| {
         format!("failed to walk the bound-name candidates of {chain_id}:{resolver_address}")
@@ -156,7 +172,7 @@ async fn candidates(
 /// The ids of the composed rows in `source` the served predicates admit, in page order, at most
 /// `limit`.
 async fn admitted(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     (chain_id, resolver_address): (&str, &str),
     source: &Value,
     limit: i64,
@@ -186,7 +202,7 @@ async fn admitted(
         .bind(resolver_address)
         .bind(source)
         .bind(limit)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .with_context(|| {
             format!("failed to filter the composed bound names of {chain_id}:{resolver_address}")

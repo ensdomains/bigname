@@ -28,33 +28,10 @@ artifact.
 
 The binary serves this contract under `/v1`; the old v1 REST surface was
 deleted before this contract took over the prefix (#315), and no `/v2` prefix
-is served. The production edge admits `/v1` reads, `POST /v1/lookup`, and
-GraphQL; see [`production.md`](production.md#public-edge) for the edge policy.
-
-## GraphQL compatibility
-
-`POST /graphql` is governed by
-[`consumer-capabilities.md` § GraphQL compatibility](consumer-capabilities.md#graphql-compatibility),
-including its generated-style roots, local extensions, and explicit unsupported
-behavior. This document does not define a second GraphQL contract.
-
-The generated `Domain_filter` serves the complete upstream ID and name operator
-families with conjunctive semantics, direct comparison against the served
-`Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
-pattern operators. Raw-name comparisons and name ordering use expression-local
-PostgreSQL `COLLATE "C"`; canonical fixed-width namehash operands use the
-database-collation index, while noncanonical ID ranges retain C semantics on a
-linear path. Pattern input retains SQL `%`, `_`, and backslash semantics. For
-the generated ID/name families, explicit null equality is
-distinct from omission, while explicit null on the other operators is rejected.
-Generated order ties use the Domain ID in the requested direction. The generated
-`Domain_orderBy` exposes only the exact values listed
-in the capability contract. The legacy `DomainFilter` behavior and local
-`registrationDate` ordering remain separate extensions.
-Graph Node generates these ID and String operator families (upstream:
-.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173), and the
-pinned ENS subgraph declares `Domain.id` as `ID!` and `Domain.name` as `String`
-(upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @ ens_subgraph@723f1b6).
+is served. The production edge admits `/v1` reads and `POST /v1/lookup`; see
+[`production.md`](production.md#public-edge) for the edge policy. The former
+`POST /graphql` compatibility surface has been removed and answers like any
+unknown route.
 
 ## Naming Dictionary
 
@@ -754,7 +731,11 @@ for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
 publication has the stored head's exact block hash. With the
 [publication switch](glossary.md#publication-switch) on, those last two checks
-read the [family marker](glossary.md#family-marker), which must also be `live`.
+read the [family marker](glossary.md#family-marker), which must also pass the
+rest of the serving fence: `live`, on readable lineage, and at most one block
+behind the stored head. Status is mixed-source until the flip: the projected
+block, its timestamp and the Project phase state still come from the project
+row.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -881,8 +862,12 @@ at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
 for equality, so nothing changes on the wire, except that turning the switch on
-or off makes every continuation cursor issued before the change return
-`409 stale` once, asking the client to restart pagination without the cursor.
+or off makes publication-bound current-state continuation cursors (history
+cursors carry no publication token) issued before the change return
+`409 stale`, asking the client to restart pagination without the cursor. Such a
+cursor stays rejected until the client restarts pagination. The API tags these
+cursors with the publication source, so this holds even when the project row's
+version and the marker's `sequence` happen to be the same number.
 Until the later step 7b slices move a route's rows onto the families, that
 route still reads the served tables while the switch is on. The served rows are
 committed before the family marker moves, so a served batch that lands between
@@ -891,25 +876,54 @@ and the check that refuses a read when the publication changed while the
 request was being read does not refuse it. The per-row snapshot checks still
 refuse any row newer than the selected position.
 
+So with the switch on, served-table reads can return inconsistent membership or
+counts despite those per-row target checks, which only drop rows newer than the
+selected position and cannot restore rows or counts from the publication a read
+started on. Production leaves the switch off until the row and guard cutovers
+are complete.
+
 With the switch on, collection expiry filters, such as `include_expired=false`
 on subnames, are evaluated at the published block's timestamp on the first page
 and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
-its post-call guard still compares the project row's generation.
+its post-call guard still compares the project row's generation. The lookup
+engine keeps reading the served tables, and its database guard moves to the
+marker in the flip slice; no lookup input moves to the families before that.
 
-With the switch on, name detail (`GET /v1/names/{name}` and the name
+With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
+instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
 diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
-resolver's bound names read [composed name rows](glossary.md#composed-name-row)
-instead of `name_current`, as does every other route that loads name rows
-through the same storage reads. Their bodies are meant to be identical to the
-served ones. A composed row describes the publication and has no older position
-of its own, so an `at` below the publication answers `409 stale` with "requested
-snapshot is not available for name", the answer served rows give once Project
-has republished them. A composed row does not yet carry the declared resolution
-topology (`declared_summary.topology`), which the records route's verified
-lookup admission and avatar readback read; that moves with the record
-inventories.
+resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
+whole. The following routes keep their own pages on the served tables until a
+later step 7b slice moves them, and take only the name rows they join from
+composed rows: `GET /v1/names/{name}/history` (whether the name exists),
+`GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
+name of each registration), `GET /v1/addresses/{address}/names` (each name's
+registration, `relation=resolves_to` included), `GET /v1/events`,
+`GET /v1/diagnostics/events` and `GET /v1/addresses/{address}/history` (each
+event's name), and the primary-name claim gate of
+`GET /v1/addresses/{address}/primary-name`. Their bodies are meant to be
+identical to the served ones. Each composed read sees one committed family
+block, so a row never mixes two blocks. A composed row describes the publication
+and has no older position of its own, so an `at` below the publication answers
+`409 stale` with "requested snapshot is not available for name", the answer
+served rows give once Project has republished them. While a family rebuild is
+in flight (the marker is not `live`, or carries another build's hash) no
+composed row is served: a route whose fence has not already refused answers
+`409 stale` with "requested snapshot is not available for" its resource.
+
+Two differences remain with the switch on. A bound-name listing still decides
+whether the resolver serves bound names at all from the served resolver row
+(`resolver_current`'s bindings status); that gate moves with the resolver
+reads. And after an ENSv1 registry `Transfer` to the zero address leaves a
+name's registry node ownerless, the served name row keeps its earlier state
+(unsupported, so unlisted) until Project next rebuilds the served tables, while
+the composed row reads the node at once (unregistered but projected), so
+`GET /v1/search` can list with the switch on a name it omits with the switch
+off. A composed row also does not yet carry the declared resolution topology
+(`declared_summary.topology`), which the records route's verified lookup
+admission and avatar readback read; that moves with the record inventories.
 
 With the switch on, `GET /v1/names/{name}/subnames` (with and without
 `include=counts`), `GET /v1/registries/{chain_id}/{address}/labels` and the
@@ -918,8 +932,11 @@ registry's `counts.labels` read the child edge families instead of
 transfer, registration status and times from the stored [name
 summary](glossary.md#name-summary), evaluated against the family marker's
 block. Every per-name child count (`subname_count` under `include=counts`, and
-a name's subname count) is an exact count over the same relation. The bodies
-are meant to be identical to the served ones.
+a name's subname count) is an exact count over the same relation. The parent
+and each child's registration come from composed rows. The bodies are meant to
+be identical to the served ones. Each child read sees one committed family
+block, and with no servable marker (a rebuild in flight, or another build's
+hash) it answers `409 stale` like the composed reads, never an empty list.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
@@ -1162,8 +1179,8 @@ shape. Diagnostics and
 Project use the internal status `success` for a retained value; product routes
 publish that status as `ok`.
 
-The exact-name detail route, resolver-records route, `profile=detail` lookup, and
-GraphQL resolver address fields flatten both projected `{encoding,bytes}`
+The exact-name detail route, resolver-records route, and `profile=detail` lookup
+flatten both projected `{encoding,bytes}`
 address values and projected scalar address values to the same scalar hex
 string. The supported internal shapes therefore do not create a second public
 multicoin-address shape.
