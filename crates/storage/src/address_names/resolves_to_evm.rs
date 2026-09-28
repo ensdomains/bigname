@@ -83,28 +83,8 @@ pub async fn load_address_records_current_evm_page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentEvmPage> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::records::load_family_resolves_to_evm_page(
-            pool, address, namespaces, dedupe_by, q, authority, sort, order, cursor, page_size,
-        )
-        .await;
-    }
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection for an evm address_records_current page")?;
-    load_address_records_evm_page_from(
-        &mut conn,
-        RowSource::Served,
-        address,
-        namespaces,
-        dedupe_by,
-        q,
-        authority,
-        sort,
-        order,
-        cursor,
-        page_size,
+    crate::families::records::load_family_resolves_to_evm_page(
+        pool, address, namespaces, dedupe_by, q, authority, sort, order, cursor, page_size,
     )
     .await
 }

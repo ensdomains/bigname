@@ -93,9 +93,6 @@ pub(crate) const FAMILY_RESOLVER_SERVED_ROWS: &str =
 /// `declared_summary -> 'classification'` and `provenance ->> 'manifest_id'`. Only those columns
 /// may be read through it.
 pub(crate) fn resolver_classification_relation() -> String {
-    if !crate::publication_source::serve_from_families() {
-        return "bigname_phase.resolver_current".to_owned();
-    }
     format!(
         "(SELECT classification_row.chain_id, classification_row.resolver_address,
                  classification_row.support_status,

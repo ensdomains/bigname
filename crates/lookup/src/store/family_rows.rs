@@ -117,8 +117,5 @@ pub(super) async fn publication(
             head.chain_id
         ))
     })?;
-    Ok(CapturedPublication {
-        project: json!({}),
-        family: Some(family),
-    })
+    Ok(CapturedPublication { family })
 }

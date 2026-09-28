@@ -73,62 +73,14 @@ pub async fn load_children_current_page_filtered(
         ),
     };
 
-    if crate::publication_source::serve_from_families() {
-        return super::families::page(
-            pool,
-            parent_logical_name_id,
-            filter,
-            cursor,
-            requested_page_size,
-        )
-        .await;
-    }
-    let mut builder = QueryBuilder::<Postgres>::new("WITH children AS (");
-    push_children_cte(&mut builder, parent_logical_name_id, filter, expiry_clock);
-    builder.push(") SELECT * FROM children WHERE TRUE");
-    if let Some(cursor) = cursor {
-        push_cursor_after(&mut builder, filter.order, cursor);
-    }
-    push_order(&mut builder, filter.sort, filter.order);
-    builder.push(" LIMIT ");
-    builder.push_bind(limit);
-
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load phase children_current page for {parent_logical_name_id} sort {} order {} q {:?} include_expired {}",
-                sort_name(filter.sort),
-                order_name(filter.order),
-                filter.q,
-                filter.include_expired
-            )
-        })?
-        .into_iter()
-        .map(decode_sorted_row)
-        .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
-        cursor_from_sorted_row(row, filter.sort)
-    });
-    let rows = rows.into_iter().map(|row| row.row).collect();
-    let summary = load_children_current_summary(pool, parent_logical_name_id).await?;
-    let total_count = if filter.admits_every_child() {
-        u64::try_from(summary.child_count).context("negative child count")?
-    } else {
-        let mut count = QueryBuilder::<Postgres>::new("WITH children AS (");
-        push_children_cte(&mut count, parent_logical_name_id, filter, expiry_clock);
-        count.push(") SELECT COUNT(*)::BIGINT FROM children");
-        u64::try_from(count.build_query_scalar::<i64>().fetch_one(pool).await?)
-            .context("negative filtered child count")?
-    };
-    Ok(ChildrenCurrentPage {
-        total_count,
-        rows,
-        next_cursor,
-        summary,
-    })
+    super::families::page(
+        pool,
+        parent_logical_name_id,
+        filter,
+        cursor,
+        requested_page_size,
+    )
+    .await
 }
 
 /// `expiry_clock` is `Some` exactly when the page omits expired children.

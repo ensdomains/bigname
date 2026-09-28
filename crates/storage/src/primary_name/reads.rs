@@ -88,13 +88,8 @@ pub async fn load_primary_name_current_snapshot(
     namespace: &str,
     coin_type: &str,
 ) -> Result<Option<PrimaryNameCurrentSnapshot>> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::records::load_family_primary_name_snapshot(
-            pool, address, namespace, coin_type,
-        )
-        .await;
-    }
-    load_served_primary_name_current_snapshot(pool, address, namespace, coin_type).await
+    crate::families::records::load_family_primary_name_snapshot(pool, address, namespace, coin_type)
+        .await
 }
 
 /// [`load_primary_name_current_snapshot`] from `primary_names_current` whatever the switch says,
@@ -138,11 +133,7 @@ pub async fn load_primary_name_current_snapshots(
     address: &str,
     keys: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), PrimaryNameCurrentSnapshot>> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::records::load_family_primary_name_snapshots(pool, address, keys)
-            .await;
-    }
-    load_served_primary_name_current_snapshots(pool, address, keys).await
+    crate::families::records::load_family_primary_name_snapshots(pool, address, keys).await
 }
 
 /// [`load_primary_name_current_snapshots`] from `primary_names_current` whatever the switch says,

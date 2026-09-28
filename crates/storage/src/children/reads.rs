@@ -110,70 +110,14 @@ pub async fn load_registry_children_current_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<RegistryChildrenPage> {
-    if crate::publication_source::serve_from_families() {
-        return super::families::registry_page(
-            pool,
-            parent_logical_name_id,
-            registry_address,
-            cursor,
-            page_size,
-        )
-        .await;
-    }
-    let registry_address = registry_address.to_ascii_lowercase();
-    let limit = checked_page_limit_i64(
+    super::families::registry_page(
+        pool,
+        parent_logical_name_id,
+        registry_address,
+        cursor,
         page_size,
-        "children_current page_size must be positive",
-        "children_current page_size is too large",
-    )?;
-    let page_size = checked_page_size_usize(
-        page_size,
-        "children_current page_size must be positive",
-        "children_current page_size does not fit in usize",
-    )?;
-    let mut builder = QueryBuilder::<Postgres>::new(child_select());
-    builder.push(DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS);
-    builder.push(" WHERE cc.parent_logical_name_id = ");
-    builder.push_bind(parent_logical_name_id);
-    builder.push(" AND cc.surface_class = ");
-    builder.push_bind(DECLARED_SURFACE_CLASS);
-    builder.push(DEFAULT_CHILDREN_CURRENT_READ_FILTER);
-    builder.push(REGISTRY_CHILD_FILTER);
-    builder.push_bind(&registry_address);
-    if let Some(cursor) = cursor {
-        builder.push(format!(
-            " AND ({CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id) > ("
-        ));
-        builder.push_bind(&cursor.canonical_display_name);
-        builder.push(", ");
-        builder.push_bind(&cursor.child_logical_name_id);
-        builder.push(")");
-    }
-    builder.push(format!(
-        " ORDER BY {CHILD_DISPLAY_NAME_EXPR}, cc.child_logical_name_id LIMIT "
-    ));
-    builder.push_bind(limit);
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .context("failed to load phase registry children_current page")?
-        .into_iter()
-        .map(decode_children_current_row)
-        .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) =
-        split_keyset_page(rows, page_size, |row| ChildrenCurrentKeysetCursor {
-            sort_value: ChildrenCurrentSortValue::Name,
-            canonical_display_name: row.canonical_display_name.clone(),
-            child_logical_name_id: row.child_logical_name_id.clone(),
-        });
-    let label_count =
-        count_registry_children_current(pool, parent_logical_name_id, &registry_address).await?;
-    Ok(RegistryChildrenPage {
-        rows,
-        next_cursor,
-        label_count,
-    })
+    )
+    .await
 }
 
 /// Exact count of the declared children of `parent_logical_name_id` whose ENSv2 registration
@@ -183,27 +127,7 @@ pub async fn count_registry_children_current(
     parent_logical_name_id: &str,
     registry_address: &str,
 ) -> Result<i64> {
-    if crate::publication_source::serve_from_families() {
-        return super::families::registry_count(pool, parent_logical_name_id, registry_address)
-            .await;
-    }
-    sqlx::query_scalar::<_, i64>(&format!(
-        r#"
-        SELECT count(*)::bigint
-        FROM bigname_phase.children_current cc
-        {DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS}
-        WHERE cc.parent_logical_name_id = $1
-          AND cc.surface_class = $2
-        {DEFAULT_CHILDREN_CURRENT_READ_FILTER}
-        {REGISTRY_CHILD_FILTER} $3
-        "#
-    ))
-    .bind(parent_logical_name_id)
-    .bind(DECLARED_SURFACE_CLASS)
-    .bind(registry_address.to_ascii_lowercase())
-    .fetch_one(pool)
-    .await
-    .context("failed to count phase registry children_current rows")
+    super::families::registry_count(pool, parent_logical_name_id, registry_address).await
 }
 
 pub async fn load_children_current_summaries(
@@ -213,54 +137,8 @@ pub async fn load_children_current_summaries(
     if parent_logical_name_ids.is_empty() {
         return Ok(Vec::new());
     }
-    if crate::publication_source::serve_from_families() {
-        return super::families::summaries(pool, parent_logical_name_ids).await;
-    }
-    // The summary annotates the page, so it has to admit exactly the rows the page admits —
-    // including the projection-target lineage fence that fails closed on an orphaned target whose
-    // identity anchors are still canonical. The aggregate order below is internal and covers every
-    // readable child, not the page: do not pair these arrays with page rows by index.
-    let rows = sqlx::query(&format!(
-        r#"
-        WITH requested AS (
-            SELECT parent_logical_name_id, ordinal
-            FROM unnest($1::text[]) WITH ORDINALITY
-              AS input(parent_logical_name_id, ordinal)
-        ),
-        readable_children AS (
-            SELECT cc.*
-            FROM bigname_phase.children_current cc
-            {DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS}
-            WHERE cc.surface_class = $2
-            {DEFAULT_CHILDREN_CURRENT_READ_FILTER}
-        )
-        SELECT requested.parent_logical_name_id,
-               COUNT(cc.child_logical_name_id)::bigint AS child_count,
-               COALESCE(jsonb_agg(cc.provenance ORDER BY cc.raw_name, cc.child_logical_name_id)
-                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
-                    AS provenance_inputs,
-               COALESCE(jsonb_agg(cc.chain_positions ORDER BY cc.raw_name, cc.child_logical_name_id)
-                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
-                    AS chain_positions,
-               COALESCE(jsonb_agg(cc.canonicality_summary ORDER BY cc.raw_name, cc.child_logical_name_id)
-                        FILTER (WHERE cc.child_logical_name_id IS NOT NULL), '[]'::jsonb)
-                    AS canonicality_summaries,
-               MAX(cc.last_recomputed_at) AS last_recomputed_at
-        FROM requested
-        LEFT JOIN readable_children cc
-          ON cc.parent_logical_name_id = requested.parent_logical_name_id
-        GROUP BY requested.ordinal, requested.parent_logical_name_id
-        ORDER BY requested.ordinal
-        "#
-    ))
-    .bind(parent_logical_name_ids)
-    .bind(DECLARED_SURFACE_CLASS)
-    .fetch_all(pool)
-    .await
-    .context("failed to load phase children_current summaries")?;
-    rows.into_iter()
-        .map(decode_children_current_summary)
-        .collect()
+
+    super::families::summaries(pool, parent_logical_name_ids).await
 }
 
 pub(super) async fn load_children_current_summary(

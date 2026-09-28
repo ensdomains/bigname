@@ -28,12 +28,10 @@ pub const PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS: i64 = 1;
 /// family marker's with it on, so an operator reading it during a family rebuild looks at the
 /// marker.
 pub(super) fn unpublished_message(chain_id: &str) -> String {
-    if crate::publication_source::serve_from_families() {
+    {
         format!(
             "chain {chain_id} owned key families are not published at its current schema-v2 head"
         )
-    } else {
-        format!("chain {chain_id} project phase is not published at its current schema-v2 head")
     }
 }
 
@@ -50,11 +48,7 @@ pub(super) async fn load_current_project_publication(
     pool: &PgPool,
     chain_id: &str,
 ) -> SnapshotSelectionResult<Option<ProjectPublication>> {
-    let sql = if crate::publication_source::serve_from_families() {
-        CURRENT_FAMILY_MARKER_PUBLICATION
-    } else {
-        CURRENT_PROJECT_ROW_PUBLICATION
-    };
+    let sql = { CURRENT_FAMILY_MARKER_PUBLICATION };
     let row: Option<(i64, String)> = sqlx::query_as(sql)
         .bind(chain_id)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
@@ -136,11 +130,7 @@ pub async fn load_served_project_generation(
     require_position_is_publication: bool,
     require_interpret_not_redo: bool,
 ) -> Result<Option<String>, sqlx::Error> {
-    let sql = if crate::publication_source::serve_from_families() {
-        SERVED_FAMILY_MARKER_GENERATION
-    } else {
-        SERVED_PROJECT_ROW_GENERATION
-    };
+    let sql = { SERVED_FAMILY_MARKER_GENERATION };
     sqlx::query_scalar::<_, String>(sql)
         .bind(chain_id)
         .bind(block_number)

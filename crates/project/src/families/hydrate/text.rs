@@ -16,7 +16,8 @@ use super::super::{
     tables,
 };
 use super::ETHEREUM;
-use crate::{ProjectError, Result, hydration::text::TEXT_RESOLVERS};
+use super::admission::TEXT_RESOLVERS;
+use crate::{ProjectError, Result};
 
 pub(super) struct Candidate {
     key: Row,

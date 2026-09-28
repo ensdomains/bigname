@@ -24,40 +24,7 @@ pub async fn load_name_current_for_snapshot(
     logical_name_id: &str,
     selected_chain_positions: &ChainPositions,
 ) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
-    if crate::publication_source::serve_from_families() {
-        return family_name_for_snapshot(pool, logical_name_id, selected_chain_positions).await;
-    }
-    let row = load_name_current(pool, logical_name_id)
-        .await
-        .map_err(|error| {
-            SnapshotSelectionError::internal(format!(
-                "failed to load name_current row for logical_name_id {logical_name_id}: {error}"
-            ))
-        })?;
-
-    let Some(row) = row else {
-        return Ok(SnapshotProjectionRead::NotFound);
-    };
-
-    match ensure_projection_chain_positions_match(
-        "name_current",
-        &row.chain_positions,
-        selected_chain_positions,
-    ) {
-        Ok(()) => {}
-        Err(error) => {
-            if !name_current_projection_covers_selected_snapshot(
-                pool,
-                &row,
-                selected_chain_positions,
-            )
-            .await?
-            {
-                return Err(error);
-            }
-        }
-    }
-    Ok(SnapshotProjectionRead::Found(row))
+    family_name_for_snapshot(pool, logical_name_id, selected_chain_positions).await
 }
 
 async fn family_name_for_snapshot(

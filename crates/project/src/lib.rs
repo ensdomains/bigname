@@ -1,26 +1,14 @@
-//! Schema-v2 current-state projection derivation and atomic publication.
+//! Schema-v2 block-by-block current-state projection and atomic family publication.
 
-mod builders;
-mod engine;
 mod error;
 pub mod families;
-mod hydration;
-mod integrity;
-#[cfg(test)]
-mod profile;
-mod publish;
-#[cfg(test)]
-mod reference;
-mod resolver_address;
-mod scope;
-mod stage;
-mod steps;
 
-pub use builders::child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
-pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode, WriteSummary};
 pub use error::{ErrorKind, ProjectError, Result};
-pub use hydration::{HydrationOutcome, Hydrator};
-pub use integrity::{
-    DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, GenerationFailureEvidence,
-};
-pub use steps::{PROJECT_STEPS, StepObserver};
+pub use families::EXCLUDED_CHILD_REGISTRATION_PARENTS;
+
+/// A block number and hash on one chain's readable lineage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Marker {
+    pub number: i64,
+    pub hash: String,
+}

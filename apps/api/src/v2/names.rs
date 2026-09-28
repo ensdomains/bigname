@@ -125,7 +125,7 @@ pub(crate) async fn get_names(
         expires_before: params.expires_before,
     };
     // Under the publication switch the rows are composed from the owned key families.
-    let storage_page = if bigname_storage::publication_source::serve_from_families() {
+    let storage_page = {
         let chains: Vec<String> = snapshot.block_bounds().into_keys().collect();
         bigname_storage::families::name::load_family_expiring_page(
             &state.pool,
@@ -134,15 +134,6 @@ pub(crate) async fn get_names(
             storage_cursor.as_ref(),
             params.page_size,
             &chains,
-        )
-        .await
-    } else {
-        bigname_storage::load_name_current_expiring_page(
-            &state.pool,
-            &filter,
-            order_to_storage(order),
-            storage_cursor.as_ref(),
-            params.page_size,
         )
         .await
     }

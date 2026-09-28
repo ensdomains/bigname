@@ -73,44 +73,22 @@ pub(crate) async fn load_reverse_identity_primary_snapshots(
     public_namespaces: &[String],
     selected: Option<&bigname_storage::SelectedSnapshot>,
 ) -> Result<BTreeMap<String, IdentityPrimaryNameSnapshot>> {
-    if bigname_storage::publication_source::serve_from_families() {
-        let chains = selected.map(|selected| {
-            selected
-                .chain_positions
-                .as_map()
-                .values()
-                .map(|position| position.chain_id.clone())
-                .collect::<Vec<_>>()
-        });
-        return bigname_storage::families::records::load_family_reverse_primary_snapshots(
-            pool,
-            address,
-            coin_type,
-            public_namespaces,
-            chains.as_deref(),
-        )
-        .await;
-    }
-    let input = ReverseIdentityStorageInput {
-        address: address.to_owned(),
-        coin_type: coin_type.to_owned(),
-        roles: ReverseIdentityRoles::Both,
-        page_size: 1,
-        cursor: None,
-    };
-    let mut loaded =
-        page::load_primary_names(pool, std::slice::from_ref(&input), public_namespaces).await?;
-    let by_namespace = loaded
-        .pop()
-        .and_then(|value| match value {
-            serde_json::Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .unwrap_or_default();
-    by_namespace
-        .into_iter()
-        .map(|(namespace, value)| Ok((namespace, page::decode_primary_name(value)?)))
-        .collect()
+    let chains = selected.map(|selected| {
+        selected
+            .chain_positions
+            .as_map()
+            .values()
+            .map(|position| position.chain_id.clone())
+            .collect::<Vec<_>>()
+    });
+    return bigname_storage::families::records::load_family_reverse_primary_snapshots(
+        pool,
+        address,
+        coin_type,
+        public_namespaces,
+        chains.as_deref(),
+    )
+    .await;
 }
 
 pub(crate) async fn prepare_reverse_identity_additional_scan(
@@ -144,99 +122,26 @@ async fn load_reverse_identity_records_live_with_count_mode(
         return Ok(Vec::new());
     }
 
-    if bigname_storage::publication_source::serve_from_families() {
-        let chains = selected.map(|selected| {
-            selected
-                .chain_positions
-                .as_map()
-                .values()
-                .map(|position| position.chain_id.clone())
-                .collect::<Vec<_>>()
-        });
-        #[cfg(test)]
-        if matches!(count_mode, ReverseCountMode::Include) {
-            test_hooks::record(pool).await?;
-        }
-        return bigname_storage::families::records::load_family_reverse_identity_groups(
-            pool,
-            inputs,
-            public_namespaces,
-            chains.as_deref(),
-            matches!(count_mode, ReverseCountMode::Include),
-        )
-        .await;
+    let chains = selected.map(|selected| {
+        selected
+            .chain_positions
+            .as_map()
+            .values()
+            .map(|position| position.chain_id.clone())
+            .collect::<Vec<_>>()
+    });
+    #[cfg(test)]
+    if matches!(count_mode, ReverseCountMode::Include) {
+        test_hooks::record(pool).await?;
     }
-
-    let first_page_feed = inputs
-        .iter()
-        .all(|input| input.page_size == 1 && input.cursor.is_none());
-    let page_records_future = async {
-        let page_rows =
-            page::load_reverse_identity_page_rows(pool, inputs, public_namespaces).await?;
-        let logical_name_ids =
-            dedupe_in_order(page_rows.iter().map(|row| row.logical_name_id.clone()));
-        let name_records =
-            bigname_storage::load_phase_identity_records_by_ids(pool, &logical_name_ids)
-                .await?
-                .into_iter()
-                .map(|record| (record.row.logical_name_id.clone(), record))
-                .collect::<BTreeMap<_, _>>();
-        Result::<_>::Ok((page_rows, name_records))
-    };
-
-    let total_counts_future = async {
-        match count_mode {
-            ReverseCountMode::Include => {
-                load_reverse_identity_total_counts_live(pool, inputs, public_namespaces)
-                    .await
-                    .map(Some)
-            }
-            ReverseCountMode::Omit => Ok(None),
-        }
-    };
-    let ((page_rows, name_records), total_counts) =
-        tokio::try_join!(page_records_future, total_counts_future)?;
-
-    let rows_by_input = page_rows.into_iter().fold(
-        BTreeMap::<usize, Vec<ReverseIdentityPageRow>>::new(),
-        |mut grouped, row| {
-            grouped.entry(row.input_index).or_default().push(row);
-            grouped
-        },
-    );
-
-    Ok(inputs
-        .iter()
-        .enumerate()
-        .map(|(input_index, input)| {
-            let mut entries = rows_by_input
-                .get(&input_index)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|row| reverse_identity_record(&name_records, input, row))
-                .collect::<Vec<_>>();
-            let total_count = total_counts.as_ref().map(|counts| {
-                *counts
-                    .get(&(input.address.clone(), input.roles))
-                    .unwrap_or(&0)
-            });
-            let has_more = match (first_page_feed, total_count) {
-                (true, Some(total_count)) => {
-                    total_count > input.page_size.max(0) as u64 && !entries.is_empty()
-                }
-                _ => entries.len() as i64 > input.page_size,
-            };
-            entries.truncate(input.page_size.max(0) as usize);
-
-            ReverseIdentityGroup {
-                input: input.clone(),
-                entries,
-                total_count,
-                has_more,
-            }
-        })
-        .collect())
+    return bigname_storage::families::records::load_family_reverse_identity_groups(
+        pool,
+        inputs,
+        public_namespaces,
+        chains.as_deref(),
+        matches!(count_mode, ReverseCountMode::Include),
+    )
+    .await;
 }
 
 fn reverse_identity_record(

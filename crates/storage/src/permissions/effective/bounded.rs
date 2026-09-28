@@ -7,27 +7,10 @@ pub async fn load_bounded_effective_permissions_by_resource_ids(
     namespace: Option<&str>,
     max_rows: u64,
 ) -> Result<Vec<EffectivePermissionRow>> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::control::permissions::page::load_family_bounded_permissions(
-            pool, ids, namespace, max_rows,
-        )
-        .await;
-    }
-    let limit = checked_page_limit_i64(
-        max_rows,
-        "positive grant budget required",
-        "grant budget too large",
-    )?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    build_query("", ids, namespace, limit)
-        .build()
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(decode_effective_permission_row)
-        .collect()
+    crate::families::control::permissions::page::load_family_bounded_permissions(
+        pool, ids, namespace, max_rows,
+    )
+    .await
 }
 
 fn build_query<'a>(

@@ -303,18 +303,8 @@ async fn load_bound_name_rows(
     resolver_address: &str,
 ) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
     let limit = page_size.saturating_add(1) as i64;
-    let loaded = if bigname_storage::publication_source::serve_from_families() {
+    let loaded = {
         bigname_storage::families::name::load_family_bound_names(
-            pool,
-            chain_id_slug,
-            resolver_address,
-            namespace,
-            cursor,
-            limit,
-        )
-        .await
-    } else {
-        bigname_storage::load_phase_resolver_bound_name_rows(
             pool,
             chain_id_slug,
             resolver_address,

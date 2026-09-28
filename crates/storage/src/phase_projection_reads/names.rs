@@ -42,57 +42,15 @@ async fn load_phase_identity_records(
     if requested.is_empty() {
         return Ok(Vec::new());
     }
-    if crate::publication_source::serve_from_families() {
-        return super::family_identity::load(pool, &requested, include_inventory).await;
-    }
-    let name_rows = load_phase_identity_name_rows(pool, &requested).await?;
-    let relations = load_phase_relations(pool, &requested).await?;
-    let inventories = if include_inventory {
-        load_phase_inventories(pool, name_rows.values()).await?
-    } else {
-        BTreeMap::new()
-    };
 
-    Ok(requested
-        .into_iter()
-        .filter_map(|logical_name_id| {
-            let row = name_rows.get(&logical_name_id)?.clone();
-            let record_inventory_current =
-                row.serving_resource_id
-                    .or(row.resource_id)
-                    .and_then(|resource_id| {
-                        select_phase_inventory(
-                            inventories.get(&resource_id)?,
-                            &row.declared_summary,
-                        )
-                    });
-            Some(IdentityNameRecordRow {
-                row,
-                record_inventory_current,
-                relations: relations.get(&logical_name_id).cloned().unwrap_or_default(),
-            })
-        })
-        .collect())
+    super::family_identity::load(pool, &requested, include_inventory).await
 }
 
 pub async fn load_phase_name_current_rows_by_ids(
     pool: &PgPool,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::name::load_family_names_by_logical_name_ids(
-            pool,
-            logical_name_ids,
-        )
-        .await;
-    }
-    let rows = load_phase_name_rows(pool, logical_name_ids).await?;
-    rows.into_iter()
-        .map(|row| {
-            let phase_id: String = row.try_get("logical_name_id")?;
-            Ok((phase_id, decode_name_current(row)?))
-        })
-        .collect()
+    crate::families::name::load_family_names_by_logical_name_ids(pool, logical_name_ids).await
 }
 
 /// The bound-name predicates of `load_phase_resolver_bound_name_rows` over a name row `nc`, with

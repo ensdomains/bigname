@@ -77,16 +77,13 @@ const FAMILY_MARKER_JOIN: &str = r#"
 /// row's. The Project phase status and Project redo flag come from the Project row either way,
 /// and the Interpret redo flag from the Interpret row.
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
-    let (project_generation_current, family_marker_join, projected) =
-        if crate::publication_source::serve_from_families() {
-            (
-                family_marker_generation_current(),
-                FAMILY_MARKER_JOIN,
-                "marker",
-            )
-        } else {
-            (PROJECT_ROW_GENERATION_CURRENT.to_owned(), "", "project")
-        };
+    let (project_generation_current, family_marker_join, projected) = {
+        (
+            family_marker_generation_current(),
+            FAMILY_MARKER_JOIN,
+            "marker",
+        )
+    };
     let rows = sqlx::query(&format!(
         r#"
         WITH known_chains AS ({PHASE_EXPECTED_CHAIN_IDS_SELECT})

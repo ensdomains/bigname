@@ -6,7 +6,6 @@ mod identity;
 mod identity_names;
 mod migration;
 mod normalized;
-mod redo;
 
 use crate::Result;
 use bigname_adapters::schema_v2::BatchOutput;
@@ -125,7 +124,6 @@ async fn prepare_redo_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    redo::capture_project_evidence(transaction, chain_id, from_block, to_block).await?;
     migration::clear_redo_range(transaction, chain_id, from_block, to_block).await?;
     stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;

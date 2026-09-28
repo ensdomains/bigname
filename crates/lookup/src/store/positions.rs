@@ -44,63 +44,15 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
 /// The publication a lookup captures at its start and the database guard
 /// (`revalidate_resolution_lookup_state`) rechecks before any comparison is written.
 pub(super) struct CapturedPublication {
-    /// The Project row's position, interpreter hash and row version (`row_xmin`).
-    pub project: Value,
-    /// With the [publication switch](bigname_storage::publication_source) on, the family
-    /// marker's position, interpreter hash and `sequence`, which the guard compares instead of
-    /// the Project row's version.
-    pub family: Option<Value>,
+    /// The marker's position, interpreter hash and sequence, captured with the input rows.
+    pub family: Value,
 }
 
 pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
 ) -> Result<CapturedPublication> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return super::family_rows::publication(transaction, head).await;
-    }
-    // The served publication may trail the head by the shared one-block tolerance.
-    let project: Option<Value> = sqlx::query_scalar(
-        r#"
-        SELECT jsonb_build_object(
-            'row_xmin', project.xmin::text,
-            'block_number', project.current_block_number,
-            'block_hash', project.current_block_hash,
-            'input_content_hash', project.input_content_hash
-        )
-        FROM chain_phase_state project
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = project.chain_id
-         AND lineage.block_number = project.current_block_number
-         AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE project.chain_id = $1
-          AND project.phase_name = 'project'
-          AND project.phase_status IN ('completed', 'running')
-          AND $2 - project.current_block_number BETWEEN 0 AND $5
-          AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
-          AND project.input_content_hash = $4
-        "#,
-    )
-    .bind(&head.chain_id)
-    .bind(head.block_number)
-    .bind(&head.block_hash)
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .bind(bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(database("validate project publication head"))?;
-    project
-        .map(|project| CapturedPublication {
-            project,
-            family: None,
-        })
-        .ok_or_else(|| {
-            LookupError::stale(format!(
-                "projected state has not reached the newest processed {} block",
-                head.chain_id
-            ))
-        })
+    super::family_rows::publication(transaction, head).await
 }
 
 pub(super) async fn inventory_position(

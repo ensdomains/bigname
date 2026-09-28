@@ -31,16 +31,12 @@ pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(
-            pool,
-            row,
-            &selected_snapshot.chain_positions,
-        )
-        .await;
-    }
-    readback::load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot)
-        .await
+    bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(
+        pool,
+        row,
+        &selected_snapshot.chain_positions,
+    )
+    .await
 }
 
 pub(crate) async fn load_record_inventory_current_matching_selected_snapshot(
@@ -65,15 +61,12 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_record_inventory_for_snapshot(
-            pool,
-            row,
-            &selected_snapshot.chain_positions,
-        )
-        .await;
-    }
-    readback::load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
+    bigname_storage::families::records::load_family_record_inventory_for_snapshot(
+        pool,
+        row,
+        &selected_snapshot.chain_positions,
+    )
+    .await
 }
 
 /// The record inventory `GET /v1/names/{name}/records` reads for every source: the served row at

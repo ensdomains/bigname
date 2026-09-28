@@ -5,15 +5,8 @@ pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await;
-    }
-    load_record_inventory_for_snapshot_key(
-        pool,
-        record_inventory_lookup_key(row),
-        selected_snapshot,
-    )
-    .await
+
+bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await
 }
 
 pub(super) async fn load_indexed_record_inventory_current_for_snapshot(
@@ -21,15 +14,8 @@ pub(super) async fn load_indexed_record_inventory_current_for_snapshot(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await;
-    }
-    load_record_inventory_for_snapshot_key(
-        pool,
-        bigname_storage::resolution_record_inventory_lookup_key_any_chain(row),
-        selected_snapshot,
-    )
-    .await
+
+bigname_storage::families::records::load_family_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await
 }
 
 async fn load_record_inventory_for_snapshot_key(
@@ -98,20 +84,8 @@ pub(super) async fn load_record_inventory_current_matching_selected_snapshot(
     selected_snapshot: &SelectedSnapshot,
     allow_selected_superset: bool,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await;
-    }
-    let Some((resource_id, _)) = record_inventory_lookup_key(row) else {
-        return Ok(None);
-    };
 
-    load_record_inventory_current_matching_selected_snapshot_by_resource(
-        pool,
-        resource_id,
-        selected_snapshot,
-        allow_selected_superset,
-    )
-    .await
+bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(pool, row, &selected_snapshot.chain_positions).await
 }
 
 async fn load_record_inventory_current_matching_selected_snapshot_by_resource(

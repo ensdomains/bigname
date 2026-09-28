@@ -1,14 +1,6 @@
-//! Owned key families (docs/projections.md, "Owned key families"): per-key current-state tables
-//! that step 2 of TYR-36 fills block by block beside the served tables. Nothing reads them yet.
-//!
-//! The loop runs after a Project batch has committed and its progress is recorded, never inside
-//! the served transaction: each family block is its own transaction, so a family failure or a
-//! slow block can never roll back a served publication. The families follow the served marker
-//! from their own shadow marker, catching up from wherever it stands. A block that fails,
-//! including one refused by a fence, stops the run with an error: the families stay at the last
-//! complete block and the caller retries.
-// The reducers land in the commits that follow and use the helpers
-// that are unused until then.
+//! Owned current-state families, applied and published atomically for each canonical block.
+//! Rebuild and replay use the same reducers and undo journal as live follow. A failed block
+//! leaves the marker and every family at the preceding complete publication.
 mod addresses;
 mod block;
 mod child_registrations;

@@ -34,29 +34,8 @@ pub async fn load_address_records_current_page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
-    if crate::publication_source::serve_from_families() {
-        return crate::families::records::load_family_resolves_to_page(
-            pool, address, coin_type, namespaces, dedupe_by, q, authority, sort, order, cursor,
-            page_size,
-        )
-        .await;
-    }
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection for an address_records_current page")?;
-    load_address_records_page_from(
-        &mut conn,
-        RowSource::Served,
-        address,
-        coin_type,
-        namespaces,
-        dedupe_by,
-        q,
-        authority,
-        sort,
-        order,
-        cursor,
+    crate::families::records::load_family_resolves_to_page(
+        pool, address, coin_type, namespaces, dedupe_by, q, authority, sort, order, cursor,
         page_size,
     )
     .await

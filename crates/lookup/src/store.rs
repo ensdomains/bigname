@@ -323,21 +323,19 @@ pub(crate) async fn load_snapshot(
         Some((&name.logical_name_id, &name.row_xmin)),
         std::slice::from_ref(&entrypoint_manifest),
     )?;
-    if project_publication.family.is_some() {
-        execution_authority["family_name"] = serde_json::json!({
-            "logical_name_id": name.logical_name_id,
-            "resolver_path": name.declared_summary.pointer("/topology/resolver_path"),
+    execution_authority["family_name"] = serde_json::json!({
+        "logical_name_id": name.logical_name_id,
+        "resolver_path": name.declared_summary.pointer("/topology/resolver_path"),
+    });
+    if let Some(inventory) = &inventory {
+        execution_authority["family_comparison"] = serde_json::json!({
+            "resource_id": inventory.resource_id,
+            "boundary_key": inventory.record_version_boundary_key,
+            "publication_sequence": inventory.row_xmin,
+            "entries": inventory.entries,
+            "provenance": inventory.provenance,
+            "coverage": inventory.coverage,
         });
-        if let Some(inventory) = &inventory {
-            execution_authority["family_comparison"] = serde_json::json!({
-                "resource_id": inventory.resource_id,
-                "boundary_key": inventory.record_version_boundary_key,
-                "publication_sequence": inventory.row_xmin,
-                "entries": inventory.entries,
-                "provenance": inventory.provenance,
-                "coverage": inventory.coverage,
-            });
-        }
     }
     Ok(LookupSnapshot {
         logical_name_id: name.logical_name_id,
@@ -526,20 +524,10 @@ fn execution_authority(
     manifests: &[manifests::ManifestEntry],
 ) -> Result<Value> {
     let (logical_name_id, name_row_xmin) = name.unzip();
-    let mut authority = serde_json::json!({
-        "project_publication": publication.project,
-        "project_row_xmin": publication.project["row_xmin"],
+    Ok(serde_json::json!({
+        "family_publication": publication.family,
         "logical_name_id": logical_name_id,
         "name_row_xmin": name_row_xmin,
         "manifest_authorities": manifests,
-    });
-    // Present only with the publication switch on: the guard then fences on the family marker.
-    if let Some(family) = &publication.family {
-        authority["family_publication"] = family.clone();
-        if let Some(object) = authority.as_object_mut() {
-            object.remove("project_publication");
-            object.remove("project_row_xmin");
-        }
-    }
-    Ok(authority)
+    }))
 }

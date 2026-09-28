@@ -361,23 +361,12 @@ async fn load_search_storage_page(
 ) -> V2Result<bigname_storage::NameCurrentListPage> {
     // Under the publication switch the rows are composed from the owned key families; the
     // candidates are the name surfaces (ruling J8).
-    let page = if bigname_storage::publication_source::serve_from_families() {
+    let page = {
         bigname_storage::families::name::load_family_search_page(
             &state.pool,
             filter,
             cursor,
             page_size,
-        )
-        .await
-    } else {
-        bigname_storage::load_name_current_list_page(
-            &state.pool,
-            filter,
-            NameCurrentListSort::Name,
-            NameCurrentListOrder::Asc,
-            cursor,
-            page_size,
-            false,
         )
         .await
     };

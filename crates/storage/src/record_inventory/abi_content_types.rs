@@ -375,14 +375,7 @@ async fn load_classifications(
             "{RESOLVER_CLASSIFICATION_RELATION}",
             &crate::families::topology::resolver_classification_relation(),
         )
-        .replace(
-            "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
-            if crate::publication_source::serve_from_families() {
-                ""
-            } else {
-                DEFAULT_RESOLVER_CURRENT_READ_FILTER
-            },
-        );
+        .replace("{DEFAULT_RESOLVER_CURRENT_READ_FILTER}", { "" });
     let rows = sqlx::query(&query)
         .bind(ordinals)
         .bind(resource_ids)

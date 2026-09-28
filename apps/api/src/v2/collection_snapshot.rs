@@ -82,22 +82,7 @@ impl CollectionSnapshot {
         }
         let token = namespaces.collection_fingerprint();
 
-        let evaluated_at = if bigname_storage::publication_source::serve_from_families() {
-            publication_clock(&namespaces)?
-        } else {
-            match cursor.as_ref() {
-                Some(cursor) => bigname_storage::parse_rfc3339_utc_timestamp(
-                    cursor
-                        .evaluated_at
-                        .as_deref()
-                        .ok_or_else(restart_required)?,
-                )
-                .map_err(|_| super::cursor::invalid_cursor_error())?,
-                None => OffsetDateTime::now_utc()
-                    .replace_nanosecond(0)
-                    .expect("zero nanoseconds are valid"),
-            }
-        };
+        let evaluated_at = { publication_clock(&namespaces)? };
         let snapshot = Self {
             namespaces,
             token,
@@ -146,9 +131,6 @@ impl CollectionSnapshot {
         state: &AppState,
         resource: super::SnapshotReadResource,
     ) -> V2Result<()> {
-        if !bigname_storage::publication_source::serve_from_families() {
-            return Ok(());
-        }
         let chains: Vec<String> = self.block_bounds().into_keys().collect();
         bigname_storage::families::name::ensure_family_publications(&state.pool, &chains)
             .await

@@ -16,7 +16,8 @@ use super::super::{
     tables,
 };
 use super::ETHEREUM;
-use crate::{ProjectError, Result, hydration::reverse::EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES};
+use super::admission::EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
+use crate::{ProjectError, Result};
 
 pub(super) struct Candidate {
     row: Row,

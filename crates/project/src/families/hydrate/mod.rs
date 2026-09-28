@@ -2,6 +2,7 @@
 //! RPC, then apply results to the real post-reducer working set. The publication transaction
 //! checks the same predecessor, revision and block hash again. Replay/rebuild never hydrate
 //! (TYR-36 step7a packet E3); their restored or empty overlays refresh on later follow blocks.
+mod admission;
 mod reverse;
 mod text;
 
