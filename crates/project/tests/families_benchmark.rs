@@ -62,18 +62,23 @@ async fn run_with(
     Ok(outcome)
 }
 
-/// Every family table as text, to compare two rebuilds.
-async fn families_text(pool: &PgPool) -> Result<Vec<String>> {
+/// Every family table as text, by table, to compare two rebuilds. The retained child history
+/// stamps its rows with the wall-clock time of the transaction that wrote them, so two rebuilds
+/// always differ there; those two columns are left out, as the other rebuild comparisons do.
+async fn families_text(pool: &PgPool) -> Result<Vec<(&'static str, String)>> {
     let mut tables = Vec::new();
     for table in families::family_tables() {
-        tables.push(
-            sqlx::query_scalar(&format!(
-                "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
-                 FROM {table} t"
-            ))
-            .fetch_one(pool)
-            .await?,
-        );
+        let row = if table == "child_registration_events" {
+            "to_jsonb(t) - ARRAY['inserted_at', 'last_recomputed_at']"
+        } else {
+            "to_jsonb(t)"
+        };
+        let text = sqlx::query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text FROM {table} t"
+        ))
+        .fetch_one(pool)
+        .await?;
+        tables.push((table, text));
     }
     Ok(tables)
 }
@@ -200,9 +205,16 @@ async fn family_block_timings() -> Result<()> {
         ranged.ranges,
         started.elapsed().as_millis()
     );
+    let differing: Vec<&str> = families_text(&pool)
+        .await?
+        .into_iter()
+        .zip(&per_block)
+        .filter(|((_, ranged), (_, per_block))| ranged != per_block)
+        .map(|((table, _), _)| table)
+        .collect();
     ensure!(
-        families_text(&pool).await? == per_block,
-        "the ranged rebuild differs from the block-by-block one"
+        differing.is_empty(),
+        "the ranged rebuild differs from the block-by-block one in {differing:?}"
     );
     // The seed writes every binding at its opening SurfaceBound's log, as the adapter does. Each
     // binding the rebuild reached (through the base) must have one candidate at that
