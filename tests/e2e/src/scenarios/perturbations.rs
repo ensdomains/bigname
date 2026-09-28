@@ -524,7 +524,8 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         },
         true,
     )
-    .await?;
+    .await
+    .context("history read after the rewind, before the stamped redo")?;
     assert!(
         production_history
             .iter()
@@ -582,7 +583,8 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         },
         true,
     )
-    .await?;
+    .await
+    .context("history read after the stamped redo")?;
     assert!(
         production_winning_history
             .iter()
