@@ -57,6 +57,7 @@ pub(in crate::schema_v2) fn public_resolver_v2_signature(signature: &str) -> boo
             | "AddressChanged(bytes32,uint256,bytes)"
             | "TextChanged(bytes32,string,string,string)"
             | "ContenthashChanged(bytes32,bytes)"
+            | "NameChanged(bytes32,string)"
             | "VersionChanged(bytes32,uint64)"
     )
 }
@@ -69,7 +70,7 @@ pub(super) fn is_public_node_event(selected: &Selected) -> bool {
         (
             "ens_v2_resolver_l1",
             "ABIChanged" | "AddrChanged" | "AddressChanged" | "TextChanged" | "ContenthashChanged"
-            | "VersionChanged",
+            | "NameChanged" | "VersionChanged",
         ) => selected.emitter_role.as_deref() == Some("public_resolver_v2"),
         _ => false,
     }

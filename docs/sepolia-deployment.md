@@ -117,7 +117,8 @@ Registry instances retain announcement-based admission. Resolver proxies require
 the declared PermissionedResolver implementation and canonical upgrade evidence.
 The directly declared PublicResolverV2 keeps the existing address/text/contenthash
 and version-boundary subset, plus the standard `ABIChanged` event that the ABI
-content-type inventory reads; it does not claim exhaustive DNS, pubkey, alias,
+content-type inventory reads and the `NameChanged` event that reverse claims read
+through a reverse node's resolver; it does not claim exhaustive DNS, pubkey, alias,
 or permission enumeration. The exact ENSV1 mirror declaration uses the canonical
 ENSv1 registry's projected records. ABI matching includes argument types and
 indexed positions, not just event names.

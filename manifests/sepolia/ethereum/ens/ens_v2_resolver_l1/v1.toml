@@ -159,6 +159,16 @@ fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
 normalized_events = ["RecordChanged"]
 emitter_roles = ["public_resolver_v2"]
 
+# PublicResolverV2 composes ENS's NameResolver profile; `setName` stores the name and emits
+# `NameChanged`, which is also what the ENSv1 reverse path reads through a reverse node's resolver.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L32 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L354 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "NameChanged"
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "VersionChanged"

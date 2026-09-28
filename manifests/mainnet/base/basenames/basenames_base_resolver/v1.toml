@@ -50,6 +50,17 @@ name = "ABIChanged"
 fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
 normalized_events = ["RecordChanged"]
 
+# The admitted L2Resolver also composes ENS's ContentHashResolver profile, whose setter stores
+# the hash (empty to clear) and emits `ContenthashChanged`.
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L6 @ basenames@1809bbc)
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L33 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/ContentHashResolver.sol:L21 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/IContentHashResolver.sol:L5 @ basenames@1809bbc).
+[[abi.events]]
+name = "ContenthashChanged"
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+normalized_events = ["RecordChanged"]
+
 [[abi.events]]
 name = "AddrChanged"
 fragment = "event AddrChanged(bytes32 indexed node, address a)"

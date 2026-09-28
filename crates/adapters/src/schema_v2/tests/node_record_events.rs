@@ -1,7 +1,7 @@
-//! `ABIChanged` goes through the same resolver selection and decoder as the other ENSv1 record
-//! events: from the directly declared PublicResolverV2, from the Basenames resolver family, and
-//! from an undeclared (custom) resolver that the family's all-emitter record events already
-//! cover. Each case loads the checked-in manifests of its profile, so the declarations are the
+//! `ABIChanged`, `NameChanged` and `ContenthashChanged` go through the same resolver selection
+//! and decoder as the other ENSv1 record events: from the directly declared PublicResolverV2, from
+//! the Basenames resolver family, and from an undeclared (custom) resolver that the family's
+//! all-emitter record events already cover. Each case loads the checked-in manifests of its profile, so the declarations are the
 //! ones production reads.
 use serde_json::Value;
 
@@ -9,6 +9,8 @@ use super::*;
 
 sol! {
     event ABIChanged(bytes32 indexed node, uint256 indexed contentType);
+    event NameChanged(bytes32 indexed node, string name);
+    event ContenthashChanged(bytes32 indexed node, bytes hash);
 }
 
 const CUSTOM_RESOLVER: &str = "0x00000000000000000000000000000000000c0570";
@@ -213,6 +215,152 @@ fn ensv1_custom_resolver_abi_changed_uses_the_ordinary_all_emitter_path() -> any
     assert_eq!(
         abi_writes(&output, CUSTOM_RESOLVER),
         expected("ens_v1_resolver_l1")
+    );
+    Ok(())
+}
+
+/// One `NameChanged` (a set, then a clear) and one `ContenthashChanged` (a set, then a clear)
+/// from `emitter` for `node` in block `block`.
+fn name_and_contenthash_logs(
+    chain: &str,
+    emitter: &str,
+    node: B256,
+    block: i64,
+) -> Vec<RawLogInput> {
+    let logs = [
+        NameChanged {
+            node,
+            name: "primary.eth".to_owned(),
+        }
+        .encode_log_data(),
+        NameChanged {
+            node,
+            name: String::new(),
+        }
+        .encode_log_data(),
+        ContenthashChanged {
+            node,
+            hash: vec![0xe3, 0x01, 0x01].into(),
+        }
+        .encode_log_data(),
+        ContenthashChanged {
+            node,
+            hash: Vec::new().into(),
+        }
+        .encode_log_data(),
+    ];
+    logs.into_iter()
+        .enumerate()
+        .map(|(index, log)| {
+            let mut raw = raw_at(log, block, i64::try_from(index).unwrap(), emitter);
+            raw.chain_id = chain.to_owned();
+            raw
+        })
+        .collect()
+}
+
+/// The name and contenthash record writes of `output` from `emitter`, as (source family, record
+/// key, value field).
+fn name_and_contenthash_writes(output: &BatchOutput, emitter: &str) -> Vec<(String, Value, Value)> {
+    output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "RecordChanged"
+                && event.after_state["resolver"] == json!(emitter)
+                && matches!(
+                    event.after_state["record_family"].as_str(),
+                    Some("name" | "contenthash")
+                )
+        })
+        .map(|event| {
+            let after = &event.after_state;
+            let value = if after["record_family"] == "name" {
+                after["raw_name"].clone()
+            } else {
+                after["contenthash_hex"].clone()
+            };
+            (
+                event.source_family.clone(),
+                after["record_key"].clone(),
+                value,
+            )
+        })
+        .collect()
+}
+
+fn expected_name_and_contenthash(family: &str) -> Vec<(String, Value, Value)> {
+    [
+        ("name", json!("primary.eth")),
+        ("name", json!("")),
+        ("contenthash", json!("0xe30101")),
+        ("contenthash", json!("0x")),
+    ]
+    .into_iter()
+    .map(|(key, value)| (family.to_owned(), json!(key), value))
+    .collect()
+}
+
+#[test]
+fn public_resolver_v2_name_changed_is_a_record_write_like_its_other_node_events()
+-> anyhow::Result<()> {
+    let (chain, manifests, admissions) =
+        profile("sepolia", &["ens_v1_resolver_l1", "ens_v2_resolver_l1"])?;
+    let public = declared_address(&admissions, "public_resolver_v2");
+    let node: B256 = common::namehash(&["name".to_owned(), "eth".to_owned()]).parse()?;
+    let block = 11_709_100;
+    let mut raw_logs = name_and_contenthash_logs(&chain, &public, node, block);
+    raw_logs.extend(name_and_contenthash_logs(
+        &chain,
+        CUSTOM_RESOLVER,
+        node,
+        block + 1,
+    ));
+    let output = interpret_test_batch(BatchInput {
+        chain_id: chain,
+        manifests,
+        discovery_rules: vec![],
+        admissions,
+        prior_events: vec![],
+        blocks: vec![],
+        raw_logs,
+    })?;
+    assert_eq!(
+        name_and_contenthash_writes(&output, &public),
+        expected_name_and_contenthash("ens_v2_resolver_l1")
+    );
+    assert_eq!(
+        name_and_contenthash_writes(&output, CUSTOM_RESOLVER),
+        expected_name_and_contenthash("ens_v1_resolver_l1")
+    );
+    Ok(())
+}
+
+#[test]
+fn basenames_contenthash_changed_is_a_record_write_for_declared_and_custom_resolvers()
+-> anyhow::Result<()> {
+    let (chain, manifests, admissions) = profile("mainnet", &["basenames_base_resolver"])?;
+    let declared = declared_address(&admissions, "resolver");
+    let node: B256 =
+        common::namehash(&["name".to_owned(), "base".to_owned(), "eth".to_owned()]).parse()?;
+    let mut raw_logs = name_and_contenthash_logs(&chain, &declared, node, 20);
+    raw_logs.extend(name_and_contenthash_logs(&chain, CUSTOM_RESOLVER, node, 21));
+    let output = interpret_test_batch(BatchInput {
+        chain_id: chain,
+        manifests,
+        discovery_rules: vec![],
+        admissions,
+        prior_events: vec![],
+        blocks: vec![],
+        raw_logs,
+    })?;
+    assert_eq!(
+        name_and_contenthash_writes(&output, &declared),
+        expected_name_and_contenthash("basenames_base_resolver")
+    );
+    assert_eq!(
+        name_and_contenthash_writes(&output, CUSTOM_RESOLVER),
+        expected_name_and_contenthash("basenames_base_resolver")
     );
     Ok(())
 }

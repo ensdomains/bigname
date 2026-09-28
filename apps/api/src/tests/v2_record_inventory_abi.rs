@@ -6,6 +6,8 @@
 /// The declared ENSv1 resolver `seed_identity_name` points each name at.
 const ABI_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
 const ABI_CHAIN: &str = "ethereum-mainnet";
+/// The manifest-declared direct PublicResolverV2 of the ENSv2 fixtures.
+const PUBLIC_RESOLVER_V2: &str = "0x00000000000000000000000000000000000a0b2c";
 
 struct AbiWrite<'a> {
     identity: &'a str,
@@ -149,7 +151,7 @@ async fn seed_abi_public_resolver_v2_name(
     name: &str,
     abi: &[&str],
 ) -> Result<()> {
-    const RESOLVER_V2: &str = "0x00000000000000000000000000000000000a0b2c";
+    const RESOLVER_V2: &str = PUBLIC_RESOLVER_V2;
     let (hash, number) = abi_head(database).await?;
     let resource = Uuid::from_u128(0x5ab900);
     let logical = seed_family_identity_inputs(

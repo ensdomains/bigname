@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use super::*;
 
-#[path = "tests/abi_changed.rs"]
-mod abi_changed;
+#[path = "tests/node_record_events.rs"]
+mod node_record_events;
 
 #[path = "tests/lookahead.rs"]
 mod lookahead;
