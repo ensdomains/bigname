@@ -350,6 +350,15 @@ const SWITCH_REGISTRY: &str = "0x00000000000000000000000000000000000000f1";
 /// at 206), a resolver role granted to bob on alpha.eth's resource at 207, an address record of
 /// alpha.eth resolving to alice at 208, and the resolver's served row the resolver routes read.
 async fn seed_switch_routes_fixture(database: &TestDatabase) -> Result<()> {
+    seed_switch_routes_fixture_with(database, Vec::new()).await
+}
+
+/// `seed_switch_routes_fixture` with `extra` events inserted beside its own before the
+/// publication.
+async fn seed_switch_routes_fixture_with(
+    database: &TestDatabase,
+    extra: Vec<NormalizedEvent>,
+) -> Result<()> {
     let (_, alpha_node, alpha_resource) = seed_switch_names_events(database).await?;
     let (sub, _) = seed_switch_name(database, "sub.alpha.eth", 0x5c1_0000, "ens_v1").await?;
     let sub_node = sub.strip_prefix("ens:").expect("ens id").to_owned();
@@ -497,11 +506,9 @@ async fn seed_switch_routes_fixture(database: &TestDatabase) -> Result<()> {
     );
     child.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
     child.raw_fact_ref["emitting_address"] = json!(SWITCH_REGISTRY);
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[edge, role, record, subregistry, child],
-    )
-    .await?;
+    let mut events = vec![edge, role, record, subregistry, child];
+    events.extend(extra);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_project_and_families(database, 240).await?;
     sqlx::query(
         "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
