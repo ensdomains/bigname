@@ -1,4 +1,4 @@
-use super::equivalence::{first_json_difference, install_stage_capture, semantic_end_state};
+use super::equivalence::{first_json_difference, semantic_end_state};
 use super::*;
 use bigname_adapters::schema_v2::seam::{
     ADMISSION_DISCOVERY_EDGE_KINDS, PREIMAGE_OBSERVATION_EVENT_KIND,
@@ -45,8 +45,6 @@ async fn alias_observed_name_survives_cold_resume() -> TestResult {
         })
         .await?;
 
-    install_stage_capture(whole.pool()).await?;
-    install_stage_capture(resumed.pool()).await?;
     assert_expected_alias_rows(whole.pool()).await?;
     assert_expected_alias_rows(resumed.pool()).await?;
     let whole_events = normalized_events_snapshot(whole.pool()).await?;

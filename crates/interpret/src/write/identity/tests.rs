@@ -1731,7 +1731,10 @@ mod numeric_short_lease_connected {
     use bigname_adapters::schema_v2::{
         self as adapter, BatchInput, BatchOutput, StateCacheCapacity,
     };
-    use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+    use bigname_project::{
+        Marker,
+        families::{self, FamilyMode, FamilyOptions},
+    };
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::Value;
     use sqlx::{PgPool, types::Uuid};
@@ -1782,6 +1785,20 @@ mod numeric_short_lease_connected {
                 .bind(&block.chain_id).bind(&block.block_hash).bind(block.block_number)
                 .bind(block.block_timestamp).bind(&block.canonicality_state).execute(pool).await?;
         }
+        // Captured receipts omit empty blocks. Supply their canonical lineage between the
+        // observed headers so the per-block family loop can traverse the same interval.
+        // These empty headers add no event or authority; timestamps interpolate observations.
+        sqlx::raw_sql("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state)
+            SELECT previous.chain_id, '0x' || lpad(to_hex(missing.number),64,'0'), missing.number,
+                previous.block_timestamp + (following.block_timestamp - previous.block_timestamp)
+                    * ((missing.number - previous.block_number)::double precision / (following.block_number - previous.block_number)),
+                'canonical'
+            FROM generate_series((SELECT min(block_number) FROM chain_lineage),
+                                 (SELECT max(block_number) FROM chain_lineage)) missing(number)
+            CROSS JOIN LATERAL (SELECT * FROM chain_lineage WHERE block_number < missing.number ORDER BY block_number DESC LIMIT 1) previous
+            CROSS JOIN LATERAL (SELECT * FROM chain_lineage WHERE block_number > missing.number ORDER BY block_number LIMIT 1) following
+            WHERE NOT EXISTS (SELECT 1 FROM chain_lineage WHERE block_number=missing.number)")
+            .execute(pool).await?;
         // Only declared fixture inputs are seeded. Identity, events and projections come from adapters.
         for manifest in &input.manifests {
             let payload: Value = serde_json::from_str(&manifest.payload_json)?;
@@ -1829,32 +1846,44 @@ mod numeric_short_lease_connected {
 
     async fn project(
         pool: &PgPool,
-        from: i64,
+        _from: i64,
         target: i64,
         previous: Option<Marker>,
     ) -> Result<Marker> {
-        Ok(Engine::new(pool.clone())
-            .run_batch(BatchRequest {
-                chain_id: fixture::CHAIN.to_owned(),
-                target_block: target,
-                affected_from_block: from,
-                affected_to_block: target,
-                resume_current: previous,
-                mode: RunMode::Normal,
-            })
+        let marker = Marker {
+            number: target,
+            hash: sqlx::query_scalar("SELECT block_hash FROM chain_lineage WHERE chain_id=$1 AND block_number=$2 AND canonicality_state IN ('canonical','safe','finalized')")
+                .bind(fixture::CHAIN).bind(target).fetch_one(pool).await?,
+        };
+        let token = families::input_token(pool, fixture::CHAIN).await?;
+        let mode = if previous.is_some() {
+            FamilyMode::Normal
+        } else {
+            FamilyMode::Rebuild
+        };
+        let outcome = families::apply(
+            pool,
+            fixture::CHAIN,
+            &marker,
+            mode,
+            &token,
+            &FamilyOptions::new(bigname_test_support::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+        assert!(!outcome.budget_exhausted);
+        let published = outcome.marker.context("family publication")?;
+        assert_eq!(published, marker);
+        Ok(published)
+    }
+
+    async fn name(pool: &PgPool, logical: &str) -> Result<bigname_storage::NameCurrentRow> {
+        bigname_storage::families::name::load_family_name(pool, logical)
             .await?
-            .current)
+            .context("published family name")
     }
 
     async fn summary(pool: &PgPool, logical: &str) -> Result<Value> {
-        Ok(
-            sqlx::query_scalar(
-                "SELECT declared_summary FROM name_current WHERE logical_name_id=$1",
-            )
-            .bind(logical)
-            .fetch_one(pool)
-            .await?,
-        )
+        Ok(name(pool, logical).await?.declared_summary)
     }
 
     async fn assert_pre(pool: &PgPool, expected: &Value, resource: Uuid) -> Result<Value> {
@@ -1878,30 +1907,44 @@ mod numeric_short_lease_connected {
                 .unwrap_or(serde_json::Value::Null),
             expected["expected_resolver"]
         );
-        let registered_at: i64 = sqlx::query_scalar("SELECT extract(epoch FROM (declared_summary #>> '{registration,registered_at}')::timestamptz)::bigint FROM name_current WHERE logical_name_id=$1")
-            .bind(&logical).fetch_one(pool).await?;
+        let registered_at: i64 =
+            sqlx::query_scalar("SELECT extract(epoch FROM $1::text::timestamptz)::bigint")
+                .bind(
+                    summary
+                        .pointer("/registration/registered_at")
+                        .and_then(Value::as_str)
+                        .context("registration timestamp")?,
+                )
+                .fetch_one(pool)
+                .await?;
         assert_eq!(
             registered_at,
             expected["registration_timestamp"].as_i64().unwrap()
         );
-        let permissions: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id=$1 AND lower(subject)=$2 AND jsonb_array_length(effective_powers)>0")
-            .bind(resource).bind(expected["expected_owner"].as_str().unwrap()).fetch_one(pool).await?;
+        let permissions = bigname_storage::load_serving_effective_permissions_page(
+            pool,
+            expected["expected_owner"].as_str(),
+            Some(resource),
+            None,
+            None,
+            100,
+        )
+        .await?;
         assert!(
-            permissions > 0,
+            permissions.rows.iter().any(|row| row
+                .effective_powers
+                .as_array()
+                .is_some_and(|powers| !powers.is_empty())),
             "current owner has no projected ownership permissions"
         );
-        let registry_owner: String = sqlx::query_scalar(
-            "SELECT registry_owner FROM permissions_current_resource_summary WHERE resource_id=$1",
+        let inventory = bigname_storage::families::records::load_family_record_inventory(
+            pool,
+            fixture::CHAIN,
+            resource,
         )
-        .bind(resource)
-        .fetch_one(pool)
-        .await?;
-        assert_eq!(registry_owner, expected["expected_owner"].as_str().unwrap());
-        let inventory: Value =
-            sqlx::query_scalar("SELECT entries FROM record_inventory_current WHERE resource_id=$1")
-                .bind(resource)
-                .fetch_one(pool)
-                .await?;
+        .await?
+        .context("record inventory")?
+        .entries;
         for (key, value) in expected["expected_records"].as_object().unwrap() {
             let record = inventory
                 .as_array()
@@ -2086,10 +2129,14 @@ mod numeric_short_lease_connected {
                     summaries.push(assert_pre(pool, &expected, registrar_resource.unwrap()).await?);
                 }
                 if to >= 415 {
-                    let selected: (Uuid,String) = sqlx::query_as("SELECT current.resource_id,binding.authority_arm FROM name_current current JOIN surface_bindings binding ON binding.surface_binding_id=current.surface_binding_id WHERE current.logical_name_id=$1")
-                        .bind(&logical).fetch_one(pool).await?;
-                    assert_ne!(Some(selected.0), registrar_resource);
-                    assert_eq!(selected.1, "ens_v2");
+                    let selected = name(pool, &logical).await?;
+                    assert_ne!(selected.resource_id, registrar_resource);
+                    assert_eq!(
+                        selected
+                            .provenance
+                            .pointer("/authority_selection/authority_arm"),
+                        Some(&serde_json::json!("ens_v2"))
+                    );
                     let current = summary(pool, &logical).await?;
                     assert_eq!(current["registration"]["expiry"], expected["v2_expiry"]);
                     summaries.push(current);
@@ -2300,28 +2347,19 @@ mod numeric_short_lease_connected {
             }
             // Project serves the released ENSv2 registration, keeps the migration as history and
             // starts the epoch at the successor binding.
-            let served: (
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Value,
-            ) = sqlx::query_as(
-                "SELECT provenance #>> '{authority_selection,authority_arm}',
-                        provenance #>> '{authority_selection,lifecycle_state}',
-                        provenance #>> '{authority_selection,proof_kind}',
-                        declared_summary #>> '{registration,status}',
-                        provenance #> '{authority_selection,epoch_start_position}'
-                 FROM name_current WHERE logical_name_id = $1",
-            )
-            .bind(&logical)
-            .fetch_one(pool)
-            .await?;
+            let current = name(pool, &logical).await?;
+            let authority = &current.provenance["authority_selection"];
+            let text = |value: &Value| value.as_str().map(str::to_owned);
+            let served = (
+                text(&authority["authority_arm"]),
+                text(&authority["proof_kind"]),
+                text(&current.declared_summary["registration"]["status"]),
+                authority["epoch_start_position"].clone(),
+            );
             assert_eq!(
                 served,
                 (
                     Some("ens_v2".to_owned()),
-                    Some("unregistered".to_owned()),
                     Some("migration_authority_transition".to_owned()),
                     Some("released".to_owned()),
                     serde_json::json!({

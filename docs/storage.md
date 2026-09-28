@@ -349,6 +349,14 @@ that drops either condition cannot use them and falls back to a broad scan, such
 storage functions `load_address_history_for_relations` and
 `load_address_history_page_for_relations`, which the public route always calls with `true`), and
 `GET /v1/diagnostics/events` with an address filter, which also reads candidate rows.
+That unbounded raw diagnostic path derives its anchors entirely from retained
+normalized events, so clearing family rows during Project rebuild does not remove
+the audit. It additionally accepts resource-scoped `PermissionChanged` evidence
+whose before or after state assigns `resource_control` to the address and
+state-derived registry-only `SurfaceBound` owner evidence. This intentionally
+includes former-controller audit history after revocation or replacement; it does
+not assert current ownership. The bounded product path keeps the current-relation
+and publication checks above. No parallel current-state cache is introduced.
 `GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
 read keeps a correlated `IN` because its attribution check refers to the row. These are access
 paths only: no stored row, response, or [interpreter content

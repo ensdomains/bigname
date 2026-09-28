@@ -3612,8 +3612,16 @@ so there is no persisted artifact to explain. See
   registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   When `address` is present, diagnostics derives its name/resource anchor set
-  from both activated and candidate address-relation evidence. Candidate
-  evidence never contributes anchors to `/v1/events` or product history routes.
+  from retained activated and candidate address-relation evidence, independently
+  of current Project family publication. In addition to registration, token
+  transfer and registry-owner evidence, resource-scoped `PermissionChanged`
+  evidence whose before or after state gives that subject `resource_control`,
+  and state-derived registry-only `SurfaceBound` owner evidence, anchor the raw
+  audit. Former controllers therefore remain searchable after revocation,
+  replacement, or a Project family reset/rebuild. These anchors identify retained
+  evidence, not a claim that the address controls the name now. Current address
+  listings and bounded product history retain their current-relation admission;
+  candidate evidence never contributes anchors to `/v1/events` or product history.
   A behavior-preserving full re-walk may assign a different numeric
   `normalized_event_id` to a pre-existing row while its `event_identity` and
   pre-existing semantic fields remain stable; the numeric ID change and the
