@@ -19,7 +19,8 @@
 //! control shadow read of the same selection, which the control comparison (`shadow.rs`) checks
 //! field by field with its named causes, and the harness requires it clean. `created_at` and
 //! the lapsed registration's authority are compared here strictly. The resolver block passes the
-//! same way only when the composed side withholds it because of a registration status that
+//! same way, together with absent resolution topology, only when the composed side withholds
+//! it because of a registration status that
 //! differs and that the control comparison decides (a released or reserved ENSv2 registration
 //! serves no resolver, name_current/build.sql:141-169): the one known case is the control
 //! comparison's `served_membership_skips_unnamed_path_expiry`. Every other difference, and a name
@@ -278,13 +279,22 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<NameRepo
             let withheld = projection(composed)
                 .pointer("/declared_summary/resolver/address")
                 .is_none_or(Value::is_null);
+            // The direct topology requires that resolver too (families/name/topology.rs).
+            // Its complete absence is the same consequence of the control-proven release;
+            // a present but different topology must still fail this comparison.
+            let topology_withheld = composed
+                .declared_summary
+                .get("topology")
+                .is_none_or(Value::is_null);
             let mut mismatched = false;
             for (path, left, right) in diffs {
                 let covered = same_selection
                     && (control_path(&path)
                         || (status_differs
                             && withheld
-                            && path.starts_with("declared_summary/resolver/")));
+                            && (path.starts_with("declared_summary/resolver/")
+                                || (topology_withheld
+                                    && path.starts_with("declared_summary/topology/")))));
                 let (kind, counter) = if covered {
                     report.covered_names.insert(name.clone());
                     ("COVERED_BY_CONTROL", &mut report.covered_by_control)
