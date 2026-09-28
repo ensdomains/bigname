@@ -397,8 +397,9 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
 
 // The classification comparison. Step 2 fills project_resolver_classification block by block,
 // so both declared resolvers are read from their rows and compared in full. With the plain
-// resolver's row removed the reader falls back to the declaration, a partial comparison of the
-// mirror only; a rebuild of the families writes the row back and the full comparison returns.
+// resolver's row removed the reader has no classification (the declaration fallback is gone,
+// TYR-36 step 7b slice 4), counted as unfilled; a rebuild of the families writes the row back and
+// the full comparison returns.
 // Changing any one field of a row, or adding a row with no served row, is a mismatch on that
 // resolver's key, except a `resolver_manifest_not_active` row, step 2's declared approximation,
 // which is counted by address.
@@ -444,8 +445,8 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
         "{row:?}"
     );
 
-    // The switch: without its row the plain resolver falls back to the declaration, compared
-    // for the mirror only; a rebuild writes the row back.
+    // Without its row the plain resolver has no classification, counted as unfilled; a rebuild
+    // writes the row back.
     sqlx::query(
         "CREATE TABLE fixture_classification AS SELECT * FROM project_resolver_classification
          WHERE chain_id = $1 AND resolver_address = $2",
@@ -464,7 +465,7 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(
-        sources(&report) == (Some("declaration"), Some("family"))
+        sources(&report) == (Some("none"), Some("family"))
             && report.f3_unfilled == 1
             && report.f3_unfilled_mirror_differs == 0,
         "{}: {:?}",
@@ -577,43 +578,6 @@ async fn bound_names_follow_the_selected_resource_not_the_newest_pointer() -> Re
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(report.bound_names == 1, "{}", report.line());
-    fixture.cleanup().await
-}
-
-// The declaration fallback reads a manifest's latest update before asking whether it is active,
-// as today's manifest staging does (crates/project/src/stage.rs, `create_manifests`): a manifest
-// whose newest update retires it declares nothing, even though an older update was active.
-#[tokio::test]
-async fn the_declaration_fallback_ignores_a_retired_manifest() -> Result<()> {
-    let mut fixture = Fixture::new("families_shadow_retired_manifest", 12).await?;
-    let retired = address(0xd7);
-    fixture.declare_resolvers(RESOLVER, &[&retired]).await?;
-    fixture.publish(2).await?;
-    sqlx::query(
-        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
-             manifest_version, source_manifest_id, chain_id, derivation_kind,
-             canonicality_state, after_state)
-         SELECT 'fixture:manifest-retired:' || manifest_id, 'ens', 'SourceManifestUpdated',
-                source_family, 1, manifest_id, chain_id, 'manifest_sync',
-                'canonical'::canonicality_state,
-                jsonb_build_object('rollout_status', 'deprecated', 'normalizer_version',
-                    'fixture', 'manifest_payload', manifest_payload)
-         FROM manifest_versions WHERE chain_id = $1 AND source_family = $2",
-    )
-    .bind(CHAIN)
-    .bind(RESOLVER)
-    .execute(fixture.pool())
-    .await?;
-    sqlx::query(
-        "DELETE FROM project_resolver_classification
-         WHERE chain_id = $1 AND resolver_address = $2",
-    )
-    .bind(CHAIN)
-    .bind(&retired)
-    .execute(fixture.pool())
-    .await?;
-    let fallback = load_resolver_shadow(fixture.pool(), CHAIN, &retired).await?;
-    ensure!(fallback.is_none(), "{fallback:?}");
     fixture.cleanup().await
 }
 

@@ -262,25 +262,27 @@ pub(super) async fn get_address_resolves_to(
     } else {
         BTreeMap::new()
     };
-    let permission_summaries = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        bigname_storage::load_permissions_current_resource_summaries(&state.pool, resource_ids)
+    let permission_summaries =
+        if let Some(resource_ids) = role_resource_ids.as_deref() {
+            bigname_storage::load_serving_permission_summaries(&state.pool, resource_ids)
             .await
-            .map_err(|_| {
+            .map_err(crate::v2::name_rows_error(crate::v2::SnapshotReadResource::Resource, |_| {
                 V2Error::internal_error(format!(
                     "failed to load role support for names resolving to {normalized_address}"
                 ))
-            })?
-    } else {
-        BTreeMap::new()
-    };
+            }))?
+        } else {
+            BTreeMap::new()
+        };
     let subname_counts_by_name = if include.counts {
+        use crate::v2::SnapshotReadResource::Resource;
         bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
-            .map_err(|_| {
+            .map_err(crate::v2::name_rows_error(Resource, |_| {
                 V2Error::internal_error(format!(
                     "failed to load subname counts for names resolving to {normalized_address}"
                 ))
-            })?
+            }))?
             .into_iter()
             .map(|summary| {
                 (
@@ -299,11 +301,11 @@ pub(super) async fn get_address_resolves_to(
             &name_rows,
         )
         .await
-        .map_err(|_| {
+        .map_err(name_rows_error(Resource, |_| {
             V2Error::internal_error(format!(
                 "failed to load record counts for names resolving to {normalized_address}"
             ))
-        })?
+        }))?
     } else {
         BTreeMap::new()
     };

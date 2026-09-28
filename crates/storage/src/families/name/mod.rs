@@ -1,6 +1,6 @@
 //! The composed name reader (TYR-36 step 7b, ruling J3): a `name_current`-shaped row assembled at
 //! read from the owned key families (docs/projections.md, "Owned key families") and the identity
-//! input tables, with no stored per-name row. It serves the fields the API routes read from
+//! input tables, without persisting the composed row. It serves the fields the API routes read from
 //! `name_current`, including the verified lookup inputs. The row carries:
 //!
 //! - identity: the surface (`name_surfaces`), the selected binding and its resource's token
@@ -38,22 +38,28 @@ mod loaders;
 pub mod seams;
 pub mod selection;
 pub mod serving;
+mod summary;
 mod topology;
 
 use sqlx::types::time::OffsetDateTime;
 
 pub(crate) use batch::{
     all_servable_publications, load as load_composed, load_base as load_composed_base,
-    read_snapshot, servable_publication,
+    servable_publication,
 };
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
+pub use summary::compose_name_summaries;
 
 pub use batch::{
     ensure_family_publications, load_family_name, load_family_name_on,
     load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,
     load_family_publication,
 };
+pub(crate) use batch::{ensure_published, read_snapshot};
+/// The composed loads and the marker read on a caller's connection, for readers of other
+/// families that join composed name rows inside their own snapshot (TYR-36 step 7b slice 4).
+pub(crate) use batch::{load as load_names_on, publication as publication_on};
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
 /// rebuild is still populating the families) or written by another interpreter build. The rule

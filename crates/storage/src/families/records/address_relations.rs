@@ -13,9 +13,9 @@
 //!   revokes it from its subject only (address_names.rs:228-283).
 //! - The registrant is the composed `registration.registrant`, for a name with a token lineage.
 //! - The token holder is the registrant, where the NameWrapper mask allows (address_names.rs:
-//!   425-439). Served, it is the recipient of the registrant event when that event is a token
-//!   transfer; the composed row carries no registrant event, so where the registrant is masked
-//!   (an owner lapse) and the event was a transfer this read differs. The harness reports it.
+//!   the token_holder relation). A transfer supplies the registrant's recipient before an owner
+//!   lapse. The lapse also removes wrapper_state, so both readers then withhold the token-holder
+//!   relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder or
 //!   registrant, where the mask allows (address_names.rs:440-476).
 //!

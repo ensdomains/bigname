@@ -52,6 +52,8 @@ mod endpoint;
 mod families_mode;
 #[path = "project_end_to_end/name_shadow.rs"]
 mod name_shadow;
+#[path = "project_end_to_end/permissions_shadow.rs"]
+mod permissions_shadow;
 #[path = "project_end_to_end/records_shadow.rs"]
 mod records_shadow;
 #[path = "project_end_to_end/served_batch.rs"]
@@ -681,6 +683,9 @@ async fn run(
         // The control and topology family readers beside the served readers at the same
         // publication, under either switch; the rebuild below stays behind `compare`.
         let readers_page = compare.or(shadow);
+        // The resources and names the control comparison excuses, which the permission
+        // comparison reads without.
+        let mut control_differing = std::collections::BTreeSet::new();
         if readers_page.is_some() {
             // The family readers beside the served readers at the same publication.
             // With `corpus`, the comparison also reads the fixture corpus's expected counts at
@@ -705,6 +710,7 @@ async fn run(
                 report.mismatched == 0,
                 "the family readers differ from the served values at {number}"
             );
+            control_differing = report.differing_keys.clone();
             // The composed name rows beside the served name rows (TYR-36 step 7b).
             let names =
                 families_mode::served_side(name_shadow::compare(pool, CHAIN, number)).await?;
@@ -812,6 +818,16 @@ async fn run(
                 report.f3_extra_not_active
             );
             topology_targets.push(report.target);
+            // The permission and resolver collection reads under both switch states (TYR-36
+            // step 7b slice 4).
+            let permissions =
+                permissions_shadow::compare(pool, CHAIN, children_page, &control_differing).await?;
+            eprintln!("{}", permissions.line());
+            permissions.require_clean()?;
+            ensure!(
+                permissions.subjects > 0 && permissions.resolvers > 0,
+                "no permission subject or resolver was compared at {number}"
+            );
         }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
             let retention = endpoint::Retention::load(

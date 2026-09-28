@@ -164,6 +164,7 @@ pub use permissions::{
     load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
     load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
     load_permissions_current_resource_summary, load_registry_permission_registration_map,
+    load_serving_effective_permissions_page, load_serving_permission_summaries,
     permission_resource_matches_namespace, resource_is_registry_control_for_registrar_lease,
     resource_wrapped_a_registrar_lease,
 };

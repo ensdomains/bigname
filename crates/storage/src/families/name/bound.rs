@@ -13,9 +13,9 @@
 //!
 //! A page is read in one snapshot (`batch::read_snapshot`).
 //!
-//! Interim: the serving-only capability gate still reads the resolver's served row
-//! (`resolver_current.declared_summary.bindings.status`), as the route's resolver overview does;
-//! both move with the resolver reads (packet E5).
+//! The serving-only capability gate reads the resolver's binding support from its F3
+//! classification row (`topology::overview`, packet E5), the rule the served
+//! `resolver_current.declared_summary.bindings.status` is built by.
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
@@ -23,6 +23,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::{CoverageShape, batch};
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
+    families::topology::{FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY},
     name_current::{COMPOSED_NC_COLUMNS, DEFAULT_NAME_CURRENT_LINEAGE_JOINS},
     phase_projection_reads::BOUND_NAME_PREDICATES,
 };
@@ -132,25 +133,12 @@ async fn candidates(
              WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
                AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
              UNION
-             -- A name whose own pointer on a resource names the resolver while the resource's
-             -- latest pointer (F5) belongs to another name: F5 keeps one pointer per resource,
-             -- and the composed row reads the name's own (loaders.rs, named_resource_pointers).
-             -- The predicates are normalized_events_resolver_current_address_lookup_idx's.
-             SELECT event.logical_name_id
-             FROM bigname_phase.normalized_events event
-             WHERE event.chain_id = $1 AND event.event_kind = 'ResolverChanged'
-               AND lower(event.after_state ->> 'resolver') = lower($2)
-               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
-               AND event.after_state ->> 'resolver' IS NOT NULL
-               AND event.after_state ->> 'resolver' <> ''
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND EXISTS (
-                   SELECT 1
-                   FROM bigname_phase.project_resource_pointer shared
-                   JOIN bigname_phase.normalized_events latest
-                     ON latest.event_identity = shared.pointer_position ->> 'event_identity'
-                   WHERE shared.chain_id = $1 AND shared.resource_id = event.resource_id
-                     AND latest.logical_name_id IS DISTINCT FROM event.logical_name_id)
+             -- Named F5 keys retain a name's own latest pointer when the resource's latest
+             -- pointer names another name. The resolver index reads retained pointer keys,
+             -- never the history of ResolverChanged events at this resolver.
+             SELECT pointer.logical_name_id
+             FROM bigname_phase.project_named_resource_pointer pointer
+             WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
          )
          SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
          FROM reached
@@ -213,9 +201,13 @@ async fn admitted(
            ON binding.surface_binding_id = nc.surface_binding_id
          LEFT JOIN bigname_phase.token_lineages token_lineage
            ON token_lineage.token_lineage_id = nc.token_lineage_id
-         LEFT JOIN bigname_phase.resolver_current resolver_capability
-           ON resolver_capability.chain_id = $1
-          AND lower(resolver_capability.resolver_address) = lower($2)
+         LEFT JOIN LATERAL (
+             SELECT {FAMILY_RESOLVER_SUMMARY} AS declared_summary
+             FROM bigname_phase.project_resolver_classification classification_row
+             WHERE classification_row.chain_id = $1
+               AND classification_row.resolver_address = lower($2)
+               AND {FAMILY_RESOLVER_SERVED_ROWS}
+         ) resolver_capability ON TRUE
          {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
          WHERE {BOUND_NAME_PREDICATES}
          ORDER BY nc.raw_name, nc.namespace, nc.namehash

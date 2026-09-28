@@ -302,24 +302,30 @@ pub(crate) async fn get_address_names(
         std::collections::BTreeMap::new()
     };
     let permission_summaries = if let Some(resource_ids) = role_resource_ids.as_deref() {
-        bigname_storage::load_permissions_current_resource_summaries(&state.pool, resource_ids)
+        bigname_storage::load_serving_permission_summaries(&state.pool, resource_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name role support for {normalized_address}"
-                ))
-            })?
+            .map_err(crate::v2::name_rows_error(
+                crate::v2::SnapshotReadResource::Resource,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load address-name role support for {normalized_address}"
+                    ))
+                },
+            ))?
     } else {
         BTreeMap::new()
     };
     let subname_counts_by_name = if include.counts {
         bigname_storage::load_children_current_summaries(&state.pool, &logical_name_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load address-name subname counts for {normalized_address}"
-                ))
-            })?
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Resource,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load address-name subname counts for {normalized_address}"
+                    ))
+                },
+            ))?
             .into_iter()
             .map(|summary| {
                 (
@@ -341,11 +347,14 @@ pub(crate) async fn get_address_names(
             &name_rows,
         )
         .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to load address-name record counts for {normalized_address}"
-            ))
-        })?
+        .map_err(super::name_rows_error(
+            super::SnapshotReadResource::Resource,
+            |_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name record counts for {normalized_address}"
+                ))
+            },
+        ))?
     } else {
         BTreeMap::new()
     };

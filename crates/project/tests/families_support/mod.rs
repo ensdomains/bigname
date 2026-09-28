@@ -48,6 +48,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_resolver_classification",
     "project_registry_pointer",
     "project_resource_pointer",
+    "project_named_resource_pointer",
     "project_node_record_partition",
     "project_node_record_value",
     "project_record_id_value",
@@ -68,6 +69,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_address_record_node_index",
     "project_address_record_id_index",
     "project_name_history",
+    "project_name_summary",
 ];
 
 pub struct Fixture {

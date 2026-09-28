@@ -4,6 +4,7 @@ mod effective;
 mod paging;
 mod reads;
 mod resource_summary;
+mod serving;
 mod types;
 
 pub use canonicality::{
@@ -35,6 +36,7 @@ pub use resource_summary::{
     load_registry_permission_registration_map, permission_resource_matches_namespace,
     resource_is_registry_control_for_registrar_lease, resource_wrapped_a_registrar_lease,
 };
+pub use serving::{load_serving_effective_permissions_page, load_serving_permission_summaries};
 pub use types::{
     EffectivePermissionRow, EffectivePermissionScope, EffectivePermissionsAccountResourcePage,
     PermissionCoverageExhaustiveness, PermissionCoverageStatus,

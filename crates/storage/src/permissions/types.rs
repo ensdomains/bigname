@@ -505,7 +505,7 @@ impl PermissionScope {
         }
     }
 
-    pub(super) fn parse(scope_kind: &str, scope_detail: &Value) -> Result<Self> {
+    pub(crate) fn parse(scope_kind: &str, scope_detail: &Value) -> Result<Self> {
         match scope_kind {
             "root" => Ok(Self::Root),
             "registry" => Ok(Self::Registry),
