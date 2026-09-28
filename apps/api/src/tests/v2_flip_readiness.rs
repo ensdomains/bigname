@@ -72,7 +72,7 @@ async fn flip_status_chain(state: &AppState, on: bool) -> Result<Value> {
     Ok(payload["data"]["chains"]["1"].clone())
 }
 
-/// Ruling J12: with the switch on, the indexed block, block lag and time lag are the family
+/// With the switch on, the indexed block, block lag and time lag are the family
 /// marker's; with it off they stay the Project row's.
 #[tokio::test]
 async fn v2_status_reads_the_family_marker_as_the_indexed_block_with_the_switch_on() -> Result<()>
@@ -95,7 +95,7 @@ async fn v2_status_reads_the_family_marker_as_the_indexed_block_with_the_switch_
     database.cleanup().await
 }
 
-/// Ruling J14: a family rebuild (`bootstrap_pending`) serves nothing with the switch on, so
+/// A family rebuild (`bootstrap_pending`) serves nothing with the switch on, so
 /// status degrades; with the switch off the marker is not read and status is unchanged.
 #[tokio::test]
 async fn v2_status_degrades_during_a_family_rebuild_only_with_the_switch_on() -> Result<()> {
@@ -245,7 +245,7 @@ async fn flip_verified_records(database: &TestDatabase, on: bool) -> Result<(Sta
     Ok((status, payload, requests))
 }
 
-/// Ruling J14 at the route: while the families rebuild (`bootstrap_pending`) a verified read
+/// At the route, while the families rebuild (`bootstrap_pending`) a verified read
 /// answers the stale 409 with the switch on, before any provider call; with the switch off the
 /// marker is not read and the lookup executes as before.
 #[tokio::test]
@@ -265,11 +265,20 @@ async fn v2_verified_records_answer_stale_during_a_family_rebuild_only_with_the_
     database.cleanup().await
 }
 
-/// Flip prerequisite 6: during an Interpret redo the stored head and the indexed position both
-/// stall, so their difference reads 0 while the chain moves on. Status reports the lags as
-/// unknown (null) for the redo's duration instead, with the switch on and off.
+/// Flip prerequisite 6: during a redo the stored head and the indexed position can both stall,
+/// so their difference reads 0 while the chain moves on. Status reports the lags as unknown
+/// (null) for an Interpret redo and a Project redo, with the switch on and off.
 #[tokio::test]
 async fn v2_status_lag_is_unknown_during_an_interpret_redo_in_both_switch_states() -> Result<()> {
+    assert_lag_unknown_during_redo("interpret").await
+}
+
+#[tokio::test]
+async fn v2_status_lag_is_unknown_during_a_project_redo_in_both_switch_states() -> Result<()> {
+    assert_lag_unknown_during_redo("project").await
+}
+
+async fn assert_lag_unknown_during_redo(phase: &str) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let state = seed_flip_status_fixture(&database).await?;
     sqlx::query(
@@ -291,24 +300,45 @@ async fn v2_status_lag_is_unknown_during_an_interpret_redo_in_both_switch_states
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(&database.lookup_pool)
     .await?;
-    let caught_up = flip_status_chain(&state, true).await?;
-    assert_eq!(caught_up["lag_blocks"], json!(0));
-    assert_eq!(caught_up["status"], json!("ready"));
+    for on in [true, false] {
+        let caught_up = flip_status_chain(&state, on).await?;
+        assert_eq!(caught_up["lag_blocks"], json!(0), "switch {on}");
+        assert_eq!(caught_up["status"], json!("ready"), "switch {on}");
+    }
 
-    database
-        .simulate_interpret_redo_begin("ethereum-mainnet", "recompute_flags")
-        .await?;
-    let families = flip_status_chain(&state, true).await?;
-    assert_eq!(families["indexed_block"], json!(120));
-    assert_eq!(families["lag_blocks"], Value::Null);
-    assert_eq!(families["lag_seconds"], Value::Null);
-    assert_eq!(families["status"], json!("degraded"));
-
-    let served = flip_status_chain(&state, false).await?;
-    assert_eq!(served["indexed_block"], json!(120));
-    assert_eq!(served["lag_blocks"], Value::Null);
-    assert_eq!(served["lag_seconds"], Value::Null);
-    assert_eq!(served["status"], json!("degraded"));
+    // The redo marker as the runner's redo begin writes it (support.rs,
+    // `simulate_interpret_redo_begin`), on the named phase's row. Only Interpret may
+    // recompute flags; a Project redo is a plain redo.
+    let mode = if phase == "interpret" { "recompute_flags" } else { "redo" };
+    let started = sqlx::query(
+        "UPDATE bigname_phase.chain_phase_state
+         SET phase_status = 'running',
+             redo_in_progress = true,
+             redo_attempt_generation = redo_attempt_generation + 1,
+             redo_mode = $2,
+             redo_previous_phase_status = phase_status,
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0,
+             redo_to_block_number = current_block_number,
+             started_at = now(),
+             finished_at = NULL,
+             updated_at = now()
+         WHERE chain_id = 'ethereum-mainnet' AND phase_name = $1",
+    )
+    .bind(phase)
+    .bind(mode)
+    .execute(&database.lookup_pool)
+    .await?;
+    assert_eq!(started.rows_affected(), 1);
+    for on in [true, false] {
+        let chain = flip_status_chain(&state, on).await?;
+        assert_eq!(chain["indexed_block"], json!(120), "{phase} switch {on}");
+        assert_eq!(chain["lag_blocks"], Value::Null, "{phase} switch {on}");
+        assert_eq!(chain["lag_seconds"], Value::Null, "{phase} switch {on}");
+        assert_eq!(chain["status"], json!("degraded"), "{phase} switch {on}");
+    }
 
     database.cleanup().await
 }

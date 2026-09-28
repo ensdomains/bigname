@@ -135,6 +135,27 @@ impl CollectionSnapshot {
         bounds
     }
 
+    /// Under the [publication switch](bigname_storage::publication_source), a name with no
+    /// composed row may be one a family rebuild has yet to reach: before a route answers it not
+    /// found, the family markers of this snapshot's chains must be servable, otherwise it is the
+    /// stale 409 for `resource`. A no-op with the switch off.
+    pub(crate) async fn ensure_families_published(
+        &self,
+        state: &AppState,
+        resource: super::SnapshotReadResource,
+    ) -> V2Result<()> {
+        if !bigname_storage::publication_source::serve_from_families() {
+            return Ok(());
+        }
+        let chains: Vec<String> = self.block_bounds().into_keys().collect();
+        bigname_storage::families::name::ensure_family_publications(&state.pool, &chains)
+            .await
+            .map(|_| ())
+            .map_err(super::name_rows_error(resource, |_| {
+                super::V2Error::internal_error("failed to read the family publication")
+            }))
+    }
+
     pub(crate) fn validate_cursor(&self, cursor: &CursorPayload) -> V2Result<()> {
         self.validate_token(cursor.snapshot.as_deref())
     }

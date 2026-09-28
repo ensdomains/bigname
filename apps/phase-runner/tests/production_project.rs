@@ -10953,9 +10953,7 @@ async fn proofless_v2_release_retains_closed_authority_after_later_v1_residue() 
             "{release_family}"
         );
         assert!(
-            bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-                .await?
-                .is_some(),
+            served_name_is_readable(scratch.pool(), &logical_name_id).await?,
             "the {release_family} closed ENSv2 authority tombstone must remain readable"
         );
 
@@ -11032,9 +11030,7 @@ async fn a_v2_regrant_after_a_release_and_v1_residue_is_served() -> Result<()> {
     .await?;
     assert_active_v2_regrant(&incremental, regrant_binding, regrant_resource);
     assert!(
-        bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-            .await?
-            .is_some(),
+        served_name_is_readable(scratch.pool(), &logical_name_id).await?,
         "the re-granted ENSv2 registration must remain readable"
     );
 
@@ -11467,9 +11463,7 @@ async fn authority_epoch_keeps_migration_fields_atomic_and_release_sticky() -> R
         assert_eq!(after_residue.1["authority_arm"], "ens_v2");
         assert_eq!(after_residue.1["lifecycle_state"], "unregistered");
         assert!(
-            bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-                .await?
-                .is_some(),
+            served_name_is_readable(scratch.pool(), &logical_name_id).await?,
             "released v2 authority disappeared from the normal storage read"
         );
         scratch.cleanup().await?;
@@ -27085,4 +27079,17 @@ fn fixture_contract_instance_id(
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
+}
+
+/// Whether the served `name_current` row of `logical_name_id` is readable. These cases check
+/// the Project row's publication, so the read keeps the switch off whatever the build's default.
+async fn served_name_is_readable(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<bool> {
+    Ok(
+        bigname_storage::publication_source::with_serve_from_families(
+            false,
+            bigname_storage::load_name_current(pool, logical_name_id),
+        )
+        .await?
+        .is_some(),
+    )
 }

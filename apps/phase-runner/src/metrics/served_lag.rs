@@ -84,7 +84,7 @@ pub(super) struct ServedLagRow {
 #[derive(Clone)]
 pub(super) struct ServedLagGauges {
     /// The [publication switch](bigname_storage::publication_source), read once when the metrics
-    /// start: on, the gauges measure the family marker (ruling J12); off, the Project row.
+    /// start: on, the gauges measure the family marker; off, the Project row.
     from_families: bool,
     lag_blocks: IntGaugeVec,
     publication_block: IntGaugeVec,

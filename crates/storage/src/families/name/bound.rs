@@ -57,6 +57,9 @@ pub async fn load_family_bound_names(
     ))
     .unwrap_or(i64::MAX);
     let mut snapshot = batch::read_snapshot(pool).await?;
+    // The walk reads family tables, which a rebuild empties: read the marker first, so a rebuild
+    // refuses rather than answers a resolver with no names.
+    batch::ensure_published(&mut snapshot, &[chain_id.to_owned()]).await?;
     let mut out = Vec::new();
     while out.len() < wanted {
         let candidates = candidates(
@@ -98,7 +101,8 @@ pub async fn load_family_bound_names(
 }
 
 /// The next names after `after` in the page order that a pointer naming the resolver reaches:
-/// (logical_name_id, raw_name, namespace, namehash).
+/// (logical_name_id, raw_name, namespace, namehash). A candidate is a superset: `admitted` keeps
+/// the names whose composed row serves the resolver.
 async fn candidates(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
@@ -127,6 +131,26 @@ async fn candidates(
                ON event.event_identity = pointer.event_identity
              WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
                AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
+             UNION
+             -- A name whose own pointer on a resource names the resolver while the resource's
+             -- latest pointer (F5) belongs to another name: F5 keeps one pointer per resource,
+             -- and the composed row reads the name's own (loaders.rs, named_resource_pointers).
+             -- The predicates are normalized_events_resolver_current_address_lookup_idx's.
+             SELECT event.logical_name_id
+             FROM bigname_phase.normalized_events event
+             WHERE event.chain_id = $1 AND event.event_kind = 'ResolverChanged'
+               AND lower(event.after_state ->> 'resolver') = lower($2)
+               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
+               AND event.after_state ->> 'resolver' IS NOT NULL
+               AND event.after_state ->> 'resolver' <> ''
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND EXISTS (
+                   SELECT 1
+                   FROM bigname_phase.project_resource_pointer shared
+                   JOIN bigname_phase.normalized_events latest
+                     ON latest.event_identity = shared.pointer_position ->> 'event_identity'
+                   WHERE shared.chain_id = $1 AND shared.resource_id = event.resource_id
+                     AND latest.logical_name_id IS DISTINCT FROM event.logical_name_id)
          )
          SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
          FROM reached

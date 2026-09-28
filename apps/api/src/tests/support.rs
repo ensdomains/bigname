@@ -979,6 +979,9 @@ impl TestDatabase {
         _initialize_manifest_schema: bool,
         _initialize_name_current_schema: bool,
     ) -> Result<Self> {
+        // These fixtures seed the Project row as the served publication, so the API tests hold
+        // the switch off whatever the build's default; the switch tests scope it on.
+        bigname_storage::publication_source::hold_for_test_process(false);
         let database = bigname_test_support::TestDatabase::create(
             TestDatabaseConfig::new("bigname_api_test")
                 .admin_database_from_url()

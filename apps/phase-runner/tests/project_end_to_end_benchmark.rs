@@ -736,7 +736,8 @@ async fn run(
                 (COPY_CHILDREN_PAGE, 20)
             };
             let (search, expiring) =
-                families_mode::measure_walks(pool, number, "ens", page_size, max_pages).await?;
+                families_mode::measure_walks(pool, number, CHAIN, "ens", page_size, max_pages)
+                    .await?;
             ensure!(
                 search.rows > 0 && expiring.rows > 0,
                 "the composed listings served nothing at {number}"

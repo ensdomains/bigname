@@ -31,6 +31,10 @@ tokio::task_local! {
     static SCOPED_SERVE_FROM_FAMILIES: bool;
 }
 
+/// A test process's held value ([`hold_for_test_process`]): 0 while none is held, 1 off, 2 on.
+#[cfg(any(test, feature = "test-support"))]
+static HELD_FOR_TEST_PROCESS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// Reads [`SERVE_FROM_FAMILIES_ENV`] over [`SERVE_FROM_FAMILIES_DEFAULT`] and holds the result
 /// for the rest of the process. Returns the value now held, for the caller's startup log, or an
 /// error naming the variable when its value is not one of the accepted spellings.
@@ -52,11 +56,28 @@ pub fn serve_from_families() -> bool {
     if let Ok(on) = SCOPED_SERVE_FROM_FAMILIES.try_with(|on| *on) {
         return on;
     }
+    #[cfg(any(test, feature = "test-support"))]
+    match HELD_FOR_TEST_PROCESS.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
     SERVE_FROM_FAMILIES.load(Ordering::Relaxed)
 }
 
+/// Holds the switch at `on` for the rest of this test process, over the build's default and over
+/// [`init_from_env`], which a test of a binary's startup path may call: for a test binary whose
+/// fixtures seed the Project row as the served publication, so its tests keep that publication
+/// when the default flips. A scoped value ([`with_serve_from_families`]) still wins, so the
+/// switch tests in the same binary keep choosing their state. The binaries never call it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_for_test_process(on: bool) {
+    HELD_FOR_TEST_PROCESS.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 /// Runs `future` with the switch fixed to `on` for that task only. Tests share one process and
-/// run in parallel, so they cannot flip the process-wide value.
+/// run in parallel, so a test that needs a state other than its binary's scopes it here rather
+/// than flipping the process-wide value.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn with_serve_from_families<F: std::future::Future>(on: bool, future: F) -> F::Output {
     SCOPED_SERVE_FROM_FAMILIES.scope(on, future).await

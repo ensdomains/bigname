@@ -2557,7 +2557,9 @@ stored head by at most one block, and the marker's `sequence` is the served
 generation a same-request recheck compares, and the verified lookup's guard
 compares too. With the switch on `/v1/status` and the served-lag gauges take
 the projected block from the marker, while the Project phase state still comes
-from the Project row.
+from the Project row. During a family rebuild (`bootstrap_pending`) status
+shows the rebuild's progress block as `indexed_block` and reports `degraded`,
+while the gauges show the unavailable -1.
 
 ## Publication switch
 
@@ -2594,8 +2596,10 @@ serving pointer and resolver, history heads and coverage. It describes the
 [publication switch](#publication-switch) on, the names group serves these rows
 and every route that joins name rows takes them from here
 ([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
-block, and none is served while the marker is not `live` for this build. The name comparison of the
-fixture-corpus harness checks every composed row against the served row.
+block, and none is served unless the marker is servable by the publication
+fence's rule (`live`, this build's, on the readable lineage). The name
+comparison of the fixture-corpus harness checks every composed row against the
+served row.
 
 ## Family undo journal
 

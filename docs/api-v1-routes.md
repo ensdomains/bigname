@@ -478,7 +478,7 @@ collection route carry neither header.
   `indexed_block` and both lags come from the
   [family marker](glossary.md#family-marker) instead. With either setting,
   both lags are `null` while an Interpret or Project redo is in progress,
-  since the redo holds the head and the indexed position still.
+  since lag is unknown during a redo.
   Missing head, project, or lineage rows preserve the existing nullable fields.
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status

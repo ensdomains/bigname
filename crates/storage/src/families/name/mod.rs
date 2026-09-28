@@ -50,8 +50,9 @@ pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 
 pub use batch::{
-    load_family_name, load_family_name_on, load_family_names_by_logical_name_ids,
-    load_family_names_by_resource_ids, load_family_publication,
+    ensure_family_publications, load_family_name, load_family_name_on,
+    load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,
+    load_family_publication,
 };
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a

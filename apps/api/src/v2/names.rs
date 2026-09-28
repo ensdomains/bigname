@@ -125,12 +125,14 @@ pub(crate) async fn get_names(
     };
     // Under the publication switch the rows are composed from the owned key families.
     let storage_page = if bigname_storage::publication_source::serve_from_families() {
+        let chains: Vec<String> = snapshot.block_bounds().into_keys().collect();
         bigname_storage::families::name::load_family_expiring_page(
             &state.pool,
             &filter,
             order_to_storage(order),
             storage_cursor.as_ref(),
             params.page_size,
+            &chains,
         )
         .await
     } else {
@@ -143,7 +145,10 @@ pub(crate) async fn get_names(
         )
         .await
     }
-    .map_err(|_| V2Error::internal_error(format!("failed to load names for {namespace}")))?;
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error(format!("failed to load names for {namespace}")),
+    ))?;
 
     let next_cursor = storage_page
         .next_cursor

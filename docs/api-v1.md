@@ -735,10 +735,10 @@ read the [family marker](glossary.md#family-marker), which must also pass the
 rest of the serving fence: `live`, on readable lineage, and at most one block
 behind the stored head. With the switch on, the projected block and its
 timestamp (`indexed_block`, and the lags computed from them) are the marker's
-too. The Project phase state and the redo markers still come from the project
-row. With either setting, while an Interpret or Project redo is in progress
-`lag_blocks` and `lag_seconds` are `null`, because the redo holds both the
-stored head and the indexed position still and their difference would read 0.
+too. The Project phase state and the Project redo flag still come from the
+Project row, and the Interpret redo flag from the Interpret row. With either setting,
+while an Interpret or Project redo is in progress `lag_blocks` and
+`lag_seconds` are `null`, because lag is unknown during a redo.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -933,9 +933,15 @@ block, so a row never mixes two blocks. A composed row describes the publication
 and has no older position of its own, so an `at` below the publication answers
 `409 stale` with "requested snapshot is not available for name", the answer
 served rows give once Project has republished them. While a family rebuild is
-in flight (the marker is not `live`, or carries another build's hash) no
-composed row is served: a route whose fence has not already refused answers
-`409 stale` with "requested snapshot is not available for" its resource.
+in flight (the marker is not `live`, carries another build's hash, or sits on a
+block a reorg orphaned) no composed row is served: a route whose fence has not
+already refused answers `409 stale` with "requested snapshot is not available
+for" its resource, including when the rebuild starts after the fence passed. A
+composed read that finds no name to compose (a name with no surface, an empty
+bound-name or expiring walk) still reads its chains' markers, so a rebuild
+answers `409 stale` rather than `404` or an empty page, and the expiring listing
+composes only names of the requested namespace, so another namespace's rebuild
+does not refuse it.
 
 Two differences remain with the switch on. A bound-name listing still decides
 whether the resolver serves bound names at all from the served resolver row

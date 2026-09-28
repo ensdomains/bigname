@@ -79,6 +79,39 @@ async fn family_name_for_snapshot(
             ))
         })?;
     let Some(row) = row else {
+        // No row composed: the name may be one a rebuild has yet to reach, so the selected
+        // chains' markers must be servable before the name is called absent.
+        let chain_ids: Vec<String> = selected_chain_positions
+            .as_map()
+            .values()
+            .map(|position| position.chain_id.clone())
+            .collect();
+        let publications = crate::families::name::ensure_family_publications(pool, &chain_ids)
+            .await
+            .map_err(|error| {
+                if crate::families::name::is_publication_unavailable(&error) {
+                    return SnapshotSelectionError::stale(format!(
+                        "name data is unavailable while the families rebuild: {error}"
+                    ));
+                }
+                SnapshotSelectionError::internal(format!(
+                    "failed to read the family markers for logical_name_id {logical_name_id}: \
+                     {error}"
+                ))
+            })?;
+        // As for a composed row: only the publication itself can say the name is absent.
+        let selected = positions_by_chain_id(selected_chain_positions)?;
+        let at_publication = publications.iter().all(|publication| {
+            selected.get(&publication.chain_id).is_some_and(|position| {
+                position.block_number == publication.block_number
+                    && position.block_hash == publication.block_hash
+            })
+        });
+        if !at_publication {
+            return Err(SnapshotSelectionError::stale(
+                "name data is unavailable at the selected historical position",
+            ));
+        }
         return Ok(SnapshotProjectionRead::NotFound);
     };
     let publication = ChainPositions::from_value(&row.chain_positions).map_err(|error| {
