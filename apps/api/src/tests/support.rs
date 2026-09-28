@@ -3906,6 +3906,229 @@ fn compact_records_inventory_current_row(
     row
 }
 
+/// A retained resolver write. Missing values exercise event generations which announce a key
+/// without retaining its value; output status and coverage are always derived by the reader.
+fn family_fixture_record_write(key: &str, value: Option<Value>) -> Value {
+    let (key, family, selector, source) = if key == "avatar" {
+        (
+            "text:avatar".to_owned(),
+            "text",
+            json!("avatar"),
+            "TextChanged",
+        )
+    } else if let Some(selector) = key.strip_prefix("text:") {
+        (key.to_owned(), "text", json!(selector), "TextChanged")
+    } else if let Some(selector) = key.strip_prefix("addr:") {
+        (key.to_owned(), "addr", json!(selector), "AddressChanged")
+    } else {
+        assert_eq!(key, "contenthash", "explicit fixture record family");
+        (
+            key.to_owned(),
+            "contenthash",
+            Value::Null,
+            "ContenthashChanged",
+        )
+    };
+    let mut after = json!({"record_key":key,"record_family":family,"selector_key":selector,"source_event":source});
+    if let Some(value) = value {
+        after["value"] = value;
+    }
+    after
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_family_fixture_record_writes(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    name: &str,
+    resolver: &str,
+    block: i64,
+    hash: &str,
+    writes: &[Value],
+) -> Result<()> {
+    let family = if namespace == "basenames" {
+        "basenames_base_resolver"
+    } else {
+        "ens_v1_resolver_l1"
+    };
+    let manifest =
+        declare_family_fixture_resolver(pool, namespace, chain, family, resolver).await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let mut events = Vec::new();
+    for write in writes {
+        let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+        let mut after = write.clone();
+        after["node"] = json!(node);
+        after["resolver"] = json!(resolver);
+        let mut event = history_event(
+            &format!("fixture-record-{ordinal}"),
+            None,
+            None,
+            Some(chain),
+            Some(block),
+            Some(hash),
+            Some("0xrecords"),
+            Some(ordinal),
+            CanonicalityState::Canonical,
+        );
+        event.namespace = namespace.into();
+        event.event_kind = "RecordChanged".into();
+        event.source_family = family.into();
+        event.manifest_version = 1;
+        event.source_manifest_id = Some(manifest);
+        event.raw_fact_ref =
+            json!({"kind":"raw_log", "emitting_address":resolver,"transaction_index":0});
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(pool, &events).await?;
+    Ok(())
+}
+
+/// The default Alice route fixture: first registry observation, registrar grant and current
+/// resolver writes at three actual block times. The response's dates and values are produced.
+async fn seed_alice_name_inputs(database: &TestDatabase) -> Result<()> {
+    let chain = "ethereum-mainnet";
+    let resource = Uuid::from_u128(0x2200);
+    let resolver = "0x0000000000000000000000000000000000000abc";
+    for (block, hash, time) in [
+        (21_000_001, "0xalice-created", "2023-01-02T03:04:05Z"),
+        (21_000_002, "0xalice-granted", "2024-01-02T03:04:05Z"),
+        (21_000_003, "0xbinding", "2026-04-17T00:00:03Z"),
+    ] {
+        seed_schema_v2_lookup_head(&database.pool, chain, block, hash, time).await?;
+    }
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        "alice.eth",
+        chain,
+        21_000_001,
+        "0xalice-created",
+        resource,
+        Uuid::from_u128(0x1100),
+        Uuid::from_u128(0x3300),
+        "ens_v1",
+    )
+    .await?;
+    let node = bigname_lookup::ens_namehash_hex("alice.eth")?;
+    let facts = [
+        (
+            21_000_001,
+            "0xalice-created",
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            json!({"source_event":"Transfer","node":node,"owner":"0x00000000000000000000000000000000000000bb"}),
+        ),
+        (
+            21_000_002,
+            "0xalice-granted",
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            json!({"authority_kind":"registrar","registrant":"0x00000000000000000000000000000000000000aa",
+                "expiry":parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z").map_err(|e| anyhow::anyhow!("{e}"))?.unix_timestamp()}),
+        ),
+        (
+            21_000_003,
+            "0xbinding",
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({"node":node,"resolver":resolver}),
+        ),
+    ];
+    let mut events = Vec::new();
+    for (block, hash, kind, family, after) in facts {
+        let mut event = history_event(
+            &format!("alice-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some(chain),
+            Some(block),
+            Some(hash),
+            Some("0xalice"),
+            Some(0),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = kind.into();
+        event.source_family = family.into();
+        event.before_state = json!({});
+        event.after_state = after;
+        events.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        chain,
+        "alice.eth",
+        resolver,
+        21_000_003,
+        "0xbinding",
+        &[
+            family_fixture_record_write(
+                "addr:60",
+                Some(json!("0x0000000000000000000000000000000000000def")),
+            ),
+            family_fixture_record_write("avatar", Some(json!("https://example.test/avatar.png"))),
+            family_fixture_record_write("contenthash", Some(json!("ipfs://alice"))),
+            family_fixture_record_write("text:description", Some(json!("Alice profile"))),
+        ],
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, chain, 21_000_003, "0xbinding").await
+}
+
+/// Start a new resolver record version and retain only the supplied writes after that boundary.
+async fn replace_alice_record_inputs(database: &TestDatabase, writes: &[Value]) -> Result<()> {
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let resolver = "0x0000000000000000000000000000000000000abc";
+    let mut version = history_event(
+        &format!("alice-record-version-{ordinal}"),
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(21_000_003),
+        Some("0xbinding"),
+        Some("0xrecords"),
+        Some(ordinal),
+        CanonicalityState::Canonical,
+    );
+    version.event_kind = "RecordVersionChanged".into();
+    version.source_family = "ens_v1_resolver_l1".into();
+    version.raw_fact_ref =
+        json!({"kind":"raw_log", "emitting_address":resolver,"transaction_index":0});
+    version.before_state = json!({});
+    version.after_state = json!({"node":bigname_lookup::ens_namehash_hex("alice.eth")?,
+        "record_version":ordinal});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[version]).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "alice.eth",
+        resolver,
+        21_000_003,
+        "0xbinding",
+        writes,
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
+}
+
+async fn v2_name_records_payload_with_writes(uri: &str, writes: &[Value]) -> Result<Value> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    replace_alice_record_inputs(&database, writes).await?;
+    let body = v2_name_record_payload_for_database(&database, uri).await?;
+    database.cleanup().await?;
+    Ok(body)
+}
+
 /// Identity inputs shared by named API fixtures. All names go through the production normalizer;
 /// the caller supplies the actual chain position and stable resource/binding identities.
 #[allow(clippy::too_many_arguments)]
