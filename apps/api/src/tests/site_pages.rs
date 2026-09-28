@@ -76,7 +76,7 @@ fn every_upstream_citation_in_the_guide_is_in_the_route_contract() {
 #[test]
 fn every_docs_link_on_the_home_page_names_a_reference_page() {
     let linked = HOME
-        .split("/docs#")
+        .split("docs/#")
         .skip(1)
         .filter_map(|rest| {
             rest.split(|c: char| !(c.is_ascii_lowercase() || c == '-'))

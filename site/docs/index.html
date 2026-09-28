@@ -141,7 +141,7 @@
 
   @media (max-width: 860px) {
     .wrap { padding: 0 18px 64px; }
-    .mast { height: 64px; } .lockup .word { font-size: 20px; } .status .t { display: none; }
+    .mast { height: 64px; } .lockup .word { font-size: 20px; } .status .t { display: none; } .mast .right { gap: 14px; }
     .split { grid-template-columns: 1fr; padding-top: 4px; }
     .index { position: static; max-height: none; overflow: visible; padding-top: 8px; mask-image: none; }
     .ihero { display: block; margin: 12px 0 30px; } .ihero p { font-family: var(--sans); font-size: 16px; line-height: 1.55; color: var(--ink-soft); margin-top: 16px; text-wrap: pretty; }
@@ -158,8 +158,10 @@
 <header class="mast">
   <a class="lockup" href="#"><svg class="mark" width="40" height="27" viewBox="0 0 92.21 62" aria-hidden="true"><rect x="0" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:0"/><rect x="14.31" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:1"/><rect x="28.62" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:2"/><rect x="42.92" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:3"/><rect x="65.18" y="0" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:4"/><rect x="79.49" y="0" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:5"/><rect x="0" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:6"/><rect x="14.31" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:7"/><rect x="28.62" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:8"/><rect x="42.92" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:9"/><rect x="65.18" y="13.04" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:10"/><rect x="79.49" y="13.04" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:11"/><rect x="0" y="37.52" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:12"/><rect x="14.31" y="37.52" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:13"/><rect x="36.57" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:14"/><rect x="50.87" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:15"/><rect x="65.18" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:16"/><rect x="79.49" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:17"/><rect x="0" y="50.55" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:18"/><rect x="14.31" y="50.55" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:19"/><rect x="36.57" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:20"/><rect x="50.87" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:21"/><rect x="65.18" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:22"/><rect x="79.49" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:23"/></svg><span class="word">bigname</span></a>
   <div class="right">
+    <span id="network"></span>
     <a class="status" id="status" href="#status" title="checking the index"><span class="tile"></span><span class="t">checking</span></a>
     <button class="theme" id="theme-btn" type="button" title="switch theme" aria-label="switch theme"></button>
+    <a href="../" data-carry="../">home</a>
     <a href="https://github.com/ensdomains/bigname">source</a>
   </div>
 </header>
@@ -169,6 +171,9 @@
     <div id="index-groups"></div>
     <div class="ver" id="ver"></div>
   </nav>
+  <!-- The reference below is written by hand. When the API publishes its OpenAPI
+       document at <base>/openapi.json (TYR-18), a renderer attaches here and reads
+       it from the network the switcher selects. -->
   <main class="page" id="page"></main>
 </div>
 </div>
@@ -220,10 +225,10 @@ const GUIDES = [
   keywords: ['quick start', 'base url', 'endpoints', 'routes'],
   sections: [
     { h: 'Examples', id: 'examples', html: `
-<pre class="block"><code>$ curl -s /v1/names/taytems.eth
-$ curl -s '/v1/names/taytems.eth/records?keys=addr:60,text:avatar'
-$ curl -s /v1/addresses/0x8e8Db5CcEF88cca9d624701Db544989C996E3216/primary-name
-$ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
+<pre class="block"><code>$ curl -s __API__/v1/names/taytems.eth
+$ curl -s '__API__/v1/names/taytems.eth/records?keys=addr:60,text:avatar'
+$ curl -s __API__/v1/addresses/0x8e8Db5CcEF88cca9d624701Db544989C996E3216/primary-name
+$ curl -s -X POST __API__/v1/lookup -H 'content-type: application/json' \\
        -d '{"profile":"feed","inputs":[{"name":"taytems.eth"}]}'</code></pre>` },
     { h: 'Manual pages', id: 'pages', html: '__ROUTE_TABLE__' },
     { h: 'The six rules', id: 'rules', html: `
@@ -959,12 +964,13 @@ const ROUTES = [
 },
 ];
 </script>
+<script src="../network.js"></script>
 <script>
 (function () {
   'use strict';
-  const VERSION = '__BIGNAME_VERSION__', BUILD_SHA = '__BIGNAME_BUILD_SHA__';
-  const dev = VERSION.startsWith('__');
-  let PREFIX = '/v1';
+  // Every request goes to the API the network switcher selects (network.js).
+  const NET = window.BignameNetwork;
+  const PREFIX = '/v1';
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const MARK = $('.mast .mark').outerHTML;
@@ -976,7 +982,8 @@ const ROUTES = [
   // the reference was written with man-page cross references; show the path or the page name instead
   const friendly = html => String(html)
     .replace(/<a href="#([a-z-]+)(\/[a-z-]+)?">[^<]*\(\d\)<\/a>/g, (_, id, anchor) => BY_ID[id] ? `<a href="#${id}${anchor || ''}">${BY_ID[id].kind === 'route' ? `<code>${esc(nameOf(BY_ID[id]))}</code>` : esc(nameOf(BY_ID[id]))}</a>` : id)
-    .replace(/\/v1\//g, PREFIX + '/');
+    .replace(/\/v1\//g, PREFIX + '/')
+    .replace(/__API__/g, esc(NET.apiBase()));
   const hlJson = str => esc(str).replace(/"((?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*)"(\s*:)/g, '<span class="k">"$1"</span>$2');
   const enc = v => encodeURIComponent(v).replace(/%3A/gi, ':').replace(/%2C/gi, ',');
   const LEDE = 'A read API for ENS';
@@ -1067,7 +1074,7 @@ const ROUTES = [
     return hit ? hit[1] : status === 404 ? 'Nothing there.' : '';
   }
   function curlFor(r, url, body) {
-    const full = location.origin + url;
+    const full = NET.apiBase() + url;
     return r.method === 'POST' ? `curl -s -X POST '${full}' -H 'content-type: application/json' -d '${body.replace(/'/g, "'\\''")}'` : `curl -s '${full}'`;
   }
 
@@ -1140,19 +1147,19 @@ const ROUTES = [
       e.preventDefault();
       const u = url(), btn = $('.run', form);
       btn.disabled = true; out.hidden = false; out.className = 'out';
-      out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(location.host)}</span></div><pre> </pre>`;
+      out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
       const t0 = performance.now();
       try {
         const init = { method: r.method, headers: { accept: 'application/json' } };
         if (r.method === 'POST') { init.headers['content-type'] = 'application/json'; init.body = body; }
-        const res = await fetch(u, init);
+        const res = await fetch(NET.apiBase() + u, init);
         const ms = Math.round(performance.now() - t0), text = await res.text();
         let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
         const why = outcomeText(r, res.status);
         const back = r.response && r.response.sample ? '<span class="sp"><button type="button" class="ex-back">example</button></span>' : '';
         out.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${back}</div>${why ? `<p class="why">${why}</p>` : ''}<pre>${hlJson(pretty)}</pre>`;
       } catch (err) {
-        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(location.origin)}. This page is served by the API itself, so open it from a running bigname to run requests.</p>`;
+        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(NET.apiBase())}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
       } finally { btn.disabled = false; }
     });
   }
@@ -1187,26 +1194,13 @@ const ROUTES = [
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   applyTheme();
 
-  async function probe(prefix) {
-    try { const r = await fetch(prefix + '/status', { headers: { accept: 'application/json' } }); if (!r.ok) return null; const j = await r.json(); return j && j.data && j.data.status ? j.data : null; } catch (e) { return null; }
-  }
-  const fmtLag = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
-  async function loadStatus(first) {
-    const el = $('#status'), t = $('.t', el);
-    let d = await probe(PREFIX);
-    if (!d && first) for (const alt of ['/v2', '/v1']) { if (alt === PREFIX) continue; d = await probe(alt); if (d) { PREFIX = alt; renderIndex(); route(); break; } }
-    if (!d) { el.className = 'status bad'; t.textContent = 'index unreachable'; el.title = `GET ${PREFIX}/status did not answer from this origin`; return; }
-    const chains = Object.entries(d.chains || {});
-    const lag = chains.map(([, c]) => c.lag_seconds).filter(x => typeof x === 'number');
-    el.className = 'status ' + (d.status === 'ready' ? 'ok' : d.status === 'stale' ? 'bad' : '');
-    t.textContent = `index ${d.status}${lag.length ? `, ${fmtLag(Math.max(...lag))} behind` : ''}`;
-    el.title = chains.map(([id, c]) => `chain ${id}: ${c.status}, indexed ${c.indexed_block ?? '?'} of ${c.latest_block ?? '?'}`).join('\n');
-  }
-
   renderIndex();
-  $('#ver').textContent = dev ? 'bigname dev' : `bigname ${VERSION} · ${BUILD_SHA.slice(0, 10)}`;
+  NET.mount($('#network'));
+  NET.statusPill($('#status'));
+  NET.statusDetail($('#ver'));
+  // The examples and the request lines name the selected API; redraw the page.
+  NET.onChange(route);
   route();
-  loadStatus(true); setInterval(() => loadStatus(false), 30000);
 })();
 </script>
 </body>
