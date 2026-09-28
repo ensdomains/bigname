@@ -133,6 +133,10 @@ const DIAGNOSTICS_BINDING_DICTIONARY_ALLOWLIST: &[&str] = &[
     "token_lineage_id",
     "surface_binding_id",
     "binding_kind",
+    // declared_state.history is two head pointers into canonical history
+    // (docs/architecture.md, exact-name `history`); each carries the persisted
+    // singular chain_position shape, as diagnostics events and records do.
+    "chain_position",
 ];
 
 const DIAGNOSTICS_AUTHORITY_DICTIONARY_ALLOWLIST: &[&str] = &[
