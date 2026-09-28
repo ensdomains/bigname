@@ -16,6 +16,8 @@ pub(crate) enum Space {
     Name,
     /// F2a, F2b, F2c, F5, F8: a resource id.
     Resource,
+    /// F5: (resource id, logical_name_id) of a named resolver pointer.
+    NamedResourcePointer,
     /// F2a: (logical_name_id, registry identifier, token id) of an ENSv2 lifecycle event.
     Triple,
     /// F2a: (logical_name_id, registry contract instance) of an ENSv2 child registration.
@@ -311,6 +313,10 @@ fn derive_resolvers(event: &BlockEvent, keys: &mut BlockKeys) {
     let mut resolvers = Vec::new();
     match kind {
         "ResolverChanged" => {
+            keys.add(
+                Space::NamedResourcePointer,
+                [event.resource_id.clone(), event.logical_name_id.clone()],
+            );
             resolvers.push(event.after_text("resolver"));
             resolvers.push(event.before_text("resolver"));
             if V1_POINTER_FAMILIES.contains(&family) {

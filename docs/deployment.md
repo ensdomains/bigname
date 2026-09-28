@@ -150,6 +150,45 @@ matching schema-migration on a large initialized database, and before starting a
 release that reads it; without the prebuild that schema-migration blocks writes to
 `normalized_events` while it builds.
 
+The permission family readers use the indexes in
+`20260928190000_project_families_permission_read_indexes.sql` and
+`20260928223000_project_permission_candidate_indexes.sql`. On a large initialized
+database, prebuild these concurrently before applying those schema-migrations;
+without a prebuild their ordinary index creation blocks writes to the indexed
+tables. Run each statement outside a transaction, with the publication switch off:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_subject_idx
+    ON bigname_phase.project_grant (subject);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_scope_idx
+    ON bigname_phase.project_grant (chain_id, scope);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_account_approval_subject_idx
+    ON bigname_phase.project_account_approval (subject, authority_kind);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_binding_observation_resource_idx
+    ON bigname_phase.project_registry_binding_observation (chain_id, resource_id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_binding_observation_owner_idx
+    ON bigname_phase.project_registry_binding_observation
+        (chain_id, registry_contract, registry_owner);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_subject_resource_idx
+    ON bigname_phase.project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_resource_subject_idx
+    ON bigname_phase.project_grant (resource_id, subject COLLATE "C", scope COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_binding_observation_owner_target_idx
+    ON bigname_phase.project_registry_binding_observation
+        (chain_id, registry_contract, registry_owner, target_resource_id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_registry_binding_observation_owner_resource_idx
+    ON bigname_phase.project_registry_binding_observation
+        (chain_id, registry_contract, registry_owner, resource_id);
+```
+
+Confirm all nine indexes are `indisvalid` and `indisready` in `pg_index`, and
+compare `pg_get_indexdef` with the statements above before applying the
+schema-migrations. `IF NOT EXISTS` does not validate an existing definition or
+repair an invalid concurrent build. Record account-page query plans and latency
+on representative data before enabling the switch; bounded candidate batches
+can still examine many resources when most grants are masked or observations
+no longer match the current registry binding.
+
 `20260928130000_project_families_name_history.sql` adds `project_name_history`
 to the [owned key families](glossary.md#owned-key-family) and, on a database
 whose families were built without it, resets every family table and the
@@ -159,6 +198,14 @@ them. Apply it before `BIGNAME_SERVE_FROM_FAMILIES` is ever turned on: with the
 answers `409 stale` until that rebuild finishes. It does not coordinate with a
 running family publisher: a family run in flight when it applies fails once and
 the next run rebuilds.
+
+`20260928160000_project_families_name_summary.sql` adds `project_name_summary`,
+the [name summary](glossary.md#name-summary), the same way, with the indexes its
+writer reads. Apply it before starting a release that writes it, whatever the
+publication switch: that release's family step writes the table on every block,
+so it fails until the table exists. Apply it before the switch is ever turned on
+too, for the same `409 stale` window, and, as above, a family run in flight when
+it applies fails once and the next run rebuilds.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current

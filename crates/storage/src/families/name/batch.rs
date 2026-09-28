@@ -25,8 +25,11 @@ use super::{
 };
 use crate::{
     NameCurrentRow,
-    families::control::lifecycle::{
-        AuthoritySelection, Clock, NameInput, evaluate, load_name_facts_on,
+    families::control::{
+        lifecycle::{
+            AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts_on,
+        },
+        wrapper::clock_boundaries,
     },
 };
 
@@ -106,7 +109,7 @@ pub(crate) async fn all_servable_publications(
 /// unless every chain has one. A read that may find no name to compose (an empty walk, a name
 /// with no surface) checks the chains it was asked about with it, so a rebuild answers stale
 /// rather than an empty or missing result.
-pub(super) async fn ensure_published(
+pub(crate) async fn ensure_published(
     conn: &mut PgConnection,
     chain_ids: &[String],
 ) -> Result<Vec<FamilyPublication>> {
@@ -135,7 +138,10 @@ pub async fn ensure_family_publications(
 }
 
 /// The chain's servable marker, by the fence's rule (`servable_family_marker`).
-async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
+pub(crate) async fn publication(
+    conn: &mut PgConnection,
+    chain_id: &str,
+) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(concat!(
         "/* storage:families.name.publication */
          SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,
@@ -291,17 +297,36 @@ pub(crate) async fn load_base(
         if surfaces.is_empty() {
             continue;
         }
-        out.extend(load_chain(conn, &publication, &surfaces, shape).await?);
+        out.extend(
+            load_chain(conn, &publication, &surfaces, shape, true)
+                .await?
+                .into_iter()
+                .filter_map(|(name, composed)| Some((name, composed.row?))),
+        );
     }
     Ok(out)
 }
 
-async fn load_chain(
+/// One composed name: its row (none when it serves no row, a bound name whose token lineage is
+/// not readable), and the first clock second after the publication at which the composition can
+/// change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry
+/// or grace boundary. The second is kept for a name with no row, whose row a binding change at
+/// that second can bring back.
+pub(super) struct Composed {
+    pub(super) row: Option<NameCurrentRow>,
+    pub(super) recompose_at: Option<i64>,
+}
+
+/// Compose `surfaces` of one chain at `publication`, on `conn`. `with_heads` reads the history
+/// heads the binding diagnostics serve; the summary writer, which does not store them, skips
+/// that read.
+pub(super) async fn load_chain(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     surfaces: &[Surface],
     shape: CoverageShape,
-) -> Result<BTreeMap<String, NameCurrentRow>> {
+    with_heads: bool,
+) -> Result<BTreeMap<String, Composed>> {
     let chain_id = publication.chain_id.as_str();
     let clock = Clock {
         block_number: publication.block_number,
@@ -398,8 +423,11 @@ async fn load_chain(
                 .map(|event| event.position.event_identity.clone())
         })
         .collect();
-    let heads =
-        Heads::new(load_heads(conn, chain_id, publication.block_number, &ids, &staged).await?);
+    let heads = if with_heads {
+        Heads::new(load_heads(conn, chain_id, publication.block_number, &ids, &staged).await?)
+    } else {
+        Heads::default()
+    };
 
     let mut out = BTreeMap::new();
     for (surface, facts) in surfaces.iter().zip(facts.iter_mut()) {
@@ -448,6 +476,13 @@ async fn load_chain(
         // A bound row whose token lineage is not readable is not served
         // (DEFAULT_NAME_CURRENT_READ_FILTER).
         if decided.binding.is_some() && token.is_some_and(|(_, readable)| !readable) {
+            out.insert(
+                name.to_owned(),
+                Composed {
+                    row: None,
+                    recompose_at: recompose_at(facts, clock.timestamp_seconds),
+                },
+            );
             continue;
         }
         let row = compose(
@@ -467,7 +502,29 @@ async fn load_chain(
             },
             shape,
         )?;
-        out.insert(name.to_owned(), row);
+        out.insert(
+            name.to_owned(),
+            Composed {
+                row: Some(row),
+                recompose_at: recompose_at(facts, clock.timestamp_seconds),
+            },
+        );
     }
     Ok(out)
+}
+
+/// The first clock second after `clock_seconds` at which a composition of `facts` can differ:
+/// the clock enters the composition only through the binding intervals (`open_at`) and the
+/// NameWrapper masks (`effective_wrapper`).
+fn recompose_at(facts: &NameFacts, clock_seconds: i64) -> Option<i64> {
+    let bindings = facts
+        .candidates
+        .iter()
+        .chain(&facts.lease_candidates)
+        .flat_map(|candidate| candidate.clock_boundaries(clock_seconds));
+    let wrappers = facts
+        .wrappers
+        .values()
+        .flat_map(|row| clock_boundaries(row, clock_seconds));
+    bindings.chain(wrappers).min()
 }

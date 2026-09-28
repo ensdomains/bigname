@@ -246,89 +246,38 @@ async fn v2_collection_expiry_clock_is_the_published_block_time_with_the_switch_
     database.cleanup().await
 }
 
-/// Seeds a declared child of `parent.eth` whose registration expires at `expiry`.
-async fn seed_subname_expiring_at(
-    database: &TestDatabase,
-    label: &str,
-    block_number: i64,
-    id: u128,
-    expiry: &str,
-) -> Result<()> {
-    let name = format!("{label}.parent.eth");
-    let logical_name_id = format!("ens:{name}");
-    let namehash = format!("node:{name}");
-    seed_v2_subnames_bound_child(
-        database,
-        &logical_name_id,
-        &name,
-        &namehash,
-        block_number,
-        Uuid::from_u128(0x4000 + id),
-        Uuid::from_u128(0x5000 + id),
-        Uuid::from_u128(0x6000 + id),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar",
-                "registrant": "0x00000000000000000000000000000000000000fB",
-                "registered_at": "2020-01-02T03:04:05Z",
-                "expiry": expiry
-            },
-            "control": {
-                "registry_owner": "0x00000000000000000000000000000000000000fA"
-            }
-        }),
-    )
-    .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            "ens:parent.eth",
-            &logical_name_id,
-            &name,
-            &namehash,
-            900 + block_number,
-            block_number,
-        )],
-    )
-    .await?;
-    Ok(())
-}
-
-/// Zeta expires after the published block's time but before the request time: live at the
-/// publication, expired by the wall clock. Epsilon expired before the published block: expired
-/// by either clock.
-const ZETA_EXPIRY: &str = "2026-06-01T00:00:00Z";
-const EPSILON_EXPIRY: &str = "2025-06-01T00:00:00Z";
+/// With the switch on the subnames page reads the child families (TYR-36 step 7b slice 2b), so
+/// the fixture is built by Project and the families from events (`v2_switch_children.rs`).
+/// two.alpha.eth expires after the published block's time but before the request time: live at
+/// the publication, expired by the wall clock. one.alpha.eth expired before the published block:
+/// expired by either clock. carol and dave are ENSv1 edges with no registration, never expired.
+const TWO_EXPIRY: i64 = 1_750_000_000;
+const ONE_EXPIRY: i64 = 1_600_000_000;
 
 #[tokio::test]
 async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_block_time()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_subname_expiring_at(&database, "zeta", 86, 0x40, ZETA_EXPIRY).await?;
-    seed_subname_expiring_at(&database, "epsilon", 87, 0x41, EPSILON_EXPIRY).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
+    seed_switch_children_fixture_expiring(&database, ONE_EXPIRY, TWO_EXPIRY).await?;
 
     // Pin the fixture's clocks, so the assertions below mean what the names say.
-    let published: Vec<sqlx::types::time::OffsetDateTime> =
-        sqlx::query_scalar("SELECT block_timestamp FROM bigname_phase.project_family_marker")
-            .fetch_all(&database.pool)
-            .await?;
+    let published: Vec<i64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM block_timestamp)::bigint
+         FROM bigname_phase.project_family_marker",
+    )
+    .fetch_all(&database.pool)
+    .await?;
     let [published] = published[..] else {
         anyhow::bail!("expected one family marker, found {}", published.len());
     };
-    let expiry = |value: &str| {
-        parse_rfc3339_utc_timestamp(value).map_err(|error| anyhow::anyhow!("{error}"))
-    };
     assert!(
-        expiry(EPSILON_EXPIRY)? < published
-            && published < expiry(ZETA_EXPIRY)?
-            && expiry(ZETA_EXPIRY)? < sqlx::types::time::OffsetDateTime::now_utc(),
-        "fixture: epsilon expiry < publication ({published}) < zeta expiry < now"
+        ONE_EXPIRY < published
+            && published < TWO_EXPIRY
+            && TWO_EXPIRY < sqlx::types::time::OffsetDateTime::now_utc().unix_timestamp(),
+        "fixture: one's expiry < publication ({published}) < two's expiry < now"
     );
 
-    let filtered = "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1";
+    let filtered = "/v1/names/alpha.eth/subnames?include_expired=false&page_size=1";
     bigname_storage::publication_source::with_serve_from_families(true, async {
         let mut names = Vec::new();
         let mut uri = filtered.to_owned();
@@ -337,8 +286,8 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
             assert_eq!(payload["page"]["total_count"], json!(3), "{uri}");
             let page = v2_subname_names(&payload);
             assert!(
-                !page.iter().any(|name| name == "epsilon.parent.eth"),
-                "{uri}: epsilon expired before the published block"
+                !page.iter().any(|name| name == "one.alpha.eth"),
+                "{uri}: one expired before the published block"
             );
             names.extend(page);
             let Some(cursor) = payload["page"]["next_cursor"].as_str() else {
@@ -348,19 +297,19 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
         }
         assert_eq!(
             names,
-            vec!["alpha.parent.eth", "gamma.parent.eth", "zeta.parent.eth"],
-            "zeta expires after the published block, so every page keeps it"
+            vec!["carol.alpha.eth", "dave.alpha.eth", "two.alpha.eth"],
+            "two expires after the published block, so every page keeps it"
         );
         let unfiltered = v2_subnames_payload_for_database(
             &database,
-            "/v1/names/Parent.eth/subnames?include_expired=true",
+            "/v1/names/alpha.eth/subnames?include_expired=true",
         )
         .await?;
         assert!(
             v2_subname_names(&unfiltered)
                 .iter()
-                .any(|name| name == "epsilon.parent.eth"),
-            "epsilon is a child; only the expiry filter drops it"
+                .any(|name| name == "one.alpha.eth"),
+            "one is a child; only the expiry filter drops it"
         );
         anyhow::Ok(())
     })
@@ -369,13 +318,13 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
     bigname_storage::publication_source::with_serve_from_families(false, async {
         let payload = v2_subnames_payload_for_database(
             &database,
-            "/v1/names/Parent.eth/subnames?include_expired=false",
+            "/v1/names/alpha.eth/subnames?include_expired=false",
         )
         .await?;
         assert_eq!(
             v2_subname_names(&payload),
-            vec!["alpha.parent.eth", "gamma.parent.eth"],
-            "switch off: zeta has expired by the request time, epsilon long before"
+            vec!["carol.alpha.eth", "dave.alpha.eth"],
+            "switch off: two has expired by the request time, one long before"
         );
         anyhow::Ok(())
     })
@@ -498,13 +447,14 @@ fn overview_next_cursor(payload: &Value) -> Option<String> {
 #[tokio::test]
 async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
+    // The subnames page reads the child families with the switch on, so both publications are
+    // built from events.
+    seed_switch_children_fixture(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
     for flip in SWITCH_FLIPS {
         assert_flip_restarts(
             &database,
-            "/v1/names/Parent.eth/subnames?page_size=1",
+            "/v1/names/alpha.eth/subnames?page_size=1",
             collection_next_cursor,
             flip,
         )
@@ -513,30 +463,33 @@ async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Res
     database.cleanup().await
 }
 
-/// The resolver overview's bound-names cursor carries the resolver generation beside the
-/// publication token; each is tagged with the publication source on its own. The second half
-/// splices the continuing mode's publication token into the flipped cursor, so only the
-/// resolver generation can refuse it. With the switch on the bound names are composed from the
-/// owned key families, so the fixture publishes both the served tables and the families from the
-/// same events (`seed_switch_names_fixture`), giving a second page in either mode.
+/// D10: the resolver overview's bound-names cursor carries no publication, source or resolver
+/// generation, so flipping the switch between pages does not refuse it: the continuation reads
+/// the bound names the new source serves after the cursor's position. With the switch on the
+/// bound names are composed from the owned key families, so the fixture publishes both the
+/// served tables and the families from the same events (`seed_switch_routes_fixture`).
 #[tokio::test]
-async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
+async fn v2_a_resolver_overview_cursor_continues_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_switch_routes_fixture(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
-    for flip in SWITCH_FLIPS {
-        assert_flip_restarts(&database, &base, overview_next_cursor, flip).await?;
-        assert_generation_alone_restarts(
-            &database,
-            &base,
-            overview_next_cursor,
-            "resolver_generation",
-            "resolver publication changed; restart pagination",
-            flip,
+    for (issued, continued) in SWITCH_FLIPS {
+        let page = bigname_storage::publication_source::with_serve_from_families(
+            issued,
+            v2_resolver_payload_for_database(&database, &base),
         )
         .await?;
+        assert_eq!(page["data"]["bound_names"]["data"][0]["name"], json!("alpha.eth"));
+        let cursor = overview_next_cursor(&page).context("the first page has a continuation")?;
+        let next = bigname_storage::publication_source::with_serve_from_families(
+            continued,
+            v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")),
+        )
+        .await?;
+        let names = &next["data"]["bound_names"];
+        assert_eq!(names["data"][0]["name"], json!("beta.eth"), "{issued} -> {continued}");
+        assert_eq!(names["page"]["next_cursor"], Value::Null, "{issued} -> {continued}");
     }
     database.cleanup().await
 }
@@ -547,10 +500,10 @@ async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way
 async fn v2_a_resolver_collection_cursor_restarts_when_the_switch_flips_either_way() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_resolver_roles_pages(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
+    // Role holders the served tables and the families both list, on a resolver both support.
+    seed_switch_permissions_fixture(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
-    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    let base = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles?page_size=1");
     for flip in SWITCH_FLIPS {
         assert_flip_restarts(&database, &base, collection_next_cursor, flip).await?;
         assert_generation_alone_restarts(

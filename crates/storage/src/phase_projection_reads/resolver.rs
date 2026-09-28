@@ -20,11 +20,21 @@ pub const DEFAULT_RESOLVER_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
+/// The resolver overview row. Under the publication switch it comes from the F3 classification
+/// at the family marker's publication instead (`families::topology::load_family_resolver_current`).
 pub async fn load_phase_resolver_current(
     pool: &PgPool,
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverCurrentRow>> {
+    if crate::publication_source::serve_from_families() {
+        return crate::families::topology::load_family_resolver_current(
+            pool,
+            chain_id,
+            resolver_address,
+        )
+        .await;
+    }
     let address = resolver_address.to_ascii_lowercase();
     let row = sqlx::query(&format!(
         r#"

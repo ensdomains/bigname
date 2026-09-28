@@ -1700,6 +1700,35 @@ included, so the publishing steps can tell which registration of the resource a
 grant was written under. The served permissions read keeps no such value and
 masks by the resource's current registration.
 
+F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
+one resource's latest pointer, including unnamed changes, for root, alias and
+wildcard composition. `project_named_resource_pointer` keeps the latest named
+`ResolverChanged` per `(chain_id, resource_id, logical_name_id)`, clears included.
+Only events carrying both keys write it; unnamed changes and changes naming
+another name leave it alone. A release does not delete a pointer fact: the
+composed reader still applies its binding and reachability rules. Both reducers
+use the same canonical event order and before-image journal as every family.
+
+The composed name reader fetches named pointers by exact resource/name pairs.
+Bound-name discovery uses `project_named_resource_pointer_resolver_idx` to find
+retained named pointer keys at the requested resolver, alongside the existing
+resource and registry-node pointer paths. It does not scan the resolver's
+`ResolverChanged` history. This bounds that input to retained pointer keys, not
+to page size: the candidate walk and sort can still visit the resolver's retained
+keys on each batch. Current-key listing cost remains a pre-switch performance
+check.
+
+Schema-migration `20260929140000_named_resource_pointer.sql` adds the named key
+table to an existing phase schema and atomically clears all family rows, the
+marker, journal and repair record when the table was absent, including
+`project_name_summary` when the following TYR-36 slice has already installed it.
+The next family
+run rebuilds from canonical interpreted input; fenced reads remain stale until
+the new publication is live. Reapplying the migration preserves an existing
+publication. Fresh initialization installs the same table from the baseline.
+The reducer source participates in the shared content fingerprint, so an older
+family build cannot be served under the new binary's hash.
+
 Registration and lease state also keeps every registration, renewal, release,
 reservation, expiry change and token transfer of a lease or ENSv2 triple as a
 row of its own, never pruned. Each row keeps the name the adapter emitted,
@@ -1711,6 +1740,44 @@ changed its candidates, the pointers that name it, its proxy upgrades, a
 discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
+
+One family is not event-keyed: the [name summary](glossary.md#name-summary)
+(`project_name_summary`) holds, per name, the fields the child and label lists
+filter, sort and count by inside one statement: the selected authority arm,
+whether the name has a serving resource, the registration status, the expiry
+and registration times, and whether the latest registry Transfer attributed to
+the name names the zero owner, attributed as the served child build attributes
+it (by the name the Transfer carries, else the latest named registry event of
+any kind of its resource and family, read from the readable interpreted events,
+else an active surface at its node). Every name with a
+surface has a row. A list cannot compose those at read for every child of a parent, so
+the name row is composed at read (ruling J3) except for this summary, which is
+stored. After a block writes its other family rows, and on a block that writes
+none, the family step composes the summary again, with the composed name
+reader's own selection, for every name the block touched: the names, nodes and
+resources of every row its journal names, each resource widened to the names
+whose candidates, key states, association targets, lifecycle events, wrapper
+row, owner events or pointer read it, every name a registry event carries on a
+resource that a registry event of a block since the family marker's carries
+(such an event can move the resource's unnamed Transfers to another name, and a
+rebuild range composes once for all its blocks), every name whose surface
+appeared since the family marker's block, and every name whose stored
+`recompose_at` the block's time has reached. `recompose_at` is the first second
+at which the name's composition can change with no fact changing: a binding
+interval opening or closing, or a NameWrapper expiry or grace boundary. It is
+stored in Unix seconds, since a NameWrapper expiry can lie past the last
+instant a timestamp holds, and kept for a name that composes no row. A summary that
+changed is journalled and written like any other family row, so an undo
+restores it from the journal and composes nothing; a rebuild composes every
+surfaced name.
+
+A stored summary is therefore refreshed only when a block touches the name or
+its scheduled boundary passes, and the work list is deliberately no wider.
+Inputs that change in place without either, such as a normalizer recompute of
+a surface's visibility or a lineage readability flip, are covered because a
+recompute only happens with a code change that rotates the interpreter
+fingerprint, which rebuilds the families. A reorg goes through undo, which
+restores the summaries from the journal.
 
 These tables are shadows today. No production serving reader reads them, and
 no served value depends on them; only the family reducers, the step 3
@@ -2274,7 +2341,8 @@ new truth family.
   [publication switch](glossary.md#publication-switch) off, the default, no
   served path reads them; with it on, the serving fences, the verified
   lookup's guard, `/v1/status` and the served-lag gauges read the marker, and
-  the composed routes read the family tables. The step 3 shadow readers read
+  the names group reads composed rows and the child routes read the child
+  families with the stored name summary. The step 3 shadow readers read
   the family tables in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not

@@ -3,12 +3,21 @@
 //! deleted and derived again from the base rows. The touched keys come from the block's journal
 //! (the pre-block images) and from the base rows as they stand when `touched` runs, so taking
 //! them before an undo's restore and after a block's write covers both states.
+//!
+//! After a block's write the name summaries of the names it touched are composed again
+//! (`summary.rs`); those are journalled, so an undo restores them with the other families.
+mod summary;
+
 use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
 #[derive(Debug, Default)]
 pub(crate) struct Touched {
+    /// The block whose journal named the keys.
+    number: i64,
+    /// Set by an undo, whose journal restores the name summaries exactly.
+    restoring: bool,
     names: Vec<String>,
     node_resolvers: Vec<String>,
     nodes: Vec<String>,
@@ -79,7 +88,10 @@ pub(crate) async fn touched(
     .map_err(|error| {
         ProjectError::database("failed to read the keys a family block touched", error)
     })?;
-    let mut touched = Touched::default();
+    let mut touched = Touched {
+        number,
+        ..Touched::default()
+    };
     for (kind, first, second) in rows {
         match kind.as_str() {
             "name" => touched.names.push(first),
@@ -96,12 +108,24 @@ pub(crate) async fn touched(
     Ok(touched)
 }
 
-/// Delete and derive again the index rows of the touched keys.
+impl Touched {
+    /// The keys of a block an undo is restoring: its name summaries come back from the journal.
+    pub(crate) fn restoring(self) -> Self {
+        Self {
+            restoring: true,
+            ..self
+        }
+    }
+}
+
+/// Delete and derive again the index rows of the touched keys, then, after a block's write,
+/// compose again the name summaries of the names it touched. Returns what the summary refresh
+/// wrote (nothing on an undo, which restores the summaries from the journal).
 pub(crate) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     touched: &Touched,
-) -> Result<()> {
+) -> Result<summary::Refreshed> {
     if !touched.names.is_empty() {
         run(transaction, NAME_DELETE, chain_id, &touched.names, None).await?;
         run(transaction, NAME_INSERT, chain_id, &touched.names, None).await?;
@@ -116,7 +140,10 @@ pub(crate) async fn refresh(
         run(transaction, RECORD_ID_DELETE, chain_id, pairs.0, pairs.1).await?;
         run(transaction, RECORD_ID_INSERT, chain_id, pairs.0, pairs.1).await?;
     }
-    Ok(())
+    if touched.restoring {
+        return Ok(summary::Refreshed::default());
+    }
+    summary::refresh(transaction, chain_id, touched.number).await
 }
 
 async fn run(

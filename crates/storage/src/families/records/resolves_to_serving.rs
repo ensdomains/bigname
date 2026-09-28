@@ -34,10 +34,7 @@ use crate::{
     address_names::{
         RowSource, load_address_records_evm_page_from, load_address_records_page_from,
     },
-    families::name::{
-        CoverageShape, FamilyPublication, all_servable_publications, load_composed,
-        servable_publication,
-    },
+    families::name::{CoverageShape, FamilyPublication, load_composed, servable_publication},
 };
 
 /// `load_address_records_current_page` over the families.
@@ -147,7 +144,7 @@ async fn compose_address_record_rows(
         candidate_resources_from(conn, &address, coin_types, CandidateSource::Index).await?
     };
     if candidates.is_empty() {
-        all_servable_publications(conn).await?;
+        // The route's namespace publication fence also covers an empty candidate set.
         return Ok((json!([]), json!([])));
     }
     let mut by_chain: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();

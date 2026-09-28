@@ -242,7 +242,7 @@ pub struct Observation {
 }
 
 impl Observation {
-    fn from_row(row: &Value) -> Option<Self> {
+    pub(crate) fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             resource_id: text(row, "resource_id")?,
             logical_name_id: text(row, "logical_name_id"),

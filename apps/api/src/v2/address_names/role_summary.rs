@@ -21,7 +21,10 @@ pub(super) async fn load_rows(
         MAX_INLINE_GRANT_ROWS,
     )
     .await
-    .map_err(|_| V2Error::internal_error("failed to load address-name role summaries"))?;
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Resource,
+        |_| V2Error::internal_error("failed to load address-name role summaries"),
+    ))?;
     let mut multiplicity = BTreeMap::<_, usize>::new();
     for resource_id in returned_resources {
         *multiplicity.entry(resource_id).or_default() += 1;

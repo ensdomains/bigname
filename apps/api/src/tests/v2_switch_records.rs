@@ -62,6 +62,7 @@ async fn v2_address_names_are_the_same_with_the_switch_off_and_on() -> Result<()
         "page_size=1&authority=ens_v1",
         "page_size=1&q=al",
         "page_size=1&include=counts",
+        "page_size=1&include=role_summary",
     ] {
         let pages = assert_switch_differential_pages(&database, &format!("{base}&{query}")).await?;
         let listed: usize = pages
@@ -116,6 +117,7 @@ async fn v2_resolves_to_is_the_same_with_the_switch_off_and_on() -> Result<()> {
             "page_size=1&dedupe=registration",
             "page_size=1&authority=ens_v1",
             "page_size=1&include=counts",
+        "page_size=1&include=role_summary",
         ] {
             let pages = assert_switch_differential_pages(
                 &database,
@@ -150,6 +152,25 @@ async fn v2_resolves_to_is_the_same_with_the_switch_off_and_on() -> Result<()> {
             ],
         )
         .await?;
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_inline_roles_read_no_served_permission_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_records_fixture(&database).await?;
+    let uris: Vec<String> = ["", "&relation=resolves_to&coin_type=60"].into_iter()
+        .map(|relation| format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&include=role_summary{relation}"))
+        .collect();
+    for uri in &uris {
+        let (status, body) = assert_switch_differential(&database, uri).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
+    }
+    for uri in &uris {
+        assert_switch_on_ignores_served_tables(&database, uri, &[
+            "permissions_current", "account_permission_state_current", "permissions_current_resource_summary",
+        ]).await?;
     }
     database.cleanup().await
 }
@@ -304,5 +325,31 @@ async fn v2_name_detail_and_records_diagnostic_inventories_are_the_same_with_the
         )
         .await?;
     }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_family_abi_inventory_reads_no_served_resolver_classification() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_routes_events(&database).await?;
+    let manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM bigname_phase.manifest_versions WHERE file_path = 'fixture/switch-resolver.toml'",
+    ).fetch_one(&database.pool).await?;
+    let name = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
+    let mut event = switch_event("switch-alpha-abi", None, None, "RecordChanged", "ens_v1_resolver_l1", 212, 0,
+        json!({"source_event": "ABIChanged", "node": name.strip_prefix("ens:").unwrap(),
+            "resolver": SWITCH_RESOLVER, "record_key": "abi:4", "record_family": "abi",
+            "selector_key": "4", "value_retained": true, "value": "4"}));
+    event.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
+    event.source_manifest_id = Some(manifest);
+    event.manifest_version = 1;
+    event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    publish_project_and_families(&database, 240).await?;
+    let uri = "/v1/names/alpha.eth/records?include=inventory";
+    let (status, body) = assert_switch_differential(&database, uri).await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(body["data"]["inventory"]["abi_content_types"], json!(["4"]), "{body:#}");
+    assert_switch_on_ignores_served_tables(&database, uri, &["resolver_current"]).await?;
     database.cleanup().await
 }

@@ -14,6 +14,18 @@ pub(super) async fn page(
     key: Option<&(String, String)>,
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return family_page(
+            pool,
+            chain,
+            address,
+            section,
+            (height, publication_block_bounds),
+            key,
+            page_size,
+        )
+        .await;
+    }
     let source = if section == "links" {
         include_str!("links.sql").to_owned()
     } else if section == "roles" {
@@ -87,6 +99,45 @@ pub(super) async fn page(
         attach_grants(pool, &mut result, height, publication_block_bounds).await?;
     }
     Ok((result, total as u64))
+}
+
+/// The page under the publication switch: the collection readers over the owned key families
+/// (`bigname_storage::families::topology`), which read at the family marker's publication, the
+/// only position the switch serves (ruling J5), with the same keys, items and totals; `/roles`
+/// then attaches names, registrations and `grant_event` exactly as the served page does.
+async fn family_page(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    address: &str,
+    section: &str,
+    (height, publication_block_bounds): (i64, &BTreeMap<String, i64>),
+    key: Option<&(String, String)>,
+    page_size: u64,
+) -> V2Result<(Vec<(String, String, Value)>, u64)> {
+    use bigname_storage::families::topology::{
+        load_resolver_aliases_shadow, load_resolver_links_shadow, load_resolver_roles_shadow,
+    };
+    let limit = page_size.saturating_add(1) as i64;
+    let loaded = match section {
+        "links" => {
+            let namespace = super::super::resolver_namespace(chain)?;
+            load_resolver_links_shadow(pool, chain, address, namespace, key, limit).await
+        }
+        "roles" => load_resolver_roles_shadow(pool, chain, address, key, limit).await,
+        _ => load_resolver_aliases_shadow(pool, chain, address, key, limit).await,
+    }
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Resolver,
+        |error| {
+            tracing::error!(?error, "resolver collection read failed");
+            read_error()
+        },
+    ))?;
+    let mut rows = loaded.rows;
+    if section == "roles" {
+        attach_grants(pool, &mut rows, height, publication_block_bounds).await?;
+    }
+    Ok((rows, loaded.total_count))
 }
 
 async fn attach_grants(

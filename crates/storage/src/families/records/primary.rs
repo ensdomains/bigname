@@ -21,7 +21,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::reverse::load_family_reverse_claim_on;
 use crate::{
     PrimaryNameClaimStatus, PrimaryNameCurrentSnapshot,
-    families::name::{FamilyPublication, all_servable_publications, servable_publication},
+    families::name::{FamilyPublication, servable_publication},
 };
 
 const HYDRATION: &str = "canonical_head_multicall_hydration";
@@ -64,7 +64,6 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
     }
     let address = address.to_ascii_lowercase();
     let mut publications: BTreeMap<String, FamilyPublication> = BTreeMap::new();
-    let mut checked_all = false;
     for (namespace, coin_type) in keys {
         let chains: Vec<String> = sqlx::query_scalar(
             "/* storage:families.records.primary_tuple_chains */
@@ -82,11 +81,8 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
         .await
         .context("failed to find the chain of a reverse tuple")?;
         let Some(chain_id) = chains.first() else {
-            // No tuple: an answer only when every chain's families are published.
-            if selected_chains.is_none() && !checked_all {
-                all_servable_publications(&mut *conn).await?;
-                checked_all = true;
-            }
+            // The caller's namespace publication fence covers an absent tuple. Requiring
+            // unrelated chains here would reject a healthy, explicitly scoped request.
             continue;
         };
         if !publications.contains_key(chain_id) {

@@ -17,6 +17,7 @@ use super::{
     keys, manifests,
     marker::{self, FamilyMarker, RecordedToken},
     reduce, repair, store,
+    tables::NAME_SUMMARY,
 };
 use crate::{Marker, ProjectError, Result};
 
@@ -296,6 +297,8 @@ async fn write(
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
+        // The name summaries follow the block clock too, which moves with no row changing.
+        refresh_derived(transaction, chain_id, block, &mut stats).await?;
         return Ok(stats);
     }
     let journal = changes
@@ -322,9 +325,25 @@ async fn write(
         let written = store::replace(transaction, super::tables::spec(name), keys, inserts).await?;
         stats.rows.insert(name, written);
     }
-    let touched = super::derived::touched(transaction, chain_id, block.number).await?;
-    super::derived::refresh(transaction, chain_id, &touched).await?;
+    refresh_derived(transaction, chain_id, block, &mut stats).await?;
     Ok(stats)
+}
+
+/// Refresh the derived rows of the keys the block touched, and count the name summaries it
+/// wrote and journalled like a family table's.
+async fn refresh_derived(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    stats: &mut BlockStats,
+) -> Result<()> {
+    let touched = super::derived::touched(transaction, chain_id, block.number).await?;
+    let summary = super::derived::refresh(transaction, chain_id, &touched).await?;
+    if summary.rows > 0 {
+        stats.rows.insert(NAME_SUMMARY.name, summary.rows);
+    }
+    stats.undo_rows += summary.undo_rows;
+    Ok(())
 }
 
 pub(crate) async fn insert_journal(

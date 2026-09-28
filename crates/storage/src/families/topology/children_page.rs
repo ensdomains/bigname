@@ -1,26 +1,32 @@
-//! The subnames page over the family child relation, with today's page semantics
-//! (crates/storage/src/children/page.rs): the optional prefix, the expiry fence with its null
-//! treatment, the name and timestamp sorts, and the keyset cursor. The total is an exact count
-//! over the same filtered relation, taken in the same statement as the page; there is no
-//! maintained child count, because eligibility depends on the parent's current state. The expiry
-//! fence reads the family marker's block timestamp unless the caller fixes `evaluated_at`, never
-//! the database's transaction time.
+//! The subnames page, the registry labels page and the child counts over the family child
+//! relation, with today's page semantics (crates/storage/src/children/page.rs and reads.rs): the
+//! optional prefix, the expiry fence with its null treatment, the name and timestamp sorts, the
+//! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds. The total
+//! is an exact count over the same filtered relation, taken in the same statement as the page;
+//! there is no maintained child count, because eligibility depends on the parent's current
+//! state. The expiry fence reads the family marker's block timestamp unless the caller fixes
+//! `evaluated_at`, never the database's transaction time.
 //!
-//! Interim: the registration and expiry times the timestamp sorts and the fence use, and the
-//! released status the fence checks, come from the served `name_current.declared_summary`, not
-//! from the families (see the interim list in `shims.rs`). Step 7 must replace that read.
+//! The registration and expiry times the timestamp sorts and the fence use, and the released
+//! status the fence checks, are the child's name summary (`project_name_summary`), the same
+//! expressions today's page reads from the child's `name_current.declared_summary`.
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{
+    PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime,
+};
 
 use crate::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentSort, ChildrenCurrentSortValue,
-    address_names::{
-        escape_like_pattern, push_expires_at_timestamp_expr, push_registered_at_timestamp_expr,
-    },
+    ChildrenCurrentSort, ChildrenCurrentSortValue, address_names::escape_like_pattern,
+    families::name::ensure_published,
 };
 
-use super::children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, push_selected};
+use super::{
+    children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, Parents, push_selected},
+    name_summary::CHILD_SUMMARY_JOIN,
+};
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
 /// The per-row provenance, chain positions and target blocks `children_current` stamps are not
@@ -54,6 +60,163 @@ pub async fn load_children_shadow_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<FamilyChildrenPage> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    page(
+        &mut conn,
+        parent_logical_name_id,
+        filter,
+        None,
+        cursor,
+        page_size,
+    )
+    .await
+}
+
+/// The shadow of `load_registry_children_current_page`: the ENSv2 children of
+/// `parent_logical_name_id` whose registration the registry `registry_address` holds, by name,
+/// with the exact count of every such child as the page total.
+pub async fn load_registry_children_shadow_page(
+    pool: &PgPool,
+    parent_logical_name_id: &str,
+    registry_address: &str,
+    cursor: Option<&ChildrenCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<FamilyChildrenPage> {
+    let registry = registry_address.to_ascii_lowercase();
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    page(
+        &mut conn,
+        parent_logical_name_id,
+        &ChildrenCurrentPageFilter::default(),
+        Some(&registry),
+        cursor,
+        page_size,
+    )
+    .await
+}
+
+/// The exact unfiltered child count of each parent, in `parent_logical_name_ids` order, the
+/// count `load_children_current_summaries` serves; one count per parent, all in one read-only
+/// snapshot.
+pub async fn count_children_shadow(
+    pool: &PgPool,
+    parent_logical_name_ids: &[String],
+) -> Result<Vec<(String, u64)>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open the count snapshot")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to fix the count snapshot")?;
+    let mut counts = Vec::with_capacity(parent_logical_name_ids.len());
+    for parent in parent_logical_name_ids {
+        counts.push((parent.clone(), count(&mut transaction, parent, None).await?));
+    }
+    transaction
+        .commit()
+        .await
+        .context("failed to close the count snapshot")?;
+    Ok(counts)
+}
+
+/// Fails with [`FamilyPublicationUnavailable`] when a surface of one of `parent_logical_name_ids`
+/// is on a chain whose family marker the publication fence would refuse (missing, not `live`,
+/// another build's, or on a block a reorg orphaned): the composed name reads' check
+/// (`ensure_published`), so a child read under the switch answers the stale 409 instead of an
+/// empty list while a rebuild populates the families. Run it in the caller's snapshot, before
+/// the reads.
+pub(crate) async fn require_publication(
+    conn: &mut PgConnection,
+    parent_logical_name_ids: &[String],
+) -> Result<()> {
+    let chains: Vec<String> = sqlx::query_scalar(
+        "/* storage:families.topology.children_publication */
+         SELECT DISTINCT surface.chain_id FROM bigname_phase.name_surfaces surface
+         WHERE surface.logical_name_id = ANY($1)
+         ORDER BY surface.chain_id",
+    )
+    .bind(parent_logical_name_ids)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to read the chains of the child reads' parents")?;
+    ensure_published(conn, &chains).await?;
+    Ok(())
+}
+
+/// The exact unfiltered child count of one parent, or of the labels its registry `registry`
+/// holds.
+pub(crate) async fn count(
+    conn: &mut PgConnection,
+    parent_logical_name_id: &str,
+    registry: Option<&str>,
+) -> Result<u64> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        &ChildrenCurrentPageFilter::default(),
+        registry,
+    );
+    builder.push(") SELECT count(*) FROM children");
+    let count: i64 = builder
+        .build_query_scalar()
+        .fetch_one(&mut *conn)
+        .await
+        .with_context(|| {
+            format!("failed to count the children shadow of {parent_logical_name_id}")
+        })?;
+    u64::try_from(count).context("negative children shadow count")
+}
+
+/// The exact unfiltered child count of each of `parent_logical_name_ids` in one statement, keyed
+/// by parent; a parent with no child (or no readable surface) has no entry.
+pub(crate) async fn counts(
+    conn: &mut PgConnection,
+    parent_logical_name_ids: &[String],
+) -> Result<BTreeMap<String, u64>> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::Many(parent_logical_name_ids),
+        &ChildrenCurrentPageFilter::default(),
+        None,
+    );
+    builder.push(
+        ") SELECT parent_logical_name_id, count(*) FROM children
+         GROUP BY parent_logical_name_id",
+    );
+    let rows: Vec<(String, i64)> = builder
+        .build_query_as()
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to count the children shadow of the parents")?;
+    rows.into_iter()
+        .map(|(parent, count)| {
+            Ok((
+                parent,
+                u64::try_from(count).context("negative children shadow count")?,
+            ))
+        })
+        .collect()
+}
+
+/// One page and its exact total in one statement.
+pub(crate) async fn page(
+    conn: &mut PgConnection,
+    parent_logical_name_id: &str,
+    filter: &ChildrenCurrentPageFilter<'_>,
+    registry: Option<&str>,
+    cursor: Option<&ChildrenCurrentKeysetCursor>,
+    page_size: u64,
+) -> Result<FamilyChildrenPage> {
     if page_size == 0 {
         bail!("children shadow page_size must be positive");
     }
@@ -71,60 +234,13 @@ pub async fn load_children_shadow_page(
             bail!("children shadow cursor sort value does not match the sort");
         }
     }
-    let joins_name_current = filter.sort.is_timestamp() || !filter.include_expired;
     let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_selected(&mut builder, parent_logical_name_id);
-    builder.push(format!(
-        " children AS (
-            SELECT selected.parent_logical_name_id, selected.child_logical_name_id,
-                   selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
-                   selected.namehash,
-                   selected.labelhash, selected.owner, selected.registrant, "
-    ));
-    match filter.sort {
-        ChildrenCurrentSort::Name => {
-            builder.push("NULL::TIMESTAMPTZ");
-        }
-        ChildrenCurrentSort::ExpiresAt => push_expires_at_timestamp_expr(&mut builder),
-        ChildrenCurrentSort::RegisteredAt => push_registered_at_timestamp_expr(&mut builder),
-    }
-    builder.push(
-        " AS sort_timestamp
-            FROM selected CROSS JOIN parent CROSS JOIN clock
-            LEFT JOIN bigname_phase.name_surfaces child_surface
-              ON child_surface.logical_name_id = selected.child_logical_name_id",
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        filter,
+        registry,
     );
-    if joins_name_current {
-        builder.push(
-            " LEFT JOIN bigname_phase.name_current nc
-                ON nc.logical_name_id = selected.child_logical_name_id",
-        );
-    }
-    builder.push(" WHERE selected.pair_rank = 1");
-    builder.push(CHILD_SURFACE_FILTER);
-    if let Some(prefix) = filter.q {
-        builder.push(format!(" AND {CHILD_DISPLAY_NAME} LIKE "));
-        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
-        builder.push(" ESCAPE '\\'");
-    }
-    if !filter.include_expired {
-        // A child with no name row, no registration or no expiry is not expired.
-        builder.push(
-            " AND COALESCE(nc.declared_summary #>> '{registration,status}', '') <> 'released' \
-             AND COALESCE(",
-        );
-        push_expires_at_timestamp_expr(&mut builder);
-        builder.push(" >= ");
-        match filter.evaluated_at {
-            Some(evaluated_at) => {
-                builder.push_bind(evaluated_at);
-            }
-            None => {
-                builder.push("clock.block_timestamp");
-            }
-        }
-        builder.push(", TRUE)");
-    }
     builder.push("), page AS (SELECT * FROM children WHERE TRUE");
     if let Some(cursor) = cursor {
         push_cursor_after(&mut builder, filter.order, cursor);
@@ -137,9 +253,13 @@ pub async fn load_children_shadow_page(
            LEFT JOIN page ON TRUE",
     );
     push_order(&mut builder, filter.sort, filter.order, "page.");
-    let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        format!("failed to load the children shadow of {parent_logical_name_id}")
-    })?;
+    let rows = builder
+        .build()
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| {
+            format!("failed to load the children shadow of {parent_logical_name_id}")
+        })?;
     let total_count = match rows.first() {
         Some(row) => u64::try_from(row.try_get::<i64, _>("total_count")?)
             .context("negative children shadow count")?,
@@ -169,6 +289,62 @@ pub async fn load_children_shadow_page(
         rows: decoded.into_iter().map(|(row, _)| row).collect(),
         next_cursor,
     })
+}
+
+/// The selected children CTEs and the `children` relation (left open, closed by the caller)
+/// after the read filter, the prefix, the expiry fence and, for a registry's labels, the registry
+/// filter, with each child's served fields and `sort_timestamp`.
+fn push_children<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    parents: Parents<'a>,
+    filter: &ChildrenCurrentPageFilter<'a>,
+    registry: Option<&'a str>,
+) {
+    push_selected(builder, parents);
+    let sort_timestamp = match filter.sort {
+        ChildrenCurrentSort::Name => "NULL::TIMESTAMPTZ",
+        ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
+        ChildrenCurrentSort::RegisteredAt => "summary.registered_at",
+    };
+    builder.push(format!(
+        " children AS (
+            SELECT selected.parent_logical_name_id, selected.child_logical_name_id,
+                   selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
+                   selected.namehash, selected.labelhash, selected.owner, selected.registrant,
+                   {sort_timestamp} AS sort_timestamp
+            FROM selected
+            JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
+            JOIN clock ON clock.chain_id = parent.chain_id
+            LEFT JOIN bigname_phase.name_surfaces child_surface
+              ON child_surface.logical_name_id = selected.child_logical_name_id
+            {CHILD_SUMMARY_JOIN}
+            WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}"
+    ));
+    if let Some(registry) = registry {
+        builder.push(" AND selected.registry_address = ");
+        builder.push_bind(registry);
+    }
+    if let Some(prefix) = filter.q {
+        builder.push(format!(" AND {CHILD_DISPLAY_NAME} LIKE "));
+        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push(" ESCAPE '\\'");
+    }
+    if !filter.include_expired {
+        // A child with no name summary, no registration or no expiry is not expired.
+        builder.push(
+            " AND COALESCE(summary.registration_status, '') <> 'released' \
+             AND COALESCE(summary.expires_at >= ",
+        );
+        match filter.evaluated_at {
+            Some(evaluated_at) => {
+                builder.push_bind(evaluated_at);
+            }
+            None => {
+                builder.push("clock.block_timestamp");
+            }
+        }
+        builder.push(", TRUE)");
+    }
 }
 
 fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<OffsetDateTime>)>> {
