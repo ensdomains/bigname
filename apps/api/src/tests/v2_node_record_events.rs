@@ -18,7 +18,10 @@ async fn publish_node_record_event(
     after: Value,
 ) -> Result<()> {
     let (hash, number) = abi_chain_head(database, chain).await?;
-    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    // `publish_primary_claim` places its events at `id * 4 + offset` for an id from the same
+    // process-wide counter, so `id * 4 + 3` orders every later call after them in the block, also
+    // when other tests in this process have advanced the counter.
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 * 4 + 3;
     let mut event = history_event(
         &format!("node-record:{family}:{ordinal}"),
         identity.0,
