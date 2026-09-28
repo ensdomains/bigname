@@ -11,7 +11,8 @@ async fn family_reverse_body(database: &TestDatabase, input: Value) -> Result<Va
 async fn seed_family_reverse_page_fixture(database: &TestDatabase) -> Result<()> {
     // beta sorts after alpha lexically; the reverse claim must move it ahead on page one.
     let mut events = family_primary_claim_events();
-    events[1].after_state["raw_name"] = json!("beta.eth");
+    let claim = events.last_mut().expect("the name record");
+    claim.after_state["raw_name"] = json!("beta.eth");
     seed_family_routes_fixture_with(database, events).await
 }
 

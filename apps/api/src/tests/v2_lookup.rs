@@ -967,16 +967,7 @@ async fn v2_lookup_ignores_invalid_phase_primary_claim() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::InvalidName,
-        Some("bad name.eth"),
-        false,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, b"bad name.eth").await?;
 
     let payload = v2_lookup_json(&database, json!({"inputs": [{"address": address}]})).await?;
 
@@ -997,16 +988,7 @@ async fn v2_lookup_paginates_normalizable_phase_primary_claim() -> Result<()> {
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
     // A later reverse claim names the primary name in a spelling that normalizes to alice.eth.
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("Alice.eth"),
-        false,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, b"Alice.eth").await?;
 
     let first = v2_lookup_json(
         &database,
@@ -1444,16 +1426,7 @@ async fn v2_lookup_reverse_serves_the_batch_when_a_primary_claim_no_longer_norma
     seed_v2_lookup_reverse_fixture(&database, address).await?;
     // A reverse record whose name does not normalize is one row's defect. The batched reverse
     // read must still answer, marking nothing primary, rather than failing every input.
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::InvalidName,
-        Some("alice..eth"),
-        false,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, b"alice..eth").await?;
 
     let payload = v2_lookup_json(&database, json!({"inputs": [{"address": address}]})).await?;
 
@@ -1529,16 +1502,7 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
     let (task, reached, resume) = paused_reverse_lookup(&database, address).await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("bob.eth"),
-        true,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, b"bob.eth").await?;
     let response = finish_paused_reverse_lookup(task, reached, resume).await?;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let refused: Value = read_json(response).await?;
@@ -1643,16 +1607,7 @@ async fn v2_lookup_reverse_pages_a_case_unstable_primary_name_without_repeating_
         43,
     )
     .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some(cherokee),
-        true,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, cherokee.as_bytes()).await?;
 
     let mut seen = Vec::new();
     let mut cursor: Option<String> = None;
@@ -2972,16 +2927,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
         },
     )
     .await?;
-    seed_phase_primary_name_snapshot(
-        database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("alice.eth"),
-        true,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", address, b"alice.eth").await?;
     seed_v2_lookup_base_head(database).await?;
     Ok(())
 }

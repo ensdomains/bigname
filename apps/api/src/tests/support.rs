@@ -7,8 +7,8 @@ use axum::{
     response::Response,
 };
 use bigname_storage::{
-    CanonicalityState, NameSurface, NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
-    ResolverCurrentRow, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
+    CanonicalityState, NameSurface, NormalizedEvent, ResolverCurrentRow, Resource, SurfaceBinding,
+    SurfaceBindingKind, TokenLineage,
     default_database_url, load_primary_name_current, parse_rfc3339_utc_timestamp,
 };
 use bigname_test_support::TestDatabaseConfig;
@@ -124,61 +124,6 @@ async fn align_phase_chain_positions(pool: &PgPool, value: &Value) -> Result<Val
     Ok(aligned)
 }
 
-fn phase_projection_source_position(value: &Value) -> Result<&Value> {
-    if value.get("block_number").is_some() {
-        Ok(value)
-    } else {
-        value
-            .as_object()
-            .and_then(|positions| positions.values().next())
-            .context("projection fixture requires one source chain position")
-    }
-}
-
-async fn phase_projection_target_for_chain(
-    pool: &PgPool,
-    chain_id: &str,
-    source_positions: &Value,
-) -> Result<(i64, String)> {
-    let position = phase_projection_source_position(source_positions)?;
-    let block_number = position
-        .get("block_number")
-        .and_then(Value::as_i64)
-        .context("permission fixture source position requires block_number")?;
-    let requested_block_hash = position
-        .get("block_hash")
-        .and_then(Value::as_str)
-        .context("permission fixture source position requires block_hash")?;
-    let timestamp = position
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .unwrap_or("2026-04-17T00:00:00Z");
-    let existing_block_hash: Option<String> = sqlx::query_scalar(
-        "SELECT block_hash FROM bigname_phase.chain_lineage \
-         WHERE chain_id = $1 AND block_number = $2 \
-           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
-         ORDER BY block_hash LIMIT 1",
-    )
-    .bind(chain_id)
-    .bind(block_number)
-    .fetch_optional(pool)
-    .await?;
-    let block_hash = existing_block_hash.unwrap_or_else(|| requested_block_hash.to_owned());
-    sqlx::query(
-        "INSERT INTO bigname_phase.chain_lineage ( \
-             chain_id, block_hash, block_number, block_timestamp, canonicality_state \
-         ) VALUES ($1, $2, $3, $4::timestamptz, 'canonical') \
-         ON CONFLICT (chain_id, block_hash) DO NOTHING",
-    )
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .bind(timestamp)
-    .execute(pool)
-    .await?;
-    Ok((block_number, block_hash))
-}
-
 struct TestDatabase {
     database: bigname_test_support::TestDatabase,
     pool: PgPool,
@@ -186,94 +131,267 @@ struct TestDatabase {
     database_name: String,
 }
 
-/// Add reverse inputs and let the real claim reducer classify their bytes.
-async fn upsert_primary_name_current_rows(
-    pool: &PgPool,
-    rows: &[PrimaryNameCurrentRow],
-) -> Result<()> {
-    for row in rows {
-        let provenance =
-            phase_primary_claim_provenance(pool, &row.namespace, &row.claim_provenance).await?;
-        let chain = provenance["chain_id"].as_str().context("claim chain")?;
-        let block = provenance["target_block_number"]
-            .as_i64()
-            .context("claim block")?;
-        let hash = provenance["target_block_hash"]
-            .as_str()
-            .context("claim hash")?;
-        let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 * 2;
-        let node = format!(
-            "{:#x}",
-            alloy_primitives::keccak256(
-                format!(
-                    "{}:{}:{}",
-                    row.namespace,
-                    row.coin_type,
-                    row.address.to_ascii_lowercase()
-                )
-                .as_bytes()
-            )
-        );
-        let source = json!({"address":row.address, "coin_type":row.coin_type,
-            "namespace":row.namespace, "reverse_node":node, "claim_provenance":provenance});
-        let mut reverse = history_event(
-            &format!("claim-reverse-{ordinal}"),
-            None,
-            None,
-            Some(chain),
-            Some(block),
-            Some(hash),
-            Some("0xclaimfixture"),
-            Some(ordinal),
-            CanonicalityState::Canonical,
-        );
-        reverse.namespace = row.namespace.clone();
-        reverse.event_kind = "ReverseChanged".into();
-        reverse.source_family = if row.namespace == "basenames" {
-            "basenames_base_reverse_registrar"
-        } else {
-            "ens_v1_reverse_registrar_l1"
+/// The ENS reverse registrar and Base L2 reverse registrar the admitted primary-name manifests
+/// declare (manifests/mainnet/ethereum/ens/ens_v1_reverse_l1/v1.toml,
+/// manifests/mainnet/base/basenames/basenames_base_primary/v1.toml), the ENS registry, and the
+/// resolver the fixtures' ENS reverse nodes point at.
+const ENS_REVERSE_REGISTRAR: &str = "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb";
+const BASENAMES_REVERSE_REGISTRAR: &str = "0x0000000000d8e504002cc26e3ec46d81971c1664";
+const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+const ENS_REVERSE_RESOLVER: &str = "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63";
+
+/// One normalized event of a primary-name claim, before it is placed on a chain.
+struct PrimaryClaimEvent {
+    kind: &'static str,
+    family: &'static str,
+    emitter: &'static str,
+    after: Value,
+}
+
+/// An event string as the adapters store it: the text when it is UTF-8 without NUL, else its
+/// hex bytes (crates/adapters/src/schema_v2/common.rs, `decoded_label` and `event_string_value`).
+fn primary_claim_string(raw: &[u8]) -> Option<String> {
+    std::str::from_utf8(raw)
+        .ok()
+        .filter(|text| !text.contains('\0'))
+        .map(str::to_owned)
+}
+
+fn primary_claim_hex(raw: &[u8]) -> Value {
+    json!({"encoding": "hex", "bytes": format!("0x{}", alloy_primitives::hex::encode(raw))})
+}
+
+/// The events the admitted reverse sources emit when `address` claims `name`, the raw bytes of
+/// the claimed name as the log carried them.
+///
+/// ENS (`ens_v1_reverse_l1`, coin type 60) follows one `setName` transaction: the reverse
+/// registrar emits ReverseClaimed, the registry points the reverse node at the resolver
+/// (NewResolver), and the resolver writes the node's name record (NameChanged). The primary
+/// claim is then the name record the reverse node's current resolver holds. Shapes, under
+/// crates/adapters/src/schema_v2/protocol/v1/: reverse.rs (`ReverseClaimed`), registry.rs
+/// (`NewResolver`), resolver.rs (`NameChanged`, `record_after`).
+///
+/// Basenames (`basenames_base_primary`, coin type 2147492101) emits NameForAddrChanged: the
+/// reverse change and the direct claim naming the tuple (reverse.rs, `NameForAddrChanged`).
+fn primary_claim_events(
+    namespace: &str,
+    address: &str,
+    name: &[u8],
+    registrar_instance: Uuid,
+    resolver_instance: Uuid,
+) -> Result<Vec<PrimaryClaimEvent>> {
+    let address = address.to_ascii_lowercase();
+    let label = address.strip_prefix("0x").unwrap_or(&address).to_owned();
+    let (family, registrar, coin_type, suffix) = match namespace {
+        "ens" => ("ens_v1_reverse_l1", ENS_REVERSE_REGISTRAR, "60", "addr.reverse"),
+        "basenames" => (
+            "basenames_base_primary",
+            BASENAMES_REVERSE_REGISTRAR,
+            "2147492101",
+            "80002105.reverse",
+        ),
+        other => anyhow::bail!("no admitted primary-name source emits {other} claims"),
+    };
+    let reverse_name = format!("{label}.{suffix}");
+    let node = bigname_lookup::ens_namehash_hex(&reverse_name)?;
+    let claim_provenance = json!({
+        "source_family": family,
+        "contract_role": "reverse_registrar",
+        "contract_instance_id": registrar_instance.to_string(),
+        "emitting_address": registrar,
+    });
+    let reverse = |source_event: &str| {
+        json!({
+            "source_event": source_event,
+            "address": address,
+            "coin_type": coin_type,
+            "namespace": namespace,
+            "reverse_namespace": namespace,
+            "reverse_label": label,
+            "reverse_name": reverse_name,
+            "reverse_node": node,
+            "claim_provenance": claim_provenance,
+        })
+    };
+    if namespace == "basenames" {
+        let mut claim = json!({
+            "source_event": "NameForAddrChanged",
+            "address": address,
+            "reverse_node": node,
+            "record_key": "name",
+            "record_family": "name",
+            "selector_key": null,
+            "raw_name": primary_claim_string(name),
+            "primary_claim_source": {
+                "address": address,
+                "namespace": namespace,
+                "coin_type": coin_type,
+                "reverse_name": reverse_name,
+                "reverse_node": node,
+                "claim_provenance": claim_provenance,
+            },
+        });
+        if claim["raw_name"].is_null() {
+            claim["raw_name_bytes"] = primary_claim_hex(name);
         }
-        .into();
-        reverse.before_state = json!({});
-        reverse.after_state = source.clone();
-        reverse.after_state["source_event"] = json!("NameForAddrChanged");
-        let mut claim = reverse.clone();
-        claim.event_identity = format!("claim-name-{}", ordinal + 1);
-        claim.log_index = Some(ordinal + 1);
-        claim.event_kind = "RecordChanged".into();
-        claim.source_family = if row.namespace == "basenames" {
-            "basenames_base_resolver"
-        } else {
-            "ens_v1_resolver_l1"
-        }
-        .into();
-        claim.after_state = json!({"source_event":"NameForAddrChanged", "node":node,
-            "record_key":"name", "primary_claim_source":source});
-        match row.claim_status {
-            PrimaryNameClaimStatus::Success | PrimaryNameClaimStatus::InvalidName => {
-                claim.after_state["raw_name"] = json!(row.raw_claim_name);
-            }
-            PrimaryNameClaimStatus::NotFound => {}
-            PrimaryNameClaimStatus::Unsupported => {
-                // An undecodable claim is the actual input of the unsupported outcome.
-                claim.after_state["raw_name_bytes"] = json!("0xff");
-            }
-        }
-        bigname_storage::insert_normalized_event_fixtures(pool, &[reverse, claim]).await?;
-        rebuild_fixture_families(pool, chain, block, hash).await?;
-        let produced =
-            load_primary_name_current(pool, &row.address, &row.namespace, &row.coin_type)
-                .await?
-                .context("the reverse inputs produced a claim")?;
-        anyhow::ensure!(
-            produced.claim_status == row.claim_status,
-            "claim fixture requests {:?}, but its raw input produces {:?}",
-            row.claim_status,
-            produced.claim_status
-        );
+        return Ok(vec![
+            PrimaryClaimEvent {
+                kind: "ReverseChanged",
+                family,
+                emitter: registrar,
+                after: reverse("NameForAddrChanged"),
+            },
+            PrimaryClaimEvent {
+                kind: "RecordChanged",
+                family,
+                emitter: registrar,
+                after: claim,
+            },
+        ]);
     }
-    Ok(())
+    Ok(vec![
+        PrimaryClaimEvent {
+            kind: "ReverseChanged",
+            family,
+            emitter: registrar,
+            after: reverse("ReverseClaimed"),
+        },
+        PrimaryClaimEvent {
+            kind: "ResolverChanged",
+            family: "ens_v1_registry_l1",
+            emitter: ENS_REGISTRY,
+            after: json!({"source_event": "NewResolver", "node": node,
+                "resolver": ENS_REVERSE_RESOLVER, "emitter_role": "registry"}),
+        },
+        PrimaryClaimEvent {
+            kind: "RecordChanged",
+            family: "ens_v1_resolver_l1",
+            emitter: ENS_REVERSE_RESOLVER,
+            after: json!({
+                "source_event": "NameChanged",
+                "resolver": ENS_REVERSE_RESOLVER,
+                "resolver_contract_instance_id": resolver_instance.to_string(),
+                "node": node,
+                "record_key": "name",
+                "record_family": "name",
+                "selector_key": null,
+                "value_retained": false,
+                "raw_name": primary_claim_string(name)
+                    .map_or_else(|| primary_claim_hex(name), Value::String),
+            }),
+        },
+    ])
+}
+
+/// The derivation kind the adapters stamp on a primary-claim event
+/// (crates/adapters/src/schema_v2/common.rs, `derivation_kind`).
+fn primary_claim_derivation(family: &str) -> &'static str {
+    if matches!(family, "ens_v1_reverse_l1" | "basenames_base_primary") {
+        "ens_v1_reverse_claim"
+    } else {
+        "ens_v1_unwrapped_authority"
+    }
+}
+
+/// Publish the events of [`primary_claim_events`] in one transaction at the namespace chain's
+/// latest readable block, then rebuild the families there. The reverse registrar and resolver
+/// are declared in their family manifests first, as the adapters only emit declared sources.
+async fn publish_primary_claim(
+    pool: &PgPool,
+    namespace: &str,
+    address: &str,
+    name: &[u8],
+) -> Result<()> {
+    let chain = if namespace == "basenames" {
+        "base-mainnet"
+    } else {
+        "ethereum-mainnet"
+    };
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT block_number, block_hash FROM bigname_phase.chain_lineage
+         WHERE chain_id = $1 AND canonicality_state IN ('canonical', 'safe', 'finalized')
+         ORDER BY block_number DESC, block_hash LIMIT 1",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("a primary claim needs a readable {chain} block"))?;
+    let (reverse_family, registrar) = if namespace == "basenames" {
+        ("basenames_base_primary", BASENAMES_REVERSE_REGISTRAR)
+    } else {
+        ("ens_v1_reverse_l1", ENS_REVERSE_REGISTRAR)
+    };
+    let (reverse_manifest, registrar_instance) = declare_family_fixture_contract(
+        pool,
+        namespace,
+        chain,
+        reverse_family,
+        "reverse_registrar",
+        registrar,
+    )
+    .await?;
+    let (resolver_manifest, resolver_instance) = if namespace == "basenames" {
+        (None, Uuid::nil())
+    } else {
+        let (manifest, instance) = declare_family_fixture_contract(
+            pool,
+            namespace,
+            chain,
+            "ens_v1_resolver_l1",
+            "resolver",
+            ENS_REVERSE_RESOLVER,
+        )
+        .await?;
+        (Some(manifest), instance)
+    };
+    let claim = primary_claim_events(
+        namespace,
+        address,
+        name,
+        registrar_instance,
+        resolver_instance,
+    )?;
+    let transaction = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64;
+    let transaction_hash = format!("0xprimaryclaim{transaction}");
+    let events = claim
+        .into_iter()
+        .enumerate()
+        .map(|(offset, event)| {
+            let log_index = transaction * 4 + offset as i64;
+            let mut normalized = history_event(
+                &format!("primary-claim-{transaction}-{offset}"),
+                None,
+                None,
+                Some(chain),
+                Some(block),
+                Some(&hash),
+                Some(&transaction_hash),
+                Some(log_index),
+                CanonicalityState::Canonical,
+            );
+            normalized.namespace = namespace.to_owned();
+            normalized.event_kind = event.kind.to_owned();
+            normalized.source_family = event.family.to_owned();
+            normalized.manifest_version = 1;
+            normalized.source_manifest_id = match event.family {
+                "ens_v1_resolver_l1" => resolver_manifest,
+                "ens_v1_registry_l1" => None,
+                _ => Some(reverse_manifest),
+            };
+            normalized.raw_fact_ref = json!({
+                "kind": "raw_log", "chain_id": chain, "block_hash": hash,
+                "block_number": block, "transaction_hash": transaction_hash,
+                "transaction_index": 0, "log_index": log_index,
+                "emitting_address": event.emitter,
+            });
+            normalized.derivation_kind = primary_claim_derivation(event.family).to_owned();
+            normalized.before_state = json!({});
+            normalized.after_state = event.after;
+            normalized
+        })
+        .collect::<Vec<_>>();
+    bigname_storage::insert_normalized_event_fixtures(pool, &events).await?;
+    rebuild_fixture_families(pool, chain, block, &hash).await
 }
 
 /// Rebuild after a test adds retained inputs at its existing publication height. This uses
@@ -305,86 +423,6 @@ async fn rebuild_fixture_families(
     );
     Ok(())
 }
-
-async fn upsert_primary_name_current_snapshots(
-    pool: &PgPool,
-    snapshots: &[PrimaryNameCurrentSnapshot],
-) -> Result<()> {
-    for snapshot in snapshots {
-        let mut row = snapshot.row.clone();
-        if snapshot.claim_name_is_normalized {
-            row.raw_claim_name = snapshot
-                .normalized_claim_name
-                .clone()
-                .or(row.raw_claim_name);
-        }
-        upsert_primary_name_current_rows(pool, std::slice::from_ref(&row)).await?;
-        let produced = bigname_storage::families::records::load_family_primary_name_snapshot(
-            pool,
-            &row.address,
-            &row.namespace,
-            &row.coin_type,
-        )
-        .await?
-        .context("the reverse input produced its normalized claim")?;
-        anyhow::ensure!(
-            produced.claim_name_is_normalized == snapshot.claim_name_is_normalized,
-            "claim fixture normalization flag must agree with its actual raw claim {:?}",
-            row.raw_claim_name
-        );
-    }
-    Ok(())
-}
-
-async fn phase_primary_claim_provenance(
-    pool: &PgPool,
-    namespace: &str,
-    source: &Value,
-) -> Result<Value> {
-    let mut provenance = source.clone();
-    let object = provenance
-        .as_object_mut()
-        .context("primary-name fixture provenance must be an object")?;
-    let chain_id = object
-        .get("chain_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            if namespace == "basenames" {
-                "base-mainnet".to_owned()
-            } else {
-                "ethereum-mainnet".to_owned()
-            }
-        });
-    let requested_target = object
-        .get("target_block_number")
-        .and_then(Value::as_i64)
-        .zip(object.get("target_block_hash").and_then(Value::as_str))
-        .map(|(block_number, block_hash)| {
-            json!({
-                "block_number": block_number,
-                "block_hash": block_hash,
-                "timestamp": "2026-04-17T00:00:00Z",
-            })
-        });
-    let (block_number, block_hash) = match requested_target {
-        Some(position) => phase_projection_target_for_chain(pool, &chain_id, &position).await?,
-        None => sqlx::query_as(
-            "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
-             WHERE chain_id = $1 \
-               AND canonicality_state IN ('canonical', 'safe', 'finalized') \
-             ORDER BY block_number DESC, block_hash LIMIT 1",
-        )
-        .bind(&chain_id)
-        .fetch_one(pool)
-        .await?,
-    };
-    object.insert("chain_id".to_owned(), json!(chain_id));
-    object.insert("target_block_number".to_owned(), json!(block_number));
-    object.insert("target_block_hash".to_owned(), json!(block_hash));
-    Ok(provenance)
-}
-
 
 const PHASE_BASELINE: [&str; 14] = [
     include_str!("../../../../schema-v2/baseline/01_chain.sql"),
@@ -932,81 +970,6 @@ impl TestDatabase {
             bigname_domain::normalization::ENS_NORMALIZER_VERSION,
         )
         .await?;
-        Ok(())
-    }
-
-    async fn insert_primary_name_current_claim_row(
-        &self,
-        address: &str,
-        namespace: &str,
-        coin_type: &str,
-        claim_status: PrimaryNameClaimStatus,
-        raw_claim_name: Option<&str>,
-    ) -> Result<()> {
-        self.insert_primary_name_current_claim_row_with_provenance(
-            address,
-            namespace,
-            coin_type,
-            claim_status,
-            raw_claim_name,
-            json!({}),
-        )
-        .await
-    }
-
-    async fn insert_primary_name_current_claim_row_with_provenance(
-        &self,
-        address: &str,
-        namespace: &str,
-        coin_type: &str,
-        claim_status: PrimaryNameClaimStatus,
-        raw_claim_name: Option<&str>,
-        claim_provenance: Value,
-    ) -> Result<()> {
-        upsert_primary_name_current_rows(
-            &self.pool,
-            &[PrimaryNameCurrentRow {
-                address: address.to_ascii_lowercase(),
-                namespace: namespace.to_owned(),
-                coin_type: coin_type.to_owned(),
-                claim_status,
-                raw_claim_name: raw_claim_name.map(str::to_owned),
-                claim_provenance,
-            }],
-        )
-        .await
-        .context("failed to upsert primary_names_current row for API tests")?;
-        Ok(())
-    }
-
-    async fn insert_primary_name_current_normalized_claim_name(
-        &self,
-        address: &str,
-        namespace: &str,
-        coin_type: &str,
-        normalized_claim_name: Option<&str>,
-        claim_name_is_normalized: bool,
-    ) -> Result<()> {
-        let row = load_primary_name_current(&self.pool, address, namespace, coin_type)
-            .await
-            .context("failed to load primary_names_current row for API test")?
-            .with_context(|| {
-                format!(
-                    "missing primary_names_current row for API test address {} namespace {} coin_type {}",
-                    address, namespace, coin_type
-                )
-            })?;
-
-        upsert_primary_name_current_snapshots(
-            &self.pool,
-            &[PrimaryNameCurrentSnapshot {
-                row,
-                normalized_claim_name: normalized_claim_name.map(str::to_owned),
-                claim_name_is_normalized,
-            }],
-        )
-        .await
-        .context("failed to upsert primary_names_current snapshot for API test")?;
         Ok(())
     }
 
@@ -3085,6 +3048,21 @@ async fn declare_family_fixture_resolver(
     family: &str,
     address: &str,
 ) -> Result<i64> {
+    Ok(declare_family_fixture_contract(pool, namespace, chain, family, "resolver", address)
+        .await?
+        .0)
+}
+
+/// Declare `address` under `role` in the active fixture manifest of `family`, returning the
+/// manifest and the contract instance it declares.
+async fn declare_family_fixture_contract(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    family: &str,
+    role: &str,
+    address: &str,
+) -> Result<(i64, Uuid)> {
     let existing: Option<(i64, Value)> = sqlx::query_as(
         "SELECT manifest_id, manifest_payload FROM manifest_versions WHERE namespace = $1
          AND chain_id = $2 AND source_family = $3 AND rollout_status = 'active'",
@@ -3117,10 +3095,18 @@ async fn declare_family_fixture_resolver(
         .as_array()
         .is_some_and(|contracts| contracts.iter().any(|c| c["address"] == address))
     {
-        return Ok(manifest);
+        let instance = sqlx::query_scalar(
+            "SELECT contract_instance_id FROM manifest_contract_instances
+             WHERE manifest_id = $1 AND declared_address = $2",
+        )
+        .bind(manifest)
+        .bind(address)
+        .fetch_one(pool)
+        .await?;
+        return Ok((manifest, instance));
     }
     payload["contracts"].as_array_mut().context("fixture manifest contracts")?.push(json!({
-        "role":"resolver", "address":address, "proxy_kind":"none", "start_block":0, "read_features":[]
+        "role":role, "address":address, "proxy_kind":"none", "start_block":0, "read_features":[]
     }));
     sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
         .bind(manifest)
@@ -3133,16 +3119,17 @@ async fn declare_family_fixture_resolver(
     sqlx::query(
         "INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind,
         declaration_name, contract_instance_id, declared_address, role, proxy_kind)
-        VALUES ($1, $2, 'contract', $3, $4, $3, 'resolver', 'none')",
+        VALUES ($1, $2, 'contract', $3, $4, $3, $5, 'none')",
     )
     .bind(manifest)
     .bind(chain)
     .bind(address)
     .bind(instance)
+    .bind(role)
     .execute(pool)
     .await?;
     seed_fixture_manifest_update(pool, manifest, chain, namespace, family, &payload).await?;
-    Ok(manifest)
+    Ok((manifest, instance))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3327,35 +3314,6 @@ async fn seed_identity_name(
         "the actual identity inputs must produce the requested {relation:?} membership"
     );
     Ok(())
-}
-
-async fn seed_phase_primary_name_snapshot(
-    database: &TestDatabase,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-    claim_status: bigname_storage::PrimaryNameClaimStatus,
-    raw_claim_name: Option<&str>,
-    claim_name_is_normalized: bool,
-) -> Result<()> {
-    upsert_primary_name_current_snapshots(
-        &database.lookup_pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: address.into(),
-                namespace: namespace.into(),
-                coin_type: coin_type.into(),
-                claim_status,
-                raw_claim_name: raw_claim_name.map(str::to_owned),
-                claim_provenance: json!({}),
-            },
-            normalized_claim_name: claim_name_is_normalized
-                .then(|| raw_claim_name.map(str::to_owned))
-                .flatten(),
-            claim_name_is_normalized,
-        }],
-    )
-    .await
 }
 
 fn primary_name_universal_resolver_addr60_response(address: &str) -> Value {
