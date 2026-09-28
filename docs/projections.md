@@ -1686,7 +1686,8 @@ whether the name has a serving resource, the registration status, the expiry
 and registration times, and whether the latest registry Transfer attributed to
 the name names the zero owner, attributed as the served child build attributes
 it (by the name the Transfer carries, else the latest named registry event of
-its resource and family, else an active surface at its node). Every name with a
+any kind of its resource and family, read from the readable interpreted events,
+else an active surface at its node). Every name with a
 surface has a row. A list cannot compose those at read for every child of a parent, so
 the name row is composed at read (ruling J3) except for this summary, which is
 stored. After a block writes its other family rows, and on a block that writes
@@ -1694,11 +1695,15 @@ none, the family step composes the summary again, with the composed name
 reader's own selection, for every name the block touched: the names, nodes and
 resources of every row its journal names, each resource widened to the names
 whose candidates, key states, association targets, lifecycle events, wrapper
-row, owner events or pointer read it, every name whose surface appeared since
-the family marker's block, and every name whose stored `recompose_at` the
-block's time has reached. `recompose_at` is the first second at which the
-name's composition can change with no fact changing: a binding interval
-opening or closing, or a NameWrapper expiry or grace boundary. A summary that
+row, owner events or pointer read it, every name a registry event carries on a
+resource one of the block's registry events carries (such an event can move the
+resource's unnamed Transfers to another name), every name whose surface
+appeared since the family marker's block, and every name whose stored
+`recompose_at` the block's time has reached. `recompose_at` is the first second
+at which the name's composition can change with no fact changing: a binding
+interval opening or closing, or a NameWrapper expiry or grace boundary. It is
+stored in Unix seconds, since a NameWrapper expiry can lie past the last
+instant a timestamp holds, and kept for a name that composes no row. A summary that
 changed is journalled and written like any other family row, so an undo
 restores it from the journal and composes nothing; a rebuild composes every
 surfaced name.

@@ -6,6 +6,14 @@
 -- summary. It also adds the indexes the writer's work list reads. An empty
 -- schema-migration database has no phase baseline yet, so this migration is a
 -- no-op there and phase-runner init-schema installs the same table.
+--
+-- Apply it before starting a release that writes project_name_summary, whatever
+-- BIGNAME_SERVE_FROM_FAMILIES says: that release's family step writes the table
+-- on every block and fails until it exists. Apply it before the switch is ever
+-- turned on as well: the reset deletes the family marker, so with the switch on
+-- every fenced route answers 409 stale until the family rebuild finishes. It
+-- takes no marker lock, so a family run in flight when it applies fails once on
+-- the missing marker and the next run rebuilds the families.
 DO $migration$
 BEGIN
 IF to_regclass('bigname_phase.name_current') IS NULL THEN

@@ -2594,12 +2594,13 @@ status, expiry and registration times, and whether the latest registry
 Transfer attributed to it names the zero owner. Each but the last is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer as the served child build does
-(by the name it carries, else the latest named registry event of its resource,
-else an active surface at its node), which is not the name row's rule. Every
+(by the name it carries, else the latest named registry event of any kind of its
+resource, else an active surface at its node), which is not the name row's rule. Every
 name with a surface has a row, empty but for that flag when the composed reader
 serves no row for it. The family step writes it for every
 name a block touches and for every name whose `recompose_at`, the first second
-its composition can change with no fact changing, the block's time has reached;
+(in Unix seconds, kept even when the name composes no row) its composition can
+change with no fact changing, the block's time has reached;
 it is journalled like every other family
 ([projections](projections.md#owned-key-families)). With the [publication
 switch](#publication-switch) on, the child lists read it
