@@ -7,7 +7,18 @@ Amended: 2026-08-13 (status readiness for removed chains); 2026-08-25
 (Issue #411 [source-role](../glossary.md#source-role) and ordering-based readiness
 enforcement); 2026-08-26 (issue #449 request-scoped lookup and search
 `meta.as_of` coverage); 2026-09-23 (records route serves only per-key
-`records`)
+`records`); 2026-09-28 (landing page and API reference move to the static
+site)
+
+## 2026-09-28 Amendment: The Landing Page And API Reference Leave The API
+
+The landing page and the API reference are a separate static site
+([`site/`](../../site/README.md)) outside the API binary; both describe this
+contract and neither is part of it. The API's `GET /` and `GET /docs` routes
+are removed, and the API answers them like any unknown route.
+`GET /openapi.json` is admitted at the public edge but not served yet; the API
+answers it like any unknown route until the OpenAPI document ships (TYR-18).
+Route details live in [`api-v1-routes.md`](../api-v1-routes.md).
 
 ## 2026-09-23 Amendment: One Value Shape On The Records Route
 
@@ -280,8 +291,8 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 `GET /healthz` remains the unversioned operator health contract outside the
 versioned product routes. Its HTTP status and `api_status` are API-local
 process/database readiness; aggregate `status` and `loops` retain phase-runner
-state. `GET /`, `GET /docs`, and `GET /openapi.json` remain
-non-contract helpers.
+state. `GET /`, `GET /docs`, and `GET /openapi.json` were non-contract helpers
+until the 2026-09-28 amendment above moved the pages to the static site.
 
 Deleted from the public catalog (capability absorbed as noted): the `profiles/`
 prefix, `/v1/coverage/*` and `/v1/explain/*` (moved under diagnostics),
