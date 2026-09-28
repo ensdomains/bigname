@@ -911,9 +911,15 @@ block, so a row never mixes two blocks. A composed row describes the publication
 and has no older position of its own, so an `at` below the publication answers
 `409 stale` with "requested snapshot is not available for name", the answer
 served rows give once Project has republished them. While a family rebuild is
-in flight (the marker is not `live`, or carries another build's hash) no
-composed row is served: a route whose fence has not already refused answers
-`409 stale` with "requested snapshot is not available for" its resource.
+in flight (the marker is not `live`, carries another build's hash, or sits on a
+block a reorg orphaned) no composed row is served: a route whose fence has not
+already refused answers `409 stale` with "requested snapshot is not available
+for" its resource, including when the rebuild starts after the fence passed. A
+composed read that finds no name to compose (a name with no surface, an empty
+bound-name or expiring walk) still reads its chains' markers, so a rebuild
+answers `409 stale` rather than `404` or an empty page, and the expiring listing
+composes only names of the requested namespace, so another namespace's rebuild
+does not refuse it.
 
 With the switch on, `GET /v1/permissions` and the resolver routes also serve
 their own rows from the families. The permission rows, the registry operator

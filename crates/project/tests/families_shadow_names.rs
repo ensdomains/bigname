@@ -189,6 +189,39 @@ async fn an_ownerless_node_serves_its_retained_registry_pointer() -> Result<()> 
     fixture.cleanup().await
 }
 
+/// An ownerless registry node whose resource a second name later points elsewhere: the served
+/// row picks the ownerless name's own latest registry pointer on the resource, so the first name
+/// keeps its serving resource and resolver.
+#[tokio::test]
+async fn an_ownerless_node_keeps_its_own_pointer_on_a_shared_resource() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_names_ownerless_shared", 20).await?;
+    let node_resource = uuid(7);
+    fixture
+        .write(
+            11,
+            1,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "owner": ZERO, "owner_getter": ZERO,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    pointer(&fixture, 12, 1, V1_REGISTRY, Some(&node_resource), RESOLVER).await?;
+    pointer(&fixture, 13, 2, V1_REGISTRY, Some(&node_resource), LATER).await?;
+    publish_and_compare(&fixture, 14).await?;
+    assert_eq!(
+        (
+            served(&fixture, 1, "/provenance/read_reachability/basis").await?,
+            served(&fixture, 1, "/declared_summary/resolver/address").await?,
+        ),
+        (json!("retained_registry_resolver_pointer"), json!(RESOLVER))
+    );
+    fixture.cleanup().await
+}
+
 /// An ENSv2 root-registry TLD with a pointer and no observed registration serves the pointer,
 /// then a root release at or after it withdraws it.
 #[tokio::test]
@@ -468,5 +501,133 @@ async fn an_ensv2_reservation_defers_to_the_ensv1_registration() -> Result<()> {
         ),
         (json!("active"), json!(OWNER), json!(RESOLVER))
     );
+    fixture.cleanup().await
+}
+
+/// Two names bound to one resource, the resolver set on the first and later on the second: the
+/// resource's latest pointer belongs to the second name, and the served row picks each name's
+/// latest pointer among its own events, so the first name still serves its own earlier pointer
+/// (name_current/build.sql, the `resolver` lateral filters by logical name first).
+#[tokio::test]
+async fn a_shared_resource_serves_each_name_its_own_latest_pointer() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_names_shared_resource", 20).await?;
+    let lease = uuid(1);
+    for (n, binding) in [(1u64, 100u32), (2, 101)] {
+        fixture
+            .binding(
+                &uuid(binding),
+                &name(n),
+                &lease,
+                "ens_v1",
+                9,
+                n as i64,
+                None,
+            )
+            .await?;
+        fixture
+            .write(
+                10,
+                n as i64,
+                "RegistrationGranted",
+                V1_REGISTRAR,
+                Some(&name(n)),
+                Some(&lease),
+                json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                       "expiry": 2_000_000_000u64}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    pointer(&fixture, 11, 1, V1_REGISTRY, Some(&lease), RESOLVER).await?;
+    pointer(&fixture, 12, 2, V1_REGISTRY, Some(&lease), LATER).await?;
+    publish_and_compare(&fixture, 13).await?;
+    assert_eq!(
+        (
+            served(&fixture, 1, "/declared_summary/resolver/address").await?,
+            served(&fixture, 2, "/declared_summary/resolver/address").await?,
+        ),
+        (json!(RESOLVER), json!(LATER))
+    );
+    // Each resolver's bound names reach the name whose own pointer names it, although the
+    // resource's latest pointer is the second name's.
+    let mut bound = Vec::new();
+    for resolver in [RESOLVER, LATER] {
+        let rows = bigname_storage::families::name::load_family_bound_names(
+            &fixture.pool,
+            support::CHAIN,
+            resolver,
+            None,
+            None,
+            10,
+        )
+        .await?;
+        bound.push(
+            rows.into_iter()
+                .map(|row| row.logical_name_id)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(bound, [vec![name(1)], vec![name(2)]]);
+    fixture.cleanup().await
+}
+
+/// A renewal the registrar emits without a name, on name 1's lease, whose expiry is not an
+/// integral second: staging names it for name 1 through its lease, and the served row then keeps
+/// no expiry, so neither listing shows the name in a window around that expiry. The composed
+/// listing considers the name through its lease (the inexact walk takes the same resource paths
+/// as the integral one) and agrees.
+#[tokio::test]
+async fn an_unnamed_inexact_renewal_lists_the_same_in_the_expiring_listing() -> Result<()> {
+    use bigname_storage::{NameCurrentExpiringFilter, NameCurrentListOrder};
+    let fixture = Fixture::new("families_shadow_names_inexact_unnamed", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    fixture
+        .event(
+            support::Event::new("renewal-12", 12, 1, "RegistrationRenewed", V1_REGISTRAR)
+                .resource(&lease)
+                .after(json!({"namehash": node(1), "authority_kind": "registrar",
+                              "expiry": 2_100_000_000.5}))
+                .raw(json!({"emitting_address": REGISTRAR})),
+        )
+        .await?;
+    publish_and_compare(&fixture, 14).await?;
+    assert_eq!(
+        served(&fixture, 1, "/declared_summary/registration/expiry").await?,
+        Value::Null
+    );
+    let filter = NameCurrentExpiringFilter {
+        namespace: "ens".to_owned(),
+        expires_after: Some(sqlx::types::time::OffsetDateTime::from_unix_timestamp(
+            2_099_000_000,
+        )?),
+        expires_before: Some(sqlx::types::time::OffsetDateTime::from_unix_timestamp(
+            2_101_000_000,
+        )?),
+    };
+    let ids = |page: bigname_storage::NameCurrentListPage| {
+        page.rows
+            .into_iter()
+            .map(|row| row.row.logical_name_id)
+            .collect::<Vec<_>>()
+    };
+    let served_page = ids(bigname_storage::load_name_current_expiring_page(
+        &fixture.pool,
+        &filter,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+    )
+    .await?);
+    let composed_page = ids(bigname_storage::families::name::load_family_expiring_page(
+        &fixture.pool,
+        &filter,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+        &[support::CHAIN.to_owned()],
+    )
+    .await?);
+    assert_eq!(composed_page, served_page);
     fixture.cleanup().await
 }

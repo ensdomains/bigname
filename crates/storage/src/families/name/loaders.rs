@@ -236,6 +236,72 @@ pub(super) async fn resource_pointers(
     Ok((by_resource, roots))
 }
 
+/// The latest `ResolverChanged` of each `(resource, name)` pair at or below `target`, read from
+/// `normalized_events`. F5 keeps only a resource's latest pointer, whichever name it came from,
+/// while the served row picks a name's latest pointer among that name's own events
+/// (name_current/build.sql, the `resolver` lateral), so a name sharing its resource with a name
+/// that pointed later reads its own pointer here. Only pairs whose F5 row names another name are
+/// asked for; the order is the served one.
+pub(super) async fn named_resource_pointers(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    target: i64,
+    pairs: &[(String, String)],
+) -> Result<BTreeMap<(String, String), PointerRow>> {
+    if pairs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let (resources, names): (Vec<String>, Vec<String>) = pairs.iter().cloned().unzip();
+    let rows = sqlx::query(
+        "/* storage:families.name.named_resource_pointers */
+         SELECT DISTINCT ON (event.resource_id, event.logical_name_id)
+                event.resource_id::text AS resource_id,
+                lower(event.after_state ->> 'resolver') AS resolver_address,
+                jsonb_build_object('block_number', event.block_number,
+                    'transaction_index', event.transaction_index,
+                    'log_index', event.log_index,
+                    'event_identity', event.event_identity) AS pointer_position,
+                event.source_family, event.logical_name_id AS event_name,
+                event.normalized_event_id AS event_id
+         FROM bigname_phase.normalized_events event
+         JOIN bigname_phase.chain_lineage lineage
+           ON lineage.chain_id = event.chain_id
+          AND lineage.block_number = event.block_number
+          AND lineage.block_hash = event.block_hash
+         WHERE event.chain_id = $1
+           AND event.event_kind = 'ResolverChanged'
+           AND event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND event.block_number <= $2
+           AND (event.resource_id::text, event.logical_name_id) IN (
+               SELECT * FROM unnest($3::text[], $4::text[]))
+         ORDER BY event.resource_id, event.logical_name_id,
+                  event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
+                  event.log_index DESC NULLS LAST, event.normalized_event_id DESC",
+    )
+    .bind(chain_id)
+    .bind(target)
+    .bind(&resources)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to load the named resource pointers")?;
+    let mut out = BTreeMap::new();
+    for row in &rows {
+        let Some(pointer) = pointer_of(row, row.try_get("pointer_position")?)? else {
+            continue;
+        };
+        let (Some(resource), Some(name)) =
+            (pointer.resource_id.clone(), pointer.logical_name_id.clone())
+        else {
+            continue;
+        };
+        out.insert((resource, name), pointer);
+    }
+    Ok(out)
+}
+
 /// F4 pointers by `(namespace, node)`.
 pub(super) async fn node_pointers(
     conn: &mut PgConnection,
