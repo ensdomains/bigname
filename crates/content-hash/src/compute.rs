@@ -68,6 +68,10 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // Redo-range preparation and the normalizer-version recompute that drive the stage above.
     "crates/interpret/src/write.rs",
     "crates/interpret/src/recompute.rs",
+    // The expiry and registration timestamp reads the stored name summary (under the storage
+    // families root) takes its `expires_at` and `registered_at` from. The rest of the address-names
+    // code serves reads only.
+    "crates/storage/src/address_names/query.rs",
 ];
 
 #[allow(dead_code)]

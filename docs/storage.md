@@ -1690,8 +1690,9 @@ test fails when SQL under `crates/project/src` is loaded only by test code.
 The storage families code (`crates/storage/src/families`) is covered as well:
 Project's family step stores the [name summaries](glossary.md#name-summary) that
 code composes, so a change there rotates the hash and forces a rebuild like a
-project change does, while the rest of the storage crate serves reads and stays
-outside.
+project change does. So is `crates/storage/src/address_names/query.rs`, whose
+expiry and registration timestamp reads the summaries store. The rest of the
+storage crate serves reads and stays outside.
 Interpret's persistence stage is covered on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute

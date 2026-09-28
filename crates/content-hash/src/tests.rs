@@ -566,12 +566,15 @@ fn write_conflict_policy_changes_the_hash() {
 #[test]
 fn storage_family_sources_change_the_hash_and_other_storage_sources_do_not() {
     // The family step stores name summaries composed by the storage families code
-    // (crates/storage/src/families/name/summary.rs and what it calls), so that code decides
-    // persisted rows; the rest of the storage crate serves reads and does not.
+    // (crates/storage/src/families/name/summary.rs and what it calls, including the expiry and
+    // registration timestamp reads in crates/storage/src/address_names/query.rs), so that code
+    // decides persisted rows; the rest of the storage crate serves reads and does not.
     for (relative_path, rotates) in [
         ("crates/storage/src/families/name/summary.rs", true),
         ("crates/storage/src/families/control/wrapper.rs", true),
         ("crates/storage/src/families/mod.rs", true),
+        ("crates/storage/src/address_names/query.rs", true),
+        ("crates/storage/src/address_names/page.rs", false),
         ("crates/storage/src/children/page.rs", false),
         ("crates/storage/src/lib.rs", false),
     ] {
