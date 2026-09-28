@@ -6,7 +6,7 @@ mod families_support;
 
 use anyhow::Result;
 use bigname_project::families::FamilyMode;
-use families_support::{CHAIN, Fixture, hash};
+use families_support::{CHAIN, Fixture, hash, uuid};
 use serde_json::{Value, json};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
@@ -535,5 +535,449 @@ async fn a_rebuild_skips_activations_below_the_retained_lineage() -> Result<()> 
                     "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
         ]
     );
+    fixture.cleanup().await
+}
+
+/// As [`manifest_status`], for a new manifest in `namespace`. Returns the manifest id.
+async fn namespaced_manifest(
+    fixture: &Fixture,
+    namespace: &str,
+    family: &str,
+    payload: Value,
+    status: &str,
+) -> Result<i64> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, $1, $2, $3, $4, $7, 'fixture', $5, $6)
+         RETURNING manifest_id",
+    )
+    .bind(namespace)
+    .bind(family)
+    .bind(CHAIN)
+    .bind(format!("fixture-{status}"))
+    .bind(format!("fixture/{namespace}/{family}/{status}.yaml"))
+    .bind(&payload)
+    .bind(status)
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state, before_state, after_state, raw_fact_ref)
+         VALUES ($1, $2, 'SourceManifestUpdated', $3, 1, $4, $5, 1, $6,
+                 'ens_v2_registry_resource_surface', 'canonical', '{}'::jsonb,
+                 jsonb_build_object('rollout_status', $7::text, 'manifest_payload', $8::jsonb),
+                 '{}'::jsonb)",
+    )
+    .bind(format!("manifest:{id}:1"))
+    .bind(namespace)
+    .bind(family)
+    .bind(id)
+    .bind(CHAIN)
+    .bind(hash(1))
+    .bind(status)
+    .bind(&payload)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(id)
+}
+
+/// `count` resolver edges to the contract at `to`, each from its own name contract numbered
+/// from `first`, admitted by `origin`: active from `from_block` with `from_hash`, until
+/// `to_block` when given.
+#[allow(clippy::too_many_arguments)]
+async fn resolver_edges(
+    fixture: &Fixture,
+    to: &str,
+    first: i64,
+    count: i64,
+    origin: i64,
+    from_block: i64,
+    from_hash: &str,
+    to_block: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "WITH names AS (
+             SELECT format('00000000-0000-0000-0000-%s', lpad(to_hex(n), 12, '0'))::uuid AS id
+             FROM generate_series($3::bigint, $3::bigint + $4::bigint - 1) n
+         ), instances AS (
+             INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+             SELECT id, $1, 'contract' FROM names
+         )
+         INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, active_to_block_number,
+             active_to_block_hash, canonicality_state)
+         SELECT $1, 'resolver', id, $2::uuid, 'NewResolver', 'fixture', $5, $6, $7, $8,
+                CASE WHEN $8 IS NOT NULL THEN format('0x%s', lpad(to_hex($8::bigint), 64, '0'))
+                END, 'canonical'
+         FROM names",
+    )
+    .bind(CHAIN)
+    .bind(to)
+    .bind(first)
+    .bind(count)
+    .bind(origin)
+    .bind(from_block)
+    .bind(from_hash)
+    .bind(to_block)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// A resolver many names point at is admitted only by the manifests with an edge that qualifies
+// at the block. Every edge of the ENS registry manifest has ended or starts at a block hash the
+// lineage does not hold, and the one edge of an inactive manifest admits nothing, so the
+// Basenames registry's edges decide: the edge candidate of its family, with no ENS-namespace
+// declaration precedence.
+#[tokio::test]
+async fn a_resolver_is_admitted_only_by_manifests_with_a_qualifying_edge() -> Result<()> {
+    let fixture = Fixture::new("families_classification_admission_set", 20).await?;
+    let declared = |role: &str| json!({"contracts": [{"address": R1, "role": role}]});
+    manifest(
+        &fixture,
+        None,
+        "ens_v1_resolver_l1",
+        1,
+        declared("public_resolver"),
+    )
+    .await?;
+    let basenames_resolver = namespaced_manifest(
+        &fixture,
+        "basenames",
+        "basenames_base_resolver",
+        declared("public_resolver"),
+        "active",
+    )
+    .await?;
+    let ens_registry = manifest(
+        &fixture,
+        None,
+        "ens_v1_registry_l1",
+        1,
+        json!({"contracts": []}),
+    )
+    .await?;
+    let basenames_registry = namespaced_manifest(
+        &fixture,
+        "basenames",
+        "basenames_base_registry",
+        json!({"contracts": []}),
+        "active",
+    )
+    .await?;
+    let shadow_registry = namespaced_manifest(
+        &fixture,
+        "ens",
+        "ens_v1_registry_l1",
+        json!({"contracts": []}),
+        "shadow",
+    )
+    .await?;
+    let resolver = "00000000-0000-0000-0000-00000000f0a1";
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1::uuid, $2, 'contract')",
+    )
+    .bind(resolver)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address)
+         VALUES ($1::uuid, $2, $3)",
+    )
+    .bind(resolver)
+    .bind(CHAIN)
+    .bind(R1)
+    .execute(&fixture.pool)
+    .await?;
+    // The ENS registry's 45 edges: 20 ended at or before block 10, 20 from a hash block 4 never
+    // had, 5 starting after it.
+    resolver_edges(
+        &fixture,
+        resolver,
+        0x1000,
+        20,
+        ens_registry,
+        2,
+        &hash(2),
+        Some(9),
+    )
+    .await?;
+    resolver_edges(
+        &fixture,
+        resolver,
+        0x1100,
+        20,
+        ens_registry,
+        4,
+        &hash(1004),
+        None,
+    )
+    .await?;
+    resolver_edges(
+        &fixture,
+        resolver,
+        0x1200,
+        5,
+        ens_registry,
+        12,
+        &hash(12),
+        None,
+    )
+    .await?;
+    resolver_edges(
+        &fixture,
+        resolver,
+        0x1300,
+        4,
+        basenames_registry,
+        10,
+        &hash(10),
+        None,
+    )
+    .await?;
+    resolver_edges(
+        &fixture,
+        resolver,
+        0x1400,
+        1,
+        shadow_registry,
+        10,
+        &hash(10),
+        None,
+    )
+    .await?;
+
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        classifications(&fixture).await?,
+        vec![
+            json!({"resolver_address": R1, "support_status": "supported",
+                    "unsupported_reason": null, "block_number": 10,
+                    "event_identity": "activation:10",
+                    "source_family": "basenames_base_resolver", "role": "public_resolver"})
+        ]
+    );
+    let row = &fixture.rows("project_resolver_classification").await?[0];
+    assert_eq!(
+        columns(row, &["manifest_id", "admission_namespace"]),
+        json!({"manifest_id": basenames_resolver, "admission_namespace": null}),
+        "admitted by the Basenames edges alone, so no ENS-namespace declaration precedes"
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
+
+/// A resolver contract at `address` whose address starts at `block`, so the block classifies it
+/// with no event and no edge of its own starting there. Returns the contract instance id.
+async fn resolver_from(
+    fixture: &Fixture,
+    instance: u32,
+    address: &str,
+    block: i64,
+) -> Result<String> {
+    let instance = uuid(instance);
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1::uuid, $2, 'contract')",
+    )
+    .bind(&instance)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address,
+             active_from_block_number, active_from_block_hash)
+         VALUES ($1::uuid, $2, $3, $4, $5)",
+    )
+    .bind(&instance)
+    .bind(CHAIN)
+    .bind(address)
+    .bind(block)
+    .bind(hash(block))
+    .execute(&fixture.pool)
+    .await?;
+    Ok(instance)
+}
+
+/// One resolver edge to the contract `to` from its own name contract `from`, admitted by
+/// `origin`: undated when `from_block` is none (no start block or hash), otherwise active from
+/// it with its lineage hash, until `to_block` when given, and deactivated when `deactivated`.
+async fn edge(
+    fixture: &Fixture,
+    from: u32,
+    to: &str,
+    origin: i64,
+    from_block: Option<i64>,
+    to_block: Option<i64>,
+    deactivated: bool,
+) -> Result<()> {
+    let from = uuid(from);
+    sqlx::query(
+        "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+         VALUES ($1::uuid, $2, 'contract')",
+    )
+    .bind(&from)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, active_to_block_number,
+             active_to_block_hash, canonicality_state, deactivated_at)
+         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, $5, $6, $7,
+                 $8, 'canonical', CASE WHEN $9 THEN now() END)",
+    )
+    .bind(CHAIN)
+    .bind(&from)
+    .bind(to)
+    .bind(origin)
+    .bind(from_block)
+    .bind(from_block.map(hash))
+    .bind(to_block)
+    .bind(to_block.map(hash))
+    .bind(deactivated)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// An undated resolver edge (no start block, no start hash) admits the resolver at any block. The
+// ENS registry's undated edge is deactivated, its other edges start after the block or closed
+// before it, so none admits: the Basenames registry's undated edge decides, with no ENS-namespace
+// declaration precedence. An ENS admission would win on that precedence, and no admission leaves
+// no row.
+#[tokio::test]
+async fn an_undated_edge_admits_beside_rejected_undated_and_dated_edges() -> Result<()> {
+    let fixture = Fixture::new("families_classification_undated", 20).await?;
+    let declared = json!({"contracts": [{"address": R1, "role": "public_resolver"}]});
+    manifest(&fixture, None, "ens_v1_resolver_l1", 1, declared.clone()).await?;
+    let basenames_resolver = namespaced_manifest(
+        &fixture,
+        "basenames",
+        "basenames_base_resolver",
+        declared,
+        "active",
+    )
+    .await?;
+    let ens_registry = manifest(
+        &fixture,
+        None,
+        "ens_v1_registry_l1",
+        1,
+        json!({"contracts": []}),
+    )
+    .await?;
+    let basenames_registry = namespaced_manifest(
+        &fixture,
+        "basenames",
+        "basenames_base_registry",
+        json!({"contracts": []}),
+        "active",
+    )
+    .await?;
+    let resolver = resolver_from(&fixture, 0xf0a1, R1, 10).await?;
+    edge(
+        &fixture,
+        0x2001,
+        &resolver,
+        basenames_registry,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    edge(&fixture, 0x2002, &resolver, ens_registry, None, None, true).await?;
+    edge(
+        &fixture,
+        0x2003,
+        &resolver,
+        ens_registry,
+        Some(12),
+        None,
+        false,
+    )
+    .await?;
+    edge(
+        &fixture,
+        0x2004,
+        &resolver,
+        ens_registry,
+        Some(2),
+        Some(9),
+        false,
+    )
+    .await?;
+
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        classifications(&fixture).await?,
+        vec![
+            json!({"resolver_address": R1, "support_status": "supported",
+                    "unsupported_reason": null, "block_number": 10,
+                    "event_identity": "activation:10",
+                    "source_family": "basenames_base_resolver", "role": "public_resolver"})
+        ]
+    );
+    let row = &fixture.rows("project_resolver_classification").await?[0];
+    assert_eq!(
+        columns(row, &["manifest_id", "admission_namespace"]),
+        json!({"manifest_id": basenames_resolver, "admission_namespace": null}),
+        "admitted by the Basenames registry's undated edge alone"
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
+
+// Dated edges of one resolver and manifest are searched newest-first at or below the block, and
+// the search passes over edges closed before it: R1's newer open edge admits beside an older
+// closed one, R2's older open edge beside a newer closed one.
+#[tokio::test]
+async fn an_open_dated_edge_admits_beside_a_closed_one_of_the_same_manifest() -> Result<()> {
+    let fixture = Fixture::new("families_classification_closed_pair", 20).await?;
+    manifest(
+        &fixture,
+        None,
+        "ens_v1_resolver_l1",
+        1,
+        json!({"contracts": [{"address": R1, "role": "public_resolver"},
+                             {"address": R2, "role": "public_resolver"}]}),
+    )
+    .await?;
+    let registry = manifest(
+        &fixture,
+        None,
+        "ens_v1_registry_l1",
+        1,
+        json!({"contracts": []}),
+    )
+    .await?;
+    let r1 = resolver_from(&fixture, 0xf0a1, R1, 10).await?;
+    edge(&fixture, 0x2101, &r1, registry, Some(2), Some(5), false).await?;
+    edge(&fixture, 0x2102, &r1, registry, Some(6), None, false).await?;
+    let r2 = resolver_from(&fixture, 0xf0a2, R2, 10).await?;
+    edge(&fixture, 0x2201, &r2, registry, Some(3), None, false).await?;
+    edge(&fixture, 0x2202, &r2, registry, Some(7), Some(9), false).await?;
+
+    fixture.apply(10, FamilyMode::Normal).await;
+    let supported = |address: &str| {
+        json!({"resolver_address": address, "support_status": "supported",
+               "unsupported_reason": null, "block_number": 10,
+               "event_identity": "activation:10",
+               "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
+    };
+    assert_eq!(
+        classifications(&fixture).await?,
+        vec![supported(R1), supported(R2)]
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }

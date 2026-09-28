@@ -170,6 +170,17 @@ CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_destination
     ON discovery_edges (chain_id, to_contract_instance_id)
     WHERE edge_kind = 'resolver';
 
+-- It classifies a block's touched resolvers from each one's contract instance, asking for one
+-- active resolver edge per active manifest.
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_admission_idx
+    ON discovery_edges (
+        chain_id,
+        to_contract_instance_id,
+        source_manifest_id,
+        active_from_block_number
+    )
+    WHERE edge_kind = 'resolver' AND deactivated_at IS NULL;
+
 -- Interpret closes and orders historical observations as well as active ones.
 CREATE INDEX IF NOT EXISTS discovery_edges_observation_history_idx
     ON discovery_edges (
