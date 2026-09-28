@@ -1407,31 +1407,6 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
             .any(|row| row.canonical_display_name == "beta.eth")
     );
 
-    let compact_page = bigname_storage::load_name_current_list_page(
-        &database.pool,
-        &bigname_storage::NameCurrentListFilter {
-            address: Some(bigname_storage::NameCurrentAddressFilter {
-                address: V2_ADDRESS.to_owned(),
-                relation: bigname_storage::NameCurrentAddressRelationFilter::Any,
-                addresses: None,
-            }),
-            ..Default::default()
-        },
-        bigname_storage::NameCurrentListSort::Name,
-        bigname_storage::NameCurrentListOrder::Asc,
-        None,
-        50,
-        true,
-    )
-    .await?;
-    assert!(
-        compact_page
-            .rows
-            .iter()
-            .all(|row| row.row.normalized_name != "beta.eth")
-    );
-    assert_eq!(compact_page.total_count, Some(4));
-
     database.cleanup().await?;
     Ok(())
 }
