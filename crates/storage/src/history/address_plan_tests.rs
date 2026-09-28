@@ -86,6 +86,17 @@ async fn with_fixture(
     let result = async {
         let mut connection = database.pool().acquire().await?;
         install_fixture(&mut connection).await?;
+        drop(connection);
+        super::super::family_test_support::publish(
+            database.pool(),
+            "ethereum-mainnet",
+            UNRELATED_NAMES + 10,
+        )
+        .await?;
+        let mut connection = database.pool().acquire().await?;
+        sqlx::raw_sql("ANALYZE; SET enable_seqscan=off; SET jit=off")
+            .execute(&mut *connection)
+            .await?;
         check(&mut connection).await
     }
     .await;
@@ -803,9 +814,6 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
                jsonb_build_object('node', '{target_hash}', 'resolver', '{TARGET_RESOLVER}');
 
-        ANALYZE;
-        SET enable_seqscan = off;
-        SET jit = off;
         "#,
         blocks = UNRELATED_NAMES + 10,
         names = UNRELATED_NAMES,

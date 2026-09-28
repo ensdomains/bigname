@@ -8,6 +8,8 @@ mod columns;
 mod decoders;
 mod duplicates;
 mod event_page;
+#[cfg(test)]
+mod family_test_support;
 mod filters;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;

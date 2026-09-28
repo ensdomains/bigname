@@ -35,12 +35,15 @@ async fn exercise_plan(connection: &mut PgConnection) -> Result<()> {
     ] {
         sqlx::raw_sql(baseline).execute(&mut *connection).await?;
     }
-    sqlx::raw_sql(
-        r#"
+    // Keep the complete plan population while bounding each insert's foreign-key trigger queue.
+    for start in (1..=100_050).step_by(1_000) {
+        let end = (start + 999).min(100_050);
+        sqlx::raw_sql(&format!(
+            r#"
         INSERT INTO chain_lineage
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
         SELECT 'ethereum-mainnet', 'block-' || n, n, to_timestamp(n), 'canonical'
-        FROM generate_series(1, 100050) n;
+        FROM generate_series({start}, {end}) n;
         INSERT INTO normalized_events
             (event_identity, namespace, event_kind, source_family, manifest_version,
              chain_id, block_hash, block_number, transaction_hash, transaction_index,
@@ -54,14 +57,16 @@ async fn exercise_plan(connection: &mut PgConnection) -> Result<()> {
                'ethereum-mainnet', 'block-' || n, n, 'tx-' || n, 0, 0,
                'ens_v1_unwrapped_authority', 'canonical',
                jsonb_build_object('node', 'node-' || n)
-        FROM generate_series(1, 100050) n
+        FROM generate_series({start}, {end}) n
         CROSS JOIN generate_series(1, 2) copy WHERE n > 100000 OR copy = 1;
-        ANALYZE normalized_events;
-        ANALYZE chain_lineage;
     "#,
-    )
-    .execute(&mut *connection)
-    .await?;
+        ))
+        .execute(&mut *connection)
+        .await?;
+    }
+    sqlx::raw_sql("ANALYZE normalized_events; ANALYZE chain_lineage")
+        .execute(&mut *connection)
+        .await?;
     let filter = EventHistoryReadFilter::default();
     let mut query = QueryBuilder::<Postgres>::new("SELECT count(*)::bigint");
     push_history_source_for_filter(&mut query, &filter, true, false, false);

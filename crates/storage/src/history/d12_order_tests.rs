@@ -302,6 +302,7 @@ async fn pointer_attribution_breaks_exact_position_ties_by_identity() -> Result<
         ),
     ]);
     let database = phase_database("history_d12_pointer_tie", &fixture).await?;
+    super::super::family_test_support::publish(database.pool(), "ethereum-mainnet", 5).await?;
     let result = async {
         let pool = database.pool();
         let attributed = attributed(pool).await?;
@@ -410,6 +411,7 @@ async fn link_selection_breaks_exact_position_ties_by_identity() -> Result<()> {
         ),
     ]);
     let database = phase_database("history_d12_link_tie", &fixture).await?;
+    super::super::family_test_support::publish(database.pool(), "ethereum-mainnet", 5).await?;
     let result = async {
         let attributed = attributed(database.pool()).await?;
         let expected = ["link:a", "link:b", "write:2"]
