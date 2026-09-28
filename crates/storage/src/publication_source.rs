@@ -87,9 +87,9 @@ fn parse_environment(value: Result<String, std::env::VarError>) -> Result<bool, 
     match value {
         Ok(value) => parse(Some(&value)),
         Err(std::env::VarError::NotPresent) => parse(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(format!("{SERVE_FROM_FAMILIES_ENV} must contain valid Unicode"))
-        }
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{SERVE_FROM_FAMILIES_ENV} must contain valid Unicode"
+        )),
     }
 }
 
