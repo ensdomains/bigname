@@ -277,19 +277,24 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     let feed = RunnerMetricsFeed::default();
     feed.seed_chain("configured-without-rows");
     feed.seed_chain("served");
-    // The cases seed the Project row as the served publication, so the gauges measure it with
-    // the switch off whatever the build's default (metrics_served_lag_families covers it on).
-    let address = bigname_storage::publication_source::with_serve_from_families(
-        false,
-        phase_runner::metrics::start(
-            "127.0.0.1:0".parse()?,
-            scratch.pool().clone(),
-            cancellation.clone(),
-            900,
-            RunnerLoopHeartbeat::default(),
-            RunnerPhaseProgress::default(),
-            feed.clone(),
-        ),
+    // Publication gauges follow the family marker, independently of runner progress or
+    // a failed attempt beyond that still-readable publication.
+    sqlx::query(
+        "INSERT INTO project_family_marker(chain_id,current_block_number,current_block_hash,
+        block_timestamp,input_content_hash,sequence,state)
+        SELECT chain_id,current_block_number,current_block_hash,now(),input_content_hash,1,'live'
+        FROM chain_phase_state WHERE phase_name='project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        scratch.pool().clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed.clone(),
     )
     .await?;
     let first_refresh_tick = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -307,7 +312,7 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         ("no-head-row", -1.0, -1.0),
         ("orphaned", -1.0, -1.0),
         ("older-hash", -1.0, -1.0),
-        ("failed", -1.0, -1.0),
+        ("failed", 14.0, 90.0),
         ("published-head", 10.0, 90.0),
         ("ingest-ahead", 10.0, 90.0),
         ("unobserved", -1.0, -1.0),
@@ -327,12 +332,10 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         );
     }
 
-    // A committed batch refreshes the gauges well before the five-second refresh tick.
+    // A committed family publication refreshes before the periodic tick.
     sqlx::query(
-        "UPDATE chain_phase_state
-         SET current_block_number = 100, current_block_hash = 'served-100',
-             target_block_number = 100, target_block_hash = 'served-100'
-         WHERE chain_id = 'served' AND phase_name = 'project'",
+        "UPDATE project_family_marker SET current_block_number=100,
+        current_block_hash='served-100', sequence=sequence+1 WHERE chain_id='served'",
     )
     .execute(scratch.pool())
     .await?;
@@ -575,25 +578,11 @@ fn sample(body: &str, name: &str, labels: &[&str]) -> Result<f64> {
         .with_context(|| format!("metric sample has an invalid value: {line}"))
 }
 
-const PROJECT_WRITE_TABLES: [&str; 11] = [
-    "name_current",
-    "children_current",
-    "permissions_current",
-    "account_permission_state_current",
-    "permissions_current_resource_summary",
-    "record_inventory_current",
-    "resolver_current",
-    "address_names_current",
-    "address_records_current",
-    "primary_names_current",
-    "child_registration_events",
-];
-
 #[tokio::test]
-async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<()> {
+async fn endpoint_exports_committed_family_publication_metrics() -> Result<()> {
     use phase_runner::{
         heads::{BlockMarker, HeadMarkers},
-        phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+        phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
         project_phase::ProjectPhase,
     };
 
@@ -642,12 +631,8 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     };
     // The seed spreads the names over blocks 1 to 40: a full rebuild to block 30, then one batch
     // for blocks 31 to 40.
-    // Each batch is followed by the owned key families, as the runner does once it has recorded
-    // the batch's progress.
     project.run_batch(context(30, None)?).await?;
-    while project.after_progress_recorded(chain).await? == AfterProgress::More {}
     project.run_batch(context(40, Some(30))?).await?;
-    while project.after_progress_recorded(chain).await? == AfterProgress::More {}
     feed.batch_committed();
 
     let chain_label = format!("chain=\"{chain}\"");
@@ -657,12 +642,18 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
             .await
             .context("phase metrics scrape task panicked")??;
         let body = parse_http_scrape(&response)?.to_owned();
-        if sample(&body, "phase_runner_project_batch_blocks", &[&chain_label]).ok() == Some(10.0) {
+        if sample(
+            &body,
+            "phase_runner_project_family_block_seconds_count",
+            &[&chain_label],
+        )
+        .is_ok_and(|count| count > 0.0)
+        {
             break body;
         }
         ensure!(
             std::time::Instant::now() < deadline,
-            "a committed Project batch must reach the write gauges before the next refresh tick"
+            "a committed Project batch must reach the family metrics before the next refresh tick"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
@@ -672,7 +663,7 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
             "phase_runner_project_family_lag_blocks",
             &[&chain_label]
         )? == 0.0,
-        "the families follow the served marker"
+        "the family publication reaches the requested target"
     );
     sample(
         &body,
@@ -691,65 +682,6 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
         !body.contains("phase_runner_project_family_skips_total"),
         "a family failure fails the batch; nothing counts skips"
     );
-    for gauge in [
-        "phase_runner_project_changed_events",
-        "phase_runner_project_staged_events",
-    ] {
-        ensure!(
-            sample(&body, gauge, &[&chain_label])? > 0.0,
-            "{gauge} is empty"
-        );
-    }
-    ensure!(
-        sample(
-            &body,
-            "phase_runner_project_scope_keys",
-            &[&chain_label, "scope=\"names\""]
-        )? > 0.0
-    );
-    for stage in [
-        "prepare",
-        "scope",
-        "inputs",
-        "builders",
-        "integrity",
-        "publish",
-    ] {
-        let label = format!("stage=\"{stage}\"");
-        sample(
-            &body,
-            "phase_runner_project_stage_duration_seconds",
-            &[&chain_label, &label],
-        )?;
-    }
-    // The counter adds both batches: every served table holds the rows it received less the
-    // rows it lost, because it started empty.
-    for table in PROJECT_WRITE_TABLES {
-        let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-            .fetch_one(scratch.pool())
-            .await?;
-        let table_label = format!("table=\"{table}\"");
-        let written = |kind: &str| {
-            sample(
-                &body,
-                "phase_runner_project_rows_written_total",
-                &[&chain_label, &table_label, &format!("kind=\"{kind}\"")],
-            )
-        };
-        assert_eq!(
-            written("inserted")? - written("deleted")?,
-            rows as f64,
-            "{table}"
-        );
-    }
-    ensure!(
-        sample(
-            &body,
-            "phase_runner_project_rows_written_total",
-            &[&chain_label, "table=\"name_current\"", "kind=\"inserted\""],
-        )? > 0.0
-    );
-
     cancellation.cancel();
     tokio::task::yield_now().await;
     scratch.cleanup().await

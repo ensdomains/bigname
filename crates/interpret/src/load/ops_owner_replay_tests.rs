@@ -8,7 +8,10 @@ use bigname_adapters::{
     prepare_schema_v2_batch_incremental_with_provenance,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+use bigname_project::{
+    Marker,
+    families::{self, FamilyMode, FamilyOptions},
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{PgPool, types::Uuid};
@@ -117,12 +120,11 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
         let summary = summary(database.pool(), logical).await?;
         assert_eq!(summary["registration"]["registrant"], previous_registrant);
         assert_eq!(summary["control"]["registry_owner"], previous_registrant);
-        let selected: (Uuid, Uuid) = sqlx::query_as(
-            "SELECT resource_id, token_lineage_id FROM name_current WHERE logical_name_id = $1",
-        )
-        .bind(logical)
-        .fetch_one(database.pool())
-        .await?;
+        let current = name(database.pool(), logical).await?;
+        let selected = (
+            current.resource_id.context("selected resource")?,
+            current.token_lineage_id.context("selected token lineage")?,
+        );
         assert!(
             prefix_output
                 .resources
@@ -144,10 +146,20 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
             prefix_markers.last().context("prefix marker")?.hash,
             fixture_lineage(&fixture, prefix_end, prefix_end)[0].1
         );
-        let grants: i64 = sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE resource_id = $1 AND lower(subject) = $2 AND jsonb_array_length(effective_powers) > 0")
-            .bind(selected.0).bind(previous_registrant).fetch_one(database.pool()).await?;
+        let grants = bigname_storage::load_serving_effective_permissions_page(
+            database.pool(),
+            Some(previous_registrant),
+            Some(selected.0),
+            None,
+            None,
+            100,
+        )
+        .await?;
         assert!(
-            grants > 0,
+            grants.rows.iter().any(|row| row
+                .effective_powers
+                .as_array()
+                .is_some_and(|powers| !powers.is_empty())),
             "selected prefix registrant has actual retained permissions"
         );
     }
@@ -253,11 +265,10 @@ async fn actual_token_sale_live_full_and_compacted_restore_project_identically()
             sale.transaction_hash.as_deref(),
             fixture["sale_transaction"].as_str()
         );
-        let selected: Uuid =
-            sqlx::query_scalar("SELECT resource_id FROM name_current WHERE logical_name_id = $1")
-                .bind(logical)
-                .fetch_one(databases[index].pool())
-                .await?;
+        let selected = name(databases[index].pool(), logical)
+            .await?
+            .resource_id
+            .context("selected resource")?;
         assert_eq!(sale.resource_id, Some(selected));
         assert!(
             output
@@ -378,34 +389,67 @@ async fn full_restore(
 
 async fn project(
     pool: &PgPool,
-    from: i64,
+    _from: i64,
     target: i64,
     previous: Option<Marker>,
 ) -> Result<Marker> {
-    Ok(Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: target,
-            affected_from_block: from,
-            affected_to_block: target,
-            resume_current: previous,
-            mode: RunMode::Normal,
-        })
+    let marker = Marker {
+        number: target,
+        hash: sqlx::query_scalar("SELECT block_hash FROM chain_lineage WHERE chain_id=$1 AND block_number=$2 AND canonicality_state IN ('canonical','safe','finalized')")
+            .bind(CHAIN).bind(target).fetch_one(pool).await?,
+    };
+    let token = families::input_token(pool, CHAIN).await?;
+    let mode = if previous.is_some() {
+        FamilyMode::Normal
+    } else {
+        FamilyMode::Rebuild
+    };
+    let outcome = families::apply(
+        pool,
+        CHAIN,
+        &marker,
+        mode,
+        &token,
+        &FamilyOptions::new(bigname_test_support::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    assert!(!outcome.budget_exhausted);
+    let published = outcome.marker.context("family publication")?;
+    assert_eq!(published, marker);
+    Ok(published)
+}
+
+async fn name(pool: &PgPool, logical: &str) -> Result<bigname_storage::NameCurrentRow> {
+    bigname_storage::families::name::load_family_name(pool, logical)
         .await?
-        .current)
+        .context("published family name")
 }
 
 async fn summary(pool: &PgPool, logical: &str) -> Result<Value> {
-    Ok(
-        sqlx::query_scalar("SELECT declared_summary FROM name_current WHERE logical_name_id = $1")
-            .bind(logical)
-            .fetch_one(pool)
-            .await?,
-    )
+    Ok(name(pool, logical).await?.declared_summary)
 }
 
 async fn database(fixture: &Value) -> Result<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new("ops_owner_replay")).await?;
+    let pool = database.pool();
+    sqlx::raw_sql("CREATE SCHEMA bigname_phase")
+        .execute(pool)
+        .await?;
+    pool.set_connect_options(
+        pool.connect_options()
+            .as_ref()
+            .clone()
+            .options([("search_path", "bigname_phase,public")]),
+    );
+    let mut connections = Vec::new();
+    for _ in 0..pool.options().get_max_connections() {
+        let mut connection = pool.acquire().await?;
+        sqlx::raw_sql("SET search_path TO bigname_phase, public")
+            .execute(&mut *connection)
+            .await?;
+        connections.push(connection);
+    }
+    drop(connections);
     for script in [
         include_str!("../../../../schema-v2/baseline/01_chain.sql"),
         include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),

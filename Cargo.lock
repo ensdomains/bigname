@@ -1697,6 +1697,7 @@ dependencies = [
  "bigname-domain",
  "bigname-manifests",
  "bigname-project",
+ "bigname-storage",
  "bigname-test-support",
  "futures-util",
  "serde_json",

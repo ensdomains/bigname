@@ -6,7 +6,6 @@ const OLD_CANDIDATE_INTERPRETER_HASH: &str =
 #[tokio::test]
 async fn semantic_end_state_keeps_surface_deactivated_at() -> TestResult {
     let database = database("interpret_semantic_surface_deactivation").await?;
-    install_stage_capture(database.pool()).await?;
     sqlx::query(
         "INSERT INTO chain_lineage
              (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -82,7 +81,7 @@ async fn fresh_activation_and_candidate_state_redo_retain_identical_interpret_en
     // The corpus is the complete unwrapped migration transaction over a predecessor without a
     // resolver, so no resolver clear is emitted. This test proves fresh-versus-redo Interpret
     // equivalence only. Working-path Project fresh/redo parity is covered by the
-    // issue_503_children reclassification tests.
+    // permanent family rebuild corpus.
 
     let fresh_state = semantic_end_state(fresh.pool()).await?;
     let redo_state = semantic_end_state(redo.pool()).await?;
@@ -141,7 +140,6 @@ async fn seed_activation_corpus(pool: &PgPool) -> TestResult {
         .await?;
     seed_migration_facts(pool, label, labelhash, namehash).await?;
     stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
-    install_stage_capture(pool).await?;
     Ok(())
 }
 
@@ -204,42 +202,6 @@ async fn write_migration_range(
     )
     .await?;
     Ok(output)
-}
-
-pub(super) async fn install_stage_capture(pool: &PgPool) -> TestResult {
-    sqlx::raw_sql(
-        "CREATE TABLE activation_project_stage_capture (
-             stage_kind text NOT NULL,
-             row_value jsonb NOT NULL
-         );
-         CREATE FUNCTION capture_activation_project_stage() RETURNS trigger AS $$
-         BEGIN
-             INSERT INTO activation_project_stage_capture
-             SELECT 'project_name_authority', to_jsonb(stage)
-             FROM project_name_authority stage
-             WHERE stage.logical_name_id = NEW.logical_name_id;
-             INSERT INTO activation_project_stage_capture
-             SELECT 'project_binding_candidates', to_jsonb(stage)
-             FROM project_binding_candidates stage
-             WHERE stage.logical_name_id = NEW.logical_name_id;
-             INSERT INTO activation_project_stage_capture
-             SELECT 'project_authority_events', to_jsonb(stage)
-             FROM project_authority_events stage
-             WHERE stage.logical_name_id = NEW.logical_name_id;
-             INSERT INTO activation_project_stage_capture
-             SELECT 'project_child_candidates', to_jsonb(stage)
-             FROM project_child_candidates stage
-             WHERE stage.child_logical_name_id = NEW.logical_name_id;
-             RETURN NEW;
-         END
-         $$ LANGUAGE plpgsql;
-         CREATE TRIGGER capture_activation_project_stage
-         AFTER INSERT OR UPDATE ON name_current
-         FOR EACH ROW EXECUTE FUNCTION capture_activation_project_stage();",
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 async fn plant_valid_replay_marker(
