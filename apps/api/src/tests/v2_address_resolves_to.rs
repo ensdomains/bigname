@@ -453,10 +453,8 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
             .iter()
             .all(|record| record.get("resolution").is_none())
     );
-    assert_eq!(
-        any_records[0]["relations"],
-        json!(["owner", "manager", "registrant"])
-    );
+    // The reverse fixture gives the address alice.eth's lease; another account controls it.
+    assert_eq!(any_records[0]["relations"], json!(["owner", "registrant"]));
     assert!(payload["meta"]["as_of"].is_object());
 
     // Feed profile keeps the relation and resolution on the reduced record.
