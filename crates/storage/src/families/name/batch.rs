@@ -74,32 +74,6 @@ pub(crate) async fn servable_publication(
     }
 }
 
-/// Every chain's publication, or [`FamilyPublicationUnavailable`] for the first chain whose
-/// marker is not servable (or `none` when no marker exists): an address read that found no rows
-/// cannot tell an empty answer from families still being built otherwise.
-pub(crate) async fn all_servable_publications(
-    conn: &mut PgConnection,
-) -> Result<Vec<FamilyPublication>> {
-    let chains: Vec<String> = sqlx::query_scalar(
-        "/* storage:families.name.marker_chains */
-         SELECT chain_id FROM bigname_phase.project_family_marker ORDER BY chain_id",
-    )
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to list the family markers")?;
-    if chains.is_empty() {
-        return Err(FamilyPublicationUnavailable {
-            chain_id: "none".to_owned(),
-        }
-        .into());
-    }
-    let mut out = Vec::with_capacity(chains.len());
-    for chain_id in chains {
-        out.push(servable_publication(conn, &chain_id).await?);
-    }
-    Ok(out)
-}
-
 async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(
         "/* storage:families.name.publication */

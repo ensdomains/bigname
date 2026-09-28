@@ -32,10 +32,7 @@ use crate::{
             rows::{BindingCandidate, WrapperRow},
             wrapper::load_wrapper_rows,
         },
-        name::{
-            CoverageShape, FamilyPublication, all_servable_publications, load_composed,
-            servable_publication,
-        },
+        name::{CoverageShape, FamilyPublication, load_composed, servable_publication},
     },
 };
 
@@ -97,8 +94,8 @@ pub(super) async fn compose_address_name_rows(
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
     if indexed.is_empty() {
-        // Nothing listed: an answer only when every chain's families are published.
-        all_servable_publications(conn).await?;
+        // The route captures and revalidates its requested namespace publication. No rows
+        // identify another chain to read here; unrelated markers cannot veto that scope.
         return Ok((json!([]), json!([])));
     }
     let mut by_chain: BTreeMap<String, Vec<String>> = BTreeMap::new();

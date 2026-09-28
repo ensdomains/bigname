@@ -341,11 +341,14 @@ pub(crate) async fn get_address_names(
             &name_rows,
         )
         .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to load address-name record counts for {normalized_address}"
-            ))
-        })?
+        .map_err(super::name_rows_error(
+            super::SnapshotReadResource::Resource,
+            |_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name record counts for {normalized_address}"
+                ))
+            },
+        ))?
     } else {
         BTreeMap::new()
     };

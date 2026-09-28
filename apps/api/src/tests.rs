@@ -429,3 +429,4 @@ include!("tests/v2_publication_bindings.rs");
 include!("tests/v2_family_marker_fence.rs");
 include!("tests/v2_switch_names.rs");
 include!("tests/v2_switch_records.rs");
+include!("tests/v2_switch_records_review.rs");

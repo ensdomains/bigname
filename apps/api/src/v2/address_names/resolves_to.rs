@@ -299,11 +299,11 @@ pub(super) async fn get_address_resolves_to(
             &name_rows,
         )
         .await
-        .map_err(|_| {
+        .map_err(name_rows_error(Resource, |_| {
             V2Error::internal_error(format!(
                 "failed to load record counts for names resolving to {normalized_address}"
             ))
-        })?
+        }))?
     } else {
         BTreeMap::new()
     };
