@@ -17,7 +17,10 @@ use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretRunMode,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
-use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+use bigname_project::{
+    Marker,
+    families::{self, FamilyMode, FamilyOptions},
+};
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -199,20 +202,25 @@ async fn interpret(pool: &PgPool, from_block: i64, to_block: i64) -> Result<()> 
 }
 
 async fn project(pool: &PgPool, target: i64, resume: Option<i64>) -> Result<()> {
-    let outcome = Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: target,
-            affected_from_block: resume.map_or(OLD_RECORD, |previous| previous + 1),
-            affected_to_block: target,
-            resume_current: resume.map(|number| Marker {
-                number,
-                hash: block_hash(number),
-            }),
-            mode: RunMode::Normal,
-        })
-        .await?;
-    assert!(outcome.complete);
+    let target = Marker {
+        number: target,
+        hash: block_hash(target),
+    };
+    let outcome = families::apply(
+        pool,
+        CHAIN,
+        &target,
+        if resume.is_some() {
+            FamilyMode::Normal
+        } else {
+            FamilyMode::Rebuild
+        },
+        &families::input_token(pool, CHAIN).await?,
+        &FamilyOptions::new(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    assert_eq!(outcome.marker.as_ref(), Some(&target));
+
     Ok(())
 }
 
@@ -233,18 +241,23 @@ async fn interpreted(pool: &PgPool) -> Result<Value> {
 
 /// `(raw_name, authority_selection, public authority)` for every projected ENS name.
 async fn selections(pool: &PgPool) -> Result<Vec<(String, Value, Option<&'static str>)>> {
-    let rows: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT raw_name, provenance FROM name_current WHERE namespace = 'ens' ORDER BY raw_name",
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT logical_name_id FROM name_surfaces WHERE namespace = 'ens' ORDER BY raw_name",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(name, provenance)| {
-            let authority = bigname_storage::name_current_public_authority(&provenance);
-            (name, provenance["authority_selection"].clone(), authority)
-        })
-        .collect())
+    let mut rows = Vec::new();
+    for id in ids {
+        if let Some(row) = bigname_storage::families::name::load_family_name(pool, &id).await? {
+            let authority = bigname_storage::name_current_public_authority(&row.provenance);
+            rows.push((
+                row.canonical_display_name,
+                row.provenance["authority_selection"].clone(),
+                authority,
+            ));
+        }
+    }
+    Ok(rows)
 }
 
 #[tokio::test]
@@ -271,12 +284,15 @@ async fn registry_generation_matches_across_interpret_and_project_batching() -> 
         let projected = selections(whole.pool()).await?;
         assert_eq!(projected, selections(split.pool()).await?, "block {block}");
         // A bare 2017-registry record creates no public name.
-        let hidden_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM name_current WHERE lower(namehash) = $1")
-                .bind(&hidden)
-                .fetch_one(whole.pool())
-                .await?;
-        assert_eq!(hidden_rows, 0, "block {block}");
+        assert!(
+            bigname_storage::families::name::load_family_name(
+                whole.pool(),
+                &format!("ens:{hidden}")
+            )
+            .await?
+            .is_none(),
+            "block {block}"
+        );
         if block == OLD_RECORD {
             assert!(projected.is_empty(), "{projected:?}");
             continue;

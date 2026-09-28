@@ -227,20 +227,29 @@ async fn run_fresh_case(producer: Producer) -> Result<()> {
             "https://example.test".to_owned(),
         )
     );
-    let inventory: Value = sqlx::query_scalar(
-        "SELECT entries FROM record_inventory_current
-         WHERE entries @> '[{\"record_key\":\"text:url\",\"value\":\"https://example.test\"}]'::jsonb",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
+    let resources: Vec<Uuid> = sqlx::query_scalar("SELECT resource_id FROM project_resource_pointer WHERE chain_id = $1 AND resolver_address = lower($2)")
+        .bind(CHAIN).bind(RESOLVER).fetch_all(scratch.pool()).await?;
+    let mut found = false;
+    for resource in resources {
+        if let Some(inventory) = bigname_storage::families::records::load_family_record_inventory(
+            scratch.pool(),
+            CHAIN,
+            resource,
+        )
+        .await?
+        {
+            found |= inventory.entries.as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["record_key"] == "text:url"
+                        && entry["value"] == "https://example.test"
+                        && entry["status"] == "success"
+                })
+            });
+        }
+    }
     assert!(
-        inventory
-            .as_array()
-            .is_some_and(|entries| entries.iter().any(|entry| {
-                entry["record_key"] == "text:url"
-                    && entry["value"] == "https://example.test"
-                    && entry["status"] == "success"
-            }))
+        found,
+        "the discovered record must be served by the published family inventory"
     );
     let verified: (String, Option<String>, bool) = sqlx::query_as(
         "SELECT phase_status, verification_level, redo_in_progress
