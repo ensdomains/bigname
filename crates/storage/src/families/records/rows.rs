@@ -2,9 +2,12 @@
 //! as record candidates, and the partition version events that are boundary candidates.
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, Row, postgres::PgRow};
 
 use super::{FamilyPosition, facts::ResolverClassification, serving::ServingPointer};
+
+#[path = "text_hydration.rs"]
+pub(super) mod text_hydration;
 
 const V1_POINTER_FAMILIES: [&str; 3] = [
     "ens_v1_registry_l1",
@@ -108,6 +111,9 @@ impl RecordCandidate {
         } else {
             None
         };
+        if with_sibling && let Some(overlay) = row.try_get::<Option<Value>, _>("text_hydration")? {
+            payload.insert(text_hydration::KEY.to_owned(), overlay);
+        }
         Ok(Self {
             record_key: row.try_get("record_key")?,
             position: FamilyPosition::from_row(row)?,
@@ -134,7 +140,7 @@ const VALUE_COLUMNS: &str =
 
 /// The admitted partitions' version events and their retained writes.
 pub(crate) async fn load_partitions(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resolver_address: &str,
     partitions: &[(&'static str, String)],
@@ -153,7 +159,7 @@ pub(crate) async fn load_partitions(
     .bind(resolver_address)
     .bind(&arms)
     .bind(&identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record partitions")?
     .into_iter()
@@ -164,18 +170,32 @@ pub(crate) async fn load_partitions(
             .and_then(FamilyPosition::from_json)
     })
     .collect();
+    let columns = VALUE_COLUMNS
+        .split(',')
+        .map(|column| format!("value.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let values = sqlx::query(&format!(
-        "SELECT {VALUE_COLUMNS}, sibling_position
+        "SELECT {columns}, value.sibling_position, {}
          FROM bigname_phase.project_node_record_value value
          JOIN unnest($3::text[], $4::text[]) admitted (arm, arm_identity)
            ON admitted.arm = value.arm AND admitted.arm_identity = value.arm_identity
-         WHERE value.chain_id = $1 AND value.resolver_address = $2"
+         LEFT JOIN bigname_phase.project_node_record_partition partition
+           ON (partition.chain_id, partition.resolver_address, partition.arm, partition.arm_identity) =
+              (value.chain_id, value.resolver_address, value.arm, value.arm_identity)
+         LEFT JOIN bigname_phase.project_resolver_classification classification
+           ON classification.chain_id = value.chain_id
+          AND classification.resolver_address = value.resolver_address
+         LEFT JOIN bigname_phase.name_surfaces surface
+           ON surface.logical_name_id = value.logical_name_id
+         WHERE value.chain_id = $1 AND value.resolver_address = $2",
+        text_hydration::COLUMNS
     ))
     .bind(chain_id)
     .bind(resolver_address)
     .bind(&arms)
     .bind(&identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record values")?
     .iter()
@@ -186,7 +206,7 @@ pub(crate) async fn load_partitions(
 
 /// The retained writes of one record id at a resolver.
 pub(crate) async fn load_record_id_values(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resolver_address: &str,
     record_id: &str,
@@ -199,7 +219,7 @@ pub(crate) async fn load_record_id_values(
     .bind(chain_id)
     .bind(resolver_address)
     .bind(record_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the linked record values")?
     .iter()

@@ -49,6 +49,14 @@ pub(crate) async fn load_primary_name_lookup_state(
                 on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
             })
         }
+        Err(load_error)
+            if bigname_storage::families::name::is_publication_unavailable(&load_error) =>
+        {
+            // Under the publication switch, families that are not published answer stale.
+            Err(crate::v2::stale_name_rows_api_error(
+                crate::v2::SnapshotReadResource::Resource,
+            ))
+        }
         Err(load_error) => {
             error!(
                 service = "api",

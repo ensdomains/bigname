@@ -2087,6 +2087,23 @@ async fn name_current_projects_retained_alias_resolution_topology() -> Result<()
         topology["version_boundaries"]["record_version_boundary"]["resource_id"],
         RESOURCE
     );
+    let token = bigname_project::families::input_token(scratch.pool(), CHAIN).await?;
+    bigname_project::families::apply(
+        scratch.pool(),
+        CHAIN,
+        &Marker {
+            number: 3,
+            hash: block_hash(CHAIN, 3),
+        },
+        bigname_project::families::FamilyMode::Normal,
+        &token,
+        &bigname_project::families::FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    let family = bigname_storage::families::name::load_family_name(scratch.pool(), "ens:0xalice")
+        .await?
+        .expect("alias family name");
+    assert_eq!(family.declared_summary["topology"], topology);
     scratch.cleanup().await
 }
 
@@ -2295,6 +2312,48 @@ async fn alias_projection_keeps_only_latest_state_and_honors_tombstones() -> Res
     scratch.cleanup().await
 }
 
+/// The Basenames route composes transport and source-time L1 execution on the family snapshot.
+/// Compare the entire topology and the execution admission the live lookup consumes.
+async fn assert_basenames_family_topology(pool: &PgPool, target: i64) -> Result<()> {
+    use bigname_project::families::{self, FamilyMode, FamilyOptions};
+    let token = families::input_token(pool, BASE_CHAIN).await?;
+    families::apply(
+        pool,
+        BASE_CHAIN,
+        &Marker {
+            number: target,
+            hash: block_hash(BASE_CHAIN, target),
+        },
+        FamilyMode::Normal,
+        &token,
+        &FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    let served = load_name_current_row(pool, "basenames:0xalice-base").await?;
+    let family = bigname_storage::families::name::load_family_name(pool, "basenames:0xalice-base")
+        .await?
+        .expect("Basenames family name");
+    assert_eq!(
+        family.declared_summary["topology"],
+        served.declared_summary["topology"]
+    );
+    assert_eq!(family.chain_positions, served.chain_positions);
+    assert_eq!(
+        resolution_verified_support_boundary(&family, None),
+        resolution_verified_support_boundary(&served, None)
+    );
+    assert!(
+        family.provenance["manifest_versions"]
+            .as_array()
+            .is_some_and(|versions| versions
+                .iter()
+                .any(|version| version["source_family"] == "basenames_execution"
+                    && version["manifest_version"] == 2
+                    && version["chain"] == ETHEREUM_CHAIN))
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn basenames_projection_retains_execution_admission_and_both_chain_positions() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_basenames_support").await?;
@@ -2329,6 +2388,7 @@ async fn basenames_projection_retains_execution_admission_and_both_chain_positio
         resolution_verified_support_boundary(&row, None).is_some(),
         "projected Basenames rows must remain inside the retained verified-resolution support class"
     );
+    assert_basenames_family_topology(scratch.pool(), 2).await?;
     scratch.cleanup().await
 }
 
@@ -2350,6 +2410,7 @@ async fn basenames_ownerless_serving_retains_verified_transport_support() -> Res
         "basenames_base_registry",
         1,
         json!({
+            "node":"0xalice-base",
             "owner":"0x0000000000000000000000000000000000000000",
             "owner_getter":"0x0000000000000000000000000000000000000000",
             "owner_getter_reason":"literal_zero"
@@ -2372,6 +2433,8 @@ async fn basenames_ownerless_serving_retains_verified_transport_support() -> Res
         resolution_verified_support_boundary(&row, None).is_some(),
         "ownerless Basenames serving must retain execution manifest provenance, both chain positions, and transport topology: {row:?}"
     );
+
+    assert_basenames_family_topology(scratch.pool(), 3).await?;
 
     insert_namespaced_event(
         scratch.pool(),
@@ -2433,6 +2496,7 @@ async fn basenames_ownerless_serving_retains_verified_transport_support() -> Res
         inventory_boundary,
         "verified Basenames lookup requires topology and inventory to select the same record boundary"
     );
+    assert_basenames_family_topology(scratch.pool(), 4).await?;
     scratch.cleanup().await
 }
 
@@ -10889,9 +10953,7 @@ async fn proofless_v2_release_retains_closed_authority_after_later_v1_residue() 
             "{release_family}"
         );
         assert!(
-            bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-                .await?
-                .is_some(),
+            served_name_is_readable(scratch.pool(), &logical_name_id).await?,
             "the {release_family} closed ENSv2 authority tombstone must remain readable"
         );
 
@@ -10968,9 +11030,7 @@ async fn a_v2_regrant_after_a_release_and_v1_residue_is_served() -> Result<()> {
     .await?;
     assert_active_v2_regrant(&incremental, regrant_binding, regrant_resource);
     assert!(
-        bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-            .await?
-            .is_some(),
+        served_name_is_readable(scratch.pool(), &logical_name_id).await?,
         "the re-granted ENSv2 registration must remain readable"
     );
 
@@ -11403,9 +11463,7 @@ async fn authority_epoch_keeps_migration_fields_atomic_and_release_sticky() -> R
         assert_eq!(after_residue.1["authority_arm"], "ens_v2");
         assert_eq!(after_residue.1["lifecycle_state"], "unregistered");
         assert!(
-            bigname_storage::load_name_current(scratch.pool(), &logical_name_id)
-                .await?
-                .is_some(),
+            served_name_is_readable(scratch.pool(), &logical_name_id).await?,
             "released v2 authority disappeared from the normal storage read"
         );
         scratch.cleanup().await?;
@@ -27021,4 +27079,17 @@ fn fixture_contract_instance_id(
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
+}
+
+/// Whether the served `name_current` row of `logical_name_id` is readable. These cases check
+/// the Project row's publication, so the read keeps the switch off whatever the build's default.
+async fn served_name_is_readable(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<bool> {
+    Ok(
+        bigname_storage::publication_source::with_serve_from_families(
+            false,
+            bigname_storage::load_name_current(pool, logical_name_id),
+        )
+        .await?
+        .is_some(),
+    )
 }

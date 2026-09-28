@@ -665,6 +665,10 @@ for migration_file in \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
     "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
+    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
+    "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -977,6 +981,14 @@ for migration_file in \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
     "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
     "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
+    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
+    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
+    "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
+    "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
@@ -9601,6 +9613,12 @@ SQL
     emit_phase_migration \
         "$ROOT/migrations/20260913120000_unsupported_inventory_serves_no_record_values.sql" \
         preceding-shape
+    # Historical writer upgrades precede the current family-aware writer. Restore that
+    # final function before comparing to the current baseline; the checks above retain
+    # the historical exact-zero behavior proof on its own preceding shape.
+    emit_phase_migration \
+        "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
+        baseline-first
     cat <<'SQL'
 DO $$
 BEGIN

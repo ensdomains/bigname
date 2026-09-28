@@ -73,8 +73,8 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
         )
         .await?;
     }
-    publish_project_and_families(database, 240).await?;
-    seed_switch_resolver_current(database).await
+    seed_switch_resolver_declaration(database).await?;
+    publish_project_and_families(database, 240).await
 }
 
 #[tokio::test]

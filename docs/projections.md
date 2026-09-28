@@ -188,8 +188,25 @@ baseline immediately when a hydration block is orphaned, even before a retry
 runs. This text policy does not change the bounded refresh of event-silent
 reverse claims described below.
 
-Hydration uses the exact number and hash from `chain_heads`, revalidates that
-head in the publication transaction, and never calls provider `latest`.
+With family hydration configured, mainnet follow blocks prepare text reads from
+the post-reducer F6 record and partition rows and F3 resolver classification.
+The same four-resolver admission above applies. RPC runs outside the publication
+transaction at the exact block number and hash being published. The transaction
+rechecks the record event position, partition version, namehash, and classification
+before accepting a result. `project_node_record_value.hydrated_value` holds the
+outcome, value, block hash, and those selectors; `hydrated_at_block` holds its
+height. The event-derived columns remain the baseline. Successful empty results
+are `not_found`; failure or lost admission removes the overlay and the block
+still publishes. A later follow block retries missing values. Canonical results
+are retained until their selectors or readable lineage change, and readers
+reject a mismatched or orphaned overlay immediately. All overlay changes use the
+ordinary [family undo journal](glossary.md#family-undo-journal). Replay, rebuild,
+and rebuild ranges make no hydration calls; subsequent follow blocks repair
+their missing overlays. The served hydrator remains unchanged while the switch
+is off.
+
+The served hydrator uses the exact number and hash from `chain_heads`, revalidates
+that head in its publication transaction, and never calls provider `latest`.
 Failed calls restore the event-derived baseline and keep Project retryable. It
 does not write raw facts, identity rows, normalized events, reusable execution
 outcomes, or durable traces.
@@ -1576,7 +1593,25 @@ version, or resolver changes. Explicit `NameForAddrChanged` tuple claims retain
 their existing event path. These are declared claims; forward verification
 remains request-scoped.
 
-Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
+With family publication enabled, mainnet follow blocks prepare reverse hydration
+before opening the publication transaction. A short preparation transaction uses
+the normal pointer and reverse reducers to include the new block's candidates,
+then closes before the hash-pinned RPC calls. The publication transaction checks
+the predecessor, input revision and block hash again, reduces the events, and
+accepts an answer only for the same selected reverse node and resolver. The
+result and its baseline enter F12's owned row set and are journalled with the
+family marker, including refresh work on empty blocks. Failed calls retract the
+overlay and publish the block; a later follow block retries through the bounded
+rolling selection. Successful not-found is distinct from failure. Attempt cohorts
+use the monotonically increasing publication generation. The reader also binds
+the overlay to its selected node/resolver and readable block hash.
+
+Replay and rebuild perform no hydration RPC. Undo restores the previous overlay
+with its row, and new or changed selectors use event-derived claims until a later
+follow block refreshes them. Rebuild ranges retain their existing behavior.
+
+The switch-off served path retains the following behavior. Current-head hydration
+for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It
 does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
@@ -1787,6 +1822,16 @@ much. It reads 0 only when the family marker is the served block, hash
 included. A marker above a lowered served marker counts the blocks in between,
 and a marker off the served branch (orphaned, or another hash at the served
 height) counts at least one block.
+
+With the publication switch on, verified lookup composes its full declared
+resolution topology and indexed inventory from one family snapshot. Alias and
+wildcard inputs share that snapshot; direct and ownerless ENS use its inventory
+boundary. Basenames retains its admitted L1 transport, execution-manifest
+provenance, and the Ethereum lineage position at or before the Base publication
+time. After RPC, the guarded writer holds the captured family marker through the
+comparison and ledger write. A new family block or rebuild refuses the write;
+the stopped served name/inventory batch is not a comparison input. See
+[verified lookup storage](storage.md#verified-lookup-storage).
 
 A family failure stops the loop at the last complete block and fails the
 Project run. Failures include a failing block, a fence its transaction refuses,
@@ -2298,12 +2343,11 @@ new truth family.
   Project also owns the [owned key families](#owned-key-families), their
   marker, undo journal and repair record. With the
   [publication switch](glossary.md#publication-switch) off, the default, no
-  served path reads them; with it on, the serving fence reads the marker, the
-  names group serves [composed name rows](glossary.md#composed-name-row), the
-  subnames page, the child counts and the registry labels read the child
-  families with the [name summary](glossary.md#name-summary), and the other
-  routes still read the projection tables. The shadow readers read the family
-  tables in the test harnesses.
+  served path reads them; with it on, the serving fences, the verified
+  lookup's guard, `/v1/status` and the served-lag gauges read the marker, and
+  the names group reads composed rows and the child routes read the child
+  families with the stored name summary. The step 3 shadow readers read
+  the family tables in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.

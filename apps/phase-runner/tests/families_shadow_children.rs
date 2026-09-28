@@ -114,6 +114,13 @@ async fn attributed_transfer(
 // hides its edges.
 #[tokio::test]
 async fn ens_v1_edges_match_the_served_children() -> Result<()> {
+    // The served side of each comparison reads the served tables, so the switch stays off
+    // whatever the build's default; with it on the switch-aware readers would read the families
+    // and compare them with themselves.
+    bigname_storage::publication_source::with_serve_from_families(false, ens_v1_edges()).await
+}
+
+async fn ens_v1_edges() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_children_v1", 12).await?;
     let (first, first_node, _) = parent(&fixture, 1, "first").await?;
     let (second, second_node, _) = parent(&fixture, 2, "second").await?;

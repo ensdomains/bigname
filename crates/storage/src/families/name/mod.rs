@@ -1,8 +1,7 @@
 //! The composed name reader (TYR-36 step 7b, ruling J3): a `name_current`-shaped row assembled at
 //! read from the owned key families (docs/projections.md, "Owned key families") and the identity
-//! input tables, with no stored per-name row. It serves the fields the API routes read from
-//! `name_current`; the verified lookup (crates/lookup) stays on the served tables until the flip
-//! slice. The row carries:
+//! input tables, without persisting the composed row. It serves the fields the API routes read from
+//! `name_current`, including the verified lookup inputs. The row carries:
 //!
 //! - identity: the surface (`name_surfaces`), the selected binding and its resource's token
 //!   lineage (`surface_bindings`, `resources`);
@@ -16,18 +15,15 @@
 //! - the serving pointer and the resolver block from the F4 and F5 pointers (`serving.rs`);
 //! - `declared_summary.history`, the name's latest events, read by key from `normalized_events`
 //!   (`heads.rs`), which the binding diagnostics route serves;
-//! - the coverage and support columns.
+//! - the coverage and support columns;
+//! - the whole declared resolution topology, composed on the same database snapshot: aliases,
+//!   wildcard sources, direct and ownerless ENS, and admitted Basenames L1 transport.
 //!
 //! The listings over composed rows are `list.rs` (search, expiring) and `bound.rs` (the names
 //! bound to a resolver).
 //!
-//! The whole-history evidence the served row also carries (`provenance.selected_event_ids`,
-//! `raw_fact_refs`, `manifest_versions`) is not read by any route and is not composed.
-//! `declared_summary.topology` is not composed yet. The alias and wildcard arms have a family
-//! reader (`topology::load_name_topology_shadow`); the direct arm takes its version boundary from
-//! the record inventory (crates/project/src/builders/name_topology/direct.rs), so the topology
-//! joins the row with the record inventory reads. Until then a composed row carries none, which
-//! the records route's verified admission and avatar readback read (docs/api-v1.md).
+//! Whole-history evidence (`selected_event_ids`, `raw_fact_refs`) is not composed. Basenames
+//! execution admission is retained in `manifest_versions` because verified lookup consumes it.
 //!
 //! Every row describes the family marker's publication (the "publication" below): its
 //! `chain_positions` and `canonicality_summary` name the marker's block, so a row carries no
@@ -43,18 +39,27 @@ pub mod seams;
 pub mod selection;
 pub mod serving;
 mod summary;
+mod topology;
 
 use sqlx::types::time::OffsetDateTime;
 
+pub(crate) use batch::{
+    all_servable_publications, load as load_composed, load_base as load_composed_base,
+    servable_publication,
+};
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 pub use summary::compose_name_summaries;
 
 pub use batch::{
-    ensure_family_publications, load_family_name, load_family_names_by_logical_name_ids,
-    load_family_names_by_resource_ids, load_family_publication,
+    ensure_family_publications, load_family_name, load_family_name_on,
+    load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,
+    load_family_publication,
 };
 pub(crate) use batch::{ensure_published, read_snapshot};
+/// The composed loads and the marker read on a caller's connection, for readers of other
+/// families that join composed name rows inside their own snapshot (TYR-36 step 7b slice 4).
+pub(crate) use batch::{load as load_names_on, publication as publication_on};
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
 /// rebuild is still populating the families) or written by another interpreter build. The rule

@@ -132,9 +132,9 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
             bigname_content_hash::INTERPRETER_CONTENT_HASH,
         ),
     )
-    .await;
+    .await?;
     anyhow::ensure!(
-        outcome.skipped.is_none() && outcome.marker.as_ref().map(|m| m.number) == Some(240),
+        outcome.marker.as_ref().map(|m| m.number) == Some(240),
         "Project replay replaced the families: {outcome:?}"
     );
     finish_switch_phase_redo(&database, "project").await?;

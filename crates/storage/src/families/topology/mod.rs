@@ -8,7 +8,7 @@
 //! `project_resolver_classification`, `project_name_alias`, `project_resolver_alias`,
 //! `project_resolver_link`, `project_grant`), the identity and lineage tables, and the interim
 //! reads [`shims`] lists, some of which are still inline reads of `name_current`,
-//! `resolver_current` and `normalized_events`. Under the publication switch
+//! `normalized_events`. Under the publication switch
 //! (`publication_source::serve_from_families`) the child readers serve the subnames and registry
 //! labels pages and the child counts (`crate::children`); the phase-runner harness compares every
 //! reader with the served one at one publication.
@@ -18,13 +18,16 @@
 //! marker (`project_family_marker`). Where a reader compares family positions it uses the
 //! canonical event order (docs/glossary.md#canonical-event-order): block number, transaction
 //! index, log index, the emission ordinal (docs/glossary.md#emission-ordinal), then event
-//! identity, never the generated normalized event id. The declaration fallback takes each
-//! manifest's latest update by normalized event id as today's manifest staging does.
+//! identity, never the generated normalized event id.
+//!
+//! Under the publication switch the resolver routes serve the overview (`overview.rs`) and the
+//! `/aliases`, `/links` and `/roles` collections from here (TYR-36 step 7b slice 4).
 mod children;
 mod children_page;
 mod collections;
 mod name_summary;
 mod name_topology;
+mod overview;
 mod pointers;
 mod resolver;
 mod shims;
@@ -41,7 +44,13 @@ pub use collections::{
     FamilyCollectionPage, load_resolver_aliases_shadow, load_resolver_links_shadow,
     load_resolver_roles_shadow,
 };
+pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;
+pub use overview::load_family_resolver_current;
+pub(crate) use overview::{
+    FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY, resolver_classification_relation,
+};
+pub(crate) use pointers::load_family_wildcard_source_on;
 pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,

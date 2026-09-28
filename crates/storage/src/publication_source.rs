@@ -1,6 +1,6 @@
 //! Which Project publication the serving reads fence on, chosen once per process.
 //!
-//! Off (the default), every serving fence reads the Project row of
+//! Off ([`SERVE_FROM_FAMILIES_DEFAULT`] until the flip), every serving fence reads the Project row of
 //! `bigname_phase.chain_phase_state`: its position while the phase is `completed` or `running`,
 //! and its row version (`xmin`) as the served generation. On, the same fences read the
 //! [family marker](../../../docs/glossary.md#family-marker) instead: its position while its
@@ -13,23 +13,41 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The environment variable apps/api and apps/phase-runner read once at startup: `1` or `true`
-/// turns the switch on; anything else, or leaving it unset, keeps it off.
+/// The environment variable apps/api and apps/phase-runner read once at startup to override
+/// [`SERVE_FROM_FAMILIES_DEFAULT`]: `1` or `true` turns the switch on, `0` or `false` turns it
+/// off, and unset or empty keeps the default. Any other value refuses to start, so a mistyped
+/// override fails loudly instead of silently keeping the default.
 pub const SERVE_FROM_FAMILIES_ENV: &str = "BIGNAME_SERVE_FROM_FAMILIES";
 
-static SERVE_FROM_FAMILIES: AtomicBool = AtomicBool::new(false);
+/// The switch's value when [`SERVE_FROM_FAMILIES_ENV`] is unset or empty. The flip (TYR-36
+/// step 7b-6) is the one-line change of this value to `true`, once every route group reads the
+/// owned key families.
+pub const SERVE_FROM_FAMILIES_DEFAULT: bool = false;
+
+static SERVE_FROM_FAMILIES: AtomicBool = AtomicBool::new(SERVE_FROM_FAMILIES_DEFAULT);
 
 #[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static SCOPED_SERVE_FROM_FAMILIES: bool;
 }
 
-/// Reads [`SERVE_FROM_FAMILIES_ENV`] and holds the result for the rest of the process. Returns
-/// the value now held, for the caller's startup log.
-pub fn init_from_env() -> bool {
-    let on = parse(std::env::var(SERVE_FROM_FAMILIES_ENV).ok().as_deref());
+/// A test process's held value ([`hold_for_test_process`]): 0 while none is held, 1 off, 2 on.
+#[cfg(any(test, feature = "test-support"))]
+static HELD_FOR_TEST_PROCESS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Reads [`SERVE_FROM_FAMILIES_ENV`] over [`SERVE_FROM_FAMILIES_DEFAULT`] and holds the result
+/// for the rest of the process. Returns the value now held, for the caller's startup log, or an
+/// error naming the variable when its value is not one of the accepted spellings.
+pub fn init_from_env() -> Result<bool, String> {
+    let on = configured()?;
     SERVE_FROM_FAMILIES.store(on, Ordering::Relaxed);
-    on
+    Ok(on)
+}
+
+/// The value [`init_from_env`] would hold, without holding it: for a harness that scopes the
+/// switch per task (`with_serve_from_families`) the way the binaries set it per process.
+pub fn configured() -> Result<bool, String> {
+    parse_environment(std::env::var(SERVE_FROM_FAMILIES_ENV))
 }
 
 /// Whether the serving fences read the family marker.
@@ -38,18 +56,52 @@ pub fn serve_from_families() -> bool {
     if let Ok(on) = SCOPED_SERVE_FROM_FAMILIES.try_with(|on| *on) {
         return on;
     }
+    #[cfg(any(test, feature = "test-support"))]
+    match HELD_FOR_TEST_PROCESS.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
     SERVE_FROM_FAMILIES.load(Ordering::Relaxed)
 }
 
+/// Holds the switch at `on` for the rest of this test process, over the build's default and over
+/// [`init_from_env`], which a test of a binary's startup path may call: for a test binary whose
+/// fixtures seed the Project row as the served publication, so its tests keep that publication
+/// when the default flips. A scoped value ([`with_serve_from_families`]) still wins, so the
+/// switch tests in the same binary keep choosing their state. The binaries never call it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_for_test_process(on: bool) {
+    HELD_FOR_TEST_PROCESS.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 /// Runs `future` with the switch fixed to `on` for that task only. Tests share one process and
-/// run in parallel, so they cannot flip the process-wide value.
+/// run in parallel, so a test that needs a state other than its binary's scopes it here rather
+/// than flipping the process-wide value.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn with_serve_from_families<F: std::future::Future>(on: bool, future: F) -> F::Output {
     SCOPED_SERVE_FROM_FAMILIES.scope(on, future).await
 }
 
-fn parse(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true"))
+fn parse_environment(value: Result<String, std::env::VarError>) -> Result<bool, String> {
+    match value {
+        Ok(value) => parse(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{SERVE_FROM_FAMILIES_ENV} must contain valid Unicode"
+        )),
+    }
+}
+
+fn parse(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("") => Ok(SERVE_FROM_FAMILIES_DEFAULT),
+        Some("1" | "true") => Ok(true),
+        Some("0" | "false") => Ok(false),
+        Some(other) => Err(format!(
+            "{SERVE_FROM_FAMILIES_ENV} must be 1, true, 0, false or unset, not {other:?}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -57,25 +109,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_one_and_true_turn_the_switch_on() {
-        assert!(parse(Some("1")));
-        assert!(parse(Some("true")));
-        for off in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("false"),
-            Some("TRUE"),
-            Some("yes"),
-        ] {
-            assert!(!parse(off), "{off:?} must leave the switch off");
+    fn the_override_accepts_four_spellings_and_unset_keeps_the_default() {
+        for on in ["1", "true"] {
+            assert_eq!(parse(Some(on)), Ok(true), "{on}");
         }
+        for off in ["0", "false"] {
+            assert_eq!(parse(Some(off)), Ok(false), "{off}");
+        }
+        for unset in [None, Some("")] {
+            assert_eq!(parse(unset), Ok(SERVE_FROM_FAMILIES_DEFAULT), "{unset:?}");
+        }
+        for invalid in ["TRUE", "yes", "on", "flase", " 1"] {
+            let error = parse(Some(invalid)).expect_err(invalid);
+            assert!(error.contains(SERVE_FROM_FAMILIES_ENV), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_invalidly_encoded_override_is_not_treated_as_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        let error = parse_environment(Err(std::env::VarError::NotUnicode(invalid)))
+            .expect_err("a present invalid value must refuse startup");
+        assert!(error.contains(SERVE_FROM_FAMILIES_ENV));
+        assert_eq!(
+            parse_environment(Err(std::env::VarError::NotPresent)),
+            Ok(SERVE_FROM_FAMILIES_DEFAULT)
+        );
     }
 
     #[tokio::test]
     async fn a_scoped_value_overrides_the_process_value_for_its_task_only() {
-        assert!(!serve_from_families());
-        assert!(with_serve_from_families(true, async { serve_from_families() }).await);
-        assert!(!serve_from_families());
+        let process = serve_from_families();
+        for on in [true, false] {
+            assert_eq!(
+                with_serve_from_families(on, async { serve_from_families() }).await,
+                on
+            );
+        }
+        assert_eq!(serve_from_families(), process);
     }
 }

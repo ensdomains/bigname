@@ -14,10 +14,13 @@
 use anyhow::{Context, Result};
 use bigname_domain::resolution_topology::ResolutionTopology;
 use serde_json::{Map, Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::pointers::{load_family_alias_source_pointer, load_family_wildcard_source};
+use super::pointers::{
+    load_family_alias_source_pointer_on as load_family_alias_source_pointer,
+    load_family_wildcard_source_on as load_family_wildcard_source,
+};
 
 /// A name's selected binding: its `project_binding_candidate` row.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,11 +34,18 @@ struct SelectedBinding {
 /// The binding the composed name reader selects for `logical_name_id`
 /// (`families::name`, the `surface_binding_id` of its row), read from its
 /// `project_binding_candidate` row.
-async fn selected_binding(pool: &PgPool, logical_name_id: &str) -> Result<Option<SelectedBinding>> {
-    let Some(binding_id) = crate::families::name::load_family_name(pool, logical_name_id)
-        .await?
-        .and_then(|row| row.surface_binding_id)
-    else {
+async fn selected_binding(
+    conn: &mut PgConnection,
+    logical_name_id: &str,
+) -> Result<Option<SelectedBinding>> {
+    let Some(binding_id) = crate::families::name::load_composed_base(
+        conn,
+        &[logical_name_id.to_owned()],
+        crate::families::name::CoverageShape::Plain,
+    )
+    .await?
+    .remove(logical_name_id)
+    .and_then(|row| row.surface_binding_id) else {
         return Ok(None);
     };
     let row: Option<(String, Uuid, String, i64)> = sqlx::query_as(
@@ -44,7 +54,7 @@ async fn selected_binding(pool: &PgPool, logical_name_id: &str) -> Result<Option
          WHERE surface_binding_id = $1",
     )
     .bind(binding_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the selected binding of {logical_name_id}"))?;
     Ok(row.map(
@@ -73,15 +83,25 @@ pub async fn load_name_topology_shadow(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<Value>> {
-    let Some(surface) = load_surface(pool, logical_name_id).await? else {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let topology = load_name_topology_on(&mut snapshot, logical_name_id).await?;
+    snapshot.commit().await?;
+    Ok(topology)
+}
+
+pub(crate) async fn load_name_topology_on(
+    conn: &mut PgConnection,
+    logical_name_id: &str,
+) -> Result<Option<Value>> {
+    let Some(surface) = load_surface(conn, logical_name_id).await? else {
         return Ok(None);
     };
-    let Some(binding) = selected_binding(pool, logical_name_id).await? else {
+    let Some(binding) = selected_binding(conn, logical_name_id).await? else {
         return Ok(None);
     };
     let topology = match binding.binding_kind.as_str() {
-        ALIAS_PATH => alias_topology(pool, &surface, &binding).await?,
-        WILDCARD_PATH => wildcard_topology(pool, &surface, &binding).await?,
+        ALIAS_PATH => alias_topology(conn, &surface, &binding).await?,
+        WILDCARD_PATH => wildcard_topology(conn, &surface, &binding).await?,
         _ => None,
     };
     topology
@@ -95,13 +115,13 @@ pub async fn load_name_topology_shadow(
         .transpose()
 }
 
-async fn load_surface(pool: &PgPool, logical_name_id: &str) -> Result<Option<Surface>> {
+async fn load_surface(conn: &mut PgConnection, logical_name_id: &str) -> Result<Option<Surface>> {
     let row: Option<(String, String, String, String)> = sqlx::query_as(
         "SELECT logical_name_id, namespace, raw_name, namehash
          FROM bigname_phase.name_surfaces WHERE logical_name_id = $1",
     )
     .bind(logical_name_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the surface of {logical_name_id}"))?;
     Ok(
@@ -166,7 +186,11 @@ fn topology(
 }
 
 /// The block's hash and timestamp on the readable lineage.
-async fn block(pool: &PgPool, chain_id: &str, number: i64) -> Result<Option<(String, Value)>> {
+async fn block(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    number: i64,
+) -> Result<Option<(String, Value)>> {
     sqlx::query_as(
         "SELECT block_hash, to_jsonb(block_timestamp) FROM bigname_phase.chain_lineage
          WHERE chain_id = $1 AND block_number = $2
@@ -174,18 +198,18 @@ async fn block(pool: &PgPool, chain_id: &str, number: i64) -> Result<Option<(Str
     )
     .bind(chain_id)
     .bind(number)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("failed to load a lineage block")
 }
 
 async fn alias_topology(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     surface: &Surface,
     binding: &SelectedBinding,
 ) -> Result<Option<Value>> {
     let Some(pointer) =
-        load_family_alias_source_pointer(pool, &binding.chain_id, binding.resource_id).await?
+        load_family_alias_source_pointer(conn, &binding.chain_id, binding.resource_id).await?
     else {
         return Ok(None);
     };
@@ -206,14 +230,14 @@ async fn alias_topology(
     )
     .bind(&binding.chain_id)
     .bind(&surface.logical_name_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("failed to load the name alias")?;
     let Some((to_id, to_normalized, to_name, to_display, to_namehash, to_resource)) = alias else {
         return Ok(None);
     };
     let Some((block_hash, timestamp)) =
-        block(pool, &binding.chain_id, binding.block_number).await?
+        block(conn, &binding.chain_id, binding.block_number).await?
     else {
         return Ok(None);
     };
@@ -260,7 +284,7 @@ async fn alias_topology(
 }
 
 async fn wildcard_topology(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     surface: &Surface,
     binding: &SelectedBinding,
 ) -> Result<Option<Value>> {
@@ -277,7 +301,7 @@ async fn wildcard_topology(
     )
     .bind(&surface.namespace)
     .bind(&suffixes)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load wildcard ancestors")?;
     for (logical_name_id, namespace, raw_name, namehash) in ancestors {
@@ -287,12 +311,12 @@ async fn wildcard_topology(
             raw_name,
             namehash,
         };
-        let Some(ancestor_binding) = selected_binding(pool, &ancestor.logical_name_id).await?
+        let Some(ancestor_binding) = selected_binding(conn, &ancestor.logical_name_id).await?
         else {
             continue;
         };
         let Some(source) = load_family_wildcard_source(
-            pool,
+            conn,
             &ancestor_binding.chain_id,
             ancestor_binding.resource_id,
         )
@@ -306,7 +330,7 @@ async fn wildcard_topology(
              WHERE event_identity = $1",
         )
         .bind(identity)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await
         .context("failed to load the wildcard boundary event")?;
         let (event_id, block_hash) =

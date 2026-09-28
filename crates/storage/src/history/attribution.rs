@@ -138,14 +138,13 @@ pub async fn load_bounded_record_attribution(
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
-    let mut connection = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection for record attribution")?;
-    load_attribution_map(&mut connection, resource_ids, published).await
+    let mut snapshot = super::paging::begin_history_snapshot(pool, "attribution").await?;
+    let result = load_attribution_map(&mut snapshot, resource_ids, published).await?;
+    snapshot.commit().await?;
+    Ok(result)
 }
 
-async fn load_attribution_map(
+pub(crate) async fn load_attribution_map(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
@@ -153,6 +152,10 @@ async fn load_attribution_map(
     let mut attributed = BTreeMap::<Uuid, BTreeSet<i64>>::new();
     if resource_ids.is_empty() {
         return Ok(attributed);
+    }
+
+    if crate::publication_source::serve_from_families() {
+        ensure_classification_publications(connection, resource_ids, published).await?;
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
@@ -183,4 +186,37 @@ async fn load_attribution_map(
     }
     attributed.retain(|_, event_ids| !event_ids.is_empty());
     Ok(attributed)
+}
+
+/// Classification is published current state even when the pointer walk is bounded history.
+/// Admit only the chains that walk actually reaches, on the same snapshot as its F3 reads.
+/// Raw audit reads keep working during Interpret redo: this checks classification publication,
+/// not mutable composed-name identity, and therefore uses the marker rule without its redo guard.
+async fn ensure_classification_publications(
+    connection: &mut PgConnection,
+    resource_ids: &[Uuid],
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<()> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    sql::push_pointer_ctes(&mut builder, resource_ids, published);
+    builder.push(" SELECT DISTINCT chain_id FROM pointers");
+    let chains: Vec<String> = builder
+        .build_query_scalar()
+        .fetch_all(&mut *connection)
+        .await?;
+    for chain_id in chains {
+        let available: bool = sqlx::query_scalar(concat!(
+            "SELECT EXISTS (SELECT 1 ",
+            crate::snapshot_selection::servable_family_marker!(),
+            ")"
+        ))
+        .bind(&chain_id)
+        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .fetch_one(&mut *connection)
+        .await?;
+        if !available {
+            return Err(crate::families::name::FamilyPublicationUnavailable { chain_id }.into());
+        }
+    }
+    Ok(())
 }

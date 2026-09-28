@@ -65,8 +65,7 @@ async fn a_composed_load_reads_one_snapshot_across_a_family_commit() -> Result<(
             REGISTRAR,
         )
         .await?;
-    let outcome = fixture.apply(12, FamilyMode::Normal).await;
-    ensure!(outcome.skipped.is_none(), "families at 12: {outcome:?}");
+    fixture.apply(12, FamilyMode::Normal).await?;
     fixture
         .write(
             13,
@@ -102,9 +101,9 @@ async fn a_composed_load_reads_one_snapshot_across_a_family_commit() -> Result<(
         &token,
         &FamilyOptions::new(CONTENT_HASH),
     )
-    .await;
+    .await?;
     ensure!(
-        outcome.skipped.is_none() && outcome.marker.as_ref().map(|m| m.number) == Some(13),
+        outcome.marker.as_ref().map(|m| m.number) == Some(13),
         "families at 13: {outcome:?}"
     );
     other.close().await;
@@ -157,8 +156,7 @@ async fn a_composed_load_refuses_an_unservable_marker() -> Result<()> {
             REGISTRAR,
         )
         .await?;
-    let outcome = fixture.apply(12, FamilyMode::Normal).await;
-    ensure!(outcome.skipped.is_none(), "families at 12: {outcome:?}");
+    fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(load_family_name(&fixture.pool, NAME).await?.is_some());
     for (state, hash) in [
         ("bootstrap_pending", CONTENT_HASH),

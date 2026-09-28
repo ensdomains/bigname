@@ -16,6 +16,7 @@ sqlx.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 alloy-sol-types.workspace = true
 anyhow.workspace = true
 bigname-adapters.workspace = true

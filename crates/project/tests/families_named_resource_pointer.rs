@@ -50,8 +50,12 @@ async fn named_keys_keep_clears_and_canonical_order_through_undo_reset_and_rebui
     let fixture = Fixture::new("families_named_pointer_replay", 14).await?;
     seed(&fixture).await?;
     for block in [10, 11] {
-        let outcome = fixture.apply(block, FamilyMode::Normal).await;
-        assert!(outcome.skipped.is_none(), "{outcome:?}");
+        let outcome = fixture.apply(block, FamilyMode::Normal).await?;
+        assert_eq!(
+            outcome.marker.as_ref().map(|marker| marker.number),
+            Some(block),
+            "{outcome:?}"
+        );
     }
     let named = fixture.rows(TABLE).await?;
     assert_eq!(named.len(), 1);
@@ -79,13 +83,19 @@ async fn named_keys_keep_clears_and_canonical_order_through_undo_reset_and_rebui
     let published = fixture.snapshot().await?;
     let mut options = FamilyOptions::new(CONTENT_HASH);
     options.max_blocks_per_run = 0;
-    fixture.apply_with(14, FamilyMode::Rebuild, &options).await;
+    fixture
+        .apply_with(14, FamilyMode::Rebuild, &options)
+        .await?;
     assert!(fixture.marker().await?.0.is_none());
     for table in FAMILY_TABLES {
         assert!(fixture.rows(table).await?.is_empty(), "reset kept {table}");
     }
-    let replayed = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(replayed.skipped.is_none(), "{replayed:?}");
+    let replayed = fixture.apply(14, FamilyMode::Normal).await?;
+    assert_eq!(
+        replayed.marker.as_ref().map(|marker| marker.number),
+        Some(14),
+        "{replayed:?}"
+    );
     assert_eq!(fixture.snapshot().await?, published);
     fixture.cleanup().await
 }
@@ -116,8 +126,12 @@ async fn shape(fixture: &Fixture) -> Result<Vec<Value>> {
 async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -> Result<()> {
     let fixture = Fixture::new("families_named_pointer_migration", 14).await?;
     seed(&fixture).await?;
-    let outcome = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(outcome.skipped.is_none(), "{outcome:?}");
+    let outcome = fixture.apply(14, FamilyMode::Normal).await?;
+    assert_eq!(
+        outcome.marker.as_ref().map(|marker| marker.number),
+        Some(14),
+        "{outcome:?}"
+    );
     let baseline = shape(&fixture).await?;
     let published = fixture.snapshot().await?;
     assert_eq!(fixture.rows(TABLE).await?.len(), 2);
@@ -136,8 +150,12 @@ async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -
             "migration kept {table}"
         );
     }
-    let rebuilt = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(rebuilt.skipped.is_none(), "{rebuilt:?}");
+    let rebuilt = fixture.apply(14, FamilyMode::Normal).await?;
+    assert_eq!(
+        rebuilt.marker.as_ref().map(|marker| marker.number),
+        Some(14),
+        "{rebuilt:?}"
+    );
     assert_eq!(
         fixture.snapshot().await?,
         published,

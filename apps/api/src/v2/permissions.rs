@@ -34,6 +34,7 @@ mod filter;
 pub(crate) use filter::registration_row;
 
 mod paging;
+mod read_errors;
 use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
 use paging::{permissions_cursor_payload, permissions_storage_cursor};
 
@@ -147,10 +148,9 @@ pub(crate) async fn get_permissions(
                 .pair_support_resource_id
                 .into_iter()
                 .collect::<Vec<_>>();
-            let summaries =
-                bigname_storage::load_permissions_current_resource_summaries(&state.pool, &ids)
-                    .await
-                    .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+            let summaries = bigname_storage::load_serving_permission_summaries(&state.pool, &ids)
+                .await
+                .map_err(read_errors::support_error())?;
             permission_support_for_resources(&ids, &summaries)
         } else {
             PermissionSupport::UNKNOWN
@@ -163,7 +163,7 @@ pub(crate) async fn get_permissions(
         ));
     }
 
-    let storage_page = bigname_storage::load_effective_permissions_account_resource_page(
+    let storage_page = bigname_storage::load_serving_effective_permissions_page(
         &state.pool,
         resolved.subject.as_deref(),
         resolved.resource_id,
@@ -176,7 +176,7 @@ pub(crate) async fn get_permissions(
         params.page_size,
     )
     .await
-    .map_err(|_| V2Error::internal_error("failed to load permissions"))?;
+    .map_err(read_errors::page_error())?;
 
     let resource_ids = storage_page
         .rows
@@ -190,12 +190,10 @@ pub(crate) async fn get_permissions(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let permission_summaries = bigname_storage::load_permissions_current_resource_summaries(
-        &state.pool,
-        &support_resource_ids,
-    )
-    .await
-    .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+    let permission_summaries =
+        bigname_storage::load_serving_permission_summaries(&state.pool, &support_resource_ids)
+            .await
+            .map_err(read_errors::support_error())?;
     // The selected resource is included so an empty page still serves its restrictions under
     // the name's registration_id.
     let current_names =

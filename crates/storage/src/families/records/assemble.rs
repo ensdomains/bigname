@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use sqlx::{PgConnection, types::time::OffsetDateTime};
 
 use super::{
     FamilyPosition, LinkSelection,
@@ -115,7 +115,7 @@ fn row(
 }
 
 pub(crate) async fn assemble(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     input: Assembly<'_>,
 ) -> Result<(RecordInventoryCurrentRow, String)> {
     let Assembly {
@@ -172,11 +172,11 @@ pub(crate) async fn assemble(
     let mut blocks = vec![pointer.block_number, boundary_block, latest_block];
     blocks.extend(latest_link.map(|(position, _, _)| position.block_number));
     blocks.extend(latest_record.map(|record| record.position.block_number));
-    let stamps = block_stamps(pool, chain_id, &blocks).await?;
+    let stamps = block_stamps(conn, chain_id, &blocks).await?;
 
     // Entries, selectors and families per record key, in the database collation.
     let order = collation_order(
-        pool,
+        conn,
         served
             .iter()
             .map(|record| record.record_key.clone())
@@ -212,7 +212,7 @@ pub(crate) async fn assemble(
         .filter_map(|record| payload::unsupported_family(&record.payload))
         .collect();
     let mut unsupported_families: Vec<Value> =
-        collation_order(pool, families.into_iter().collect())
+        collation_order(conn, families.into_iter().collect())
             .await?
             .into_iter()
             .map(|family| {
@@ -281,6 +281,10 @@ pub(crate) async fn assemble(
         "record_link_event_ids": link_ids,
         "attributed_event_ids": attributed,
         "read_rules": read_rules,
+        // ABI admission must use the classification read in this inventory's snapshot.
+        "abi_observation_classification": classification.map(|row| json!({
+            "source_family": row.field("source_family"), "role": row.field("role"),
+        })),
         "coverage": {"status": "projected", "exhaustiveness": "not_asserted"},
     });
     if !zero_keys.is_empty() {

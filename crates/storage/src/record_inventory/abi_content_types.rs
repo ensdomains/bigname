@@ -5,14 +5,16 @@
 //! read dereferences those ids instead of re-deriving resolver history, so the resolver
 //! selection, record-version reset, record-link, mirror, and canonicality rules stay Project's.
 //!
-//! The admitted-ABI-event check needs the resolver's classification from `resolver_current`. A
-//! change to the classification's manifest, declaration, admission namespace, or upgrade evidence
-//! makes Project republish every dependent inventory row; the remaining family flips do not change
+//! The admitted-ABI-event check uses the serving resolver classification. A change to the
+//! classification's manifest, declaration, admission namespace, or upgrade evidence makes Project
+//! republish every dependent inventory row; the remaining family flips do not change
 //! whether ABI observations are admitted. Project also re-stamps an unchanged resolver at newer
 //! targets without republishing those rows, so target blocks cannot be compared. Instead the
 //! classification is read in the statement that confirms the held row (same resource, record
 //! version boundary key, chain positions, and recompute time) is still published; a replaced row
 //! answers `abi_observations_stale` instead of pairing the older row with a newer classification.
+//! Family inventories instead carry the classification captured in their own read snapshot;
+//! their ABI admission does not reread a mutable classification after inventory assembly.
 //! The public meaning is documented under `GET /v1/names/{name}/records` in
 //! `docs/api-v1-routes.md`.
 
@@ -184,8 +186,53 @@ pub async fn load_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
+    load_abi_content_types(pool, inputs, true).await
+}
+
+/// [`load_record_inventory_abi_content_types`] for family inventory rows (TYR-36 step 7b, the
+/// records route under the publication switch): ABI admission uses the resolver classification
+/// captured while assembling the inventory in its read snapshot. A later reset or reclassification
+/// cannot turn that held inventory into an unsupported-observations answer. Referenced events
+/// still have to be retained as canonical, activated evidence.
+pub async fn load_family_record_inventory_abi_content_types(
+    pool: &PgPool,
+    inputs: &[AbiContentTypesInput<'_>],
+) -> Result<Vec<AbiContentTypes>> {
+    load_abi_content_types(pool, inputs, false).await
+}
+
+async fn load_abi_content_types(
+    pool: &PgPool,
+    inputs: &[AbiContentTypesInput<'_>],
+    confirm_published: bool,
+) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
-    let classifications = load_classifications(pool, inputs, &plans).await?;
+    let classifications = if confirm_published {
+        load_classifications(pool, inputs, &plans).await?
+    } else {
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let admitted = input
+                    .provenance
+                    .get("abi_observation_classification")
+                    .ok_or(AbiContentTypesUnavailable::ObservationsStale)
+                    .map(|classification| {
+                        classification
+                            .get("source_family")
+                            .and_then(Value::as_str)
+                            .is_some_and(|family| {
+                                admits_abi_observations(
+                                    family,
+                                    classification.get("role").and_then(Value::as_str),
+                                )
+                            })
+                    });
+                (index, admitted)
+            })
+            .collect()
+    };
 
     let mut answers = Vec::with_capacity(plans.len());
     let mut pending = Vec::new();
@@ -349,20 +396,21 @@ async fn load_classifications(
     if ordinals.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let rows = sqlx::query(&ABI_CLASSIFICATION_QUERY.replace(
+    let query = ABI_CLASSIFICATION_QUERY.replace(
         "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
         DEFAULT_RESOLVER_CURRENT_READ_FILTER,
-    ))
-    .bind(ordinals)
-    .bind(resource_ids)
-    .bind(boundary_keys)
-    .bind(chain_positions)
-    .bind(recomputed_at)
-    .bind(chain_ids)
-    .bind(addresses)
-    .fetch_all(pool)
-    .await
-    .context("failed to load resolver classifications for ABI content types")?;
+    );
+    let rows = sqlx::query(&query)
+        .bind(ordinals)
+        .bind(resource_ids)
+        .bind(boundary_keys)
+        .bind(chain_positions)
+        .bind(recomputed_at)
+        .bind(chain_ids)
+        .bind(addresses)
+        .fetch_all(pool)
+        .await
+        .context("failed to load resolver classifications for ABI content types")?;
     let mut classifications = BTreeMap::new();
     for row in rows {
         let index = usize::try_from(row.try_get::<i64, _>("ordinal")?)

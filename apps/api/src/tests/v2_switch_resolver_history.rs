@@ -106,9 +106,9 @@ async fn advance_switch_without_resolver_changes(database: &TestDatabase) -> Res
             bigname_content_hash::INTERPRETER_CONTENT_HASH,
         ),
     )
-    .await;
+    .await?;
     anyhow::ensure!(
-        outcome.skipped.is_none() && outcome.marker.as_ref().map(|m| m.number) == Some(241),
+        outcome.marker.as_ref().map(|m| m.number) == Some(241),
         "{outcome:?}"
     );
     let target: i64 = sqlx::query_scalar(

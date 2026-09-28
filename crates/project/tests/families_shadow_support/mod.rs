@@ -9,6 +9,8 @@
 pub mod compare;
 #[path = "../../../../apps/phase-runner/tests/project_end_to_end/name_shadow.rs"]
 pub mod names;
+#[path = "../../../../apps/phase-runner/tests/project_end_to_end/permissions_shadow.rs"]
+pub mod permissions;
 pub mod replay;
 pub mod wrapper;
 
@@ -74,6 +76,11 @@ pub async fn publish_and_compare(fixture: &Fixture, target: i64) -> Result<compa
     let names = names::compare(&fixture.pool, CHAIN, target).await?;
     names.print();
     names.require_clean()?;
+    // The permission and resolver reads under both switch states, without the items the
+    // control comparison already reports.
+    let permissions = permissions::compare(&fixture.pool, CHAIN, 2, &report.differing_keys).await?;
+    eprintln!("{}", permissions.line());
+    permissions.require_clean()?;
     Ok(report)
 }
 

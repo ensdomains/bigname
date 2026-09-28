@@ -121,15 +121,22 @@ async fn family_name_for_snapshot(
         ))
     })?;
     let selected = positions_by_chain_id(selected_chain_positions)?;
-    let at_publication =
-        positions_by_chain_id(&publication)?
-            .into_iter()
-            .all(|(chain_id, published)| {
-                selected.get(&chain_id).is_some_and(|position| {
-                    position.block_number == published.block_number
-                        && position.block_hash == published.block_hash
-                })
-            });
+    let authoritative_chain = row.provenance["chain_id"].as_str().ok_or_else(|| {
+        SnapshotSelectionError::internal("composed name row has no authoritative chain")
+    })?;
+    let published = positions_by_chain_id(&publication)?;
+    // Indexed Basenames reads select Base alone. The composed topology may also carry an
+    // Ethereum execution position, which becomes a read dependency only when selected for
+    // verified resolution. Always require the authoritative publication, and check every
+    // auxiliary position that the request did select.
+    let at_publication = selected.contains_key(authoritative_chain)
+        && published.contains_key(authoritative_chain)
+        && published.iter().all(|(chain_id, published)| {
+            selected.get(chain_id).is_none_or(|position| {
+                position.block_number == published.block_number
+                    && position.block_hash == published.block_hash
+            })
+        });
     if !at_publication {
         return Err(SnapshotSelectionError::stale(
             "name data is unavailable at the selected historical position",

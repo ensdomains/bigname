@@ -5,8 +5,8 @@ use sqlx::PgPool;
 use crate::{Marker, ProjectError, Result};
 
 mod head;
-mod reverse;
-mod text;
+pub(crate) mod reverse;
+pub(crate) mod text;
 
 const ETHEREUM: &str = "ethereum-mainnet";
 pub(super) const HYDRATION_KEY: &str = "canonical_head_multicall_hydration";
@@ -26,6 +26,11 @@ pub struct Hydrator {
 }
 
 impl Hydrator {
+    /// The same endpoint configuration used by the family block's prepared hydration.
+    pub fn rpc_urls(&self) -> &ChainRpcUrls {
+        &self.rpc_urls
+    }
+
     pub fn new(pool: PgPool, rpc_urls: ChainRpcUrls) -> Self {
         Self { pool, rpc_urls }
     }

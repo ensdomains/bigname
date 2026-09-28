@@ -16,7 +16,7 @@ const BATCH_SIZE: usize = 250;
 // (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L88 @ ens_app_v3@7175858)
 // (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L105 @ ens_app_v3@7175858)
 // (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121 @ ens_app_v3@7175858)
-const TEXT_RESOLVERS: &[&str] = &[
+pub(crate) const TEXT_RESOLVERS: &[&str] = &[
     "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41",
     "0xdaaf96c344f63131acadd0ea35170e7892d3dfba",
     "0x226159d592e2b063810a10ebf6dcbada94ed68b8",

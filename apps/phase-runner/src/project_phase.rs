@@ -11,6 +11,8 @@ use bigname_project::{
 };
 use sqlx::PgPool;
 
+mod family_batch;
+
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
@@ -67,6 +69,9 @@ pub struct ProjectPhase {
     /// The served marker, mode and input token of each chain's last committed batch, which the
     /// owned key families follow once the runner has recorded the batch's progress.
     pending_families: Arc<Mutex<BTreeMap<String, PendingFamilies>>>,
+    /// With the publication switch on, each chain's family batch that spent its budget and
+    /// answered `Continue`, which the next batch of the same run resumes.
+    family_continuations: Arc<Mutex<BTreeMap<String, family_batch::Continuation>>>,
 }
 
 impl ProjectPhase {
@@ -78,6 +83,7 @@ impl ProjectPhase {
             metrics_feed: None,
             families: FamilySettings::default(),
             pending_families: Arc::default(),
+            family_continuations: Arc::default(),
         }
     }
 
@@ -89,6 +95,7 @@ impl ProjectPhase {
             metrics_feed: None,
             families: FamilySettings::default(),
             pending_families: Arc::default(),
+            family_continuations: Arc::default(),
         }
     }
 
@@ -151,6 +158,10 @@ impl ProjectPhase {
         let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
             .with_max_blocks_per_run(self.families.max_blocks_per_run)
             .with_rebuild_ranges(self.families.rebuild_ranges);
+        let options = match &self.hydrator {
+            Some(hydrator) => options.with_hydration(hydrator.rpc_urls().clone()),
+            None => options,
+        };
         let (outcome, error) =
             bigname_project::families::run(&self.pool, chain_id, &target, mode, &token, &options)
                 .await;
@@ -276,6 +287,11 @@ impl Phase for ProjectPhase {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&context.chain_id);
+            // With the publication switch on the family loop is the batch: the served engine,
+            // the served hydrator and the redo target they read do not run (TYR-36 step 7b).
+            if bigname_storage::publication_source::serve_from_families() {
+                return self.run_family_batch(context).await;
+            }
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .require_rpc_configuration(&context.chain_id)

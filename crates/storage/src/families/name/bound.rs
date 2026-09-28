@@ -13,9 +13,9 @@
 //!
 //! A page is read in one snapshot (`batch::read_snapshot`).
 //!
-//! Interim: the serving-only capability gate still reads the resolver's served row
-//! (`resolver_current.declared_summary.bindings.status`), as the route's resolver overview does;
-//! both move with the resolver reads (packet E5).
+//! The serving-only capability gate reads the resolver's binding support from its F3
+//! classification row (`topology::overview`, packet E5), the rule the served
+//! `resolver_current.declared_summary.bindings.status` is built by.
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
@@ -23,6 +23,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::{CoverageShape, batch};
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
+    families::topology::{FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY},
     name_current::{COMPOSED_NC_COLUMNS, DEFAULT_NAME_CURRENT_LINEAGE_JOINS},
     phase_projection_reads::BOUND_NAME_PREDICATES,
 };
@@ -200,9 +201,13 @@ async fn admitted(
            ON binding.surface_binding_id = nc.surface_binding_id
          LEFT JOIN bigname_phase.token_lineages token_lineage
            ON token_lineage.token_lineage_id = nc.token_lineage_id
-         LEFT JOIN bigname_phase.resolver_current resolver_capability
-           ON resolver_capability.chain_id = $1
-          AND lower(resolver_capability.resolver_address) = lower($2)
+         LEFT JOIN LATERAL (
+             SELECT {FAMILY_RESOLVER_SUMMARY} AS declared_summary
+             FROM bigname_phase.project_resolver_classification classification_row
+             WHERE classification_row.chain_id = $1
+               AND classification_row.resolver_address = lower($2)
+               AND {FAMILY_RESOLVER_SERVED_ROWS}
+         ) resolver_capability ON TRUE
          {DEFAULT_NAME_CURRENT_LINEAGE_JOINS}
          WHERE {BOUND_NAME_PREDICATES}
          ORDER BY nc.raw_name, nc.namespace, nc.namehash

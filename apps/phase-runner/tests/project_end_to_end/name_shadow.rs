@@ -4,21 +4,23 @@
 //! `name_current` row: the identity columns, the coverage column, the registration, control,
 //! resolver and coverage blocks with the NameWrapper state and fuses, and the authority
 //! selection, read reachability, resolver pointer family and chain of the provenance, and the
-//! history heads (`declared_summary.history`) the binding diagnostics route serves.
+//! history heads (`declared_summary.history`) the binding diagnostics route serves, and the
+//! complete declared resolution topology consumed by verified lookup and record readback.
 //!
 //! Not compared, because no route reads them: the whole-history evidence
 //! (`selected_event_ids`, `raw_fact_refs`, `manifest_versions`, `registrant_event_id`), the
 //! selection's `lifecycle_state`, and the row metadata
 //! (`chain_positions`, `canonicality_summary`, `manifest_version`, `last_recomputed_at`), which a
-//! composed row takes from the publication. `declared_summary.topology` is compared by the
-//! topology comparison.
+//! composed row takes from the publication. Basenames execution admission and both chain
+//! positions are checked by the dedicated cross-chain projection tests.
 //!
 //! A registration or control field that differs passes, counted as `covered_by_control`, only
 //! when the composed authority selection equals the served one: both blocks are then the
 //! control shadow read of the same selection, which the control comparison (`shadow.rs`) checks
 //! field by field with its named causes, and the harness requires it clean. `created_at` and
 //! the lapsed registration's authority are compared here strictly. The resolver block passes the
-//! same way only when the composed side withholds it because of a registration status that
+//! same way, together with absent resolution topology, only when the composed side withholds
+//! it because of a registration status that
 //! differs and that the control comparison decides (a released or reserved ENSv2 registration
 //! serves no resolver, name_current/build.sql:141-169): the one known case is the control
 //! comparison's `served_membership_skips_unnamed_path_expiry`. Every other difference, and a name
@@ -154,6 +156,7 @@ pub fn projection(row: &NameCurrentRow) -> Value {
             "registration": pick(summary, "registration"),
             "control": pick(summary, "control"),
             "resolver": pick(summary, "resolver"),
+            "topology": pick(summary, "topology"),
             "coverage": pick(summary, "coverage"),
             "wrapper_state": pick(summary, "wrapper_state"),
             "wrapper_fuses": pick(summary, "wrapper_fuses"),
@@ -276,13 +279,22 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<NameRepo
             let withheld = projection(composed)
                 .pointer("/declared_summary/resolver/address")
                 .is_none_or(Value::is_null);
+            // The direct topology requires that resolver too (families/name/topology.rs).
+            // Its complete absence is the same consequence of the control-proven release;
+            // a present but different topology must still fail this comparison.
+            let topology_withheld = composed
+                .declared_summary
+                .get("topology")
+                .is_none_or(Value::is_null);
             let mut mismatched = false;
             for (path, left, right) in diffs {
                 let covered = same_selection
                     && (control_path(&path)
                         || (status_differs
                             && withheld
-                            && path.starts_with("declared_summary/resolver/")));
+                            && (path.starts_with("declared_summary/resolver/")
+                                || (topology_withheld
+                                    && path.starts_with("declared_summary/topology/")))));
                 let (kind, counter) = if covered {
                     report.covered_names.insert(name.clone());
                     ("COVERED_BY_CONTROL", &mut report.covered_by_control)

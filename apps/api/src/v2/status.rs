@@ -16,7 +16,7 @@ use super::{
 };
 
 mod readiness;
-use readiness::meets_floor;
+use readiness::{meets_floor, projection_lags};
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusData {
     pub(crate) status: OpsStatus,
@@ -127,14 +127,7 @@ fn build_chain_status(
     heartbeat_max_age_seconds: i64,
     status_freshness: &StatusFreshness,
 ) -> ChainStatus {
-    let lag_blocks = row
-        .canonical_block
-        .zip(row.latest_projected_block)
-        .map(|(canonical, projected)| canonical.saturating_sub(projected).max(0));
-    let lag_seconds = row
-        .canonical_timestamp
-        .zip(row.latest_projected_timestamp)
-        .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
+    let (lag_blocks, lag_seconds) = projection_lags(row);
     let data_readiness = status_freshness.readiness(
         row.canonical_block,
         row.latest_projected_block,

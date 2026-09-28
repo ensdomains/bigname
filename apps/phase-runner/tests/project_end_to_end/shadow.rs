@@ -202,6 +202,9 @@ pub struct Report {
     /// serves active: the served-side bug of `served_membership_skips_unnamed_path_expiry`.
     pub served_side_bug_names: Vec<String>,
     pub lines: Vec<String>,
+    /// Every item that differs, excused or not: the permission comparison
+    /// (`permissions_shadow.rs`) compares their reads without them.
+    pub differing_keys: BTreeSet<String>,
     /// `corpus_expectation` at this publication, when asked for (`Options::corpus`).
     pub corpus_expected: Option<BTreeMap<String, usize>>,
 }
@@ -221,6 +224,7 @@ impl Report {
             self.equal += 1;
             return;
         }
+        self.differing_keys.insert(key.to_owned());
         if diffs.iter().any(|(_, why)| *why == Excuse::None) {
             self.mismatched += 1;
         } else if diffs.iter().any(|(_, why)| *why == Excuse::SameBlockOrder) {

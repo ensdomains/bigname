@@ -52,7 +52,8 @@ async fn main() -> Result<()> {
 
 async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
-    let serve_from_families = bigname_storage::publication_source::init_from_env();
+    let serve_from_families =
+        bigname_storage::publication_source::init_from_env().map_err(anyhow::Error::msg)?;
     let chain_rpc_urls = args.effective_lookup_chain_rpc_urls()?;
     let pool = bigname_storage::connect_phase_with_application_name_and_statement_timeout(
         &args.database,

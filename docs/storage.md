@@ -105,8 +105,11 @@ diagnostic input only until their contracted consumer activation. Current
 projections can be rebuilt from canonical consumer-visible identity and
 normalized events. Canonical-head
 [hydration](glossary.md#hydration) is execution-derived enrichment applied by
-Project to the documented record and primary-name surfaces after event-derived
-publication.
+Project to the documented record and primary-name surfaces. The served hydrator
+runs after event-derived publication; the family path applies prepared results
+inside follow-block publication and journals them with the event-derived rows.
+The [projection contract](projections.md) describes text and reverse hydration
+admission, invalidation, and replay behavior.
 
 ## Identity
 
@@ -189,6 +192,16 @@ schema-migration; raw facts, manifest identities,
 normalized-event identities, and unrelated phase rows remain in place for the
 mandatory full Interpret and Project redos.
 
+Reverse address lookup under the [publication switch](glossary.md#publication-switch)
+uses `project_address_name_index` to admit candidate name surfaces, seeks those
+keys in primary-first, role, and lexical order, and recomputes their current
+relations in batches of at most 64 names. The primary claims, relation masks,
+exact count, and page inventories share one read-only repeatable-read snapshot.
+The count visits every candidate but retains only a page and its overflow row.
+The candidate SQL can inspect or sort more index entries than it returns, and
+masked candidates can require additional seeks; production query plans and
+latency still require qualification before enabling the switch.
+
 ## Table ownership
 
 | Family | Writer | Meaning |
@@ -209,7 +222,8 @@ mandatory full Interpret and Project redos.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
-| `project_family_marker`, `project_family_undo`, `project_repair_record` and the owned key family tables (`project_name_state` through `project_address_record_id_index`, `project_name_history`, a name's first event block and time, ENSv2 corpus flag and voted authority arms, and `project_name_summary`, plus `project_named_resource_pointer`, the latest named resolver pointer per chain, resource and name) | Project, after each batch's progress is recorded | [Owned key families](projections.md#owned-key-families): per-key current state, its block marker, its undo journal (kept back to the lowest of 256 blocks, the finalized and safe blocks and an active repair's floor) and the record of the latest family repair or rebuild. With the [publication switch](glossary.md#publication-switch) off, the default, they are shadows that no served path reads; with it on, the serving fence reads `project_family_marker`, the names group serves [composed name rows](glossary.md#composed-name-row) built from these tables at read (walking `project_lifecycle_event` and `project_wrapper_state` by expiry for the expiring listing, and `project_resource_pointer`, `project_named_resource_pointer` and `project_registry_pointer` by resolver for bound names, through `project_lifecycle_event_expiry_idx`, `project_lifecycle_event_inexact_expiry_idx`, `project_wrapper_state_expiry_idx`, `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`), the subnames page, child counts and registry labels read the child families with `project_name_summary` (the [name summary](glossary.md#name-summary), the one stored per-name row: a name's selected arm, serving flag, registration status, expiry and registration times and zero-owner flag, which the family step composes again for every name a block touches or whose `recompose_at` the block's time reaches, found through `project_name_summary_recompose_idx` and the resource indexes `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`, `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`, with the zero-owner attribution reading `project_registry_owner_event_name_idx`), and every other route that joins name rows (name and address history, events, permissions, roles, address names and the primary-name claim gate; the list is in [the API contract](api-v1.md#tier-2-product-reads)) takes those name rows from composed rows too while its own pages stay on the `*_current` tables until the later step 7b slices move them. Each composed read and each child read runs in one read-only repeatable-read transaction, so it sees one family block, and a marker the publication fence would refuse (not `live`, another build's hash, or on a block a reorg orphaned) serves no composed row and no child (the read fails, and the API answers `409 stale`). The step 3 [shadow harness](glossary.md#shadow-read) reads the family tables in tests only. Rebuildable from canonical interpreted input; with the switch off, the family tables are never serving data. |
+| `project_family_marker`, `project_family_undo`, `project_repair_record` and the owned key family tables (`project_name_state` through `project_address_record_id_index`, `project_name_history`, a name's first event block and time, ENSv2 corpus flag and voted authority arms, and `project_name_summary`, plus `project_named_resource_pointer`, the latest named resolver pointer per chain, resource and name) | Project, after each batch's progress is recorded | [Owned key families](projections.md#owned-key-families): per-key current state, its block marker, its undo journal (kept back to the lowest of 256 blocks, the finalized and safe blocks and an active repair's floor) and the record of the latest family repair or rebuild. With the [publication switch](glossary.md#publication-switch) off, the default, they are shadows that no served path reads; with it on, the serving fence reads `project_family_marker`, the names group serves [composed name rows](glossary.md#composed-name-row) built from these tables at read (walking `project_lifecycle_event` and `project_wrapper_state` by expiry for the expiring listing, and `project_resource_pointer`, `project_named_resource_pointer` and `project_registry_pointer` by resolver for bound names, through `project_lifecycle_event_expiry_idx`, `project_lifecycle_event_inexact_expiry_idx`, `project_wrapper_state_expiry_idx`, `project_named_resource_pointer_resolver_idx` and `project_registry_pointer_resolver_idx`), the subnames page, child counts and registry labels read the child families with `project_name_summary` (the [name summary](glossary.md#name-summary), the one stored per-name row: a name's selected arm, serving flag, registration status, expiry and registration times and zero-owner flag, which the family step composes again for every name a block touches or whose `recompose_at` the block's time reaches, found through `project_name_summary_recompose_idx` and the resource indexes `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`, `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`, with the zero-owner attribution reading `project_registry_owner_event_name_idx`), the records and address group reads its own rows from them too (the records route's inventory, address-name relations recomputed at read from `project_address_name_index`, `resolves_to` pages from both `project_address_record_node_index` and `project_address_record_id_index`, record counts, and the indexed primary-name claim), `GET /v1/permissions` and the resolver routes serve their own rows from the grants, approvals, registry bindings and resolver classification (through `project_grant_subject_idx`, `project_grant_scope_idx`, `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx` and `project_registry_binding_observation_owner_idx`), and every other route that joins name rows (name and address history and events; the list is in [the API contract](api-v1.md#tier-2-product-reads)) takes those name rows from composed rows too while its own pages stay on the `*_current` tables until the later step 7b slices move them. Each composed read and each child read runs in one read-only repeatable-read transaction, so it sees one family block, and a marker the publication fence would refuse (not `live`, another build's hash, or on a block a reorg orphaned) serves no composed row and no child (the read fails, and the API answers `409 stale`). The step 3 [shadow harness](glossary.md#shadow-read) reads the family tables in tests only. Rebuildable from canonical interpreted input; with the switch off, the family tables are never serving data. |
+
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
@@ -2019,6 +2033,20 @@ Schema-migration `20260914120000_lookup_publication_revalidation.sql` replaces
 only this function, preserving data and existing grants; fresh schemas receive
 the identical guard from the baseline. Older callers without a captured
 publication object retain the exact-head check.
+With the publication switch on, the lookup instead composes the name topology
+and inventory in one repeatable-read family snapshot. It passes that request's
+indexed entries, read rules, coverage, and resolver path to the writer, bound to
+the captured marker sequence. The guard locks the live family marker and checks
+the sequence, block identity, interpreter hash, canonical execution positions,
+and real manifest row versions in the same transaction as the ledger mutation.
+It does not load stale served rows. The writer evaluates the supplied indexed
+entries with the same exact-or-ENSIP-19 rules before comparing the provider
+result. This input is internal application state, never client-supplied request
+data and never persisted as a reusable execution outcome.
+`20260929130000_lookup_family_inputs.sql` replaces only the guard and writer
+functions in place; the baseline contains identical definitions. The switch-off
+path retains its served-row locks and refusal results.
+
 Ledger rows are durable operational observations;
 they are not projection input or a response cache.
 When projection publishes an ENS Mainnet exact resolver as null, a projection

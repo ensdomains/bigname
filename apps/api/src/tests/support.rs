@@ -979,6 +979,9 @@ impl TestDatabase {
         _initialize_manifest_schema: bool,
         _initialize_name_current_schema: bool,
     ) -> Result<Self> {
+        // These fixtures seed the Project row as the served publication, so the API tests hold
+        // the switch off whatever the build's default; the switch tests scope it on.
+        bigname_storage::publication_source::hold_for_test_process(false);
         let database = bigname_test_support::TestDatabase::create(
             TestDatabaseConfig::new("bigname_api_test")
                 .admin_database_from_url()
@@ -4583,7 +4586,18 @@ async fn seed_switch_name(
     seed: u128,
     arm: &str,
 ) -> Result<(String, Uuid)> {
-    let (logical_name_id, namehash) = phase_logical_identity("ens", name)?;
+    seed_switch_name_on(database, name, seed, arm, "ens", SWITCH_CHAIN).await
+}
+
+async fn seed_switch_name_on(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    arm: &str,
+    namespace: &str,
+    chain_id: &str,
+) -> Result<(String, Uuid)> {
+    let (logical_name_id, namehash) = phase_logical_identity(namespace, name)?;
     let (resource_id, token_lineage_id, surface_binding_id) = (
         Uuid::from_u128(seed),
         Uuid::from_u128(seed + 1),
@@ -4594,7 +4608,7 @@ async fn seed_switch_name(
         &database.pool,
         &[NameSurface {
             logical_name_id: logical_name_id.clone(),
-            namespace: "ens".to_owned(),
+            namespace: namespace.to_owned(),
             input_name: name.to_owned(),
             canonical_display_name: name.to_owned(),
             normalized_name: name.to_owned(),
@@ -4604,7 +4618,7 @@ async fn seed_switch_name(
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.to_owned(),
             normalization_warnings: json!([]),
             normalization_errors: json!([]),
-            chain_id: SWITCH_CHAIN.to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
             block_number: SWITCH_FIRST_BLOCK,
             provenance: json!({"seed": "switch_differential"}),
@@ -4616,7 +4630,7 @@ async fn seed_switch_name(
         &database.pool,
         &[TokenLineage {
             token_lineage_id,
-            chain_id: SWITCH_CHAIN.to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
             block_number: SWITCH_FIRST_BLOCK,
             provenance: json!({"seed": "switch_differential"}),
@@ -4629,7 +4643,7 @@ async fn seed_switch_name(
         &[Resource {
             resource_id,
             token_lineage_id: Some(token_lineage_id),
-            chain_id: SWITCH_CHAIN.to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
             block_number: SWITCH_FIRST_BLOCK,
             provenance: json!({"seed": "switch_differential"}),
@@ -4642,13 +4656,13 @@ async fn seed_switch_name(
         &[SurfaceBinding {
             surface_binding_id,
             // The helper derives the name id from `namespace:name`.
-            logical_name_id: format!("ens:{name}"),
+            logical_name_id: format!("{namespace}:{name}"),
             resource_id,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             authority_arm: arm.to_owned(),
             active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + SWITCH_FIRST_BLOCK)?,
             active_to: None,
-            chain_id: SWITCH_CHAIN.to_owned(),
+            chain_id: chain_id.to_owned(),
             block_hash: hash,
             block_number: SWITCH_FIRST_BLOCK,
             provenance: json!({"seed": "switch_differential", "transaction_index": 0,
@@ -4723,9 +4737,9 @@ async fn publish_project_and_families(database: &TestDatabase, target: i64) -> R
         &token,
         &bigname_project::families::FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
     )
-    .await;
+    .await?;
     anyhow::ensure!(
-        outcome.skipped.is_none() && outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
         "the families followed {target}: {outcome:?}"
     );
     Ok(())

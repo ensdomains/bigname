@@ -494,6 +494,11 @@ collection route carry neither header.
   `chain_heads` positions. `indexed_block` maps to the `project` phase's
   `current_block_number`. `lag_seconds` compares the timestamps of the exact
   latest-head and project-current hashes in `bigname_phase.chain_lineage`.
+  With the [publication switch](glossary.md#publication-switch) on,
+  `indexed_block` and both lags come from the
+  [family marker](glossary.md#family-marker) instead. With either setting,
+  both lags are `null` while an Interpret or Project redo is in progress,
+  since lag is unknown during a redo.
   Missing head, project, or lineage rows preserve the existing nullable fields.
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
@@ -536,7 +541,8 @@ collection route carry neither header.
   threshold defaults to 60 seconds so a long database statement between
   five-second runner heartbeat opportunities.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
-  clamps its own canonical-versus-projected difference at `0`.
+  clamps its own canonical-versus-projected difference at `0`, and both are
+  `null` during an Interpret or Project redo.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
   `stale`. This is the only non-result `status` enum in `v2`. `project`
@@ -1244,7 +1250,10 @@ collection route carry neither header.
     reason covers an inventory row that Project replaced after the route
     loaded it and before it read the resolver's classification: the answer is
     withheld rather than computed from the older row and the newer
-    classification, and a retry reads the new row.
+    classification, and a retry reads the new row. Family inventories capture
+    classification in the same read snapshot as their selected writes; a later
+    family reset or completed replacement therefore leaves that coherent ABI
+    answer intact while its selected event evidence remains canonical and retained.
   - `abi_content_type_not_single_bit`: a selected ABI write names a content
     type that is zero or has more than one bit set. The ENS setters reject
     such types, so only a nonstandard resolver emits them; bigname neither

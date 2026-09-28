@@ -149,11 +149,14 @@ pub(super) async fn evm_primary_flags(
         .collect::<Vec<_>>();
     let claims = bigname_storage::load_primary_name_current_snapshots(pool, address, &keys)
         .await
-        .map_err(|_| {
-            V2Error::internal_error(format!(
-                "failed to load primary names for address {address}"
-            ))
-        })?
+        .map_err(crate::v2::name_rows_error(
+            crate::v2::SnapshotReadResource::Resource,
+            |_| {
+                V2Error::internal_error(format!(
+                    "failed to load primary names for address {address}"
+                ))
+            },
+        ))?
         .into_iter()
         .filter(|(_, snapshot)| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
         .filter_map(|(key, snapshot)| {

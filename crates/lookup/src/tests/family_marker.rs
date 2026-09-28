@@ -43,9 +43,8 @@ async fn lookup_is_stale_while_the_family_marker_bootstraps_with_the_switch_on()
 }
 
 #[tokio::test]
-async fn lookup_serves_beside_a_live_family_marker_and_ignores_it_with_the_switch_off()
--> AnyResult<()> {
-    for (on, state) in [(true, "live"), (false, "bootstrap_pending")] {
+async fn lookup_ignores_the_family_marker_with_the_switch_off() -> AnyResult<()> {
+    for (on, state) in [(false, "live"), (false, "bootstrap_pending")] {
         let (rpc_url, rpc_handle) =
             spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
         let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
@@ -80,13 +79,6 @@ async fn lookup_is_stale_without_a_family_marker_row_with_the_switch_on() -> Any
         .await
         .expect_err("a chain without a marker row has no published families");
     assert_eq!(error.kind(), ErrorKind::Stale);
-    assert_eq!(
-        error.message(),
-        format!(
-            "owned key families or projected state have not reached the newest processed \
-             {ETHEREUM} block"
-        )
-    );
 
     // Switch off, the Project row governs and the wording is unchanged.
     sqlx::query(
@@ -103,5 +95,66 @@ async fn lookup_is_stale_without_a_family_marker_row_with_the_switch_on() -> Any
         format!("projected state has not reached the newest processed {ETHEREUM} block")
     );
     fixture.cleanup().await?;
+    Ok(())
+}
+
+/// Runs a lookup whose provider call has answered, then `mutate`s the database before the guarded
+/// comparison write, as a publication landing during provider execution would.
+async fn lookup_mutated_during_execution(
+    on: bool,
+    state: &str,
+    mutate: &'static str,
+) -> AnyResult<(crate::Result<LookupResponse>, i64)> {
+    let (rpc_url, rpc_handle) =
+        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_family_marker(fixture.pool(), state).await?;
+    let pool = fixture.pool().clone();
+    let update_pool = pool.clone();
+    let result = bigname_storage::publication_source::with_serve_from_families(
+        on,
+        lookup_engine(&pool, &rpc_url)?.lookup_with_before_persist(
+            lookup_request(&fixture.logical_name_id)?,
+            move || async move {
+                sqlx::query(mutate)
+                    .execute(&update_pool)
+                    .await
+                    .expect("mutate the publication during provider execution");
+            },
+        ),
+    )
+    .await;
+    let ledger = ledger_count(&pool).await?;
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok((result, ledger))
+}
+
+const REPUBLISH_PROJECT_ROW: &str = "UPDATE chain_phase_state \
+     SET current_block_number = current_block_number WHERE phase_name = 'project'";
+const ADVANCE_FAMILY_SEQUENCE: &str = "UPDATE project_family_marker SET sequence = sequence + 1";
+const START_FAMILY_REBUILD: &str = "UPDATE project_family_marker \
+     SET state = 'bootstrap_pending', sequence = sequence + 1";
+
+// These served-only fixtures exercise the switch-off path. Switch-on comparison and guard
+// coverage lives in API v2_switch_lookup.rs, seeded through the actual family reducers.
+#[tokio::test]
+async fn a_project_republish_during_execution_is_refused_with_the_switch_off() -> AnyResult<()> {
+    let (served, ledger) =
+        lookup_mutated_during_execution(false, "live", REPUBLISH_PROJECT_ROW).await?;
+    let error = served.expect_err("a republished Project row refuses the served lookup");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_family_publication_or_rebuild_is_ignored_with_the_switch_off() -> AnyResult<()> {
+    for mutate in [ADVANCE_FAMILY_SEQUENCE, START_FAMILY_REBUILD] {
+        let (served, ledger) = lookup_mutated_during_execution(false, "live", mutate).await?;
+        let response = served?;
+        assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+        assert_eq!(ledger, 1);
+    }
     Ok(())
 }

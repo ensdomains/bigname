@@ -6,7 +6,7 @@
 //! one copy replaces the other.
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -38,6 +38,15 @@ pub async fn load_family_alias_source_pointer(
     chain_id: &str,
     resource_id: Uuid,
 ) -> Result<Option<FamilyAliasSourcePointer>> {
+    let mut conn = pool.acquire().await?;
+    load_family_alias_source_pointer_on(&mut conn, chain_id, resource_id).await
+}
+
+pub(crate) async fn load_family_alias_source_pointer_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_id: Uuid,
+) -> Result<Option<FamilyAliasSourcePointer>> {
     type PointerRow = (
         Option<String>,
         Option<Value>,
@@ -52,7 +61,7 @@ pub async fn load_family_alias_source_pointer(
     )
     .bind(chain_id)
     .bind(resource_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the resource pointer of {resource_id}"))?;
     Ok(row.and_then(
@@ -96,6 +105,15 @@ pub async fn load_family_wildcard_source(
     chain_id: &str,
     resource_id: Uuid,
 ) -> Result<Option<FamilyWildcardSource>> {
+    let mut conn = pool.acquire().await?;
+    load_family_wildcard_source_on(&mut conn, chain_id, resource_id).await
+}
+
+pub(crate) async fn load_family_wildcard_source_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_id: Uuid,
+) -> Result<Option<FamilyWildcardSource>> {
     let row: Option<(Option<String>, Value, String, Value, Value)> = sqlx::query_as(
         "SELECT nonzero_resolver_address, nonzero_position, boundary_kind, boundary_position,
                 to_jsonb(boundary_block_timestamp)
@@ -106,7 +124,7 @@ pub async fn load_family_wildcard_source(
     )
     .bind(chain_id)
     .bind(resource_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the wildcard source of {resource_id}"))?;
     Ok(row.map(

@@ -243,21 +243,28 @@ async fn render_storage_exact_reverse_lookup_results(
         })
         .collect::<Vec<_>>();
     let storage_inputs = deduped_reverse_storage_inputs(storage_exact_inputs.iter().copied());
-    let groups =
-        load_reverse_identity_records_live(&state.pool, &storage_inputs, public_namespaces)
-            .await
-            .map_err(|load_error| {
-                error!(
-                    service = "api",
-                    input_count = inputs.len(),
-                    error = ?load_error,
-                    "failed to load v2 lookup reverse detail records"
-                );
-                V2Error::internal_error("failed to load lookup reverse detail records")
-            })?
-            .into_iter()
-            .map(|group| (reverse_group_key(&group), group))
-            .collect::<BTreeMap<_, _>>();
+    let groups = load_reverse_identity_records_live(
+        &state.pool,
+        &storage_inputs,
+        public_namespaces,
+        selected_snapshot,
+    )
+    .await
+    .map_err(crate::v2::snapshots::name_rows_error(
+        crate::v2::snapshots::SnapshotReadResource::Name,
+        |load_error| {
+            error!(
+                service = "api",
+                input_count = inputs.len(),
+                error = ?load_error,
+                "failed to load v2 lookup reverse detail records"
+            );
+            V2Error::internal_error("failed to load lookup reverse detail records")
+        },
+    ))?
+    .into_iter()
+    .map(|group| (reverse_group_key(&group), group))
+    .collect::<BTreeMap<_, _>>();
 
     for input in storage_exact_inputs {
         let key = ReverseStorageKey::from(input);
@@ -328,18 +335,22 @@ async fn load_exact_relation_reverse_page(
             &state.pool,
             std::slice::from_ref(&storage_input),
             public_namespaces,
+            selected_snapshot,
         )
         .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                input_count = 1,
-                relation = ?input.relation,
-                error = ?load_error,
-                "failed to load v2 lookup reverse exact-relation records"
-            );
-            V2Error::internal_error("failed to load lookup reverse records")
-        })?;
+        .map_err(crate::v2::snapshots::name_rows_error(
+            crate::v2::snapshots::SnapshotReadResource::Name,
+            |load_error| {
+                error!(
+                    service = "api",
+                    input_count = 1,
+                    relation = ?input.relation,
+                    error = ?load_error,
+                    "failed to load v2 lookup reverse exact-relation records"
+                );
+                V2Error::internal_error("failed to load lookup reverse records")
+            },
+        ))?;
         let Some(mut group) = groups.pop() else {
             break;
         };

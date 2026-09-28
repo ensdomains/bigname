@@ -89,6 +89,7 @@ impl Gathered {
     }
 
     fn source(&self) -> Value {
+        super::seams::note_submitted_rows(self.rows.len());
         Value::Array(self.rows.clone())
     }
 }

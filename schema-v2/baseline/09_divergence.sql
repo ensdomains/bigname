@@ -79,6 +79,7 @@ DECLARE
     manifest_authority jsonb;
     compared_project_row_xmin text;
     compared_publication jsonb;
+    compared_family_publication jsonb;
     compared_logical_name_id text;
     compared_name_row_xmin text;
 BEGIN
@@ -121,46 +122,101 @@ BEGIN
     compared_name_row_xmin :=
         compared_execution_authority ->> 'name_row_xmin';
 
-    IF compared_project_row_xmin IS NULL
-        OR btrim(compared_project_row_xmin) = ''
-    THEN
-        RETURN 'invalid_comparison';
-    END IF;
-
-    -- Lock the captured publication, including its generation, while a running
-    -- pass may be preparing its successor. Older callers without a publication
-    -- object retain the exact-head fence. Keep the one-block bound aligned with
+    -- With the publication switch on (TYR-36 step 7b), the caller captured the family
+    -- marker instead: the fence is the marker's sequence while it is live, and the Project
+    -- row's version is not compared. Keep the one-block bound aligned with
     -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
-    PERFORM 1
-    FROM chain_phase_state project
-    JOIN chain_lineage lineage
-      ON lineage.chain_id = project.chain_id
-     AND lineage.block_number = project.current_block_number
-     AND lineage.block_hash = project.current_block_hash
-     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-    WHERE project.chain_id = requested_authoritative_chain_id
-      AND project.phase_name = 'project'
-      AND project.phase_status IN ('completed', 'running')
-      AND project.current_block_number::text = COALESCE(
-          compared_publication ->> 'block_number',
-          requested_authoritative_block_number::text
-      )
-      AND project.current_block_hash = COALESCE(
-          compared_publication ->> 'block_hash',
-          requested_authoritative_block_hash
-      )
-      AND requested_authoritative_block_number - project.current_block_number BETWEEN 0 AND 1
-      AND (project.current_block_number <> requested_authoritative_block_number
-           OR project.current_block_hash = requested_authoritative_block_hash)
-      AND (compared_publication IS NULL OR (
-          project.input_content_hash = compared_publication ->> 'input_content_hash'
-          AND project.xmin::text = compared_publication ->> 'row_xmin'
-      ))
-      AND project.xmin::text = compared_project_row_xmin
-    FOR SHARE OF project, lineage;
+    compared_family_publication :=
+        compared_execution_authority -> 'family_publication';
+    IF compared_family_publication IS NOT NULL THEN
+        -- Redo begins by locking this chain's phase rows in phase-name order. Hold
+        -- the same rows through the caller's commit, without comparing ordinary row
+        -- versions, so a redo cannot start after admission but before a ledger mutation.
+        PERFORM 1
+        FROM chain_phase_state input_phase
+        WHERE input_phase.chain_id = requested_authoritative_chain_id
+          AND input_phase.phase_name IN ('interpret', 'project')
+        ORDER BY input_phase.phase_name
+        FOR SHARE;
 
-    IF NOT FOUND THEN
-        RETURN 'project_changed';
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
+
+        -- Only the lookup builds this object, with every field; a missing field fails the
+        -- equality match below and reads as project_changed.
+        PERFORM 1
+        FROM project_family_marker marker
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = marker.chain_id
+         AND lineage.block_number = marker.current_block_number
+         AND lineage.block_hash = marker.current_block_hash
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE marker.chain_id = requested_authoritative_chain_id
+          AND marker.state = 'live'
+          AND marker.sequence::text = compared_family_publication ->> 'sequence'
+          AND marker.current_block_number::text =
+              compared_family_publication ->> 'block_number'
+          AND marker.current_block_hash = compared_family_publication ->> 'block_hash'
+          AND marker.input_content_hash =
+              compared_family_publication ->> 'input_content_hash'
+          AND requested_authoritative_block_number - marker.current_block_number BETWEEN 0 AND 1
+          AND (marker.current_block_number <> requested_authoritative_block_number
+               OR marker.current_block_hash = requested_authoritative_block_hash)
+          AND NOT EXISTS (
+              SELECT 1 FROM chain_phase_state input_phase
+              WHERE input_phase.chain_id = marker.chain_id
+                AND input_phase.phase_name IN ('interpret', 'project')
+                AND input_phase.redo_in_progress
+                AND input_phase.redo_from_block_number <= marker.current_block_number
+          )
+        FOR SHARE OF marker, lineage;
+
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
+    ELSE
+        IF compared_project_row_xmin IS NULL
+            OR btrim(compared_project_row_xmin) = ''
+        THEN
+            RETURN 'invalid_comparison';
+        END IF;
+
+        -- Lock the captured publication, including its generation, while a running
+        -- pass may be preparing its successor. Older callers without a publication
+        -- object retain the exact-head fence. Keep the one-block bound aligned with
+        -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
+        PERFORM 1
+        FROM chain_phase_state project
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = project.chain_id
+         AND lineage.block_number = project.current_block_number
+         AND lineage.block_hash = project.current_block_hash
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE project.chain_id = requested_authoritative_chain_id
+          AND project.phase_name = 'project'
+          AND project.phase_status IN ('completed', 'running')
+          AND project.current_block_number::text = COALESCE(
+              compared_publication ->> 'block_number',
+              requested_authoritative_block_number::text
+          )
+          AND project.current_block_hash = COALESCE(
+              compared_publication ->> 'block_hash',
+              requested_authoritative_block_hash
+          )
+          AND requested_authoritative_block_number - project.current_block_number BETWEEN 0 AND 1
+          AND (project.current_block_number <> requested_authoritative_block_number
+               OR project.current_block_hash = requested_authoritative_block_hash)
+          AND (compared_publication IS NULL OR (
+              project.input_content_hash = compared_publication ->> 'input_content_hash'
+              AND project.xmin::text = compared_publication ->> 'row_xmin'
+          ))
+          AND project.xmin::text = compared_project_row_xmin
+        FOR SHARE OF project, lineage;
+
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
     END IF;
 
     IF jsonb_typeof(requested_observed_positions) IS DISTINCT FROM 'object'
@@ -202,7 +258,16 @@ BEGIN
     -- Match project publication order: name_current is locked before
     -- record_inventory_current. This prevents serving-path writes from
     -- deadlocking with a same-height projection swap.
-    IF compared_logical_name_id IS NULL
+    IF compared_family_publication IS NOT NULL THEN
+        -- The composed name was read in the same snapshot as this locked marker.
+        IF compared_logical_name_id IS NOT NULL AND (
+            compared_execution_authority #>> '{family_name,logical_name_id}'
+                IS DISTINCT FROM compared_logical_name_id
+            OR compared_name_row_xmin IS DISTINCT FROM compared_family_publication ->> 'sequence'
+        ) THEN
+            RETURN 'name_changed';
+        END IF;
+    ELSIF compared_logical_name_id IS NULL
         AND compared_name_row_xmin IS NULL
     THEN
         NULL;
@@ -273,6 +338,23 @@ BEGIN
         OR compared_row_xmin IS NULL
     THEN
         RETURN 'invalid_comparison';
+    END IF;
+
+    IF compared_family_publication IS NOT NULL THEN
+        -- All record families are published atomically with the marker. The input payload is
+        -- composed by lookup in that captured snapshot; neither the payload nor its results
+        -- are persisted as reusable serving data.
+        IF compared_execution_authority #>> '{family_comparison,resource_id}'
+                IS DISTINCT FROM compared_resource_id::text
+            OR compared_execution_authority #>> '{family_comparison,boundary_key}'
+                IS DISTINCT FROM compared_boundary_key
+            OR compared_execution_authority #>> '{family_comparison,publication_sequence}'
+                IS DISTINCT FROM compared_row_xmin
+            OR compared_row_xmin IS DISTINCT FROM compared_family_publication ->> 'sequence'
+        THEN
+            RETURN 'record_changed';
+        END IF;
+        RETURN 'unchanged';
     END IF;
 
     PERFORM 1
@@ -383,6 +465,17 @@ BEGIN
             RETURN 'guard_rejected';
     END CASE;
 
+    IF compared_execution_authority -> 'family_publication' IS NOT NULL THEN
+        -- The guard holds the captured publication until this transaction commits. Lookup
+        -- supplies the composed inventory from that publication; apply the identical indexed
+        -- evaluator below, including unsupported coverage and default-address rules.
+        compared_entries := compared_execution_authority #> '{family_comparison,entries}';
+        compared_provenance := compared_execution_authority #> '{family_comparison,provenance}';
+        compared_support_status := CASE
+            WHEN compared_execution_authority #>> '{family_comparison,coverage,status}' = 'projected'
+            THEN 'supported' ELSE 'unsupported' END;
+        resolver_path := compared_execution_authority #> '{family_name,resolver_path}';
+    ELSE
     SELECT inventory.entries,
            inventory.provenance,
            inventory.support_status,
@@ -400,8 +493,12 @@ BEGIN
       AND inventory.xmin::text = compared_row_xmin
     FOR SHARE OF inventory, name;
 
-    IF NOT FOUND
-        OR jsonb_typeof(resolver_path) IS DISTINCT FROM 'array'
+        IF NOT FOUND THEN
+            RETURN 'guard_rejected';
+        END IF;
+    END IF;
+
+    IF jsonb_typeof(resolver_path) IS DISTINCT FROM 'array'
         OR jsonb_array_length(resolver_path) = 0
         OR resolver_path -> (jsonb_array_length(resolver_path) - 1)
                 ->> 'chain_id' <> requested_resolver_chain_id

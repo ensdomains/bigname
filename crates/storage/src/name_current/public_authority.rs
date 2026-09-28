@@ -55,17 +55,20 @@ pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str>
     }
 }
 
-/// Keeps rows whose exact-name row serves the public `authority` value, as
-/// [`name_current_public_authority`] maps it. One primary-key probe per candidate row.
-pub(crate) fn push_public_authority_filter<'a>(
+/// Keeps rows whose exact-name row in `names` serves the public `authority` value, as
+/// [`name_current_public_authority`] maps it. One primary-key probe per candidate row. `names` is
+/// `bigname_phase.name_current`, or a relation with its `logical_name_id` and `provenance`
+/// columns (the composed name rows of a family read).
+pub(crate) fn push_public_authority_filter_in<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
+    names: &str,
     logical_name_id: &str,
     authority: &'a str,
 ) {
     builder.push(format!(
         r#" AND EXISTS (
                 SELECT 1
-                FROM bigname_phase.name_current authority_nc
+                FROM {names} authority_nc
                 WHERE authority_nc.logical_name_id = {logical_name_id}
                   AND authority_nc.provenance #> '{{authority_selection,ownerless_registry}}'
                       IS DISTINCT FROM 'true'::jsonb

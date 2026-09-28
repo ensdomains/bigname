@@ -15,10 +15,6 @@
 //! Inline reads of served projection tables. Each must be replaced by a family read before step 7
 //! serves the reader that holds it:
 //!
-//! - `/aliases` (`collections.rs`), binding arm: reads `name_current` directly for the selected
-//!   binding, resource and token lineage ids, the raw name and namehash it returns, and the
-//!   shared current-name readability predicates (`DEFAULT_NAME_CURRENT_READ_FILTER`). That is
-//!   both its eligibility and its payload.
 //! - `load_bound_names_shadow` (`resolver.rs`): only the resolver match comes from
 //!   `project_resource_pointer`. The name's eligibility, the registration, release and control
 //!   checks, the namespace filter and the page order are `name_current` columns, the same
@@ -38,9 +34,6 @@
 //!
 //! Inline reads of `normalized_events`:
 //!
-//! - The declaration fallback in `load_resolver_shadow` (`resolver.rs`) reads the latest
-//!   `SourceManifestUpdated` of each manifest. Interim: it covers a resolver with no
-//!   classification row and has no place once the table is complete, so it goes before step 7.
 //! - `/links` (`collections.rs`) looks up each link's event by identity for its block hash and
 //!   transaction hash, and the wildcard arm of `load_name_topology_shadow` (`name_topology.rs`)
 //!   looks up the boundary event for its id and block hash. These are metadata lookups by key
@@ -52,15 +45,6 @@
 //!
 //! Known gaps outside this file:
 //!
-//! - `/roles` (`collections.rs`) mirrors only the resource predicate of the served permissions
-//!   read filter, so for corresponding grant facts the served results are contained in the
-//!   shadow's. The filter's other two predicates have no counterpart, because `project_grant`
-//!   carries no block hash or row state: a readable resource can sit beside a grant row whose own
-//!   canonicality state is unreadable, and the publication block can be orphaned. Orphaning the
-//!   publication need not orphan the granting event, so no family undo may ever remove the grant.
-//!   In both cases today's reader drops a grant the shadow keeps. Row-state and publication-lineage
-//!   parity are prerequisites for serving `/roles` from the families, with the masks and the
-//!   `grant_event` provenance.
 //! - The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
 //!   surface is unreadable. Today's `DEFAULT_CHILDREN_CURRENT_READ_FILTER` also keeps such a child
 //!   when `provenance.label.source = 'label_preimage'`. No current writer sets that key: the only

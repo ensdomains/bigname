@@ -37,6 +37,7 @@ use paging::{load_event_history_rows, load_history, load_history_head};
 use read_filter::{EventHistoryReadFilter, event_history_read_filter};
 use selectors::{name_history_selector, resource_history_selector};
 
+pub(crate) use attribution::load_attribution_map;
 pub use attribution::load_bounded_record_attribution;
 pub use block_window::resolve_chain_block_ranges;
 #[cfg(any(test, feature = "test-support"))]

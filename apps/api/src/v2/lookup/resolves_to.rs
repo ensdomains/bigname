@@ -61,37 +61,57 @@ pub(super) async fn render_resolves_to_lookup_results(
     let selected_snapshot = served_head.map(ServedHead::selected);
     for input in inputs.iter().filter(|input| is_resolves_to_input(input)) {
         let coin_type = input.coin_type.to_string();
-        let page = bigname_storage::load_address_records_current_page(
-            &state.pool,
-            &input.address,
-            &coin_type,
-            Some(public_namespaces),
-            AddressNamesCurrentDedupe::Surface,
-            None,
-            None,
-            AddressNamesCurrentSort::Name,
-            AddressNamesCurrentOrder::Asc,
-            input.resolves_to_cursor.as_ref(),
-            input.page_size,
-        )
-        .await
-        .map_err(|load_error| {
-            if input.resolves_to_cursor.is_some()
-                && load_error
-                    .to_string()
-                    .contains("page cursor does not match a grouped entry")
-            {
-                return invalid_lookup_cursor();
-            }
-            error!(
-                service = "api",
-                address = %input.address,
-                coin_type = %coin_type,
-                error = ?load_error,
-                "failed to load v2 lookup resolves_to records"
-            );
-            V2Error::internal_error("failed to load lookup resolves_to records")
-        })?;
+        let page = if bigname_storage::publication_source::serve_from_families() {
+            bigname_storage::families::records::load_family_resolves_to_page(
+                &state.pool,
+                &input.address,
+                &coin_type,
+                Some(public_namespaces),
+                AddressNamesCurrentDedupe::Surface,
+                None,
+                None,
+                AddressNamesCurrentSort::Name,
+                AddressNamesCurrentOrder::Asc,
+                input.resolves_to_cursor.as_ref(),
+                input.page_size,
+            )
+            .await
+        } else {
+            bigname_storage::load_address_records_current_page(
+                &state.pool,
+                &input.address,
+                &coin_type,
+                Some(public_namespaces),
+                AddressNamesCurrentDedupe::Surface,
+                None,
+                None,
+                AddressNamesCurrentSort::Name,
+                AddressNamesCurrentOrder::Asc,
+                input.resolves_to_cursor.as_ref(),
+                input.page_size,
+            )
+            .await
+        }
+        .map_err(crate::v2::snapshots::name_rows_error(
+            crate::v2::snapshots::SnapshotReadResource::Name,
+            |load_error| {
+                if input.resolves_to_cursor.is_some()
+                    && load_error
+                        .to_string()
+                        .contains("page cursor does not match a grouped entry")
+                {
+                    return invalid_lookup_cursor();
+                }
+                error!(
+                    service = "api",
+                    address = %input.address,
+                    coin_type = %coin_type,
+                    error = ?load_error,
+                    "failed to load v2 lookup resolves_to records"
+                );
+                V2Error::internal_error("failed to load lookup resolves_to records")
+            },
+        ))?;
 
         let logical_name_ids = page
             .entries
@@ -101,15 +121,18 @@ pub(super) async fn render_resolves_to_lookup_results(
         let name_records =
             bigname_storage::load_phase_identity_records_by_ids(&state.pool, &logical_name_ids)
                 .await
-                .map_err(|load_error| {
-                    error!(
-                        service = "api",
-                        address = %input.address,
-                        error = ?load_error,
-                        "failed to load v2 lookup resolves_to name records"
-                    );
-                    V2Error::internal_error("failed to load lookup resolves_to name records")
-                })?
+                .map_err(crate::v2::snapshots::name_rows_error(
+                    crate::v2::snapshots::SnapshotReadResource::Name,
+                    |load_error| {
+                        error!(
+                            service = "api",
+                            address = %input.address,
+                            error = ?load_error,
+                            "failed to load v2 lookup resolves_to name records"
+                        );
+                        V2Error::internal_error("failed to load lookup resolves_to name records")
+                    },
+                ))?
                 .into_iter()
                 .map(|record| (record.row.logical_name_id.clone(), record))
                 .collect::<BTreeMap<_, _>>();
@@ -118,17 +141,21 @@ pub(super) async fn render_resolves_to_lookup_results(
             &input.address,
             &coin_type,
             public_namespaces,
+            served_head.map(super::head::ServedHead::selected),
         )
         .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                address = %input.address,
-                error = ?load_error,
-                "failed to load v2 lookup resolves_to primary names"
-            );
-            V2Error::internal_error("failed to load lookup resolves_to primary names")
-        })?;
+        .map_err(crate::v2::snapshots::name_rows_error(
+            crate::v2::snapshots::SnapshotReadResource::Name,
+            |load_error| {
+                error!(
+                    service = "api",
+                    address = %input.address,
+                    error = ?load_error,
+                    "failed to load v2 lookup resolves_to primary names"
+                );
+                V2Error::internal_error("failed to load lookup resolves_to primary names")
+            },
+        ))?;
 
         let mut entries: Vec<(ReverseIdentityRecordRow, AddressNameResolution)> = Vec::new();
         for entry in &page.entries {

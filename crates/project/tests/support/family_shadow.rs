@@ -170,7 +170,12 @@ pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowRe
 
 /// Rebuild the families at `target` without comparing; returns the chain.
 pub async fn rebuild_families_at(pool: &PgPool, target: &Marker) -> Result<String> {
-    rebuild_families_with(pool, target, &FamilyOptions::new("family-shadow")).await
+    rebuild_families_with(
+        pool,
+        target,
+        &FamilyOptions::new(bigname_test_support::INTERPRETER_CONTENT_HASH),
+    )
+    .await
 }
 
 /// Rebuild the families at `target` with `options` without comparing; returns the chain.
@@ -232,6 +237,13 @@ async fn compare_family_reads_on(
         report.address_index_misses.len(),
         report.classification_fallbacks.len(),
     );
+    for (route, (served_us, family_us, reads)) in &report.read_timings {
+        eprintln!(
+            "FAMILY_SHADOW_TIMING target={} route={route} reads={reads} served_us={served_us} \
+             family_us={family_us}",
+            target.number
+        );
+    }
     Ok(report)
 }
 
@@ -250,7 +262,7 @@ pub async fn compare_family_reads_at(
 pub async fn assert_family_reads_match(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
     // First a rebuild that applies every work block below the target in rebuild ranges, then the
     // default rebuild, whose report is returned; both must read as today's readers do.
-    let ranges = FamilyOptions::new("family-shadow")
+    let ranges = FamilyOptions::new(bigname_test_support::INTERPRETER_CONTENT_HASH)
         .with_rebuild_ranges(RebuildRanges::Through(target.number));
     let chain_id = rebuild_families_with(pool, target, &ranges).await?;
     let ranged = compare_family_reads_on(pool, &chain_id, target).await?;

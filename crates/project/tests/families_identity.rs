@@ -1025,7 +1025,7 @@ async fn a_name_keeps_its_first_block_and_its_history_facts() -> Result<()> {
             REGISTRAR,
         )
         .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_name_history").await?;
     assert_eq!(rows.len(), 1);
     let first: String = sqlx::query_scalar(

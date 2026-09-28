@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 use bigname_domain::resolver_read::ensip19_default_fallback_target;
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{PgConnection, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
@@ -24,6 +24,7 @@ use super::{
         push_evm_entries_ctes,
     },
     resolves_to_filter::ADDRESS_RECORDS_CURRENT_READ_FILTER,
+    source::RowSource,
     types::{
         AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
         AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
@@ -74,44 +75,9 @@ pub struct AddressRecordsCurrentPage {
     pub next_cursor: Option<AddressNamesCurrentSortedCursor>,
 }
 
-/// Load a bounded page of current names whose `addr:<coin_type>` record resolves to `address`.
-///
-/// `coin_type` is the decimal ENSIP-9/SLIP-44 coin type. `namespaces` restricts rows to those
-/// public namespaces; `None` reads every namespace. Sort, order, dedupe, and the keyset cursor
-/// use the `address_names_current` vocabulary.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_address_records_current_page(
-    pool: &PgPool,
-    address: &str,
-    coin_type: &str,
-    namespaces: Option<&[String]>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-    cursor: Option<&AddressNamesCurrentSortedCursor>,
-    page_size: u64,
-) -> Result<AddressRecordsCurrentPage> {
-    let filter = AddressRecordsFilter {
-        address,
-        coins: AddressRecordsCoinSelector::Single(coin_type),
-        namespaces,
-        dedupe_by,
-        q,
-        authority,
-    };
-    let (rows, next_cursor) =
-        load_sorted_entries(pool, &filter, sort, order, cursor, page_size).await?;
-    Ok(AddressRecordsCurrentPage {
-        entries: rows.into_iter().map(|row| row.entry).collect(),
-        next_cursor,
-    })
-}
-
 /// Run one page statement (after validating a continuation cursor) and split the keyset page.
 pub(super) async fn load_sorted_entries(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     filter: &AddressRecordsFilter<'_>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
@@ -131,12 +97,12 @@ pub(super) async fn load_sorted_entries(
 
     if let Some(cursor) = cursor {
         ensure_cursor_matches_sort(sort, cursor)?;
-        ensure_cursor_exists(pool, filter, sort, cursor).await?;
+        ensure_cursor_exists(&mut *conn, filter, sort, cursor).await?;
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_page_statement(&mut builder, filter, sort, order, cursor, page_limit);
-    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+    let rows = builder.build().fetch_all(conn).await.with_context(|| {
         format!(
             "failed to load address_records_current page for {} sort {} order {}",
             filter.context(),
@@ -177,7 +143,7 @@ pub(super) fn push_page_statement<'a>(
     page_limit: i64,
 ) {
     push_entries_cte(builder, filter);
-    push_address_names_current_sortable_entries_cte(builder, sort);
+    push_address_names_current_sortable_entries_cte(builder, filter.source.names(), sort);
     builder.push(
         r#"
         SELECT
@@ -248,6 +214,7 @@ pub(super) struct AddressRecordsFilter<'a> {
     pub(super) dedupe_by: AddressNamesCurrentDedupe,
     pub(super) q: Option<&'a str>,
     pub(super) authority: Option<&'a str>,
+    pub(super) source: RowSource<'a>,
 }
 
 impl AddressRecordsFilter<'_> {
@@ -283,9 +250,9 @@ fn push_entries_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &AddressRecordsFilter<'a>,
 ) {
-    builder.push("\n        WITH ");
+    filter.source.push_with(builder);
     if filter.coins == AddressRecordsCoinSelector::Evm {
-        push_evm_address_rows_cte(builder, filter.address);
+        push_evm_address_rows_cte(builder, filter.source, filter.address);
     }
     builder.push(
         r#"filtered AS (
@@ -327,12 +294,13 @@ fn push_entries_cte<'a>(
             builder.push("arc.coin_type AS matched_coin_type");
         }
     }
-    builder.push(match filter.coins {
-        AddressRecordsCoinSelector::Single(_) => {
-            "\n            FROM bigname_phase.address_records_current arc"
+    builder.push("\n            FROM ");
+    match filter.coins {
+        AddressRecordsCoinSelector::Single(_) => filter.source.push_address_records(builder),
+        AddressRecordsCoinSelector::Evm => {
+            builder.push("evm_address_rows arc");
         }
-        AddressRecordsCoinSelector::Evm => "\n            FROM evm_address_rows arc",
-    });
+    }
     builder.push(
         r#"
             JOIN bigname_phase.name_surfaces surface
@@ -389,8 +357,9 @@ fn push_entries_cte<'a>(
         builder.push(" ESCAPE '\\'");
     }
     if let Some(authority) = filter.authority {
-        crate::name_current::push_public_authority_filter(
+        crate::name_current::push_public_authority_filter_in(
             builder,
+            filter.source.names(),
             "arc.logical_name_id",
             authority,
         );
@@ -446,14 +415,14 @@ fn push_entries_cte<'a>(
 }
 
 async fn ensure_cursor_exists(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     filter: &AddressRecordsFilter<'_>,
     sort: AddressNamesCurrentSort,
     cursor: &AddressNamesCurrentSortedCursor,
 ) -> Result<()> {
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_cursor_exists_statement(&mut builder, filter, sort, cursor);
-    let row = builder.build().fetch_one(pool).await.with_context(|| {
+    let row = builder.build().fetch_one(conn).await.with_context(|| {
         format!(
             "failed to validate address_records_current page cursor for {} sort {}",
             filter.context(),
@@ -475,7 +444,7 @@ pub(super) fn push_cursor_exists_statement<'a>(
     cursor: &'a AddressNamesCurrentSortedCursor,
 ) {
     push_entries_cte(builder, filter);
-    push_address_names_current_sortable_entries_cte(builder, sort);
+    push_address_names_current_sortable_entries_cte(builder, filter.source.names(), sort);
     builder.push(" SELECT EXISTS (SELECT 1 FROM ");
     builder.push(if sort.is_timestamp() {
         "sortable_entries"

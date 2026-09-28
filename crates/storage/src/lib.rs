@@ -164,6 +164,7 @@ pub use permissions::{
     load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
     load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
     load_permissions_current_resource_summary, load_registry_permission_registration_map,
+    load_serving_effective_permissions_page, load_serving_permission_summaries,
     permission_resource_matches_namespace, resource_is_registry_control_for_registrar_lease,
     resource_wrapped_a_registrar_lease,
 };
@@ -187,7 +188,8 @@ pub use record_inventory::{
     RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
     RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
     RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
-    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_abi_content_types,
+    count_record_inventory_selectors_by_lookup_keys,
+    load_family_record_inventory_abi_content_types, load_record_inventory_abi_content_types,
     load_record_inventory_current, load_record_inventory_current_for_snapshot,
     load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
 };

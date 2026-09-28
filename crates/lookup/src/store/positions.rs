@@ -41,20 +41,26 @@ pub(super) fn position_for_chain(positions: &Value, chain_id: &str) -> Result<Pr
     Ok(position)
 }
 
+/// The publication a lookup captures at its start and the database guard
+/// (`revalidate_resolution_lookup_state`) rechecks before any comparison is written.
+pub(super) struct CapturedPublication {
+    /// The Project row's position, interpreter hash and row version (`row_xmin`).
+    pub project: Value,
+    /// With the [publication switch](bigname_storage::publication_source) on, the family
+    /// marker's position, interpreter hash and `sequence`, which the guard compares instead of
+    /// the Project row's version.
+    pub family: Option<Value>,
+}
+
 pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
-) -> Result<Value> {
-    // The publication may trail the stored head within the shared lag tolerance (see
-    // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
-    // lineage and belong to this build's interpreter generation. While the publication switch is
-    // on, the family marker must pass the same admission and be `live` too.
-    let family_marker_admission = if bigname_storage::publication_source::serve_from_families() {
-        FAMILY_MARKER_ADMISSION
-    } else {
-        ""
-    };
-    let publication: Option<Value> = sqlx::query_scalar(&format!(
+) -> Result<CapturedPublication> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return super::family_rows::publication(transaction, head).await;
+    }
+    // The served publication may trail the head by the shared one-block tolerance.
+    let project: Option<Value> = sqlx::query_scalar(
         r#"
         SELECT jsonb_build_object(
             'row_xmin', project.xmin::text,
@@ -67,7 +73,7 @@ pub(super) async fn ensure_project_at_head(
           ON lineage.chain_id = project.chain_id
          AND lineage.block_number = project.current_block_number
          AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'){family_marker_admission}
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         WHERE project.chain_id = $1
           AND project.phase_name = 'project'
           AND project.phase_status IN ('completed', 'running')
@@ -75,7 +81,7 @@ pub(super) async fn ensure_project_at_head(
           AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
           AND project.input_content_hash = $4
         "#,
-    ))
+    )
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
@@ -84,43 +90,18 @@ pub(super) async fn ensure_project_at_head(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;
-    publication.ok_or_else(|| {
-        // With the switch on the marker's admission can refuse too, so the message names the
-        // owned key families; with it off the wording is unchanged.
-        LookupError::stale(if family_marker_admission.is_empty() {
-            format!(
+    project
+        .map(|project| CapturedPublication {
+            project,
+            family: None,
+        })
+        .ok_or_else(|| {
+            LookupError::stale(format!(
                 "projected state has not reached the newest processed {} block",
                 head.chain_id
-            )
-        } else {
-            format!(
-                "owned key families or projected state have not reached the newest processed {} \
-                 block",
-                head.chain_id
-            )
+            ))
         })
-    })
 }
-
-/// The family marker's admission while the publication switch is on. The generation the lookup
-/// records (`row_xmin`) stays the Project row's `xmin`: the database guard
-/// `revalidate_resolution_lookup_state` rechecks it against `chain_phase_state`, and moving it to
-/// the marker's `sequence` needs that guard redefined by a schema-migration. The lookup engine
-/// keeps reading the served tables, and that guard moves to the marker in the flip slice; no
-/// lookup input moves to the families before that, so the Project row's `xmin` still covers
-/// every input the lookup reads.
-const FAMILY_MARKER_ADMISSION: &str = r#"
-        JOIN project_family_marker marker
-          ON marker.chain_id = project.chain_id
-         AND marker.state = 'live'
-         AND marker.input_content_hash = $4
-         AND $2 - marker.current_block_number BETWEEN 0 AND $5
-         AND (marker.current_block_number <> $2 OR marker.current_block_hash = $3)
-        JOIN chain_lineage marker_lineage
-          ON marker_lineage.chain_id = marker.chain_id
-         AND marker_lineage.block_number = marker.current_block_number
-         AND marker_lineage.block_hash = marker.current_block_hash
-         AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"#;
 
 pub(super) async fn inventory_position(
     transaction: &mut Transaction<'_, Postgres>,
