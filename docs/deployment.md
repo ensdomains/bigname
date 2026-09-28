@@ -194,9 +194,12 @@ do not forward the variable: anyone running the binaries that way must pass
 `-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
 the `phases` invocations.
 
-Production leaves the switch off until the row and guard cutovers are complete:
-with it on, served-table reads can return inconsistent membership or counts
-(see [`api-v1.md`](api-v1.md), the publication switch paragraph).
+This release carries the guard cutover: with the switch on, the verified
+lookup's guard fences the family marker. Production still leaves the switch off
+until the row cutovers are complete: with it on, the reads that still use the
+served tables, the lookup's inputs among them, can return inconsistent
+membership or counts (see [`api-v1.md`](api-v1.md), the publication switch
+paragraph).
 
 ## Phase-runner configuration
 

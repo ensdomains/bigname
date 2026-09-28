@@ -1,4 +1,4 @@
-//! The served-lag gauges under the publication switch (TYR-36 step 7b-6, ruling J12): with
+//! The served-lag gauges under the publication switch (TYR-36 step 7b-6): with
 //! `BIGNAME_SERVE_FROM_FAMILIES` on, `phase_runner_served_lag_blocks` and
 //! `phase_runner_served_publication_block` measure the family marker, the publication the API
 //! then serves; with it off they keep measuring the Project row. The metrics task reads the
@@ -145,7 +145,7 @@ async fn served_lag_measures_the_family_marker_only_with_the_switch_on() -> Resu
         vec![(14.0, 90.0); 4]
     );
     // Switch on: only a live marker of this build is a publication; the rebuild window
-    // (ruling J14) and a missing or foreign marker report the unavailable -1.
+    // and a missing or foreign marker report the unavailable -1.
     assert_eq!(
         scrape_gauges(pool, true, &chains).await?,
         vec![(9.0, 95.0), (-1.0, -1.0), (-1.0, -1.0), (-1.0, -1.0)]

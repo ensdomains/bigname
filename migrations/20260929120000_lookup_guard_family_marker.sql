@@ -79,15 +79,8 @@ BEGIN
     compared_family_publication :=
         compared_execution_authority -> 'family_publication';
     IF compared_family_publication IS NOT NULL THEN
-        IF jsonb_typeof(compared_family_publication) IS DISTINCT FROM 'object'
-            OR compared_family_publication ->> 'sequence' IS NULL
-            OR compared_family_publication ->> 'block_number' IS NULL
-            OR compared_family_publication ->> 'block_hash' IS NULL
-            OR compared_family_publication ->> 'input_content_hash' IS NULL
-        THEN
-            RETURN 'invalid_comparison';
-        END IF;
-
+        -- Only the lookup builds this object, with every field; a missing field fails the
+        -- equality match below and reads as project_changed.
         PERFORM 1
         FROM project_family_marker marker
         JOIN chain_lineage lineage

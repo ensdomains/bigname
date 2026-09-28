@@ -144,7 +144,7 @@ const ADVANCE_FAMILY_SEQUENCE: &str = "UPDATE project_family_marker SET sequence
 const START_FAMILY_REBUILD: &str = "UPDATE project_family_marker \
      SET state = 'bootstrap_pending', sequence = sequence + 1";
 
-/// The flip's guard (TYR-36 step 7b-6, ruling J1): with the switch on, a family block committed
+/// The flip's guard (TYR-36 step 7b-6): with the switch on, a family block committed
 /// while the provider call runs, with the Project row unchanged, is refused with exactly the error
 /// the served guard gives when the Project row is republished with the switch off, and no
 /// divergence row is written.
@@ -196,7 +196,7 @@ async fn each_switch_state_guards_only_its_own_publication() -> AnyResult<()> {
     Ok(())
 }
 
-/// Ruling J14: a family rebuild that starts while the provider call runs leaves the marker
+/// A family rebuild that starts while the provider call runs leaves the marker
 /// `bootstrap_pending`, so with the switch on the lookup is refused (the API's 409 stale) and
 /// writes nothing; with the switch off the same rebuild changes nothing.
 #[tokio::test]
@@ -229,9 +229,9 @@ async fn guard_status(pool: &PgPool, execution_authority: &Value) -> AnyResult<S
     .await?)
 }
 
-/// The guard's own answers for a captured family publication: unchanged while the marker is, the
-/// served guard's `project_changed` for a stale sequence or a marker that is no longer `live`,
-/// and `invalid_comparison` for a publication without its sequence.
+/// The guard's own answers for a captured family publication: unchanged while the marker is, and
+/// the served guard's `project_changed` for a stale sequence, a publication without its
+/// sequence, or a marker that is no longer `live`.
 #[tokio::test]
 async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
@@ -258,9 +258,10 @@ async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
         .as_object_mut()
         .expect("family publication object")
         .remove("sequence");
+    // Only the lookup builds this object; a field it lacks fails the match and refuses.
     assert_eq!(
         guard_status(fixture.pool(), &unsequenced).await?,
-        "invalid_comparison"
+        "project_changed"
     );
 
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending'")
@@ -273,9 +274,12 @@ async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
 
     // Captured with the switch off, the authority carries no family publication and the guard
     // keeps comparing the Project row, whatever the marker says.
-    let served = crate::store::load_snapshot(fixture.pool(), &request)
-        .await?
-        .execution_authority;
+    let served = bigname_storage::publication_source::with_serve_from_families(
+        false,
+        crate::store::load_snapshot(fixture.pool(), &request),
+    )
+    .await?
+    .execution_authority;
     assert!(served.get("family_publication").is_none());
     assert_eq!(guard_status(fixture.pool(), &served).await?, "unchanged");
     fixture.cleanup().await?;

@@ -72,9 +72,10 @@ const FAMILY_MARKER_JOIN: &str = r#"
           ON marker.chain_id = known_chains.chain_id"#;
 
 /// `/v1/status` readiness. With the [publication switch](crate::publication_source) on, the
-/// indexed block and its timestamp are the family marker's (ruling J12: the publication the
+/// indexed block and its timestamp are the family marker's (the publication the
 /// fences serve), and the generation check is the marker's rule; with it off both are the Project
-/// row's. The Project phase status and redo flags come from the Project row either way.
+/// row's. The Project phase status and Project redo flag come from the Project row either way,
+/// and the Interpret redo flag from the Interpret row.
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
     let (project_generation_current, family_marker_join, projected) =
         if crate::publication_source::serve_from_families() {

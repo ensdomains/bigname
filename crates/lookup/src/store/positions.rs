@@ -118,9 +118,10 @@ pub(super) async fn ensure_project_at_head(
         })
 }
 
-/// The family marker's admission while the publication switch is on. The lookup inputs still
-/// come from the served tables, whose per-row versions the guard also rechecks; the publication
-/// generation the guard compares is the marker's `sequence` ([`FAMILY_PUBLICATION`]).
+/// The family marker's admission while the publication switch is on. The guard then fences the
+/// marker's `sequence` ([`FAMILY_PUBLICATION`]) and, beyond it, only the row versions the lookup
+/// read from `name_current` and `record_inventory_current`. The lookup still reads the served
+/// tables until step 7b slice 7, which moves its inputs to the families.
 const FAMILY_MARKER_ADMISSION: &str = r#"
         JOIN project_family_marker marker
           ON marker.chain_id = project.chain_id
@@ -134,7 +135,7 @@ const FAMILY_MARKER_ADMISSION: &str = r#"
          AND marker_lineage.block_hash = marker.current_block_hash
          AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"#;
 
-/// The captured family publication (ruling J1): the marker's position, interpreter hash and
+/// The captured family publication: the marker's position, interpreter hash and
 /// `sequence` as text, which `revalidate_resolution_lookup_state` requires unchanged and `live`.
 const FAMILY_PUBLICATION: &str = r#"jsonb_build_object(
             'sequence', marker.sequence::text,

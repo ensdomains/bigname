@@ -735,10 +735,10 @@ read the [family marker](glossary.md#family-marker), which must also pass the
 rest of the serving fence: `live`, on readable lineage, and at most one block
 behind the stored head. With the switch on, the projected block and its
 timestamp (`indexed_block`, and the lags computed from them) are the marker's
-too. The Project phase state and the redo markers still come from the project
-row. With either setting, while an Interpret or Project redo is in progress
-`lag_blocks` and `lag_seconds` are `null`, because the redo holds both the
-stored head and the indexed position still and their difference would read 0.
+too. The Project phase state and the Project redo flag still come from the
+Project row, and the Interpret redo flag from the Interpret row. With either setting,
+while an Interpret or Project redo is in progress `lag_blocks` and
+`lag_seconds` are `null`, because lag is unknown during a redo.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -897,9 +897,9 @@ and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
 its post-call guard compares the marker's `sequence` (see the served-generation
-paragraph above). The lookup engine's inputs still come from the served tables,
-whose per-row versions the guard also compares; they move to the families
-before the served batch stops.
+paragraph above) and, beyond the marker, only the row versions the lookup read
+from `name_current` and `record_inventory_current`. The lookup still reads the
+served tables until step 7b slice 7, which moves its inputs to the families.
 
 With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
 instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name

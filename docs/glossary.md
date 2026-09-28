@@ -2552,7 +2552,9 @@ stored head by at most one block, and the marker's `sequence` is the served
 generation a same-request recheck compares, and the verified lookup's guard
 compares too. With the switch on `/v1/status` and the served-lag gauges take
 the projected block from the marker, while the Project phase state still comes
-from the Project row.
+from the Project row. During a family rebuild (`bootstrap_pending`) status
+shows the rebuild's progress block as `indexed_block` and reports `degraded`,
+while the gauges show the unavailable -1.
 
 ## Publication switch
 
