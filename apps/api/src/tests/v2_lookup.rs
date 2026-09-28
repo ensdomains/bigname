@@ -5326,7 +5326,7 @@ async fn reverse_readability_rechecks_the_same_stored_address() -> Result<()> {
         cursor: None,
     });
     let namespaces = vec!["ens".to_owned()];
-    let before = load_reverse(&database.lookup_pool, &requests, &namespaces).await?;
+    let before = load_reverse(&database.lookup_pool, &requests, &namespaces, None).await?;
     assert_eq!(before.len(), 2);
     for group in before {
         assert_eq!(group.total_count, Some(1));
@@ -5350,7 +5350,7 @@ async fn reverse_readability_rechecks_the_same_stored_address() -> Result<()> {
     .execute(&database.lookup_pool)
     .await?;
     assert_eq!(changed.rows_affected(), 1);
-    let after = load_reverse(&database.lookup_pool, &requests, &namespaces).await?;
+    let after = load_reverse(&database.lookup_pool, &requests, &namespaces, None).await?;
     assert_eq!(after.len(), 2);
     assert_eq!(after[0].input, requests[0]);
     assert_eq!(after[0].total_count, Some(0));
@@ -5422,7 +5422,7 @@ async fn reverse_plan_pages(
     let mut names = Vec::new();
     let mut first_cursor = None;
     loop {
-        let groups = load_reverse(&database.lookup_pool, &[request.clone()], namespaces).await?;
+        let groups = load_reverse(&database.lookup_pool, &[request.clone()], namespaces, None).await?;
         assert_eq!(groups.len(), 1);
         let group = &groups[0];
         assert_eq!(group.total_count, Some(expected.len() as u64));
@@ -5551,7 +5551,7 @@ async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
             page_size: 2,
             cursor: None,
         });
-    let empty = load_reverse(&database.lookup_pool, &[], &namespaces).await?;
+    let empty = load_reverse(&database.lookup_pool, &[], &namespaces, None).await?;
     assert!(empty.is_empty());
     assert!(
         explain_page(&database.lookup_pool, &[], &namespaces)
@@ -5661,7 +5661,7 @@ async fn reverse_readability_plans_follow_address_candidates() -> Result<()> {
         }
         let mut batch = [0, 3, 4, 5].map(|case| cases[case][0].clone()).to_vec();
         batch.push(missing.clone());
-        let groups = load_reverse(&database.lookup_pool, &batch, &namespaces).await?;
+        let groups = load_reverse(&database.lookup_pool, &batch, &namespaces, None).await?;
         let expected_batch = [
             &expected[0][..2],
             &expected[1][2..4],

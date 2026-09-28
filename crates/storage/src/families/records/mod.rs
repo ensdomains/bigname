@@ -27,6 +27,7 @@ mod primary;
 mod resolves_to;
 mod resolves_to_serving;
 mod reverse;
+mod reverse_page;
 mod rows;
 mod serving;
 mod shadow;
@@ -65,6 +66,9 @@ pub use resolves_to::{
 };
 pub use resolves_to_serving::{load_family_resolves_to_evm_page, load_family_resolves_to_page};
 pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
+pub use reverse_page::{
+    load_family_reverse_identity_groups, load_family_reverse_primary_snapshots,
+};
 pub use shadow::{ShadowReport, compare_family_reads, compare_family_reads_excusing};
 
 /// The resolver address a clear writes: the zero address, or the empty string for a pointer event

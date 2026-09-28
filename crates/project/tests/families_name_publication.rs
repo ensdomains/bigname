@@ -55,8 +55,7 @@ async fn registered(fixture: &Fixture) -> Result<()> {
             REGISTRAR,
         )
         .await?;
-    let outcome = fixture.apply(12, FamilyMode::Normal).await;
-    ensure!(outcome.skipped.is_none(), "families at 12: {outcome:?}");
+    fixture.apply(12, FamilyMode::Normal).await?;
     ensure!(load_family_name(&fixture.pool, &name(1)).await?.is_some());
     Ok(())
 }
@@ -231,11 +230,7 @@ async fn an_expiring_page_ignores_another_namespaces_rebuild() -> Result<()> {
     fixture.lineage(BASE, 20).await?;
     basenames_grant(&fixture, 2, json!(2_000_000_100u64)).await?;
     basenames_grant(&fixture, 3, json!(2_000_000_200.5)).await?;
-    let outcome = fixture.apply_on(BASE, 12).await;
-    ensure!(
-        outcome.skipped.is_none(),
-        "{BASE} families at 12: {outcome:?}"
-    );
+    fixture.apply_on(BASE, 12).await?;
     let (integral, inexact): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE expiry_seconds IS NOT NULL),
                 count(*) FILTER (WHERE expiry_seconds IS NULL
