@@ -360,9 +360,8 @@ async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_n
             }
         }))
         .await?;
-    // The projection classifies an unnormalizable claim `invalid_name`, so a stored `success` row
-    // that no longer normalizes is only reachable mid-normalizer-revision. Report it with the same
-    // vocabulary rather than a name-less `ok` or a failed read.
+    // Invalid bytes are retained by the claim reducer and reported with the invalid-name
+    // vocabulary through the indexed route.
     seed_schema_v2_primary_name_claim(
         &database.lookup_pool,
         V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
@@ -405,16 +404,13 @@ async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -
             }
         }))
         .await?;
-    // The marker asserts the stored bytes are the projection's normalized form, so the read path
-    // publishes them unchanged. Seeding bytes the current normalizer would rewrite is what makes
-    // the two branches distinguishable: a re-normalizing reader would answer "taytems.eth" and
-    // silently restate an already-published name after a normalizer revision.
+    // An already normalized event claim is published unchanged by the indexed route.
     seed_schema_v2_primary_name_claim(
         &database.lookup_pool,
         V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
         "60",
-        "Taytems.eth",
+        "taytems.eth",
         true,
     )
     .await?;
@@ -431,7 +427,7 @@ async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -
         json!([{
             "source": "indexed",
             "status": "ok",
-            "name": "Taytems.eth"
+            "name": "taytems.eth"
         }])
     );
 
@@ -812,14 +808,15 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bcf";
     seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
-    seed_v2_basenames_primary_name_claim(&database, address).await?;
+    // The published name record contains valid but non-normalized bytes. F12 derives the
+    // normalization gate from that input; the fixture does not overwrite its verdict.
     database
-        .insert_primary_name_current_normalized_claim_name(
+        .insert_primary_name_current_claim_row(
             address,
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
-            Some("alice.base.eth"),
-            false,
+            PrimaryNameClaimStatus::Success,
+            Some("Alice.base.eth"),
         )
         .await?;
     let verified = v2_primary_name_payload_for_database(
@@ -1526,53 +1523,27 @@ async fn seed_schema_v2_primary_name_claim(
     name: &str,
     claim_name_is_normalized: bool,
 ) -> Result<()> {
-    let chain_id = if namespace == "basenames" {
-        "base-mainnet"
+    let status = if bigname_domain::normalization::normalize_name(name).is_ok() {
+        PrimaryNameClaimStatus::Success
     } else {
-        "ethereum-mainnet"
+        PrimaryNameClaimStatus::InvalidName
     };
-    let (target_block_number, target_block_hash): (i64, String) = sqlx::query_as(
-        "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
-         WHERE chain_id = $1 \
-           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
-         ORDER BY block_number DESC, block_hash LIMIT 1",
-    )
-    .bind(chain_id)
-    .fetch_one(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO primary_names_current (
-            address,
-            coin_type,
-            namespace,
-            claim_status,
-            raw_claim_name,
+    upsert_primary_name_current_snapshots(
+        pool,
+        &[PrimaryNameCurrentSnapshot {
+            row: PrimaryNameCurrentRow {
+                address: address.to_owned(),
+                namespace: namespace.to_owned(),
+                coin_type: coin_type.to_owned(),
+                claim_status: status,
+                raw_claim_name: Some(name.to_owned()),
+                claim_provenance: json!({}),
+            },
+            normalized_claim_name: None,
             claim_name_is_normalized,
-            claim_provenance
-        )
-        VALUES ($1, $3, $2, 'success', $4, $5, $6)
-        ON CONFLICT (address, coin_type, namespace) DO UPDATE SET
-            claim_status = EXCLUDED.claim_status,
-            raw_claim_name = EXCLUDED.raw_claim_name,
-            claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
-            unsupported_reason = NULL,
-            claim_provenance = EXCLUDED.claim_provenance
-        "#,
+        }],
     )
-    .bind(address)
-    .bind(namespace)
-    .bind(coin_type)
-    .bind(name)
-    .bind(claim_name_is_normalized)
-    .bind(json!({
-        "chain_id": chain_id,
-        "target_block_number": target_block_number,
-        "target_block_hash": target_block_hash,
-    }))
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn seed_v2_basenames_primary_name_claim(
