@@ -2348,7 +2348,11 @@ production reader serves from today's tables at the same publication. Shadow
 reads run only in tests and the fixture-corpus harness. A differing field passes
 only as a disclosed same-block ordering case or under a named cause whose check
 holds for that field, and no API response uses a shadow read
-([projections](projections.md#owned-key-families)).
+([projections](projections.md#owned-key-families)). With the
+[publication switch](#publication-switch) off, the default, no served path reads
+the families or their marker; with it on, the API fences on the
+[family marker](#family-marker), while its rows still come from today's tables
+until the later step 7b slices move each route onto the families.
 
 ## Sidecar
 

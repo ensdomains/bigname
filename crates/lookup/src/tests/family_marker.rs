@@ -65,3 +65,43 @@ async fn lookup_serves_beside_a_live_family_marker_and_ignores_it_with_the_switc
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn lookup_is_stale_without_a_family_marker_row_with_the_switch_on() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    let lookup = |on| {
+        bigname_storage::publication_source::with_serve_from_families(
+            on,
+            run_lookup(&fixture, "http://127.0.0.1:1"),
+        )
+    };
+
+    let error = lookup(true)
+        .await
+        .expect_err("a chain without a marker row has no published families");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    assert_eq!(
+        error.message(),
+        format!(
+            "owned key families or projected state have not reached the newest processed \
+             {ETHEREUM} block"
+        )
+    );
+
+    // Switch off, the Project row governs and the wording is unchanged.
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'another-build' WHERE phase_name = 'project'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    let error = lookup(false)
+        .await
+        .expect_err("a Project row from another build is not servable");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    assert_eq!(
+        error.message(),
+        format!("projected state has not reached the newest processed {ETHEREUM} block")
+    );
+    fixture.cleanup().await?;
+    Ok(())
+}

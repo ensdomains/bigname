@@ -880,11 +880,20 @@ interpreter content hash, sit on readable lineage, and trail the stored head by
 at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
-for equality, so nothing changes on the wire, except that a continuation cursor
-issued before the switch was turned on returns `409 stale` once and must
-restart. Collection expiry filters, such as `include_expired=false` on
-subnames, are evaluated at the published block's timestamp on the first page and
-every continuation, not at the time of the first request; a scope spanning
+for equality, so nothing changes on the wire, except that turning the switch on
+or off makes every continuation cursor issued before the change return
+`409 stale` once, asking the client to restart pagination without the cursor.
+Until the later step 7b slices move a route's rows onto the families, that
+route still reads the served tables while the switch is on. The served rows are
+committed before the family marker moves, so a served batch that lands between
+a read's first check and its recheck leaves the marker's `sequence` unchanged,
+and the check that refuses a read when the publication changed while the
+request was being read does not refuse it. The per-row snapshot checks still
+refuse any row newer than the selected position.
+
+With the switch on, collection expiry filters, such as `include_expired=false`
+on subnames, are evaluated at the published block's timestamp on the first page
+and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
 its post-call guard still compares the project row's generation.

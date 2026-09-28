@@ -362,9 +362,8 @@ async fn load_phase_head_position(
     let publication = super::project::load_current_project_publication(pool, &requirement.chain_id)
         .await?
         .ok_or_else(|| {
-            SnapshotSelectionError::stale(format!(
-                "chain {} project phase is not published at its current schema-v2 head",
-                requirement.chain_id
+            SnapshotSelectionError::stale(super::project::unpublished_message(
+                &requirement.chain_id,
             ))
         })?;
     let (block_hash, block_number) = if publication.block_number == latest_block_number
@@ -376,9 +375,10 @@ async fn load_phase_head_position(
             > super::project::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS
         {
             return Err(SnapshotSelectionError::stale(format!(
-                "chain {} project phase is not published at its current schema-v2 head \
-                 (publication at {} lags head {} beyond tolerance)",
-                requirement.chain_id, publication.block_number, latest_block_number
+                "{} (publication at {} lags head {} beyond tolerance)",
+                super::project::unpublished_message(&requirement.chain_id),
+                publication.block_number,
+                latest_block_number
             )));
         }
         if publication.block_number < block_number {

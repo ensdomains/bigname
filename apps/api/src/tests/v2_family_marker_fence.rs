@@ -355,3 +355,128 @@ async fn api_preflight_requires_the_family_marker_only_with_the_switch_on() -> R
     assert!(missing(false).await?.is_empty(), "switch off: nothing reads it");
     database.cleanup().await
 }
+
+/// Flipping the switch changes the generation a cursor's publication token is built from (the
+/// Project row's `xmin` or the marker's `sequence`), so an outstanding continuation is refused
+/// once with a restart in either direction; a fresh first page then paginates normally.
+#[tokio::test]
+async fn v2_a_cursor_restarts_once_when_the_switch_flips_either_way() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_live_family_marker(&database.pool, 1).await?;
+    let first_page = "/v1/names/Parent.eth/subnames?page_size=1";
+    let next_cursor = |payload: &Value| {
+        payload["page"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned)
+            .context("the first page has a continuation")
+    };
+
+    for (issued, continued) in [(false, true), (true, false)] {
+        let label = format!("issued with the switch {issued}, continued with it {continued}");
+        let cursor = bigname_storage::publication_source::with_serve_from_families(
+            issued,
+            v2_subnames_payload_for_database(&database, first_page),
+        )
+        .await?;
+        let cursor = next_cursor(&cursor)?;
+
+        bigname_storage::publication_source::with_serve_from_families(continued, async {
+            let response = v2_subnames_response_for_database(
+                &database,
+                &format!("{first_page}&cursor={cursor}"),
+            )
+            .await?;
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
+            let body: Value = read_json(response).await?;
+            assert_eq!(body["error"]["code"], json!("stale"), "{label}");
+            assert_eq!(
+                body["error"]["message"],
+                json!(
+                    "collection publication is no longer available; restart pagination without \
+                     a cursor"
+                ),
+                "{label}"
+            );
+
+            let restarted = v2_subnames_payload_for_database(&database, first_page).await?;
+            let cursor = next_cursor(&restarted)?;
+            v2_subnames_payload_for_database(&database, &format!("{first_page}&cursor={cursor}"))
+                .await?;
+            anyhow::Ok(())
+        })
+        .await?;
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn api_preflight_requires_a_readable_family_marker_only_with_the_switch_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let role = format!("marker_preflight_{}", std::process::id());
+    for statement in [
+        format!("CREATE ROLE {role} NOLOGIN"),
+        format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"),
+        format!("REVOKE SELECT ON bigname_phase.project_family_marker FROM {role}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&database.lookup_pool)
+            .await?;
+    }
+    let config = database.database_config(1)?;
+    let options =
+        PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?;
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let set_role = set_role.clone();
+            Box::pin(async move { sqlx::query(&set_role).execute(connection).await.map(|_| ()) })
+        })
+        .connect_with(options)
+        .await?;
+    let marker_missing = |on| {
+        let pool = pool.clone();
+        bigname_storage::publication_source::with_serve_from_families(on, async move {
+            let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+            anyhow::Ok(
+                missing
+                    .iter()
+                    .any(|object| object.identity == "bigname_phase.project_family_marker"),
+            )
+        })
+    };
+    assert!(
+        marker_missing(true).await?,
+        "switch on: an unreadable marker is listed"
+    );
+    assert!(
+        !marker_missing(false).await?,
+        "switch off: nothing reads the marker"
+    );
+    let error = bigname_storage::publication_source::with_serve_from_families(
+        true,
+        crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool),
+    )
+    .await
+    .expect_err("startup must reject an unreadable marker with the switch on");
+    assert!(
+        format!("{error:#}").contains("bigname_phase.project_family_marker"),
+        "unexpected error: {error:#}"
+    );
+    bigname_storage::publication_source::with_serve_from_families(
+        false,
+        crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool),
+    )
+    .await
+    .expect("switch off: startup does not need the marker");
+    pool.close().await;
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    database.cleanup().await
+}

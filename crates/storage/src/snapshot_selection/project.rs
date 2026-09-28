@@ -23,6 +23,20 @@ JOIN bigname_phase.chain_phase_state project
 /// wedged or paused Project surfaces within one block instead of serving old data.
 pub const PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS: i64 = 1;
 
+/// Why a chain has no servable publication, for a `409 stale`: the Project row's wording with the
+/// [publication switch](crate::publication_source) off (unchanged from before the switch), the
+/// family marker's with it on, so an operator reading it during a family rebuild looks at the
+/// marker.
+pub(super) fn unpublished_message(chain_id: &str) -> String {
+    if crate::publication_source::serve_from_families() {
+        format!(
+            "chain {chain_id} owned key families are not published at its current schema-v2 head"
+        )
+    } else {
+        format!("chain {chain_id} project phase is not published at its current schema-v2 head")
+    }
+}
+
 /// The project phase's completed publication for this binary's interpreter generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProjectPublication {
@@ -158,6 +172,14 @@ const SERVED_PROJECT_ROW_GENERATION: &str = r#"
 
 /// The marker's `sequence` grows with every family block and undo, so it is the generation a
 /// same-request recheck compares. The Interpret-not-in-redo clause stays on `chain_phase_state`.
+///
+/// Interim gap (TYR-36 step 7b, disclosed in docs/api-v1.md under the publication switch): until
+/// slices 2 to 4 move a route's rows onto the owned key families, that route still reads the
+/// served tables, which the served Project batch commits before the family block moves the
+/// marker. A served batch landing between a read's capture and its recheck therefore leaves
+/// `sequence` unchanged and passes this check; only the per-row snapshot checks (no row target
+/// newer than the selected position) still refuse. The guard closes for a route once its rows
+/// come from the families, whose block commit advances `sequence` in the same transaction.
 const SERVED_FAMILY_MARKER_GENERATION: &str = r#"
         SELECT marker.sequence::TEXT
         FROM bigname_phase.chain_heads head
@@ -215,22 +237,16 @@ pub(super) async fn validate_current_project_publications(
             ))
         })?;
         let Some(latest_block_number) = latest_block_number else {
-            return Err(SnapshotSelectionError::stale(format!(
-                "chain {chain_id} project phase is not published at its current schema-v2 head"
-            )));
+            return Err(SnapshotSelectionError::stale(unpublished_message(chain_id)));
         };
         let publication = load_current_project_publication(pool, chain_id)
             .await?
-            .ok_or_else(|| {
-                SnapshotSelectionError::stale(format!(
-                    "chain {chain_id} project phase is not published at its current schema-v2 head"
-                ))
-            })?;
+            .ok_or_else(|| SnapshotSelectionError::stale(unpublished_message(chain_id)))?;
         if latest_block_number - publication.block_number > PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS
         {
             return Err(SnapshotSelectionError::stale(format!(
-                "chain {chain_id} project phase is not published at its current schema-v2 head \
-                 (publication at {} lags head {latest_block_number})",
+                "{} (publication at {} lags head {latest_block_number})",
+                unpublished_message(chain_id),
                 publication.block_number
             )));
         }

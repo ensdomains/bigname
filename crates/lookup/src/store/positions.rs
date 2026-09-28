@@ -85,10 +85,20 @@ pub(super) async fn ensure_project_at_head(
     .await
     .map_err(database("validate project publication head"))?;
     publication.ok_or_else(|| {
-        LookupError::stale(format!(
-            "projected state has not reached the newest processed {} block",
-            head.chain_id
-        ))
+        // With the switch on the marker's admission can refuse too, so the message names the
+        // owned key families; with it off the wording is unchanged.
+        LookupError::stale(if family_marker_admission.is_empty() {
+            format!(
+                "projected state has not reached the newest processed {} block",
+                head.chain_id
+            )
+        } else {
+            format!(
+                "owned key families or projected state have not reached the newest processed {} \
+                 block",
+                head.chain_id
+            )
+        })
     })
 }
 

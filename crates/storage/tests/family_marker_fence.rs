@@ -7,10 +7,11 @@
 use anyhow::Result;
 use bigname_storage::publication_source::with_serve_from_families;
 use bigname_storage::{
-    ChainPositions, ChildrenCurrentPageFilter, SnapshotConsistency, SnapshotPositionRequirement,
-    SnapshotSelectionErrorKind, SnapshotSelectionScope, SnapshotSelectorInput,
-    load_children_current_page_filtered, load_phase_indexing_status,
-    load_served_project_generation, resolve_exact_name_snapshot_selection,
+    ChainPositions, ChildrenCurrentPageFilter, SnapshotAt, SnapshotConsistency,
+    SnapshotPositionRequirement, SnapshotSelectionError, SnapshotSelectionErrorKind,
+    SnapshotSelectionScope, SnapshotSelectorInput, load_children_current_page_filtered,
+    load_phase_indexing_status, load_served_project_generation, parse_rfc3339_utc_timestamp,
+    resolve_exact_name_snapshot_selection,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{PgPool, raw_sql};
@@ -162,7 +163,25 @@ async fn select(
     pool: &PgPool,
     on: bool,
 ) -> bigname_storage::SnapshotSelectionResult<ChainPositions> {
-    let input = SnapshotSelectorInput::new(None, None, SnapshotConsistency::Head)?;
+    select_input(pool, on, None).await
+}
+
+/// A historical `at` read at block 11's timestamp, which the selection checks against the current
+/// publication after resolving the position.
+async fn select_at_block_11(
+    pool: &PgPool,
+    on: bool,
+) -> bigname_storage::SnapshotSelectionResult<ChainPositions> {
+    let at = parse_rfc3339_utc_timestamp("2026-04-17T00:02:12Z")?;
+    select_input(pool, on, Some(SnapshotAt::Timestamp(at))).await
+}
+
+async fn select_input(
+    pool: &PgPool,
+    on: bool,
+    at: Option<SnapshotAt>,
+) -> bigname_storage::SnapshotSelectionResult<ChainPositions> {
+    let input = SnapshotSelectorInput::new(at, None, SnapshotConsistency::Head)?;
     let scope = scope();
     with_serve_from_families(on, async {
         resolve_exact_name_snapshot_selection(pool, &scope, &input)
@@ -332,6 +351,126 @@ async fn an_expiry_filtered_children_page_needs_an_evaluation_time() -> Result<(
     assert!(
         format!("{error:#}").contains("evaluation time"),
         "unexpected error: {error:#}"
+    );
+
+    drop(pool);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_chain_without_a_marker_row_is_stale_not_an_error_with_the_switch_on() -> Result<()> {
+    let database = fixture("family_marker_fence_no_row").await?;
+    let pool = database.pool().clone();
+    update(&pool, "DELETE FROM project_family_marker").await?;
+
+    assert_eq!(generation(&pool, true, HASH_11, 11).await?, None);
+    for (read, error) in [
+        (
+            "head",
+            select(&pool, true).await.expect_err("no marker row"),
+        ),
+        (
+            "at",
+            select_at_block_11(&pool, true)
+                .await
+                .expect_err("no marker row"),
+        ),
+    ] {
+        assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale, "{read}");
+    }
+    assert!(
+        !generation_current(&pool, true).await?,
+        "/v1/status: no marker row is not a current generation"
+    );
+
+    assert!(generation(&pool, false, HASH_11, 11).await?.is_some());
+    assert_eq!(selected_number(&select(&pool, false).await?), 11);
+    assert_eq!(
+        selected_number(&select_at_block_11(&pool, false).await?),
+        11
+    );
+    assert!(generation_current(&pool, false).await?);
+
+    drop(pool);
+    database.cleanup().await
+}
+
+fn stale_message(
+    result: bigname_storage::SnapshotSelectionResult<ChainPositions>,
+) -> SnapshotSelectionError {
+    let error = result.expect_err("the publication is not servable");
+    assert_eq!(error.kind(), SnapshotSelectionErrorKind::Stale, "{error}");
+    error
+}
+
+#[tokio::test]
+async fn the_stale_message_names_the_family_marker_only_with_the_switch_on() -> Result<()> {
+    let database = fixture("family_marker_fence_wording").await?;
+    let pool = database.pool().clone();
+    let families = format!(
+        "chain {CHAIN_ID} owned key families are not published at its current schema-v2 head"
+    );
+    let project =
+        format!("chain {CHAIN_ID} project phase is not published at its current schema-v2 head");
+
+    // No servable publication: the marker is gone with the switch on, the Project row is from
+    // another interpreter generation with the switch off.
+    update(&pool, "DELETE FROM project_family_marker").await?;
+    assert_eq!(stale_message(select(&pool, true).await).message(), families);
+    assert_eq!(
+        stale_message(select_at_block_11(&pool, true).await).message(),
+        families
+    );
+    update(
+        &pool,
+        "UPDATE chain_phase_state SET input_content_hash = 'another-build' WHERE phase_name = 'project'",
+    )
+    .await?;
+    assert_eq!(stale_message(select(&pool, false).await).message(), project);
+    assert_eq!(
+        stale_message(select_at_block_11(&pool, false).await).message(),
+        project
+    );
+
+    // A publication beyond the lag tolerance: the marker at block 9 with the switch on, the
+    // Project row at block 9 with the switch off.
+    sqlx::query(
+        "INSERT INTO project_family_marker
+             (chain_id, current_block_number, current_block_hash, block_timestamp,
+              input_content_hash, sequence, state)
+         SELECT chain_id, block_number, block_hash, block_timestamp, $2, $3, 'live'
+         FROM chain_lineage WHERE chain_id = $1 AND block_hash = $4",
+    )
+    .bind(CHAIN_ID)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .bind(SEQUENCE)
+    .bind(HASH_9)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET input_content_hash = $2, current_block_number = 9, current_block_hash = $1
+         WHERE phase_name = 'project'",
+    )
+    .bind(HASH_9)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        stale_message(select(&pool, true).await).message(),
+        format!("{families} (publication at 9 lags head 11 beyond tolerance)")
+    );
+    assert_eq!(
+        stale_message(select_at_block_11(&pool, true).await).message(),
+        format!("{families} (publication at 9 lags head 11)")
+    );
+    assert_eq!(
+        stale_message(select(&pool, false).await).message(),
+        format!("{project} (publication at 9 lags head 11 beyond tolerance)")
+    );
+    assert_eq!(
+        stale_message(select_at_block_11(&pool, false).await).message(),
+        format!("{project} (publication at 9 lags head 11)")
     );
 
     drop(pool);

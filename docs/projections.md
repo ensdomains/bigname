@@ -2178,8 +2178,11 @@ new truth family.
   replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
   Project also owns the [owned key families](#owned-key-families), their
-  marker, undo journal and repair record; no served path reads them. The
-  step 3 shadow readers read them in the test harnesses only.
+  marker, undo journal and repair record. With the
+  [publication switch](glossary.md#publication-switch) off, the default, no
+  served path reads them; with it on, only the serving fence reads the marker,
+  and served rows still come from the projection tables. The step 3 shadow
+  readers read the family tables in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.
