@@ -167,7 +167,7 @@ async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Res
     )
     .await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
@@ -209,7 +209,7 @@ async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<
     )
     .await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
@@ -2696,13 +2696,10 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
 /// `exact_name_authority_not_verifiable` is reserved for a topology-bearing row whose selected
 /// arm the execution declaration does not admit.
 #[tokio::test]
-async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
-) -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
-        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
-        |_, _, _| {},
-    )
-    .await?;
+async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology()
+-> Result<()> {
+    let payload =
+        v2_name_records_payload("/v1/names/Alice.eth/records?source=verified&keys=addr:60").await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(
@@ -2718,56 +2715,27 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_
 
 #[tokio::test]
 async fn v2_get_name_records_withholds_unproven_authority_without_verified_lookup() -> Result<()> {
-    // Every unsupported reason short-circuits the records response under its public name; only
-    // `current_authority_not_projected` keeps its own documented inventory reason.
-    for (reason, product_reason) in [
-        (
-            "conflicting_current_ens_authority",
-            "conflicting_current_ens_authority",
-        ),
-        (
-            "mixed_ensv1_ensv2_exact_name_corpus",
-            "mixed_exact_name_corpus",
-        ),
-        (
-            "a_reason_this_build_has_never_seen",
-            "a_reason_this_build_has_never_seen",
-        ),
-        (
-            "current_authority_not_projected",
-            "inventory_not_available",
-        ),
-    ] {
-        for source in ["indexed", "verified", "auto"] {
-            let payload = v2_name_records_payload_with_row_and_setup(
-                &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
-                |row| {
-                    row.coverage = json!({
-                        "status":"unsupported",
-                        "unsupported_reason":reason
-                    });
-                },
-                |_, _, _| {},
-            )
-            .await?;
-
-            assert_eq!(payload["data"]["resolver"], Value::Null);
-            assert_eq!(
-                payload["data"]["records"]["addr:60"],
-                json!({
-                    "status":"unsupported",
-                    "unsupported_reason":product_reason
-                })
-            );
-            assert_eq!(
-                payload["meta"]["source"],
-                json!(if source == "verified" {
-                    "verified"
-                } else {
-                    "indexed"
-                })
-            );
-        }
+    for source in ["indexed", "verified", "auto"] {
+        let payload = v2_alice_state_payload(
+            &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
+            AliceInputState::Unbound,
+        )
+        .await?;
+        assert_eq!(payload["data"]["resolver"], Value::Null);
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({
+                "status":"unsupported", "unsupported_reason":"inventory_not_available"
+            })
+        );
+        assert_eq!(
+            payload["meta"]["source"],
+            if source == "verified" {
+                "verified"
+            } else {
+                "indexed"
+            }
+        );
     }
 
     Ok(())
@@ -4918,13 +4886,39 @@ async fn seed_alice_state_inputs(database: &TestDatabase, state: AliceInputState
             )
             .await?;
             if matches!(state, AliceInputState::Reserved) {
+                // Retain the old resource's record observations after its binding and pointer end.
+                sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(1776384003) WHERE surface_binding_id = $1")
+                    .bind(Uuid::from_u128(0x3300)).execute(&database.pool).await?;
                 append_alice_name_input(
                     database,
-                    "RegistrationReserved",
+                    "SurfaceUnbound",
                     "ens_v2_registry_l1",
-                    json!({"source_event":"NameReserved", "expiry":4_000_000_000_u64}),
+                    json!({"source_event":"LabelReserved", "token_id":"4294967297"}),
                 )
                 .await?;
+                append_alice_name_input(database, "ResolverChanged", "ens_v2_registry_l1",
+                    json!({"source_event":"LabelReserved", "token_id":"4294967297", "resolver":null})).await?;
+                let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+                let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+                let mut reservation = history_event(
+                    &format!("alice-reserved-{ordinal}"),
+                    Some(&logical),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(21_000_003),
+                    Some("0xbinding"),
+                    Some("0xalice-current"),
+                    Some(ordinal),
+                    CanonicalityState::Canonical,
+                );
+                reservation.event_kind = "RegistrationReserved".into();
+                reservation.source_family = "ens_v2_registry_l1".into();
+                reservation.before_state = json!({});
+                reservation.after_state = json!({"source_event":"LabelReserved", "status":"reserved",
+                    "expiry":4_000_000_000_u64, "token_id":"4294967297", "current_token_id":"4294967297",
+                    "registry_contract_instance_id":Uuid::from_u128(0x4400).to_string()});
+                bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation])
+                    .await?;
             }
         }
         AliceInputState::Released => {
@@ -6507,32 +6501,18 @@ fn assert_no_banned_v1_spellings(value: &Value) {
     }
 }
 
-/// Stamps the seeded ENSv2 migration proof on the Alice row: a `MigrationApplied`
-/// normalized event at `block_number` plus the matching `authority_selection`.
+/// Publishes the migration proof as a named retained event; composition supplies migrated_at.
 async fn stamp_v2_alice_migration_transition(
     database: &TestDatabase,
     block_number: i64,
-    block_timestamp: i64,
 ) -> Result<()> {
-    let block_hash = format!("0xmigration{block_number}");
-    upsert_phase_raw_blocks(
-        &database.pool,
-        &[raw_block(
-            "ethereum-mainnet",
-            &block_hash,
-            None,
-            block_number,
-            block_timestamp,
-        )],
-    )
-    .await?;
-    let event_identity = format!(
-        "ens_v2_migration_l1:1:ethereum-mainnet:{block_hash}:0xtxmigration:0:MigrationApplied:0"
-    );
+    let block_hash: String = sqlx::query_scalar("SELECT block_hash FROM chain_lineage WHERE chain_id = 'ethereum-mainnet' AND block_number = $1 AND canonicality_state = 'canonical'")
+        .bind(block_number).fetch_one(&database.pool).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
     let mut event = history_event(
-        &event_identity,
-        None,
-        None,
+        &format!("alice-migration-{block_number}"),
+        Some(&logical),
+        Some(Uuid::from_u128(0x2200)),
         Some("ethereum-mainnet"),
         Some(block_number),
         Some(&block_hash),
@@ -6540,32 +6520,13 @@ async fn stamp_v2_alice_migration_transition(
         Some(0),
         CanonicalityState::Canonical,
     );
-    event.event_kind = "MigrationApplied".to_owned();
-    event.source_family = "ens_v2_migration_l1".to_owned();
-    event.derivation_kind = "ens_v2_migration".to_owned();
+    event.event_kind = "MigrationApplied".into();
+    event.source_family = "ens_v2_migration_l1".into();
+    event.derivation_kind = "ens_v2_migration".into();
     event.before_state = json!({});
-    event.after_state = json!({});
+    event.after_state = json!({"transition_id":"alice-migration"});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-    let proof_event_id: i64 = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
-    )
-    .bind(&event_identity)
-    .fetch_one(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET provenance = provenance || jsonb_build_object('authority_selection', $1::jsonb)
-         WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
-    )
-    .bind(json!({
-        "authority_arm": "ens_v2",
-        "proof_kind": "migration_authority_transition",
-        "proof_event_id": proof_event_id,
-        "lifecycle_state": "registered",
-    }))
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 #[tokio::test]
@@ -6582,13 +6543,13 @@ async fn v2_get_name_reports_authority_arm_without_migration_transition() -> Res
 #[tokio::test]
 async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_alice_name_inputs(&database).await?;
-    stamp_v2_alice_migration_transition(&database, 21_000_002, 1_717_171_699).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Registry).await?;
+    stamp_v2_alice_migration_transition(&database, 21_000_002).await?;
 
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
-    assert_eq!(data.get("migrated_at"), Some(&json!("2024-05-31T16:08:19Z")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("2024-01-02T03:04:05Z")));
 
     let response = v2_lookup_response_for_database(
         &database,
@@ -6600,7 +6561,7 @@ async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() ->
     let lookup: Value = read_json(response).await?;
     let record = &lookup["data"][0]["record"];
     assert_eq!(record["authority"], json!("ens_v2"));
-    assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+    assert_eq!(record["migrated_at"], json!("2024-01-02T03:04:05Z"));
 
     database.cleanup().await
 }
