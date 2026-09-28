@@ -5179,102 +5179,175 @@ async fn seed_v2_alice_name_records_fixture_with_row(
 
 // Sepolia's root registry registers `reverse` and points it at the ENSv1 mirror resolver
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
-// These rows follow what Project builds for a bound, registered root name read through a mirror
-// (crates/project/tests/mirror_resolver.rs, `tld_root_bound`): a supported ENSv2 row with its own
-// binding and resolver, no serving resource and no pointer reachability, and an inventory on the
-// registration's resource that carries the mirrored records.
 const REVERSE_MIRROR: &str = "0x0000000000000000000000000000000000000f10";
 
-async fn v2_reverse_root_records_payload(
+#[derive(Clone, Copy)]
+enum MirrorFixtureSource {
+    Exact,
+    Absent,
+    Ancestor,
+}
+
+// Retained input shape from Project's mirror fixture: an ENSv2 root pointer plus an independent
+// ENSv1 node pointer and resolver writes. No serving rows are supplied by this constructor.
+async fn v2_mirror_records_payload(
     uri: &str,
-    mirror_projected: bool,
+    name: &str,
+    mirror: &str,
+    source: MirrorFixtureSource,
 ) -> Result<Value> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-    let logical_name_id = "ens:reverse";
-    let resource_id = Uuid::from_u128(0x6100);
-    let token_lineage_id = Uuid::from_u128(0x6101);
-    let surface_binding_id = Uuid::from_u128(0x6102);
+    const CHAIN: &str = "ethereum-sepolia";
+    const HASH: &str = "0xmirror";
+    const V1_REGISTRY: &str = "0x4444444444444444444444444444444444444401";
+    const V1_RESOLVER: &str = "0x1111111111111111111111111111111111111111";
+    let database = TestDatabase::new_migrated().await?;
     database
-        .seed_name_current_binding(
-            logical_name_id,
+        .seed_snapshot_selector_chain_positions(&json!({CHAIN:{
+            "chain_id":CHAIN,"block_number":21000003,"block_hash":HASH,
+            "timestamp":"2026-04-17T00:00:03Z"
+        }}))
+        .await?;
+    let resource = Uuid::from_u128(0x6100);
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        CHAIN,
+        21000003,
+        HASH,
+        resource,
+        Uuid::from_u128(0x6101),
+        Uuid::from_u128(0x6102),
+        "ens_v2",
+    )
+    .await?;
+    let payload = json!({"deployment_epoch":"fixture",
+        "correlation_addresses":{"ens_v1_registry":V1_REGISTRY},
+        "contracts":[{"role":"ensv1_mirror_resolver","address":mirror,"proxy_kind":"none","start_block":0}]});
+    let mut root_manifest = 0;
+    for (family, payload) in [
+        ("ens_v2_root_l1", json!({})),
+        ("ens_v2_resolver_l1", payload),
+    ] {
+        let manifest:i64=sqlx::query_scalar("INSERT INTO manifest_versions
+            (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload)
+            VALUES (1,'ens',$1,$2,'fixture','active','fixture',$3,$4) RETURNING manifest_id")
+            .bind(family).bind(CHAIN).bind(format!("fixture/{family}.toml")).bind(&payload)
+            .fetch_one(&database.pool).await?;
+        seed_fixture_manifest_update(&database.pool, manifest, CHAIN, "ens", family, &payload)
+            .await?;
+        if family == "ens_v2_root_l1" {
+            root_manifest = manifest;
+        }
+    }
+    let root_instance = Uuid::from_u128(0x6110);
+    let mirror_instance = Uuid::from_u128(0x6111);
+    for instance in [root_instance, mirror_instance] {
+        sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1,$2,'contract')")
+            .bind(instance).bind(CHAIN).execute(&database.pool).await?;
+    }
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,source_manifest_id,active_from_block_number,active_from_block_hash)
+        VALUES ($1,$2,$3,$4,21000003,$5)")
+        .bind(mirror_instance).bind(CHAIN).bind(mirror).bind(root_manifest).bind(HASH).execute(&database.pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id,edge_kind,from_contract_instance_id,to_contract_instance_id,discovery_source,admission_basis,source_manifest_id,active_from_block_number,active_from_block_hash,canonicality_state)
+        VALUES ($1,'resolver',$2,$3,'ResolverChanged','registry_pointer',$4,21000003,$5,'canonical')")
+        .bind(CHAIN).bind(root_instance).bind(mirror_instance).bind(root_manifest).bind(HASH).execute(&database.pool).await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let facts = [
+        (
+            "RegistrationGranted",
+            json!({"source_event":"LabelRegistered","authority_kind":"ens_v2_registry","registrant":V2_ADDRESS,"expiry":u64::MAX}),
+        ),
+        (
+            "TokenControlTransferred",
+            json!({"source_event":"Transfer","from":"0x0000000000000000000000000000000000000000","to":V2_ADDRESS}),
+        ),
+        ("ResolverChanged", json!({"node":node,"resolver":mirror})),
+    ];
+    let mut events = Vec::new();
+    for (index, (kind, after)) in facts.into_iter().enumerate() {
+        let mut event = history_event(
+            &format!("mirror-root-{kind}"),
+            Some(&logical),
+            Some(resource),
+            Some(CHAIN),
+            Some(21000003),
+            Some(HASH),
+            Some("0xmirror"),
+            Some(index as i64),
+            CanonicalityState::Canonical,
+        );
+        event.source_family = "ens_v2_root_l1".into();
+        event.event_kind = kind.into();
+        event.source_manifest_id = Some(root_manifest);
+        event.manifest_version = 1;
+        event.before_state = json!({});
+        event.after_state = after;
+        event.raw_fact_ref = json!({"emitting_address":V1_REGISTRY});
+        events.push(event);
+    }
+    if !matches!(source, MirrorFixtureSource::Absent) {
+        let pointer_name = if matches!(source, MirrorFixtureSource::Ancestor) {
+            "eth"
+        } else {
+            name
+        };
+        let mut pointer = history_event(
+            "mirror-v1-pointer",
+            None,
+            None,
+            Some(CHAIN),
+            Some(21000003),
+            Some(HASH),
+            Some("0xmirror"),
+            Some(4),
+            CanonicalityState::Canonical,
+        );
+        pointer.source_family = "ens_v1_registry_l1".into();
+        pointer.event_kind = "ResolverChanged".into();
+        pointer.before_state = json!({});
+        pointer.after_state =
+            json!({"node":bigname_lookup::ens_namehash_hex(pointer_name)?,"resolver":V1_RESOLVER});
+        pointer.raw_fact_ref = json!({"emitting_address":V1_REGISTRY});
+        events.push(pointer);
+        insert_family_fixture_record_writes(
+            &database.pool,
             "ens",
-            "reverse",
-            "reverse",
-            "namehash:reverse",
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
+            CHAIN,
+            name,
+            V1_RESOLVER,
+            21000003,
+            HASH,
+            &[
+                family_fixture_record_write(
+                    "addr:60",
+                    Some(json!("0x0000000000000000000000000000000000000def")),
+                ),
+                family_fixture_record_write("text:description", Some(json!("Alice profile"))),
+                family_fixture_record_write("text:url", Some(json!("https://reverse.example"))),
+            ],
         )
         .await?;
-    let mut row = exact_name_row(logical_name_id, surface_binding_id, resource_id, token_lineage_id);
-    row.canonical_display_name = "reverse".to_owned();
-    row.normalized_name = "reverse".to_owned();
-    row.namehash = "namehash:reverse".to_owned();
-    row.declared_summary["registration"] = json!({
-        "status": "active",
-        "authority_kind": "ens_v2_registry",
-        "latest_event_kind": "RegistrationGranted",
-        "registrant": "0x0000000000000000000000000000000000000660",
-        "expiry": u64::MAX
-    });
-    row.declared_summary["control"] = json!({
-        "registrant": "0x0000000000000000000000000000000000000660",
-        "registry_owner": "0x0000000000000000000000000000000000000660",
-        "expiry": null
-    });
-    row.declared_summary["resolver"]["address"] = json!(REVERSE_MIRROR);
-    row.provenance["authority_selection"] = json!({
-        "authority_arm": "ens_v2",
-        "resource_id": resource_id,
-        "surface_binding_id": surface_binding_id
-    });
-    row.provenance["read_reachability"] = json!({});
-    database.insert_name_current_row(row).await?;
-
-    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
-    inventory.selectors = json!([{
-        "record_key": "text:url",
-        "record_family": "text",
-        "selector_key": "url",
-        "cacheable": true
-    }]);
-    inventory.explicit_gaps = json!([]);
-    inventory.unsupported_families = json!([]);
-    inventory.entries = json!([{
-        "record_key": "text:url",
-        "record_family": "text",
-        "selector_key": "url",
-        "status": "success",
-        "value": "https://reverse.example"
-    }]);
-    inventory.provenance["mirror"] = json!({
-        "resolver_address": REVERSE_MIRROR,
-        "mirrored_resolver_address": "0x0000000000000000000000000000000000000f11",
-        "ancestor_depth": 0
-    });
-    if !mirror_projected {
-        inventory.coverage = json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_asserted",
-            "unsupported_reason": "mirrored_resolver_not_projected"
-        });
     }
-    database.insert_record_inventory_current_row(inventory).await?;
-
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("reverse records request failed")?;
-    let status = response.status();
-    let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, CHAIN, 21000003, HASH).await?;
+    let body = v2_name_record_payload_for_database(&database, uri).await?;
     database.cleanup().await?;
-    Ok(payload)
+    Ok(body)
+}
+
+async fn v2_reverse_root_records_payload(uri: &str, mirror_projected: bool) -> Result<Value> {
+    v2_mirror_records_payload(
+        uri,
+        "reverse",
+        REVERSE_MIRROR,
+        if mirror_projected {
+            MirrorFixtureSource::Exact
+        } else {
+            MirrorFixtureSource::Absent
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -5287,7 +5360,7 @@ async fn v2_get_name_records_serves_the_registered_reverse_root_through_its_mirr
         .await?;
         assert_eq!(
             payload["data"]["resolver"],
-            json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+            json!({"chain_id": 11155111, "address": REVERSE_MIRROR}),
             "{source}: {payload}"
         );
         assert_eq!(
@@ -5305,7 +5378,7 @@ async fn v2_get_name_records_serves_the_registered_reverse_root_through_its_mirr
     .await?;
     assert_eq!(
         indexed["data"]["resolver"],
-        json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+        json!({"chain_id": 11155111, "address": REVERSE_MIRROR}),
         "{indexed}"
     );
     assert_eq!(
@@ -5313,7 +5386,10 @@ async fn v2_get_name_records_serves_the_registered_reverse_root_through_its_mirr
         json!({"status": "unsupported", "unsupported_reason": "mirrored_resolver_not_projected"}),
         "{indexed}"
     );
-    assert_eq!(indexed["data"]["inventory"]["unsupported_keys"], json!(["text:url"]));
+    assert_eq!(
+        indexed["data"]["inventory"]["unsupported_keys"],
+        json!(["text:url"])
+    );
     // An unsupported inventory does not satisfy `auto`; the key goes to verified lookup, which
     // this fixture declares no topology for, and the resolver stays the registration's own.
     let auto = v2_reverse_root_records_payload(
@@ -5324,7 +5400,7 @@ async fn v2_get_name_records_serves_the_registered_reverse_root_through_its_mirr
     assert_eq!(auto["meta"]["source"], json!("verified"), "{auto}");
     assert_eq!(
         auto["data"]["resolver"],
-        json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+        json!({"chain_id": 11155111, "address": REVERSE_MIRROR}),
         "{auto}"
     );
     assert_eq!(
@@ -6305,24 +6381,11 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
     // Project publishes a name bound to a declared ENSv1 mirror resolver with the same name's
     // ENSv1 inventory and `provenance.mirror`; the route serves it like any supported inventory.
     const MIRROR: &str = "0x1010101010101010101010101010101010101010";
-    let payload = v2_name_records_payload_with_row_and_setup(
+    let payload = v2_mirror_records_payload(
         "/v1/names/alice.eth/records?keys=addr:60,text:description&include=inventory",
-        |row| {
-            row.declared_summary["resolver"]["address"] = json!(MIRROR);
-        },
-        |_, _, inventory| {
-            inventory.provenance["resolver_address"] = json!(MIRROR);
-            inventory.provenance["mirror"] = json!({
-                "resolver_address": MIRROR,
-                "mirrored_source_family": "ens_v1_resolver_l1",
-                "mirrored_registry_source_family": "ens_v1_registry_l1",
-                "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
-                "mirrored_resolver_address": "0x0000000000000000000000000000000000000abc",
-                "mirrored_resource_id": "00000000-0000-0000-0000-000000000b100",
-                "mirrored_pointer_event_id": 77,
-                "mirrored_pointer_source_family": "ens_v1_registry_l1"
-            });
-        },
+        "alice.eth",
+        MIRROR,
+        MirrorFixtureSource::Exact,
     )
     .await?;
     assert_eq!(payload["meta"]["source"], json!("indexed"));
@@ -6344,62 +6407,11 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
     Ok(())
 }
 
-/// Project's row for a name bound to the ENSv1 mirror whose nearest ENSv1 resolver is a
-/// non-extended ancestor, which the mirror rejects: unsupported with the public mirror reason, no
-/// record values, and the internal marker only in persisted `provenance.mirror`.
-fn ancestor_rejected_mirror_inventory(
-    mirror: &str,
-    inventory: &mut bigname_storage::RecordInventoryCurrentRow,
-) {
-    inventory.selectors = json!([]);
-    inventory.entries = json!([]);
-    inventory.explicit_gaps = json!([]);
-    inventory.unsupported_families = json!([{
-        "record_family": "resolver_classification",
-        "unsupported_reason": "mirrored_resolver_not_projected"
-    }]);
-    inventory.coverage = json!({
-        "status": "unsupported",
-        "exhaustiveness": "not_asserted",
-        "unsupported_reason": "mirrored_resolver_not_projected"
-    });
-    inventory.provenance["resolver_address"] = json!(mirror);
-    for field in [
-        "record_event_ids",
-        "record_link_event_ids",
-        "attributed_event_ids",
-        "read_rules",
-    ] {
-        inventory.provenance[field] = json!([]);
-    }
-    inventory.provenance["mirror"] = json!({
-        "resolver_address": mirror,
-        "mirrored_source_family": "ens_v1_resolver_l1",
-        "mirrored_registry_source_family": "ens_v1_registry_l1",
-        "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
-        "queried_node": "namehash:alice.eth",
-        "mirrored_node": "namehash:eth",
-        "mirrored_name": "eth",
-        "ancestor_depth": 1,
-        "forwarding": "direct_call",
-        "mirrored_resolver_address": "0x0000000000000000000000000000000000000abc",
-        "mirrored_pointer_event_id": 77,
-        "mirrored_pointer_source_family": "ens_v1_registry_l1",
-        "mirrored_unsupported_reason": "ancestor_resolver_not_extended"
-    });
-}
-
 #[tokio::test]
 async fn v2_get_name_records_refuses_a_mirror_whose_ancestor_resolver_is_rejected() -> Result<()> {
     const MIRROR: &str = "0x1010101010101010101010101010101010101010";
     let payload_for = |uri: &'static str| {
-        v2_name_records_payload_with_row_and_setup(
-            uri,
-            |row| {
-                row.declared_summary["resolver"]["address"] = json!(MIRROR);
-            },
-            |_, _, inventory| ancestor_rejected_mirror_inventory(MIRROR, inventory),
-        )
+        v2_mirror_records_payload(uri, "alice.eth", MIRROR, MirrorFixtureSource::Ancestor)
     };
 
     // Explicit indexed keys answer unsupported with the existing public mirror reason, and the
@@ -6431,8 +6443,15 @@ async fn v2_get_name_records_refuses_a_mirror_whose_ancestor_resolver_is_rejecte
         })
     );
     let serialized = payload.to_string();
-    for internal in ["ancestor_resolver_not_extended", "mirrored_unsupported_reason", "provenance"] {
-        assert!(!serialized.contains(internal), "{internal} leaked: {payload:#}");
+    for internal in [
+        "ancestor_resolver_not_extended",
+        "mirrored_unsupported_reason",
+        "provenance",
+    ] {
+        assert!(
+            !serialized.contains(internal),
+            "{internal} leaked: {payload:#}"
+        );
     }
 
     // Without keys the default set comes from the row's selectors, entries and gaps, all empty,
