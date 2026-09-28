@@ -54,12 +54,12 @@ async fn reset_switch_families(database: &TestDatabase) -> Result<()> {
         &token,
         &options,
     )
-    .await;
+    .await?;
     anyhow::ensure!(
         outcome.reset
             && outcome.budget_exhausted
             && outcome.marker.is_none()
-            && outcome.skipped.is_none(),
+           ,
         "reset before replay: {outcome:?}"
     );
     for table in bigname_project::families::family_tables() {

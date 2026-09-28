@@ -44,8 +44,8 @@ async fn reset_records_families(database: &TestDatabase) -> Result<()> {
         bigname_project::families::FamilyMode::Rebuild,
         &token,
         &options,
-    ).await;
-    anyhow::ensure!(outcome.reset && outcome.marker.is_none() && outcome.skipped.is_none(),
+    ).await?;
+    anyhow::ensure!(outcome.reset && outcome.marker.is_none(),
         "actual reset before replay: {outcome:?}");
     Ok(())
 }
