@@ -284,6 +284,11 @@ async fn rebuild_fixture_families(
     block: i64,
     hash: &str,
 ) -> Result<()> {
+    // Production tables carry statistics; without them the history attribution join picks a
+    // nested loop that scans the chain's events once per pointer.
+    sqlx::query("ANALYZE normalized_events")
+        .execute(pool)
+        .await?;
     let token = bigname_project::families::input_token(pool, chain).await?;
     let outcome = bigname_project::families::apply(
         pool,
