@@ -254,6 +254,13 @@ pub trait Phase: Send + Sync {
         Box::pin(async { Ok(AfterProgress::Done) })
     }
 
+    /// Whether `after_progress_recorded` has work waiting for the chain, answered without taking
+    /// it. A phase with none finishes its batch even when a stop has been raised; one with work
+    /// waiting is abandoned by the stop before the hook is called.
+    fn has_after_progress_work(&self, _chain_id: &str) -> bool {
+        false
+    }
+
     /// Checked once an operator redo of the chain has finished and been recorded. An error fails
     /// the redo command without undoing its recorded work.
     fn after_redo(&self, _chain_id: &str) -> RunnerResult<()> {

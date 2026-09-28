@@ -241,6 +241,13 @@ impl Phase for ProjectPhase {
         PhaseName::Project
     }
 
+    fn has_after_progress_work(&self, chain_id: &str) -> bool {
+        self.pending_families
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(chain_id)
+    }
+
     fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
         let pending = self
             .pending_families

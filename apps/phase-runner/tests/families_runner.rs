@@ -19,7 +19,7 @@ use phase_runner::{
     database::RunnerDatabase,
     error::{ErrorKind, RunnerError},
     phase::{
-        AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
+        AfterProgress, AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
         PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseSet, RunMode,
     },
     project_phase::FamilySettings,
@@ -232,15 +232,39 @@ async fn redo_until_family_error(
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     };
-    let (command, failure) = tokio::join!(
+    let (command, failure) = with_watcher(
         redo_with_phase_and_stop(scratch, project, head, stop.clone()),
-        watch
-    );
-    let failure = failure?;
+        watch,
+    )
+    .await?;
     let error = command
         .err()
         .ok_or_else(|| anyhow::anyhow!("the redo completed despite the family failure"))?;
     Ok((error, failure))
+}
+
+/// Runs a runner command beside a watcher that observes or steers it, the pair bounded by one
+/// outer deadline, so a stalled statement on either side fails the test instead of hanging it. A
+/// watcher failure ends the pair at once, abandoning the command; the command's own result is
+/// returned as data, since some tests expect it to fail.
+async fn with_watcher<T>(
+    command: impl std::future::Future<Output = Result<()>>,
+    watcher: impl std::future::Future<Output = Result<T>>,
+) -> Result<(Result<()>, T)> {
+    let paired = async {
+        tokio::pin!(command);
+        tokio::pin!(watcher);
+        tokio::select! {
+            watched = &mut watcher => {
+                let watched = watched?;
+                Ok((command.await, watched))
+            }
+            done = &mut command => Ok((done, watcher.await?)),
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(120), paired)
+        .await
+        .map_err(|_| anyhow::anyhow!("the command and its watcher did not end within 120 s"))?
 }
 
 /// Whether the Project row is in redo, and the redo's recorded progress.
@@ -484,9 +508,8 @@ async fn a_family_integrity_failure_is_retried_under_the_supervised_settings_and
             .await?;
         Ok::<_, anyhow::Error>(())
     };
-    let (command, lifted) =
-        tokio::join!(redo_with_phase_and_stop(&scratch, project, 30, stop), lift);
-    lifted?;
+    let (command, ()) =
+        with_watcher(redo_with_phase_and_stop(&scratch, project, 30, stop), lift).await?;
     command?;
     assert!(served.load(Ordering::SeqCst) >= 3);
     assert_eq!(
@@ -499,23 +522,24 @@ async fn a_family_integrity_failure_is_retried_under_the_supervised_settings_and
 }
 
 // A family catch-up of several runs keeps the Project heartbeat fresh between runs, as a batch
-// settlement does. The first run's block 10 holds its transaction past the heartbeat interval;
-// block 11, the second run's first, reads how old the heartbeat is.
+// settlement does. The first run's block 10 reads the heartbeat and then holds its transaction
+// past the heartbeat interval, so the throttle is due; block 11, the second run's first, reads it
+// again and finds it newer.
 #[tokio::test]
 async fn a_family_catch_up_of_several_runs_keeps_the_phase_heartbeat_fresh() -> Result<()> {
     let scratch = ready_through("families_runner_heartbeat", 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
     sqlx::raw_sql(
-        "CREATE TABLE heartbeat_probe (age_seconds float8 NOT NULL);
+        "CREATE TABLE heartbeat_probe (block_number bigint NOT NULL, heartbeat_epoch float8);
          CREATE FUNCTION probe_heartbeat() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
-             IF NEW.current_block_number = 10 THEN PERFORM pg_sleep(5.5); END IF;
-             IF NEW.current_block_number = 11 THEN
+             IF NEW.current_block_number IN (10, 11) THEN
                  INSERT INTO heartbeat_probe
-                 SELECT extract(epoch FROM clock_timestamp() - heartbeat_at)
-                 FROM service_heartbeats
-                 WHERE chain_id = NEW.chain_id AND phase_name = 'project';
+                 SELECT NEW.current_block_number,
+                        (SELECT extract(epoch FROM heartbeat_at)::float8 FROM service_heartbeats
+                         WHERE chain_id = NEW.chain_id AND phase_name = 'project');
              END IF;
+             IF NEW.current_block_number = 10 THEN PERFORM pg_sleep(5.5); END IF;
              RETURN NEW;
          END $$;
          CREATE TRIGGER probe_heartbeat AFTER INSERT OR UPDATE ON project_family_marker
@@ -532,14 +556,17 @@ async fn a_family_catch_up_of_several_runs_keeps_the_phase_heartbeat_fresh() -> 
         30,
     )
     .await?;
-    let ages: Vec<f64> = sqlx::query_scalar("SELECT age_seconds FROM heartbeat_probe")
-        .fetch_all(scratch.pool())
-        .await?;
-    assert_eq!(ages.len(), 1, "block 11 read the heartbeat once: {ages:?}");
+    let reads: Vec<(i64, Option<f64>)> = sqlx::query_as(
+        "SELECT block_number, heartbeat_epoch FROM heartbeat_probe ORDER BY block_number",
+    )
+    .fetch_all(scratch.pool())
+    .await?;
+    let [(10, Some(at_block_10)), (11, Some(at_block_11))] = reads.as_slice() else {
+        anyhow::bail!("blocks 10 and 11 each read the heartbeat once: {reads:?}");
+    };
     assert!(
-        ages[0] < 2.0,
-        "the heartbeat was recorded after the first run, not before it: {} s old",
-        ages[0]
+        at_block_11 > at_block_10,
+        "the heartbeat was recorded between the runs: {at_block_10} then {at_block_11}"
     );
     assert_eq!(marker(&scratch).await?, Some(30));
     scratch.cleanup().await
@@ -664,6 +691,107 @@ async fn wait_for_project_status(scratch: &ScratchDatabase, status: &str) -> Res
     anyhow::bail!("project never reached status {status}")
 }
 
+// A stop raised while the served batch settles reaches the after-progress loop already cancelled:
+// the loop returns without calling the hook, so no family run is even planned after the stop.
+#[tokio::test]
+async fn a_stop_before_the_after_progress_loop_calls_no_hook() -> Result<()> {
+    let scratch = ready("families_runner_hook_precancelled").await?;
+    let stop = CancellationToken::new();
+    let (phase, calls) = CountingHook::stopping(HookStop::InBatch, stop.clone());
+    let error = redo_with_phase_and_stop(&scratch, phase, 3, stop)
+        .await
+        .expect_err("the stop left the redo incomplete");
+    assert!(error.to_string().contains("is incomplete"), "{error}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no hook call after the stop"
+    );
+    scratch.cleanup().await
+}
+
+// A stop raised during one family run, which asks for another, ends the loop before the next
+// hook call.
+#[tokio::test]
+async fn a_stop_between_family_runs_prevents_the_next_hook_call() -> Result<()> {
+    let scratch = ready("families_runner_hook_between").await?;
+    let stop = CancellationToken::new();
+    let (phase, calls) = CountingHook::stopping(HookStop::InHook, stop.clone());
+    let error = redo_with_phase_and_stop(&scratch, phase, 3, stop)
+        .await
+        .expect_err("the stop left the redo incomplete");
+    assert!(error.to_string().contains("is incomplete"), "{error}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the hook ran once, before the stop"
+    );
+    scratch.cleanup().await
+}
+
+#[derive(Clone, Copy)]
+enum HookStop {
+    InBatch,
+    InHook,
+}
+
+/// A loopback Project whose after-progress hook counts its calls, counted when the hook is called
+/// rather than when its future is polled, and asks for one more run after the first; it reports
+/// work waiting until the second call. The stop is
+/// raised either as the served batch returns or inside the first hook call.
+struct CountingHook {
+    inner: LoopbackPhase,
+    calls: Arc<AtomicUsize>,
+    stop_at: HookStop,
+    stop: CancellationToken,
+}
+
+impl CountingHook {
+    fn stopping(stop_at: HookStop, stop: CancellationToken) -> (Arc<dyn Phase>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let phase = Arc::new(Self {
+            inner: LoopbackPhase::new(PhaseName::Project),
+            calls: Arc::clone(&calls),
+            stop_at,
+            stop,
+        });
+        (phase, calls)
+    }
+}
+
+impl Phase for CountingHook {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await;
+            if matches!(self.stop_at, HookStop::InBatch) {
+                self.stop.cancel();
+            }
+            outcome
+        })
+    }
+
+    fn has_after_progress_work(&self, _chain_id: &str) -> bool {
+        self.calls.load(Ordering::SeqCst) < 2
+    }
+
+    fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if matches!(self.stop_at, HookStop::InHook) {
+            self.stop.cancel();
+        }
+        let step = if call == 1 {
+            AfterProgress::More
+        } else {
+            AfterProgress::Done
+        };
+        Box::pin(std::future::ready(Ok(step)))
+    }
+}
+
 // An input token that fails to read is the family run's failure, raised after the batch's
 // progress is recorded, and the restart loop retries it. Here only the token read fails: the
 // Project phase reads `chain_phase_state` through a view whose `last_error` column, which only the
@@ -733,11 +861,11 @@ async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retri
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     };
-    let (command, observed) = tokio::join!(
+    let (command, (failure, progress, family)) = with_watcher(
         redo_with_phase_and_stop(&scratch, project, 3, CancellationToken::new()),
-        observed
-    );
-    let (failure, progress, family) = observed?;
+        observed,
+    )
+    .await?;
     command?;
     assert!(
         failure.contains("failed to read the family input token")
@@ -877,6 +1005,10 @@ impl Phase for ServedBatches {
 
     fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
         self.inner.after_progress_recorded(chain_id)
+    }
+
+    fn has_after_progress_work(&self, chain_id: &str) -> bool {
+        self.inner.has_after_progress_work(chain_id)
     }
 
     fn after_redo(&self, chain_id: &str) -> phase_runner::error::RunnerResult<()> {

@@ -136,6 +136,19 @@ async fn a_second_application_of_a_published_block_is_refused_by_the_generation_
     );
     let refused = fixture.exact().await?;
 
+    // The refused run left the families exactly as a fault-free run through block 13 leaves an
+    // identically seeded chain: no older row deleted or moved, and nothing of block 14.
+    let control = Fixture::new("families_repair_generation_control", 20).await?;
+    seed(&control, 11..=14).await?;
+    control.apply(12, FamilyMode::Normal).await?;
+    control.apply(13, FamilyMode::Normal).await?;
+    let expected = control.exact().await?;
+    control.cleanup().await?;
+    assert_eq!(
+        refused, expected,
+        "the refused run left what a fault-free run through block 13 leaves"
+    );
+
     // Block 14, applied and undone, restores exactly what the refused run left.
     sql(
         &fixture,

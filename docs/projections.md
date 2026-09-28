@@ -1731,7 +1731,9 @@ error recorded, the redo stays in progress and a rerun is admitted. Retrying
 would run the served redo again each time, forever when the failure persists,
 as it does while Interpret is in redo. A stop abandons a family run under way:
 its open transaction rolls back and the Project run ends as cancelled, so a
-redo stays in progress and rerunning it repairs the families. The Project phase reads the Interpret and Project rows of
+redo stays in progress and rerunning it repairs the families. A stop raised
+before a run starts, including one raised while the batch's progress is
+recorded, ends the loop before the next run is planned. The Project phase reads the Interpret and Project rows of
 `chain_phase_state` for the family run before the batch's progress is
 recorded, while a finished redo's session is still open.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
@@ -1744,9 +1746,10 @@ as the run planned them: the marker's generation (`sequence`, advanced by every
 block and undo) and the repair's state and attempt. It then reads the
 Interpret row's content hash and redo attempt, the [family input
 revision](glossary.md#family-input-revision), and stops the run with an error
-the runner retries when that revision differs from the one the run applies
-under or Interpret is in redo; the retry adopts the new revision or fails
-again until the redo ends. The block
+when that revision differs from the one the run applies under or Interpret is
+in redo. The supervised runner retries it, and the retry adopts the new
+revision or fails again until the redo ends; the one-shot `redo` command
+returns the error and ends, as it does on any family failure. The block
 records that revision and the whole input token on the marker. The run reads
 the chain's manifest updates once, before its first block; each block takes its
 active manifest set from that read and records the set's key, and a rebuild
@@ -1760,7 +1763,8 @@ disagree keep the first in the [canonical event
 order](glossary.md#canonical-event-order) and count on
 `phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
 loop with an error and leaves the served publication and its progress as they
-were; the retry catches up from where the marker stands.
+were; the supervised runner's retry, or a rerun of the one-shot command,
+catches up from where the marker stands.
 
 A rebuild (a first build, or a rebuild after a content hash change, a redo
 below the kept journal or an orphaned lineage) applies its work blocks at or
@@ -2019,9 +2023,11 @@ reported as `phase_runner_project_families_seconds`,
 applied in a transaction of its own, from its first read to its commit; a
 rebuild range is not observed) and
 `phase_runner_project_family_duplicate_anomalies_total`. A run that fails still
-reports the blocks it committed before the failure, and its own wall time. The
-block times wait in memory for the metrics task, at most 65,536 per chain;
-blocks past that cap are not observed.
+reports the blocks it committed before the failure, and its own wall time. A
+cancelled run can lose them: its outcome reaches the metrics only when
+`families::run` returns, so a stop that abandons the run drops the block times
+it had gathered. The block times wait in memory for the metrics task, at most
+65,536 per chain; blocks past that cap are not observed.
 
 The first readers of these tables live in the storage crate
 (`bigname_storage::families::control`) and run only in tests. They rebuild a

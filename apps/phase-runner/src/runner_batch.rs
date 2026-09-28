@@ -199,7 +199,8 @@ impl PhaseRunner {
     /// heartbeat are recorded as a batch settlement records them, so a family catch-up that spans
     /// hours stays visibly alive, and the capacity guard is re-entered as before a batch, with no
     /// write reservation since a family run carries no estimate. A stop abandons waiting work:
-    /// returns false when one did.
+    /// returns false when one did. With no work waiting it returns true without calling the hook,
+    /// stop or not, so a phase with nothing to follow finishes its batch as before.
     pub(super) async fn follow_batch(
         &self,
         chain: &ChainConfig,
@@ -209,10 +210,15 @@ impl PhaseRunner {
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<bool> {
         loop {
+            if !phase.has_after_progress_work(&chain.chain_id) {
+                return Ok(true);
+            }
+            // The stop is checked first, and the hook is called only inside the polled branch:
+            // calling it plans a family run, so a stop already raised must not reach it.
             let step = tokio::select! {
                 biased;
-                result = phase.after_progress_recorded(&chain.chain_id) => result?,
                 () = cancellation.cancelled() => return Ok(false),
+                result = async { phase.after_progress_recorded(&chain.chain_id).await } => result?,
             };
             if step == AfterProgress::Done {
                 return Ok(true);
