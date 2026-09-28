@@ -119,13 +119,16 @@ pub(crate) async fn get_subnames(
                     namespace, normalized.normalized_name
                 ))
             },
-        ))?
-        .ok_or_else(|| {
-            V2Error::not_found(format!(
-                "name {} was not found in namespace {namespace}",
-                normalized.normalized_name
-            ))
-        })?;
+        ))?;
+    let Some(parent) = parent else {
+        snapshot
+            .ensure_families_published(&state, super::SnapshotReadResource::Name)
+            .await?;
+        return Err(V2Error::not_found(format!(
+            "name {} was not found in namespace {namespace}",
+            normalized.normalized_name
+        )));
+    };
 
     let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
     let binding = SubnamesCursorBinding {

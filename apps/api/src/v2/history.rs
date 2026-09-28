@@ -149,6 +149,9 @@ pub(crate) async fn get_history(
                 },
             ))?;
         if parent.is_none() {
+            snapshot
+                .ensure_families_published(&state, super::SnapshotReadResource::Name)
+                .await?;
             let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
                 .await
                 .map_err(|error| map_history_page_error(error, "failed to load name history"))?;

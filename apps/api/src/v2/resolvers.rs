@@ -309,11 +309,14 @@ async fn load_bound_name_rows(
         )
         .await
     }
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
-        ))
-    })?;
+    .map_err(crate::v2::name_rows_error(
+        SnapshotReadResource::Resolver,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
+            ))
+        },
+    ))?;
     let mut rows = loaded
         .into_iter()
         .map(|row| NameCurrentListRow {

@@ -77,6 +77,7 @@ pub struct Walk {
 pub async fn measure_walks(
     pool: &PgPool,
     target: i64,
+    chain: &str,
     namespace: &str,
     page_size: u64,
     max_pages: u64,
@@ -105,6 +106,7 @@ pub async fn measure_walks(
                 NameCurrentListOrder::Asc,
                 cursor.as_ref(),
                 page_size,
+                &[chain.to_owned()],
             )
             .await
         }
