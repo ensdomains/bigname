@@ -42,9 +42,12 @@ All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
 The product collections `GET /v1/names`, subnames, address names, and
-permissions read current state. Their cursors
-bind anchors, filters, sorting, the served project publication (including
-same-height replacement) and manifest revisions. Counts and rows use the same
+permissions read current state. The subnames, address names, and permissions
+cursors bind anchors, filters, sorting, the served project publication (including
+same-height replacement) and manifest revisions. A `GET /v1/names` cursor binds
+its namespace, window, and order and holds a position only; a continuation reads
+the current publication (see
+[current-state list cursors](api-v1.md#current-state-list-cursors)). Counts and rows use the same
 filters; time-dependent expiry filtering retains the first page's evaluation
 time (with the [publication switch](glossary.md#publication-switch) on, it is
 the published block's timestamp on every page). These reads revalidate the publication before returning and disclose
@@ -116,7 +119,8 @@ explicit `finality=latest` is accepted. `meta.as_of_token` is omitted because
 these collection publications cannot be replayed through `at`.
 
 Search and diagnostic-event cursors retain their existing latest-state behavior
-without a publication-validity claim. Search discloses request-scope `meta.as_of`
+without a publication-validity claim; search cursors follow the
+[current-state list cursor](api-v1.md#current-state-list-cursors) contract. Search discloses request-scope `meta.as_of`
 and `meta.as_of_completeness`; diagnostic events omit snapshot metadata. The
 per-input `POST /v1/lookup` cursor contract is documented separately. Historical
 collection replay remains deferred.
@@ -612,12 +616,15 @@ collection route carry neither header.
   `registration_status`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
-  bound to namespace, both bounds, and order. `page.total_count` is `null`.
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+  bound to namespace, both bounds, and order, and hold the last row's position;
+  see [current-state list cursors](api-v1.md#current-state-list-cursors).
+  `page.total_count` is `null`.
+- Snapshot behavior: each page uses the publication current when it is read and
+  discloses it in `meta.as_of`. A continuation is not refused when a newer
+  publication has landed since the previous page: it returns the rows after the
+  cursor's position in the new publication, so a name renewed between pages can
+  appear twice or not at all. A page whose publication changes during its own
+  read returns `409 stale` and can simply be retried, with or without its cursor.
   Historical replay through `at` is not supported.
 - Status semantics: an empty window returns `200` with empty `data`.
 
@@ -2838,7 +2845,8 @@ introduces it rebuilds Project from full history before serving the option; see
   every active public namespace's chains. An explicit namespace accounts only
   for that namespace's chains, even when another public namespace is readable.
   Returned search rows do not change that denominator. The response omits
-  `meta.as_of_token`, and its cursor carries no snapshot validity claim. True
+  `meta.as_of_token`, and its cursor carries no snapshot validity claim (see
+  [current-state list cursors](api-v1.md#current-state-list-cursors)). True
   as-of search enumeration is deferred to the
   revision-bound storage follow-up. Bare search reloads the active manifest
   declarations, selected authority chain heads, project generations, and
@@ -3075,10 +3083,13 @@ For a registrar lease first identified by a later readable observation, registra
   target may precede the selected position when the row was unchanged by later
   incremental publications; it may not be ahead, and a same-height target must
   match the selected hash. The projection-phase generation is revalidated after the
-  read, and an invalid target or changed generation returns `409 stale`. A
-  publication change during a continuation returns `409 stale` and requires
-  restarting without a cursor; a request without a cursor whose publication
-  changes during the read returns `409 stale` too and can simply be retried.
+  read, and an invalid target or changed generation returns `409 stale`; a
+  publication change during the read returns `409 stale` too and the request,
+  with or without its cursor, can simply be retried. The `bound_names` cursor
+  binds the resolver and sort, and `at` when the request pinned it, and holds the last name's position; a continuation without `at` reads the
+  current publication, so a name whose resolver changed between pages can be
+  missed or appear again (see
+  [current-state list cursors](api-v1.md#current-state-list-cursors)).
 - Status semantics: only a request without `at` and with `finality=latest`
   applies the latest served-head Interpret-redo check and returns retryable `409
   stale` while its selected chain is undergoing a redo. Historical `at` reads
