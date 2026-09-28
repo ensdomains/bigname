@@ -3,11 +3,12 @@
 //! every name of the chain, the fields the API and the verified lookup read from the served
 //! `name_current` row: the identity columns, the coverage column, the registration, control,
 //! resolver and coverage blocks with the NameWrapper state and fuses, and the authority
-//! selection, read reachability, resolver pointer family and chain of the provenance.
+//! selection, read reachability, resolver pointer family and chain of the provenance, and the
+//! history heads (`declared_summary.history`) the binding diagnostics route serves.
 //!
 //! Not compared, because no route reads them: the whole-history evidence
-//! (`selected_event_ids`, `raw_fact_refs`, `manifest_versions`, `registrant_event_id`,
-//! `declared_summary.history`), the selection's `lifecycle_state`, and the row metadata
+//! (`selected_event_ids`, `raw_fact_refs`, `manifest_versions`, `registrant_event_id`), the
+//! selection's `lifecycle_state`, and the row metadata
 //! (`chain_positions`, `canonicality_summary`, `manifest_version`, `last_recomputed_at`), which a
 //! composed row takes from the publication. `declared_summary.topology` is compared by the
 //! topology comparison.
@@ -65,6 +66,10 @@ pub struct NameReport {
     /// Mismatched fields by field, `presence` for a name only one side serves.
     pub mismatched_fields: BTreeMap<String, usize>,
     pub mismatched: usize,
+    /// The names with a field left to the control comparison: their served and composed rows
+    /// differ by a cause that comparison decides, so a listing that orders or filters by those
+    /// fields may place them differently.
+    pub covered_names: BTreeSet<String>,
     pub lines: Vec<String>,
 }
 
@@ -137,6 +142,7 @@ pub fn projection(row: &NameCurrentRow) -> Value {
             "coverage": pick(summary, "coverage"),
             "wrapper_state": pick(summary, "wrapper_state"),
             "wrapper_fuses": pick(summary, "wrapper_fuses"),
+            "history": pick(summary, "history"),
         },
         "provenance": {
             "chain_id": pick(provenance, "chain_id"),
@@ -252,6 +258,7 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<NameRepo
                             && withheld
                             && path.starts_with("declared_summary/resolver/")));
                 let (kind, counter) = if covered {
+                    report.covered_names.insert(name.clone());
                     ("COVERED_BY_CONTROL", &mut report.covered_by_control)
                 } else {
                     mismatched = true;

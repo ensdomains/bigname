@@ -43,6 +43,8 @@ pub(super) struct Parts<'a> {
     pub(super) node_pointer: Option<&'a PointerRow>,
     /// The token lineage of the row's event resource.
     pub(super) token_lineage_id: Option<Uuid>,
+    /// The history heads (`heads.rs`), given the row's resource.
+    pub(super) heads: &'a super::heads::Heads,
 }
 
 fn trace_text<'a>(shadow: &'a ShadowName, key: &str) -> Option<&'a str> {
@@ -265,6 +267,27 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
     summary.insert("control".into(), Value::Object(shadow.control.clone()));
     summary.insert("resolver".into(), resolver);
     summary.insert("coverage".into(), coverage_block.clone());
+    let staged: Vec<&str> = parts
+        .facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.original_logical_name_id.is_none() && staged_as_own(parts.facts, event)
+        })
+        .map(|event| event.position.event_identity.as_str())
+        .collect();
+    let row_resource = match binding {
+        Some(binding) if !mismatch && selection.unsupported_reason.is_none() => {
+            Some(binding.resource_id.as_str())
+        }
+        _ => None,
+    };
+    summary.insert(
+        "history".into(),
+        parts
+            .heads
+            .history(&parts.surface.logical_name_id, &staged, row_resource),
+    );
     wrapper_fields(
         &mut summary,
         event_resource.and_then(|resource| parts.facts.wrappers.get(resource)),

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::{
     CoverageShape, FamilyPublication,
     compose::{Parts, Surface, compose},
+    heads::{Heads, load_heads},
     loaders::{
         histories, migrations, node_pointers, resource_pointers, resources, root_releases, surfaces,
     },
@@ -199,6 +200,18 @@ async fn load_chain(
         .filter_map(|pointer| pointer.resource_id.clone())
         .collect();
     let releases = root_releases(pool, chain_id, &root_resources).await?;
+    let staged: Vec<String> = facts
+        .iter()
+        .flat_map(|facts| {
+            facts
+                .events
+                .iter()
+                .filter(|event| event.original_logical_name_id.is_none())
+                .map(|event| event.position.event_identity.clone())
+        })
+        .collect();
+    let heads =
+        Heads::new(load_heads(pool, chain_id, publication.block_number, &ids, &staged).await?);
 
     let mut out = BTreeMap::new();
     for (surface, facts) in surfaces.iter().zip(facts.iter_mut()) {
@@ -260,6 +273,7 @@ async fn load_chain(
                 serving: serving.as_ref(),
                 resource_pointer: resolver_resource.and_then(|resource| pointers.get(resource)),
                 node_pointer: node_pointers.get(&node),
+                heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),
             },
             shape,

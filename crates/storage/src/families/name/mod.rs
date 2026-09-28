@@ -13,12 +13,14 @@
 //!   (ruling J4) and a released ENSv1 tombstone's lapsed authority;
 //! - the NameWrapper state and fuses (F2b) masked at the publication's block time;
 //! - the serving pointer and the resolver block from the F4 and F5 pointers (`serving.rs`);
+//! - `declared_summary.history`, the name's latest events, read by key from `normalized_events`
+//!   (`heads.rs`), which the binding diagnostics route serves;
 //! - the coverage and support columns.
 //!
 //! The whole-history evidence the served row also carries (`provenance.selected_event_ids`,
-//! `raw_fact_refs`, `manifest_versions`, `declared_summary.history`) is not read by any route and
-//! is not composed. `declared_summary.topology` is not composed here either: the alias and
-//! wildcard arms come from `topology::load_name_topology_shadow`.
+//! `raw_fact_refs`, `manifest_versions`) is not read by any route and is not composed.
+//! `declared_summary.topology` is not composed here either: the alias and wildcard arms come from
+//! `topology::load_name_topology_shadow`.
 //!
 //! Every row describes the family marker's publication (the "publication" below): its
 //! `chain_positions` and `canonicality_summary` name the marker's block, so a row carries no
@@ -26,6 +28,7 @@
 //! (docs/api-v1.md, "Publication switch").
 mod batch;
 mod compose;
+mod heads;
 mod list;
 mod loaders;
 pub mod selection;
