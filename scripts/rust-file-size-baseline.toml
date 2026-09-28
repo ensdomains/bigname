@@ -92,8 +92,3 @@ justification = "Index timing, rebuild, throughput, memory measurement, and red-
 path = "apps/phase-runner/src/heads.rs"
 loc = 616
 justification = "Head-marker validation, retained provider finality, and publication checks share this module; database persistence is already split into heads/persist.rs. Preserve that boundary for this integration."
-
-[[files]]
-path = "crates/project/src/scope/topology.rs"
-loc = 663
-justification = "The topology closure keeps frontier setup and ancestor/descendant SQL together so their scope rules can be reviewed as one algorithm. This integration records the existing size without extending the algorithm."

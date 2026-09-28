@@ -93,14 +93,14 @@ async fn load_mirror_pointers(
                COALESCE(resolver.support_status = 'supported' AND declaration.active
                         AND declaration.namespace = latest.pointer_namespace, FALSE) AS followable
         FROM pointer_windows latest
-        JOIN bigname_phase.resolver_current resolver
+        JOIN __family_resolver_classification__ resolver
           ON resolver.chain_id = latest.chain_id
          AND resolver.resolver_address = latest.resolver_address
          AND resolver.declared_summary #>> '{classification,source_family}' = 'ens_v2_resolver_l1'
          AND resolver.declared_summary #>> '{classification,role}' = 'ensv1_mirror_resolver'
         LEFT JOIN"
             .replace(
-                "bigname_phase.resolver_current",
+                "__family_resolver_classification__",
                 &resolver_classification_relation(),
             ),
     );
