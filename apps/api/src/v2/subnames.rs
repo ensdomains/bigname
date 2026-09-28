@@ -119,13 +119,17 @@ pub(crate) async fn get_subnames(
                     namespace, normalized.normalized_name
                 ))
             },
-        ))?
-        .ok_or_else(|| {
-            V2Error::not_found(format!(
-                "name {} was not found in namespace {namespace}",
-                normalized.normalized_name
-            ))
-        })?;
+        ))?;
+    let Some(parent) = parent else {
+        snapshot
+            .ensure_families_published(&state, super::SnapshotReadResource::Name)
+            .await?;
+        snapshot.finish(&state).await?;
+        return Err(V2Error::not_found(format!(
+            "name {} was not found in namespace {namespace}",
+            normalized.normalized_name
+        )));
+    };
 
     let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
     let binding = SubnamesCursorBinding {
@@ -162,12 +166,15 @@ pub(crate) async fn get_subnames(
         params.page_size,
     )
     .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load subnames for {}/{}",
-            namespace, normalized.normalized_name
-        ))
-    })?;
+    .map_err(super::name_rows_error(
+        super::SnapshotReadResource::Name,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load subnames for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        },
+    ))?;
 
     let child_logical_name_ids = storage_page
         .rows
@@ -191,12 +198,15 @@ pub(crate) async fn get_subnames(
     let child_summaries = if include_counts {
         bigname_storage::load_children_current_summaries(&state.pool, &child_logical_name_ids)
             .await
-            .map_err(|_| {
-                V2Error::internal_error(format!(
-                    "failed to load subname counts for {}/{}",
-                    namespace, normalized.normalized_name
-                ))
-            })?
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Name,
+                |_| {
+                    V2Error::internal_error(format!(
+                        "failed to load subname counts for {}/{}",
+                        namespace, normalized.normalized_name
+                    ))
+                },
+            ))?
             .into_iter()
             .map(|summary| (summary.parent_logical_name_id.clone(), summary))
             .collect()

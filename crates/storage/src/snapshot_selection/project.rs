@@ -85,10 +85,16 @@ const CURRENT_PROJECT_ROW_PUBLICATION: &str = r#"
           AND project.input_content_hash = $2
         "#;
 
-/// A marker is servable once it is `live`: `bootstrap_pending` means a rebuild is still
-/// populating the families, which is unservable (the first-sync fence).
-const CURRENT_FAMILY_MARKER_PUBLICATION: &str = r#"
-        SELECT marker.current_block_number, marker.current_block_hash
+/// The servable family marker of a chain, as a `FROM ... WHERE` clause binding the chain as `$1`
+/// and this build's interpreter content hash as `$2`, with the marker as `marker`. A marker is
+/// servable once it is `live` (`bootstrap_pending` means a rebuild is still populating the
+/// families: the first-sync fence), written by this build, and on the readable lineage (a reorg
+/// that orphans its block makes it unservable until the families republish). The publication
+/// fence and the composed name reader (families/name/batch.rs) share it, so a composed read never
+/// serves a marker the fence would refuse.
+macro_rules! servable_family_marker {
+    () => {
+        r#"
         FROM bigname_phase.project_family_marker marker
         JOIN bigname_phase.chain_lineage lineage
           ON lineage.chain_id = marker.chain_id
@@ -98,7 +104,15 @@ const CURRENT_FAMILY_MARKER_PUBLICATION: &str = r#"
         WHERE marker.chain_id = $1
           AND marker.state = 'live'
           AND marker.input_content_hash = $2
-        "#;
+        "#
+    };
+}
+pub(crate) use servable_family_marker;
+
+const CURRENT_FAMILY_MARKER_PUBLICATION: &str = concat!(
+    "SELECT marker.current_block_number, marker.current_block_hash",
+    servable_family_marker!()
+);
 
 /// The served generation for the publication that serves `block_number` / `block_hash` on
 /// `chain_id`, or `None` when no such publication is servable. The generation is the project

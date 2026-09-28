@@ -156,8 +156,17 @@ whose families were built without it, resets every family table and the
 [family marker](glossary.md#family-marker), so the next family run rebuilds
 them. Apply it before `BIGNAME_SERVE_FROM_FAMILIES` is ever turned on: with the
 [publication switch](glossary.md#publication-switch) on, every fenced route
-answers `409 stale` until that rebuild finishes. It takes no marker lock, so a
-family run in flight when it applies fails once and the next run rebuilds.
+answers `409 stale` until that rebuild finishes. It does not coordinate with a
+running family publisher: a family run in flight when it applies fails once and
+the next run rebuilds.
+
+`20260928160000_project_families_name_summary.sql` adds `project_name_summary`,
+the [name summary](glossary.md#name-summary), the same way, with the indexes its
+writer reads. Apply it before starting a release that writes it, whatever the
+publication switch: that release's family step writes the table on every block,
+so it fails until the table exists. Apply it before the switch is ever turned on
+too, for the same `409 stale` window, and, as above, a family run in flight when
+it applies fails once and the next run rebuilds.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current

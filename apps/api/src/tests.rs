@@ -429,3 +429,5 @@ include!("tests/v2_publication_bindings.rs");
 include!("tests/v2_family_marker_fence.rs");
 include!("tests/v2_switch_names.rs");
 include!("tests/v2_list_cursor.rs");
+include!("tests/v2_switch_children.rs");
+include!("tests/v2_switch_name_publication_changes.rs");

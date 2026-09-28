@@ -57,6 +57,9 @@ pub async fn load_family_bound_names(
     ))
     .unwrap_or(i64::MAX);
     let mut snapshot = batch::read_snapshot(pool).await?;
+    // The walk reads family tables, which a rebuild empties: read the marker first, so a rebuild
+    // refuses rather than answers a resolver with no names.
+    batch::ensure_published(&mut snapshot, &[chain_id.to_owned()]).await?;
     let mut out = Vec::new();
     while out.len() < wanted {
         let candidates = candidates(
@@ -98,7 +101,8 @@ pub async fn load_family_bound_names(
 }
 
 /// The next names after `after` in the page order that a pointer naming the resolver reaches:
-/// (logical_name_id, raw_name, namespace, namehash).
+/// (logical_name_id, raw_name, namespace, namehash). A candidate is a superset: `admitted` keeps
+/// the names whose composed row serves the resolver.
 async fn candidates(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
@@ -127,6 +131,13 @@ async fn candidates(
                ON event.event_identity = pointer.event_identity
              WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
                AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
+             UNION
+             -- Named F5 keys retain a name's own latest pointer when the resource's latest
+             -- pointer names another name. The resolver index reads retained pointer keys,
+             -- never the history of ResolverChanged events at this resolver.
+             SELECT pointer.logical_name_id
+             FROM bigname_phase.project_named_resource_pointer pointer
+             WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
          )
          SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
          FROM reached

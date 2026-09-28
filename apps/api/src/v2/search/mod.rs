@@ -381,7 +381,10 @@ async fn load_search_storage_page(
         )
         .await
     };
-    page.map_err(|_| V2Error::internal_error("failed to load search results"))
+    page.map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error("failed to load search results"),
+    ))
 }
 
 fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String> {

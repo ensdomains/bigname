@@ -85,6 +85,18 @@ pub fn effective_wrapper(row: &WrapperRow, clock_seconds: i64) -> EffectiveWrapp
     }
 }
 
+/// The clock seconds after `clock_seconds` at which [`effective_wrapper`] of `row` can change:
+/// the first second past the expiry, and the first second inside the `.eth` grace window. A
+/// stored read of the masks is stale from the earliest of them.
+pub fn clock_boundaries(row: &WrapperRow, clock_seconds: i64) -> impl Iterator<Item = i64> {
+    let clock = i128::from(clock_seconds);
+    expiry(row)
+        .into_iter()
+        .flat_map(|expiry| [expiry + 1, expiry - GRACE_PERIOD_SECONDS + 1])
+        .filter(move |boundary| *boundary > clock)
+        .filter_map(|boundary| i64::try_from(boundary).ok())
+}
+
 /// The wrapper expiry a wrapped name with no registrar lease serves: an integral word between
 /// 1 and 253402300799 (build.sql:586-592).
 pub fn servable_expiry(row: &WrapperRow) -> Option<i64> {

@@ -38,6 +38,7 @@ fn a_resource_pointer_without_a_name_owns_its_node_and_resource_but_no_name() {
     let keys = derive(&[pointer]);
     assert!(keys.contains(Space::RegistryPointer, &["ens", "0xab"]));
     assert!(keys.contains(Space::Resource, &[RESOURCE]));
+    assert_eq!(keys.of(Space::NamedResourcePointer).count(), 0);
     assert!(keys.contains(
         Space::Resolver,
         &["0x00000000000000000000000000000000000000b1"]
@@ -46,6 +47,26 @@ fn a_resource_pointer_without_a_name_owns_its_node_and_resource_but_no_name() {
         keys.of(Space::Name).count(),
         0,
         "no name key without a name"
+    );
+}
+
+#[test]
+fn only_named_resolver_changes_own_a_resource_name_pointer() {
+    let mut pointer = event(
+        "ResolverChanged",
+        "ens_v2_registry_l1",
+        json!({"resolver": null}),
+    );
+    pointer.resource_id = Some(RESOURCE.to_owned());
+    pointer.logical_name_id = Some("ens:0xname".to_owned());
+    assert!(
+        derive(std::slice::from_ref(&pointer))
+            .contains(Space::NamedResourcePointer, &[RESOURCE, "ens:0xname"])
+    );
+    pointer.event_kind = "RecordVersionChanged".to_owned();
+    assert_eq!(
+        derive(&[pointer]).of(Space::NamedResourcePointer).count(),
+        0
     );
 }
 

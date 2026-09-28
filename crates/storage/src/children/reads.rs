@@ -110,6 +110,16 @@ pub async fn load_registry_children_current_page(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<RegistryChildrenPage> {
+    if crate::publication_source::serve_from_families() {
+        return super::families::registry_page(
+            pool,
+            parent_logical_name_id,
+            registry_address,
+            cursor,
+            page_size,
+        )
+        .await;
+    }
     let registry_address = registry_address.to_ascii_lowercase();
     let limit = checked_page_limit_i64(
         page_size,
@@ -173,6 +183,10 @@ pub async fn count_registry_children_current(
     parent_logical_name_id: &str,
     registry_address: &str,
 ) -> Result<i64> {
+    if crate::publication_source::serve_from_families() {
+        return super::families::registry_count(pool, parent_logical_name_id, registry_address)
+            .await;
+    }
     sqlx::query_scalar::<_, i64>(&format!(
         r#"
         SELECT count(*)::bigint
@@ -198,6 +212,9 @@ pub async fn load_children_current_summaries(
 ) -> Result<Vec<ChildrenCurrentSummary>> {
     if parent_logical_name_ids.is_empty() {
         return Ok(Vec::new());
+    }
+    if crate::publication_source::serve_from_families() {
+        return super::families::summaries(pool, parent_logical_name_ids).await;
     }
     // The summary annotates the page, so it has to admit exactly the rows the page admits —
     // including the projection-target lineage fence that fails closed on an orphaned target whose

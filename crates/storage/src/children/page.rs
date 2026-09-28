@@ -50,6 +50,7 @@ pub async fn load_children_current_page_filtered(
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<ChildrenCurrentPage> {
+    let requested_page_size = page_size;
     let limit = checked_page_limit_i64(
         page_size,
         "children_current page_size must be positive",
@@ -72,6 +73,16 @@ pub async fn load_children_current_page_filtered(
         ),
     };
 
+    if crate::publication_source::serve_from_families() {
+        return super::families::page(
+            pool,
+            parent_logical_name_id,
+            filter,
+            cursor,
+            requested_page_size,
+        )
+        .await;
+    }
     let mut builder = QueryBuilder::<Postgres>::new("WITH children AS (");
     push_children_cte(&mut builder, parent_logical_name_id, filter, expiry_clock);
     builder.push(") SELECT * FROM children WHERE TRUE");

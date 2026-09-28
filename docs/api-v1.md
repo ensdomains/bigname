@@ -904,9 +904,7 @@ diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
 resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
 whole. The following routes keep their own pages on the served tables until a
 later step 7b slice moves them, and take only the name rows they join from
-composed rows: `GET /v1/names/{name}/subnames` (the parent and each child's
-registration), `GET /v1/registries/{chain_id}/{address}/labels` (each child's
-registration), `GET /v1/names/{name}/history` (whether the name exists),
+composed rows: `GET /v1/names/{name}/history` (whether the name exists),
 `GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
 name of each registration), `GET /v1/addresses/{address}/names` (each name's
 registration, `relation=resolves_to` included), `GET /v1/events`,
@@ -918,9 +916,15 @@ block, so a row never mixes two blocks. A composed row describes the publication
 and has no older position of its own, so an `at` below the publication answers
 `409 stale` with "requested snapshot is not available for name", the answer
 served rows give once Project has republished them. While a family rebuild is
-in flight (the marker is not `live`, or carries another build's hash) no
-composed row is served: a route whose fence has not already refused answers
-`409 stale` with "requested snapshot is not available for" its resource.
+in flight (the marker is not `live`, carries another build's hash, or sits on a
+block a reorg orphaned) no composed row is served: a route whose fence has not
+already refused answers `409 stale` with "requested snapshot is not available
+for" its resource, including when the rebuild starts after the fence passed. A
+composed read that finds no name to compose (a name with no surface, an empty
+bound-name or expiring walk) still reads its chains' markers, so a rebuild
+answers `409 stale` rather than `404` or an empty page, and the expiring listing
+composes only names of the requested namespace, so another namespace's rebuild
+does not refuse it.
 
 Two differences remain with the switch on. A bound-name listing still decides
 whether the resolver serves bound names at all from the served resolver row
@@ -933,6 +937,19 @@ the composed row reads the node at once (unregistered but projected), so
 off. A composed row also does not yet carry the declared resolution topology
 (`declared_summary.topology`), which the records route's verified lookup
 admission and avatar readback read; that moves with the record inventories.
+
+With the switch on, `GET /v1/names/{name}/subnames` (with and without
+`include=counts`), `GET /v1/registries/{chain_id}/{address}/labels` and the
+registry's `counts.labels` read the child edge families instead of
+`children_current`, with each child's arm, serving resource, zero-owner
+transfer, registration status and times from the stored [name
+summary](glossary.md#name-summary), evaluated against the family marker's
+block. Every per-name child count (`subname_count` under `include=counts`, and
+a name's subname count) is an exact count over the same relation. The parent
+and each child's registration come from composed rows. The bodies are meant to
+be identical to the served ones. Each child read sees one committed family
+block, and with no servable marker (a rebuild in flight, or another build's
+hash) it answers `409 stale` like the composed reads, never an empty list.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
