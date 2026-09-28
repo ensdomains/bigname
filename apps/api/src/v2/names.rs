@@ -145,7 +145,10 @@ pub(crate) async fn get_names(
         )
         .await
     }
-    .map_err(|_| V2Error::internal_error(format!("failed to load names for {namespace}")))?;
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error(format!("failed to load names for {namespace}")),
+    ))?;
 
     let next_cursor = storage_page
         .next_cursor
