@@ -112,14 +112,14 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
     out.into_iter()
         .filter_map(|(address, relation)| {
             let address = address?.to_ascii_lowercase();
-            (!address.trim().is_empty() && address != ZERO).then_some((address, relation))
+            (address != ZERO).then_some((address, relation))
         })
         .collect()
 }
 
 /// The served `scope_modifiers.in_grace`: unknown when the fuses or the expiry is.
 fn in_grace(wrapper: &WrapperRow, clock_seconds: i64) -> Option<bool> {
-    let fuses = wrapper.fuses.filter(|fuses| *fuses >= 0)?;
+    let fuses = wrapper.fuses?;
     let expiry: i128 = wrapper.expiry_seconds.as_deref()?.parse().ok()?;
     let clock = i128::from(clock_seconds);
     Some(fuses & IS_DOT_ETH != 0 && expiry >= clock && expiry - GRACE_PERIOD_SECONDS < clock)

@@ -91,7 +91,7 @@ pub(super) fn record_rows(
         || row
             .provenance
             .get("record_serving")
-            .is_some_and(|serving| serving == false || serving == "false")
+            .is_some_and(|serving| serving == false)
     {
         return Vec::new();
     }
