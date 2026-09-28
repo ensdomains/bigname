@@ -10,6 +10,8 @@
 //! The registration and expiry times the timestamp sorts and the fence use, and the released
 //! status the fence checks, are the child's name summary (`project_name_summary`), the same
 //! expressions today's page reads from the child's `name_current.declared_summary`.
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail};
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime,
@@ -22,7 +24,7 @@ use crate::{
 };
 
 use super::{
-    children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, push_selected},
+    children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, Parents, push_selected},
     name_summary::CHILD_SUMMARY_JOIN,
 };
 
@@ -158,7 +160,7 @@ pub(crate) async fn count(
     let mut builder = QueryBuilder::<Postgres>::new("WITH ");
     push_children(
         &mut builder,
-        parent_logical_name_id,
+        Parents::One(parent_logical_name_id),
         &ChildrenCurrentPageFilter::default(),
         registry,
     );
@@ -171,6 +173,38 @@ pub(crate) async fn count(
             format!("failed to count the children shadow of {parent_logical_name_id}")
         })?;
     u64::try_from(count).context("negative children shadow count")
+}
+
+/// The exact unfiltered child count of each of `parent_logical_name_ids` in one statement, keyed
+/// by parent; a parent with no child (or no readable surface) has no entry.
+pub(crate) async fn counts(
+    conn: &mut PgConnection,
+    parent_logical_name_ids: &[String],
+) -> Result<BTreeMap<String, u64>> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::Many(parent_logical_name_ids),
+        &ChildrenCurrentPageFilter::default(),
+        None,
+    );
+    builder.push(
+        ") SELECT parent_logical_name_id, count(*) FROM children
+         GROUP BY parent_logical_name_id",
+    );
+    let rows: Vec<(String, i64)> = builder
+        .build_query_as()
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to count the children shadow of the parents")?;
+    rows.into_iter()
+        .map(|(parent, count)| {
+            Ok((
+                parent,
+                u64::try_from(count).context("negative children shadow count")?,
+            ))
+        })
+        .collect()
 }
 
 /// One page and its exact total in one statement.
@@ -200,7 +234,12 @@ pub(crate) async fn page(
         }
     }
     let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(&mut builder, parent_logical_name_id, filter, registry);
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        filter,
+        registry,
+    );
     builder.push("), page AS (SELECT * FROM children WHERE TRUE");
     if let Some(cursor) = cursor {
         push_cursor_after(&mut builder, filter.order, cursor);
@@ -256,11 +295,11 @@ pub(crate) async fn page(
 /// filter, with each child's served fields and `sort_timestamp`.
 fn push_children<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
-    parent_logical_name_id: &'a str,
+    parents: Parents<'a>,
     filter: &ChildrenCurrentPageFilter<'a>,
     registry: Option<&'a str>,
 ) {
-    push_selected(builder, parent_logical_name_id);
+    push_selected(builder, parents);
     let sort_timestamp = match filter.sort {
         ChildrenCurrentSort::Name => "NULL::TIMESTAMPTZ",
         ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
@@ -272,7 +311,9 @@ fn push_children<'a>(
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    {sort_timestamp} AS sort_timestamp
-            FROM selected CROSS JOIN parent CROSS JOIN clock
+            FROM selected
+            JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
+            JOIN clock ON clock.chain_id = parent.chain_id
             LEFT JOIN bigname_phase.name_surfaces child_surface
               ON child_surface.logical_name_id = selected.child_logical_name_id
             {CHILD_SUMMARY_JOIN}

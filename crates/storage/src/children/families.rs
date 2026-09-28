@@ -15,7 +15,10 @@ use sqlx::{PgPool, Postgres, Transaction, types::time::OffsetDateTime};
 
 use crate::families::{
     name::read_snapshot,
-    topology::{FamilyChildRow, children_page_on, count_children_on, require_publication},
+    topology::{
+        FamilyChildRow, children_page_on, count_children_of_parents_on, count_children_on,
+        require_publication,
+    },
 };
 
 use super::{
@@ -118,13 +121,13 @@ pub(super) async fn summaries(
     parent_logical_name_ids: &[String],
 ) -> Result<Vec<ChildrenCurrentSummary>> {
     let mut transaction = snapshot(pool, parent_logical_name_ids).await?;
-    let mut out = Vec::with_capacity(parent_logical_name_ids.len());
-    for parent in parent_logical_name_ids {
-        let count = count_children_on(&mut transaction, parent, None).await?;
-        out.push(summary(parent, count)?);
-    }
+    // One statement for every parent, as the served summaries aggregate them in one query.
+    let counts = count_children_of_parents_on(&mut transaction, parent_logical_name_ids).await?;
     close(transaction).await?;
-    Ok(out)
+    parent_logical_name_ids
+        .iter()
+        .map(|parent| summary(parent, counts.get(parent).copied().unwrap_or(0)))
+        .collect()
 }
 
 fn summary(parent_logical_name_id: &str, child_count: u64) -> Result<ChildrenCurrentSummary> {

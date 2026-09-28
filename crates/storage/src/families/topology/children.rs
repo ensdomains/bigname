@@ -43,29 +43,43 @@ fn active_instance(alias: &str, chain: &str, address: &str) -> String {
     )
 }
 
+/// The parents a child read covers: one, for a page, or many, for the per-parent counts.
+#[derive(Clone, Copy)]
+pub(super) enum Parents<'a> {
+    One(&'a str),
+    Many(&'a [String]),
+}
+
 /// Push `clock`, `parent`, `parent_migration`, `candidates` and `selected` CTE definitions (each
-/// followed by a comma) for the parent `parent_logical_name_id`. `selected` holds one row per
-/// served child with `pair_rank = 1`, before the page read filter; an ENSv2 child carries the
-/// emitter of its registration event as `registry_address`, others null.
-pub(super) fn push_selected<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    parent_logical_name_id: &'a str,
-) {
+/// followed by a comma) for `parents`. `clock` holds one row per chain of the parents, and
+/// `selected` one row per served child with `pair_rank = 1`, before the page read filter, with
+/// its parent as `parent_logical_name_id`; an ENSv2 child carries the emitter of its
+/// registration event as `registry_address`, others null.
+pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parents: Parents<'a>) {
     builder.push(
         "parent_surface AS (
             SELECT surface.* FROM bigname_phase.name_surfaces surface
             WHERE surface.logical_name_id = ",
     );
-    builder.push_bind(parent_logical_name_id);
+    match parents {
+        Parents::One(parent) => {
+            builder.push_bind(parent);
+        }
+        Parents::Many(parents) => {
+            builder.push("ANY(");
+            builder.push_bind(parents);
+            builder.push(")");
+        }
+    }
     builder.push(
         "
         ), clock AS (
-            -- The clock: the family marker's block of the parent's chain, never NOW(), when
+            -- The clock: the family marker's block of each parent's chain, never NOW(), when
             -- the marker is servable by the fence's rule (`servable_family_marker`,
             -- snapshot_selection/project.rs): live, written by this build, on a readable block.
             -- The readers check that first (`children_page::require_publication`); without a
             -- servable marker there is no clock and no child.
-            SELECT marker.chain_id, marker.current_block_number AS block_number,
+            SELECT DISTINCT marker.chain_id, marker.current_block_number AS block_number,
                    marker.block_timestamp,
                    extract(epoch FROM marker.block_timestamp) AS epoch_seconds
             FROM bigname_phase.project_family_marker marker
@@ -83,15 +97,16 @@ pub(super) fn push_selected<'a>(
         ), parent AS (
             SELECT surface.logical_name_id, surface.namespace, surface.chain_id, surface.raw_name,
                    lower(surface.namehash) AS node, surface.labelhashes
-            FROM parent_surface surface CROSS JOIN clock
+            FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id
             WHERE surface.visibility_state = 'active' AND {parent_readable}
         ), parent_migration AS (
             -- Today's ENSv1 migration gate (crates/project/src/builders/children.rs, the
             -- migration path test in `v1_rows`). Removing that gate from the builder must
             -- remove this block in the same change.
-            SELECT state.migration_path, registry.registry_contract_instance_id::text
+            SELECT parent.logical_name_id AS parent_logical_name_id, state.migration_path,
+                   registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id
-            FROM parent CROSS JOIN clock
+            FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_name_state state
               ON state.chain_id = parent.chain_id
              AND state.namespace = parent.namespace
@@ -152,11 +167,12 @@ pub(super) fn push_selected<'a>(
             -- A zero current owner overrides the edge's owner; any other owner does not, as
             -- project_latest_registry_owner keeps zero owners only. The child's name summary
             -- carries whether its node's latest registry transfer names the zero owner.
-            SELECT edge.*, parent.namespace || ':' || edge.child_node AS child_logical_name_id,
+            SELECT edge.*, parent.logical_name_id AS edge_parent_logical_name_id,
+                   parent.namespace || ':' || edge.child_node AS child_logical_name_id,
                    CASE WHEN {zero_owner} THEN {ZERO_ADDRESS}
                         ELSE lower(COALESCE(edge.owner_getter, edge.owner))
                    END AS served_owner
-            FROM parent CROSS JOIN clock
+            FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_child_edge_candidate edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
              AND edge.parent_node = parent.node
@@ -176,9 +192,11 @@ pub(super) fn push_selected<'a>(
                    edge.block_number, edge.transaction_index, edge.log_index, edge.event_identity,
                    NULL::text AS registry_address
             FROM v1_edges edge
-            CROSS JOIN parent CROSS JOIN clock
+            JOIN parent ON parent.logical_name_id = edge.edge_parent_logical_name_id
+            JOIN clock ON clock.chain_id = parent.chain_id
             LEFT JOIN bigname_phase.label_preimages preimage ON preimage.labelhash = edge.labelhash
-            LEFT JOIN parent_migration migration ON TRUE
+            LEFT JOIN parent_migration migration
+              ON migration.parent_logical_name_id = parent.logical_name_id
             WHERE (COALESCE(edge.served_owner, '') NOT IN ('', {ZERO_ADDRESS})
                    OR {serving})
               AND (edge.source_family <> 'ens_v1_registry_l1'
@@ -203,7 +221,7 @@ pub(super) fn push_selected<'a>(
                    registration.transaction_index, registration.log_index,
                    registration.event_identity,
                    lower(registration_event.raw_fact_ref ->> 'emitting_address')
-            FROM parent CROSS JOIN clock
+            FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id
              AND subregistry.logical_name_id = parent.logical_name_id
