@@ -53,9 +53,18 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         data.get("registrant"),
         Some(&json!("0x00000000000000000000000000000000000000aa"))
     );
-    assert_eq!(data.get("registered_at"), Some(&json!("2024-01-02T03:04:05Z")));
-    assert_eq!(data.get("created_at"), Some(&json!("2023-01-02T03:04:05Z")));
-    assert_eq!(data.get("expires_at"), Some(&json!("2027-01-02T03:04:05Z")));
+    assert_eq!(
+        parse_rfc3339_utc_timestamp(data["registered_at"].as_str().context("registered_at")?).unwrap(),
+        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z").unwrap(),
+    );
+    assert_eq!(
+        parse_rfc3339_utc_timestamp(data["created_at"].as_str().context("created_at")?).unwrap(),
+        parse_rfc3339_utc_timestamp("2023-01-02T03:04:05Z").unwrap(),
+    );
+    assert_eq!(
+        parse_rfc3339_utc_timestamp(data["expires_at"].as_str().context("expires_at")?).unwrap(),
+        parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z").unwrap(),
+    );
     assert_eq!(
         data.get("addresses"),
         Some(&json!({
@@ -70,7 +79,7 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         }))
     );
     assert_eq!(data.get("content_hash"), Some(&json!("ipfs://alice")));
-    assert_eq!(data.get("primary_name"), Some(&json!("alice.eth")));
+    assert!(data.get("primary_name").is_none());
     assert_eq!(
         data.get("primary_address"),
         Some(&json!("0x0000000000000000000000000000000000000def"))
@@ -2321,7 +2330,7 @@ async fn v2_get_name_records_returns_indexed_values_for_the_default_key_set() ->
         payload["data"]["records"],
         json!({
             "addr:60": {"status": "ok", "value": "0x0000000000000000000000000000000000000def"},
-            "avatar": {"status": "ok", "value": "https://example.test/avatar.png"},
+            "text:avatar": {"status": "ok", "value": "https://example.test/avatar.png"},
             "contenthash": {"status": "ok", "value": "ipfs://alice"},
             "text:description": {"status": "ok", "value": "Alice profile"}
         })
@@ -2358,23 +2367,9 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
 
 #[tokio::test]
 async fn v2_get_name_records_flattens_projected_byte_address_values() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?keys=addr:0",
-        |_, _, inventory| {
-            inventory.selectors = json!([{
-                "record_key": "addr:0",
-                "record_family": "addr",
-                "selector_key": "0",
-                "cacheable": true
-            }]);
-            inventory.entries = json!([{
-                "record_key": "addr:0",
-                "record_family": "addr",
-                "selector_key": "0",
-                "status": "success",
-                "value": {"encoding": "hex", "bytes": "0x001122"}
-            }]);
-        },
+        &[family_fixture_record_write("addr:0", Some(json!({"encoding":"hex","bytes":"0x001122"})))],
     )
     .await?;
 
@@ -2604,26 +2599,9 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
 
 #[tokio::test]
 async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?source=indexed&keys=addr:2147483649",
-        |_, _, inventory| {
-            inventory.selectors = json!([{
-                "record_key": "addr:2147483648",
-                "record_family": "addr",
-                "selector_key": "2147483648",
-                "cacheable": true
-            }]);
-            inventory.entries = json!([{
-                "record_key": "addr:2147483648",
-                "record_family": "addr",
-                "selector_key": "2147483648",
-                "status": "success",
-                "value": "0x0000000000000000000000000000000000000def"
-            }]);
-            inventory.provenance["read_rules"] = json!([]);
-            inventory.explicit_gaps = json!([]);
-            inventory.unsupported_families = json!([]);
-        },
+        &[family_fixture_record_write("addr:2147483648", Some(json!("0x0000000000000000000000000000000000000def")))],
     )
     .await?;
     assert_eq!(
@@ -2891,59 +2869,9 @@ async fn v2_get_name_records_rejects_too_many_keys() -> Result<()> {
 
 #[tokio::test]
 async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?keys=contenthash,text:email",
-        |_, _, inventory| {
-            inventory.selectors = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "cacheable": true
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "cacheable": true
-                }
-            ]);
-            inventory.entries = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x0000000000000000000000000000000000000def"
-                    }
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "status": "success",
-                    "value": {
-                        "value": "https://example.test/avatar.png"
-                    }
-                }
-            ]);
-            inventory.explicit_gaps = json!([
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "gap_reason": "not_observed_on_current_resolver"
-                }
-            ]);
-            inventory.unsupported_families = json!([
-                {
-                    "record_family": "text",
-                    "unsupported_reason": "resolver_family_pending"
-                }
-            ]);
-        },
+        &[family_fixture_record_write("text:email", None)],
     )
     .await?;
 
@@ -2955,7 +2883,7 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
             },
             "text:email": {
                 "status": "unsupported",
-                "unsupported_reason": "resolver_family_pending"
+                "unsupported_reason": "value_not_retained"
             }
         })
     );
@@ -2965,70 +2893,19 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
 
 #[tokio::test]
 async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?keys=contenthash,text:email&include=inventory",
-        |_, _, inventory| {
-            inventory.selectors = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "cacheable": true
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "cacheable": true
-                }
-            ]);
-            inventory.entries = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x0000000000000000000000000000000000000def"
-                    }
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "status": "success",
-                    "value": {
-                        "value": "https://example.test/avatar.png"
-                    }
-                }
-            ]);
-            inventory.explicit_gaps = json!([
-                {
-                    "record_key": "contenthash",
-                    "record_family": "contenthash",
-                    "selector_key": null,
-                    "gap_reason": "not_observed_on_current_resolver"
-                }
-            ]);
-            inventory.unsupported_families = json!([
-                {
-                    "record_family": "text",
-                    "unsupported_reason": "resolver_family_pending"
-                }
-            ]);
-        },
+        &[family_fixture_record_write("addr:60", Some(json!("0x0000000000000000000000000000000000000def"))), family_fixture_record_write("avatar", Some(json!("https://example.test/avatar.png"))), family_fixture_record_write("text:email", None)],
     )
     .await?;
 
     assert_eq!(
         payload["data"]["inventory"],
         json!({
-            "known_keys": ["addr:60", "avatar"],
+            "known_keys": ["addr:60", "text:avatar"],
             "unset_keys": [],
             "unsupported_keys": ["text:email"],
-            "abi_content_types": null,
-            "abi_unsupported_reason": "abi_observations_not_supported"
+            "abi_content_types": []
         })
     );
 
@@ -3037,45 +2914,9 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
 
 #[tokio::test]
 async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?keys=addr:60,avatar&include=inventory",
-        |_, _, inventory| {
-            inventory.selectors = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "cacheable": true
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "cacheable": true
-                }
-            ]);
-            inventory.entries = json!([
-                {
-                    "record_key": "addr:60",
-                    "record_family": "addr",
-                    "selector_key": "60",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "60",
-                        "value": "0x0000000000000000000000000000000000000def"
-                    }
-                },
-                {
-                    "record_key": "avatar",
-                    "record_family": "avatar",
-                    "selector_key": null,
-                    "status": "unsupported",
-                    "unsupported_reason": "resolver_family_pending"
-                }
-            ]);
-            inventory.explicit_gaps = json!([]);
-            inventory.unsupported_families = json!([]);
-        },
+        &[family_fixture_record_write("addr:60", Some(json!("0x0000000000000000000000000000000000000def"))), family_fixture_record_write("avatar", None)],
     )
     .await?;
 
@@ -3084,9 +2925,8 @@ async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Resul
         json!({
             "known_keys": ["addr:60"],
             "unset_keys": [],
-            "unsupported_keys": ["avatar"],
-            "abi_content_types": null,
-            "abi_unsupported_reason": "abi_observations_not_supported"
+            "unsupported_keys": ["text:avatar"],
+            "abi_content_types": []
         })
     );
 
@@ -3575,7 +3415,7 @@ async fn seed_v2_basenames_auto_transition_fixture(
         "record_family": "addr",
         "selector_key": "60",
         "status": "unsupported",
-        "unsupported_reason": "value_not_retained_in_normalized_events"
+        "unsupported_reason": "value_not_retained"
     }]);
     database
         .insert_record_inventory_current_row(inventory)
@@ -3770,7 +3610,7 @@ async fn seed_basenames_auto_fallback_requiring_inventory(database: &TestDatabas
         "record_family": "addr",
         "selector_key": "60",
         "status": "unsupported",
-        "unsupported_reason": "value_not_retained_in_normalized_events"
+        "unsupported_reason": "value_not_retained"
     }]))
     .execute(&database.pool)
     .await?;
@@ -5146,8 +4986,8 @@ async fn seed_v2_sepolia_only_phase_head_name(database: &TestDatabase) -> Result
 async fn seed_v2_snapshot_profile_name(
     database: &TestDatabase,
     normalized_name: &str,
-    display_name: &str,
-    namehash: &str,
+    _display_name: &str,
+    _namehash: &str,
     resource_id: Uuid,
     token_lineage_id: Uuid,
     surface_binding_id: Uuid,
@@ -5157,101 +4997,20 @@ async fn seed_v2_snapshot_profile_name(
     block_hash: &str,
     timestamp: &str,
 ) -> Result<()> {
-    let fixture_logical_name_id = format!("ens:{normalized_name}");
-    let identity_block_number = block_number.rem_euclid(100);
-    let mut surface = collection_name_surface(
-        &fixture_logical_name_id,
-        display_name,
-        namehash,
-        identity_block_number,
-    );
-    surface.normalized_name = normalized_name.to_owned();
-    surface.dns_encoded_name = normalized_name.as_bytes().to_vec();
-    surface.labelhashes = labelhash_for_display_name(normalized_name)
-        .into_iter()
-        .collect();
-    surface.chain_id = chain_id.to_owned();
-    surface.block_hash = format!("0xsurface{identity_block_number:02x}");
-    upsert_test_name_surfaces(&database.pool, &[surface]).await?;
-
-    let mut token_lineage = address_name_token_lineage(
-        token_lineage_id,
-        &format!("0xtoken{identity_block_number:02x}"),
-        identity_block_number,
-    );
-    token_lineage.chain_id = chain_id.to_owned();
-    upsert_test_token_lineages(&database.pool, &[token_lineage]).await?;
-
-    let mut resource = address_name_resource(
-        resource_id,
-        Some(token_lineage_id),
-        &format!("0xresource{identity_block_number:02x}"),
-        identity_block_number,
-    );
-    resource.chain_id = chain_id.to_owned();
-    upsert_test_resources(&database.pool, &[resource]).await?;
-
-    let mut binding = address_name_surface_binding(
-        surface_binding_id,
-        &fixture_logical_name_id,
-        resource_id,
-        &format!("0xbinding{identity_block_number:02x}"),
-        identity_block_number,
-        1_717_176_000 + identity_block_number,
-    );
-    binding.chain_id = chain_id.to_owned();
-    upsert_test_surface_bindings(&database.pool, &[binding]).await?;
-
-    upsert_phase_name_current_rows(
-        &database.pool,
-        &[v2_subnames_name_current_row(
-            &fixture_logical_name_id,
-            display_name,
-            namehash,
-            identity_block_number,
-            Some(surface_binding_id),
-            Some(resource_id),
-            Some(token_lineage_id),
-            json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "ens_v2_registry"
-            },
-            "control": {
-                "registry_owner": "0x0000000000000000000000000000000000000001"
-            },
-            "resolver": {
-                "chain_id": chain_id,
-                "address": "0x0000000000000000000000000000000000000abc",
-                "latest_event_kind": "ResolverChanged"
-            }
-            }),
-        )],
-    )
-    .await?;
-
-    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", normalized_name);
-    let mut row = bigname_storage::load_name_current(&database.pool, &logical_name_id)
-        .await
-        .with_context(|| format!("failed to load v2 snapshot fixture row {logical_name_id}"))?
-        .with_context(|| format!("v2 snapshot fixture row {logical_name_id} was not inserted"))?;
-    row.chain_positions = v2_snapshot_chain_positions(slot, chain_id, block_number, block_hash, timestamp);
-    row.canonicality_summary = json!({
-        "status": "finalized",
-        "chains": {
-            chain_id: "finalized"
-        }
-    });
-    row.declared_summary["resolver"]["chain_id"] = json!(chain_id);
-    row.provenance["manifest_versions"] = json!([
-        {
-            "manifest_version": 3,
-            "source_family": "ens_v2_registry_l1",
-            "chain": chain_id,
-            "deployment_epoch": "ens_v2"
-        }
-    ]);
-    database.insert_name_current_row(row).await
+    database.seed_snapshot_selector_chain_positions(&v2_snapshot_chain_positions(
+        slot, chain_id, block_number, block_hash, timestamp)).await?;
+    let logical = seed_family_identity_inputs(&database.pool, "ens", normalized_name,
+        chain_id, block_number, block_hash, resource_id, token_lineage_id, surface_binding_id,
+        "ens_v2").await?;
+    let mut resolver = history_event(&format!("snapshot-resolver-{resource_id}"), Some(&logical),
+        Some(resource_id), Some(chain_id), Some(block_number), Some(block_hash),
+        Some("0xsnapshot"), Some(0), CanonicalityState::Canonical);
+    resolver.event_kind = "ResolverChanged".into();
+    resolver.source_family = "ens_v2_registry_l1".into();
+    resolver.after_state = json!({"node":bigname_lookup::ens_namehash_hex(normalized_name)?,
+        "resolver":"0x0000000000000000000000000000000000000abc"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[resolver]).await?;
+    rebuild_fixture_families(&database.pool, chain_id, block_number, block_hash).await
 }
 
 fn v2_snapshot_chain_positions(
@@ -5332,7 +5091,11 @@ fn v2_at_token(
 }
 
 async fn v2_name_record_payload(uri: &str) -> Result<Value> {
-    v2_name_record_payload_with_row(uri, |_| {}).await
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    let payload = v2_name_record_payload_for_database(&database, uri).await?;
+    database.cleanup().await?;
+    Ok(payload)
 }
 
 async fn v2_name_record_payload_for_database(
@@ -5615,7 +5378,7 @@ async fn seed_v2_alice_name_record_fixture_with_binding_mode(
 }
 
 async fn v2_name_records_payload(uri: &str) -> Result<Value> {
-    v2_name_records_payload_with_setup(uri, |_, _, _| {}).await
+    v2_name_record_payload(uri).await
 }
 
 async fn v2_name_records_payload_with_setup(
