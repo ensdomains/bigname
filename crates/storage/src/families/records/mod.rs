@@ -38,6 +38,7 @@ use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
+pub(crate) use address_names::name_relations_on;
 pub use compare::{
     Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
     compare_primary_name, compare_record_inventory,
@@ -49,7 +50,8 @@ pub use facts::{
 pub use inventory::{
     CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
     load_family_record_inventory, load_family_record_inventory_detail,
-    load_family_record_inventory_for_snapshot, load_family_supported_record_inventory_for_snapshot,
+    load_family_record_inventory_detail_on, load_family_record_inventory_for_snapshot,
+    load_family_supported_record_inventory_for_snapshot,
 };
 pub use links::{
     DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,

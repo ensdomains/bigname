@@ -9,6 +9,9 @@ pub(super) async fn load_name(
     transaction: &mut Transaction<'_, Postgres>,
     logical_name_id: &str,
 ) -> Result<NameRow> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return super::family_rows::load_name(transaction, logical_name_id).await;
+    }
     sqlx::query_as::<_, NameRow>(
         r#"
         SELECT name.logical_name_id, name.namespace, name.raw_name, name.namehash,
@@ -87,6 +90,9 @@ pub(super) async fn load_inventory(
     resource_id: &str,
     boundary: &Value,
 ) -> Result<InventoryRow> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return super::family_rows::load_inventory(transaction, resource_id, boundary).await;
+    }
     sqlx::query_as::<_, InventoryRow>(&format!(
         r#"
         SELECT ric.resource_id::text AS resource_id,

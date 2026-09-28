@@ -430,3 +430,5 @@ include!("tests/v2_family_marker_fence.rs");
 include!("tests/v2_switch_names.rs");
 include!("tests/v2_flip_readiness.rs");
 include!("tests/v2_switch_records.rs");
+
+include!("tests/v2_switch_lookup.rs");

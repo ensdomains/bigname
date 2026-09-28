@@ -11,6 +11,7 @@ use crate::{
     Result, abi::ResolutionResultAbi, call::ExecutionBlock, ens_l1_chain, error::database,
 };
 
+mod family_rows;
 mod indexed;
 mod manifests;
 mod persistence;
@@ -317,11 +318,27 @@ pub(crate) async fn load_snapshot(
         positions::observed_positions(&comparison_position, &execution_position)?;
     let revalidation_positions =
         positions::comparison_and_live_positions(&comparison_position, &live_execution_position)?;
-    let execution_authority = execution_authority(
+    let mut execution_authority = execution_authority(
         &project_publication,
         Some((&name.logical_name_id, &name.row_xmin)),
         std::slice::from_ref(&entrypoint_manifest),
     )?;
+    if project_publication.family.is_some() {
+        execution_authority["family_name"] = serde_json::json!({
+            "logical_name_id": name.logical_name_id,
+            "resolver_path": name.declared_summary.pointer("/topology/resolver_path"),
+        });
+        if let Some(inventory) = &inventory {
+            execution_authority["family_comparison"] = serde_json::json!({
+                "resource_id": inventory.resource_id,
+                "boundary_key": inventory.record_version_boundary_key,
+                "publication_sequence": inventory.row_xmin,
+                "entries": inventory.entries,
+                "provenance": inventory.provenance,
+                "coverage": inventory.coverage,
+            });
+        }
+    }
     Ok(LookupSnapshot {
         logical_name_id: name.logical_name_id,
         name: name.raw_name,
@@ -519,6 +536,10 @@ fn execution_authority(
     // Present only with the publication switch on: the guard then fences on the family marker.
     if let Some(family) = &publication.family {
         authority["family_publication"] = family.clone();
+        if let Some(object) = authority.as_object_mut() {
+            object.remove("project_publication");
+            object.remove("project_row_xmin");
+        }
     }
     Ok(authority)
 }

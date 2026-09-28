@@ -208,6 +208,32 @@ pub(crate) async fn load(
     logical_name_ids: &[String],
     shape: CoverageShape,
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
+    let mut rows = load_base(conn, logical_name_ids, shape).await?;
+    for row in rows.values_mut() {
+        super::topology::enrich(conn, row).await?;
+    }
+    Ok(rows)
+}
+
+/// One name, including its declared topology, on the caller's repeatable-read snapshot.
+pub async fn load_family_name_on(
+    conn: &mut PgConnection,
+    logical_name_id: &str,
+) -> Result<Option<NameCurrentRow>> {
+    Ok(load(
+        conn,
+        &[logical_name_id.to_owned()],
+        CoverageShape::WithBasis,
+    )
+    .await?
+    .remove(logical_name_id))
+}
+
+pub(crate) async fn load_base(
+    conn: &mut PgConnection,
+    logical_name_ids: &[String],
+    shape: CoverageShape,
+) -> Result<BTreeMap<String, NameCurrentRow>> {
     let mut out = BTreeMap::new();
     if logical_name_ids.is_empty() {
         return Ok(out);

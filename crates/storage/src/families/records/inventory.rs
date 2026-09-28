@@ -142,20 +142,15 @@ async fn family_record_inventory_for_key(
     let Some(resource_id) = resource_id else {
         return Ok(None);
     };
-    let composed = crate::ChainPositions::from_value(&row.chain_positions)?;
-    let Some(chain_id) = composed
-        .as_map()
-        .values()
-        .map(|position| position.chain_id.clone())
-        .next()
-    else {
-        return Err(SnapshotSelectionError::internal(
-            "composed name row carries no chain position",
-        ));
-    };
     let mut snapshot = crate::families::read_snapshot(pool)
         .await
         .map_err(internal)?;
+    let chain_id: String =
+        sqlx::query_scalar("SELECT chain_id FROM bigname_phase.resources WHERE resource_id = $1")
+            .bind(resource_id)
+            .fetch_one(&mut *snapshot)
+            .await
+            .map_err(|error| internal(error.into()))?;
     let publication = crate::families::name::servable_publication(&mut snapshot, &chain_id)
         .await
         .map_err(internal)?;
@@ -181,7 +176,14 @@ async fn family_record_inventory_for_key(
         .commit()
         .await
         .map_err(|error| internal(error.into()))?;
-    Ok(inventory.map(|inventory| inventory.row))
+    Ok(inventory.map(|inventory| {
+        let mut row = inventory.row;
+        row.chain_positions = serde_json::json!({
+            "target_block_number": publication.block_number,
+            "target_block_hash": publication.block_hash,
+        });
+        row
+    }))
 }
 
 /// Under the publication switch, the public record selector count of each composed name row
@@ -241,7 +243,7 @@ pub async fn load_family_record_counts(
 }
 
 /// [`load_family_record_inventory_detail`] on `conn`, which the caller holds in one snapshot.
-pub(crate) async fn load_family_record_inventory_detail_on(
+pub async fn load_family_record_inventory_detail_on(
     conn: &mut PgConnection,
     chain_id: &str,
     resource_id: Uuid,

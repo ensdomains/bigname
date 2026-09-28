@@ -1105,26 +1105,27 @@ async fn lookup_rejects_a_republished_lagging_generation() -> AnyResult<()> {
 }
 
 #[tokio::test]
-async fn lookup_publication_migration_preserves_guard_and_privileges() -> AnyResult<()> {
+async fn lookup_publication_migration_preserves_guard_writer_and_privileges() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    let before: (String, Option<String>) = sqlx::query_as(
-        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
-         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
-    ).fetch_one(fixture.pool()).await?;
-    // The upgrade path: the Project-row guard, then its family-marker successor.
+    let before: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
+         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname"
+    ).fetch_all(fixture.pool()).await?;
+    // Upgrade through the Project-row guard, marker fence, then composed family inputs.
     for migration in [
         include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
         include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
+        include_str!("../../../migrations/20260929130000_lookup_family_inputs.sql"),
     ] {
         raw_sql(migration).execute(fixture.pool()).await?;
     }
-    let after: (String, Option<String>) = sqlx::query_as(
-        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE oid =
-         'revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'::regprocedure"
-    ).fetch_one(fixture.pool()).await?;
+    let after: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
+         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname"
+    ).fetch_all(fixture.pool()).await?;
     assert_eq!(
         before, after,
-        "fresh and migrated guards must have identical definitions and grants"
+        "fresh and migrated guard/writer must have identical definitions and grants"
     );
     fixture.cleanup().await?;
     Ok(())

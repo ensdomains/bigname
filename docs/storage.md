@@ -2013,6 +2013,20 @@ Schema-migration `20260914120000_lookup_publication_revalidation.sql` replaces
 only this function, preserving data and existing grants; fresh schemas receive
 the identical guard from the baseline. Older callers without a captured
 publication object retain the exact-head check.
+With the publication switch on, the lookup instead composes the name topology
+and inventory in one repeatable-read family snapshot. It passes that request's
+indexed entries, read rules, coverage, and resolver path to the writer, bound to
+the captured marker sequence. The guard locks the live family marker and checks
+the sequence, block identity, interpreter hash, canonical execution positions,
+and real manifest row versions in the same transaction as the ledger mutation.
+It does not load stale served rows. The writer evaluates the supplied indexed
+entries with the same exact-or-ENSIP-19 rules before comparing the provider
+result. This input is internal application state, never client-supplied request
+data and never persisted as a reusable execution outcome.
+`20260929130000_lookup_family_inputs.sql` replaces only the guard and writer
+functions in place; the baseline contains identical definitions. The switch-off
+path retains its served-row locks and refusal results.
+
 Ledger rows are durable operational observations;
 they are not projection input or a response cache.
 When projection publishes an ENS Mainnet exact resolver as null, a projection

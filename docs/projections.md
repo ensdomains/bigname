@@ -1719,6 +1719,16 @@ included. A marker above a lowered served marker counts the blocks in between,
 and a marker off the served branch (orphaned, or another hash at the served
 height) counts at least one block.
 
+With the publication switch on, verified lookup composes its full declared
+resolution topology and indexed inventory from one family snapshot. Alias and
+wildcard inputs share that snapshot; direct and ownerless ENS use its inventory
+boundary. Basenames retains its admitted L1 transport, execution-manifest
+provenance, and the Ethereum lineage position at or before the Base publication
+time. After RPC, the guarded writer holds the captured family marker through the
+comparison and ledger write. A new family block or rebuild refuses the write;
+the stopped served name/inventory batch is not a comparison input. See
+[verified lookup storage](storage.md#verified-lookup-storage).
+
 A family failure stops the loop at the last complete block and fails the
 Project run. Failures include a failing block, a fence its transaction refuses,
 a changed [family input revision](glossary.md#family-input-revision), Interpret

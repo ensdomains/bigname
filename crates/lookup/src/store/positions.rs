@@ -56,32 +56,24 @@ pub(super) async fn ensure_project_at_head(
     transaction: &mut Transaction<'_, Postgres>,
     head: &HeadRow,
 ) -> Result<CapturedPublication> {
-    // The publication may trail the stored head within the shared lag tolerance (see
-    // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
-    // lineage and belong to this build's interpreter generation. While the publication switch is
-    // on, the family marker must pass the same admission and be `live` too, and the guard fences
-    // on the marker's sequence.
-    let (family_marker_admission, family_publication) =
-        if bigname_storage::publication_source::serve_from_families() {
-            (FAMILY_MARKER_ADMISSION, FAMILY_PUBLICATION)
-        } else {
-            ("", "NULL::jsonb")
-        };
-    let publication: Option<(Value, Option<Value>)> = sqlx::query_as(&format!(
+    if bigname_storage::publication_source::serve_from_families() {
+        return super::family_rows::publication(transaction, head).await;
+    }
+    // The served publication may trail the head by the shared one-block tolerance.
+    let project: Option<Value> = sqlx::query_scalar(
         r#"
         SELECT jsonb_build_object(
             'row_xmin', project.xmin::text,
             'block_number', project.current_block_number,
             'block_hash', project.current_block_hash,
             'input_content_hash', project.input_content_hash
-        ),
-        {family_publication}
+        )
         FROM chain_phase_state project
         JOIN chain_lineage lineage
           ON lineage.chain_id = project.chain_id
          AND lineage.block_number = project.current_block_number
          AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'){family_marker_admission}
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         WHERE project.chain_id = $1
           AND project.phase_name = 'project'
           AND project.phase_status IN ('completed', 'running')
@@ -89,7 +81,7 @@ pub(super) async fn ensure_project_at_head(
           AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
           AND project.input_content_hash = $4
         "#,
-    ))
+    )
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
@@ -98,50 +90,18 @@ pub(super) async fn ensure_project_at_head(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database("validate project publication head"))?;
-    publication
-        .map(|(project, family)| CapturedPublication { project, family })
+    project
+        .map(|project| CapturedPublication {
+            project,
+            family: None,
+        })
         .ok_or_else(|| {
-            // With the switch on the marker's admission can refuse too, so the message names the
-            // owned key families; with it off the wording is unchanged.
-            LookupError::stale(if family_marker_admission.is_empty() {
-                format!(
-                    "projected state has not reached the newest processed {} block",
-                    head.chain_id
-                )
-            } else {
-                format!(
-                    "owned key families or projected state have not reached the newest processed \
-                     {} block",
-                    head.chain_id
-                )
-            })
+            LookupError::stale(format!(
+                "projected state has not reached the newest processed {} block",
+                head.chain_id
+            ))
         })
 }
-
-/// The family marker's admission while the publication switch is on. The lookup inputs still
-/// come from the served tables, whose per-row versions the guard also rechecks; the publication
-/// generation the guard compares is the marker's `sequence` ([`FAMILY_PUBLICATION`]).
-const FAMILY_MARKER_ADMISSION: &str = r#"
-        JOIN project_family_marker marker
-          ON marker.chain_id = project.chain_id
-         AND marker.state = 'live'
-         AND marker.input_content_hash = $4
-         AND $2 - marker.current_block_number BETWEEN 0 AND $5
-         AND (marker.current_block_number <> $2 OR marker.current_block_hash = $3)
-        JOIN chain_lineage marker_lineage
-          ON marker_lineage.chain_id = marker.chain_id
-         AND marker_lineage.block_number = marker.current_block_number
-         AND marker_lineage.block_hash = marker.current_block_hash
-         AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"#;
-
-/// The captured family publication (ruling J1): the marker's position, interpreter hash and
-/// `sequence` as text, which `revalidate_resolution_lookup_state` requires unchanged and `live`.
-const FAMILY_PUBLICATION: &str = r#"jsonb_build_object(
-            'sequence', marker.sequence::text,
-            'block_number', marker.current_block_number,
-            'block_hash', marker.current_block_hash,
-            'input_content_hash', marker.input_content_hash
-        )"#;
 
 pub(super) async fn inventory_position(
     transaction: &mut Transaction<'_, Postgres>,

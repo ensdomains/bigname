@@ -283,3 +283,56 @@ impl ChainInputs {
             .filter(|binding| binding.logical_name_id == row.logical_name_id)
     }
 }
+
+/// Address relations for composed names on the caller's snapshot, used by batch lookup.
+pub(crate) async fn name_relations_on(
+    conn: &mut PgConnection,
+    composed: &BTreeMap<String, NameCurrentRow>,
+) -> Result<BTreeMap<String, Vec<crate::IdentityAddressRelationRow>>> {
+    let mut chains: BTreeMap<String, BTreeMap<String, NameCurrentRow>> = BTreeMap::new();
+    for (id, row) in composed {
+        let chain = row.provenance["chain_id"]
+            .as_str()
+            .context("composed name has no chain")?;
+        chains
+            .entry(chain.to_owned())
+            .or_default()
+            .insert(id.clone(), row.clone());
+    }
+    let mut out = BTreeMap::new();
+    for (chain, names) in chains {
+        let publication = servable_publication(conn, &chain).await?;
+        let inputs = ChainInputs::load(conn, &chain, &names).await?;
+        for row in names.values() {
+            let candidates = inputs.candidates_of(&row.logical_name_id);
+            let input = NameRelationsInput {
+                row,
+                candidates: &candidates,
+                binding: inputs.selected_binding(row),
+                wrapper: row
+                    .resource_id
+                    .and_then(|resource| inputs.wrappers.get(&resource.to_string())),
+                clock_seconds: publication.timestamp_seconds(),
+            };
+            let related = relations(&input)
+                .into_iter()
+                .map(|(address, relation)| {
+                    let relation = match relation {
+                        "registrant" => AddressNameRelation::Registrant,
+                        "token_holder" => AddressNameRelation::TokenHolder,
+                        "effective_controller" => AddressNameRelation::EffectiveController,
+                        _ => unreachable!("family relations have three defined kinds"),
+                    };
+                    crate::IdentityAddressRelationRow {
+                        address,
+                        logical_name_id: row.logical_name_id.clone(),
+                        relation,
+                        chain_positions: row.chain_positions.clone(),
+                    }
+                })
+                .collect();
+            out.insert(row.logical_name_id.clone(), related);
+        }
+    }
+    Ok(out)
+}

@@ -33,7 +33,9 @@ pub use collections::{
     FamilyCollectionPage, load_resolver_aliases_shadow, load_resolver_links_shadow,
     load_resolver_roles_shadow,
 };
+pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;
+pub(crate) use pointers::load_family_wildcard_source_on;
 pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,

@@ -4,14 +4,15 @@
 //! `name_current` row: the identity columns, the coverage column, the registration, control,
 //! resolver and coverage blocks with the NameWrapper state and fuses, and the authority
 //! selection, read reachability, resolver pointer family and chain of the provenance, and the
-//! history heads (`declared_summary.history`) the binding diagnostics route serves.
+//! history heads (`declared_summary.history`) the binding diagnostics route serves, and the
+//! complete declared resolution topology consumed by verified lookup and record readback.
 //!
 //! Not compared, because no route reads them: the whole-history evidence
 //! (`selected_event_ids`, `raw_fact_refs`, `manifest_versions`, `registrant_event_id`), the
 //! selection's `lifecycle_state`, and the row metadata
 //! (`chain_positions`, `canonicality_summary`, `manifest_version`, `last_recomputed_at`), which a
-//! composed row takes from the publication. `declared_summary.topology` is compared by the
-//! topology comparison.
+//! composed row takes from the publication. Basenames execution admission and both chain
+//! positions are checked by the dedicated cross-chain projection tests.
 //!
 //! A registration or control field that differs passes, counted as `covered_by_control`, only
 //! when the composed authority selection equals the served one: both blocks are then the
@@ -154,6 +155,7 @@ pub fn projection(row: &NameCurrentRow) -> Value {
             "registration": pick(summary, "registration"),
             "control": pick(summary, "control"),
             "resolver": pick(summary, "resolver"),
+            "topology": pick(summary, "topology"),
             "coverage": pick(summary, "coverage"),
             "wrapper_state": pick(summary, "wrapper_state"),
             "wrapper_fuses": pick(summary, "wrapper_fuses"),

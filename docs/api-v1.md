@@ -897,9 +897,11 @@ and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
 its post-call guard compares the marker's `sequence` (see the served-generation
-paragraph above). The lookup engine's inputs still come from the served tables,
-whose per-row versions the guard also compares; they move to the families
-before the served batch stops.
+paragraph above). The lookup engine composes its name topology and indexed
+comparison from the families in one repeatable-read snapshot. The writer checks
+that captured publication and the real execution manifests in the transaction
+that evaluates the indexed answer and writes or clears its divergence. It has
+no dependency on the stopped served name or inventory rows with the switch on.
 
 With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
 instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
@@ -915,8 +917,9 @@ record fields (`GET /v1/names/{name}`, both sources) and for
 and the composed names, its `relation=resolves_to` pages (both the exact coin
 type and `coin_type=evm`) from the record-id index alone, the record counts of
 `include=counts`, and the indexed primary-name claim of
-`GET /v1/addresses/{address}/primary-name`. The verified lookup engine keeps
-reading the served tables until the flip. The following routes keep their own
+`GET /v1/addresses/{address}/primary-name`. Batch lookup identity records,
+address relations, inventory readback, and verified lookup inputs use those same
+family publications. The following routes keep their own
 pages on the served tables until a later step 7b slice moves them, and take
 only the name rows they join from composed rows:
 `GET /v1/names/{name}/subnames` (the parent and each child's registration),
@@ -942,9 +945,11 @@ name's registry node ownerless, the served name row keeps its earlier state
 (unsupported, so unlisted) until Project next rebuilds the served tables, while
 the composed row reads the node at once (unregistered but projected), so
 `GET /v1/search` can list with the switch on a name it omits with the switch
-off. A composed row also does not yet carry the declared resolution topology
-(`declared_summary.topology`), which the records route's verified lookup
-admission and avatar readback read; the record inventories moved without it.
+off. Composed rows carry the complete declared resolution topology
+(`declared_summary.topology`): aliases, wildcard sources, direct and ownerless
+ENS, and admitted Basenames cross-chain transport. Basenames retains its
+execution-manifest admission and the Ethereum position selected at the Base
+publication's timestamp.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.

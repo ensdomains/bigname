@@ -43,9 +43,8 @@ async fn lookup_is_stale_while_the_family_marker_bootstraps_with_the_switch_on()
 }
 
 #[tokio::test]
-async fn lookup_serves_beside_a_live_family_marker_and_ignores_it_with_the_switch_off()
--> AnyResult<()> {
-    for (on, state) in [(true, "live"), (false, "bootstrap_pending")] {
+async fn lookup_ignores_the_family_marker_with_the_switch_off() -> AnyResult<()> {
+    for (on, state) in [(false, "live"), (false, "bootstrap_pending")] {
         let (rpc_url, rpc_handle) =
             spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
         let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
@@ -80,13 +79,6 @@ async fn lookup_is_stale_without_a_family_marker_row_with_the_switch_on() -> Any
         .await
         .expect_err("a chain without a marker row has no published families");
     assert_eq!(error.kind(), ErrorKind::Stale);
-    assert_eq!(
-        error.message(),
-        format!(
-            "owned key families or projected state have not reached the newest processed \
-             {ETHEREUM} block"
-        )
-    );
 
     // Switch off, the Project row governs and the wording is unchanged.
     sqlx::query(
@@ -144,140 +136,25 @@ const ADVANCE_FAMILY_SEQUENCE: &str = "UPDATE project_family_marker SET sequence
 const START_FAMILY_REBUILD: &str = "UPDATE project_family_marker \
      SET state = 'bootstrap_pending', sequence = sequence + 1";
 
-/// The flip's guard (TYR-36 step 7b-6, ruling J1): with the switch on, a family block committed
-/// while the provider call runs, with the Project row unchanged, is refused with exactly the error
-/// the served guard gives when the Project row is republished with the switch off, and no
-/// divergence row is written.
+// These served-only fixtures exercise the switch-off path. Switch-on comparison and guard
+// coverage lives in API v2_switch_lookup.rs, seeded through the actual family reducers.
 #[tokio::test]
-async fn a_family_block_during_execution_is_refused_like_a_project_republish() -> AnyResult<()> {
-    let (served, served_ledger) =
-        lookup_mutated_during_execution(false, "live", REPUBLISH_PROJECT_ROW).await?;
-    let served = served.expect_err("the served guard refuses a republished Project row");
-    assert_eq!(served.kind(), ErrorKind::ConcurrentState);
-    assert_eq!(served_ledger, 0);
-
-    let (family, family_ledger) =
-        lookup_mutated_during_execution(true, "live", ADVANCE_FAMILY_SEQUENCE).await?;
-    let family = family.expect_err("the marker guard refuses an advanced family sequence");
-    assert_eq!(family.kind(), served.kind());
-    assert_eq!(family.message(), served.message());
-    assert_eq!(
-        family_ledger, 0,
-        "a refused lookup writes no divergence row"
-    );
-    Ok(())
-}
-
-/// With the switch on the guard reads the marker, so a Project row republished during execution
-/// no longer refuses the lookup once the marker is unchanged; with it off the marker is not read,
-/// so an advanced family sequence does not refuse it.
-#[tokio::test]
-async fn each_switch_state_guards_only_its_own_publication() -> AnyResult<()> {
-    for (on, mutate) in [
-        (true, REPUBLISH_PROJECT_ROW),
-        (false, ADVANCE_FAMILY_SEQUENCE),
-    ] {
-        let (response, ledger) = lookup_mutated_during_execution(on, "live", mutate).await?;
-        let response = response.map_err(|error| {
-            anyhow::anyhow!("switch {on}: {:?} {}", error.kind(), error.message())
-        })?;
-        assert_eq!(
-            response.records[0].value,
-            Some(json!(LIVE_VALUE)),
-            "switch {on}"
-        );
-        assert_eq!(
-            response.records[0].ledger_action,
-            LedgerAction::Written,
-            "switch {on}"
-        );
-        assert_eq!(ledger, 1, "switch {on}");
-    }
-    Ok(())
-}
-
-/// Ruling J14: a family rebuild that starts while the provider call runs leaves the marker
-/// `bootstrap_pending`, so with the switch on the lookup is refused (the API's 409 stale) and
-/// writes nothing; with the switch off the same rebuild changes nothing.
-#[tokio::test]
-async fn a_family_rebuild_during_execution_refuses_the_lookup_only_with_the_switch_on()
--> AnyResult<()> {
-    let (refused, ledger) =
-        lookup_mutated_during_execution(true, "live", START_FAMILY_REBUILD).await?;
-    let refused = refused.expect_err("a rebuilding marker is not servable");
-    assert_eq!(refused.kind(), ErrorKind::ConcurrentState);
-    assert_eq!(ledger, 0);
-
+async fn a_project_republish_during_execution_is_refused_with_the_switch_off() -> AnyResult<()> {
     let (served, ledger) =
-        lookup_mutated_during_execution(false, "live", START_FAMILY_REBUILD).await?;
-    let served =
-        served.map_err(|error| anyhow::anyhow!("{:?} {}", error.kind(), error.message()))?;
-    assert_eq!(served.records[0].ledger_action, LedgerAction::Written);
-    assert_eq!(ledger, 1);
+        lookup_mutated_during_execution(false, "live", REPUBLISH_PROJECT_ROW).await?;
+    let error = served.expect_err("a republished Project row refuses the served lookup");
+    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
+    assert_eq!(ledger, 0);
     Ok(())
 }
 
-async fn guard_status(pool: &PgPool, execution_authority: &Value) -> AnyResult<String> {
-    Ok(sqlx::query_scalar(
-        "SELECT revalidate_resolution_lookup_state($1, 10, $2, $3, $4, NULL, NULL, NULL)",
-    )
-    .bind(ETHEREUM)
-    .bind(ETHEREUM_HASH)
-    .bind(observed_position(10, ETHEREUM_HASH, "2026-08-03T00:00:00Z"))
-    .bind(execution_authority)
-    .fetch_one(pool)
-    .await?)
-}
-
-/// The guard's own answers for a captured family publication: unchanged while the marker is, the
-/// served guard's `project_changed` for a stale sequence or a marker that is no longer `live`,
-/// and `invalid_comparison` for a publication without its sequence.
 #[tokio::test]
-async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    seed_family_marker(fixture.pool(), "live").await?;
-    let request = lookup_request(&fixture.logical_name_id)?;
-    let captured = bigname_storage::publication_source::with_serve_from_families(
-        true,
-        crate::store::load_snapshot(fixture.pool(), &request),
-    )
-    .await?
-    .execution_authority;
-    assert_eq!(captured["family_publication"]["sequence"], json!("1"));
-    assert_eq!(guard_status(fixture.pool(), &captured).await?, "unchanged");
-
-    let mut stale = captured.clone();
-    stale["family_publication"]["sequence"] = json!("0");
-    assert_eq!(
-        guard_status(fixture.pool(), &stale).await?,
-        "project_changed"
-    );
-
-    let mut unsequenced = captured.clone();
-    unsequenced["family_publication"]
-        .as_object_mut()
-        .expect("family publication object")
-        .remove("sequence");
-    assert_eq!(
-        guard_status(fixture.pool(), &unsequenced).await?,
-        "invalid_comparison"
-    );
-
-    sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending'")
-        .execute(fixture.pool())
-        .await?;
-    assert_eq!(
-        guard_status(fixture.pool(), &captured).await?,
-        "project_changed"
-    );
-
-    // Captured with the switch off, the authority carries no family publication and the guard
-    // keeps comparing the Project row, whatever the marker says.
-    let served = crate::store::load_snapshot(fixture.pool(), &request)
-        .await?
-        .execution_authority;
-    assert!(served.get("family_publication").is_none());
-    assert_eq!(guard_status(fixture.pool(), &served).await?, "unchanged");
-    fixture.cleanup().await?;
+async fn a_family_publication_or_rebuild_is_ignored_with_the_switch_off() -> AnyResult<()> {
+    for mutate in [ADVANCE_FAMILY_SEQUENCE, START_FAMILY_REBUILD] {
+        let (served, ledger) = lookup_mutated_during_execution(false, "live", mutate).await?;
+        let response = served?;
+        assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
+        assert_eq!(ledger, 1);
+    }
     Ok(())
 }

@@ -42,6 +42,9 @@ async fn load_phase_identity_records(
     if requested.is_empty() {
         return Ok(Vec::new());
     }
+    if crate::publication_source::serve_from_families() {
+        return super::family_identity::load(pool, &requested, include_inventory).await;
+    }
     let name_rows = load_phase_identity_name_rows(pool, &requested).await?;
     let relations = load_phase_relations(pool, &requested).await?;
     let inventories = if include_inventory {
@@ -76,6 +79,13 @@ pub async fn load_phase_name_current_rows_by_ids(
     pool: &PgPool,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
+    if crate::publication_source::serve_from_families() {
+        return crate::families::name::load_family_names_by_logical_name_ids(
+            pool,
+            logical_name_ids,
+        )
+        .await;
+    }
     let rows = load_phase_name_rows(pool, logical_name_ids).await?;
     rows.into_iter()
         .map(|row| {
@@ -336,7 +346,7 @@ fn phase_coverage(row: &PgRow) -> Result<Value> {
     })
 }
 
-fn normalize_phase_name(
+pub(super) fn normalize_phase_name(
     logical_name_id: &str,
     raw_name: &str,
 ) -> Result<bigname_domain::normalization::NormalizedEnsName> {
@@ -345,7 +355,7 @@ fn normalize_phase_name(
     })
 }
 
-fn phase_labelhash(
+pub(super) fn phase_labelhash(
     normalized: &bigname_domain::normalization::NormalizedEnsName,
 ) -> Option<String> {
     normalized.normalized_labels.first().map(|label| {
