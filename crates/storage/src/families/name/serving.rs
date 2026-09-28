@@ -9,10 +9,9 @@
 //! Both read the F5 resource pointer (`project_resource_pointer`) and the F4 registry-node
 //! pointer (`project_registry_pointer`), which keep each key's latest pointer. The name each
 //! pointer event carried is read back from `normalized_events` by its identity, a metadata
-//! lookup by key. Where the served lateral takes an older pointer of the name because a later
-//! pointer on the same key is another name's or not admitted, the families hold only the later
-//! one; the name comparison (apps/phase-runner/tests/project_end_to_end/name_shadow.rs) reports
-//! that as a difference.
+//! lookup by key. The F5 named pointer (`project_named_resource_pointer`) also retains each
+//! name's latest admitted pointer on a resource, so another name's later write on the same
+//! resource does not displace it (`families_shadow_names` covers that comparison).
 use serde_json::Value;
 
 use crate::families::records::FamilyPosition;
