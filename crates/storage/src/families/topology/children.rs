@@ -2,16 +2,17 @@
 //! (`project_child_edge_candidate`) and parent subregistry (`project_parent_subregistry`), the
 //! per-registry child registrations (`project_child_registration_state`), child wrapper fuses
 //! (`project_wrapper_state`) and the parent's migration state (`project_name_state`), with the
-//! identity tables, label preimages and the zero-owner attribution shim. It
+//! identity tables, label preimages and the children's name summaries
+//! (`project_name_summary`: selected arm, serving resource, zero-owner transfer). It
 //! reproduces the relation crates/project/src/builders/children.rs builds into
 //! `children_current` (its candidates, then the arm selection of `publish`) and the read filter
 //! of crates/storage/src/children/page.rs, evaluated at read against the family marker's block:
 //! no stored eligibility and no maintained count.
 use sqlx::{Postgres, QueryBuilder};
 
-use super::shims::{
-    attributed_zero_owner, effective_child_fuses, row_position, selected_authority_arm,
-    serving_row_exists,
+use super::{
+    name_summary::{selected_authority_arm, serving, zero_owner},
+    shims::{effective_child_fuses, row_position},
 };
 
 pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";
@@ -44,7 +45,8 @@ fn active_instance(alias: &str, chain: &str, address: &str) -> String {
 
 /// Push `clock`, `parent`, `parent_migration`, `candidates` and `selected` CTE definitions (each
 /// followed by a comma) for the parent `parent_logical_name_id`. `selected` holds one row per
-/// served child with `pair_rank = 1`, before the page read filter.
+/// served child with `pair_rank = 1`, before the page read filter; an ENSv2 child carries the
+/// emitter of its registration event as `registry_address`, others null.
 pub(super) fn push_selected<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parent_logical_name_id: &'a str,
@@ -134,10 +136,8 @@ pub(super) fn push_selected<'a>(
             -- The latest edge for the child across parents and arms (ranked_v1), so a child is
             -- never served under a parent it has left.
             -- A zero current owner overrides the edge's owner; any other owner does not, as
-            -- project_latest_registry_owner keeps zero owners only. Today attributes the
-            -- Transfer to a name by the name it carries, then its resource, then an active
-            -- surface at its node, which project_registry_node_state (keyed by node) cannot
-            -- reproduce, so the override is the attribution shim over normalized_events.
+            -- project_latest_registry_owner keeps zero owners only. The child's name summary
+            -- carries whether its node's latest registry transfer names the zero owner.
             SELECT edge.*, parent.namespace || ':' || edge.child_node AS child_logical_name_id,
                    CASE WHEN {zero_owner} THEN {ZERO_ADDRESS}
                         ELSE lower(COALESCE(edge.owner_getter, edge.owner))
@@ -152,14 +152,15 @@ pub(super) fn push_selected<'a>(
                   AND other.child_node = edge.child_node
                   AND {other_position} > {edge_position})
         ), candidates AS (
-            SELECT parent.logical_name_id AS parent_logical_name_id,
+            SELECT parent.logical_name_id AS parent_logical_name_id, parent.chain_id,
                    edge.child_logical_name_id, edge.namespace,
                    {v1_raw_name} AS raw_name, {v1_decoded_name} AS decoded_name,
                    edge.child_node AS namehash, edge.labelhash, edge.served_owner AS owner,
                    NULL::text AS registrant,
                    CASE WHEN edge.source_family = 'basenames_base_registry' THEN 'basenames'
                         ELSE 'ens_v1' END AS authority_arm,
-                   edge.block_number, edge.transaction_index, edge.log_index, edge.event_identity
+                   edge.block_number, edge.transaction_index, edge.log_index, edge.event_identity,
+                   NULL::text AS registry_address
             FROM v1_edges edge
             CROSS JOIN parent CROSS JOIN clock
             LEFT JOIN bigname_phase.label_preimages preimage ON preimage.labelhash = edge.labelhash
@@ -180,13 +181,14 @@ pub(super) fn push_selected<'a>(
                                  migration.migration_registry_contract_instance_id
                              AND history.exists)))
             UNION ALL
-            SELECT parent.logical_name_id, child.logical_name_id, child.namespace,
+            SELECT parent.logical_name_id, parent.chain_id, child.logical_name_id, child.namespace,
                    {v2_raw_name}, {v2_decoded_name},
                    child.namehash, lower(child.labelhashes[1]), NULL::text,
                    registration.registrant, 'ens_v2',
                    GREATEST(registration.block_number, subregistry.block_number),
                    registration.transaction_index, registration.log_index,
-                   registration.event_identity
+                   registration.event_identity,
+                   lower(registration_event.raw_fact_ref ->> 'emitting_address')
             FROM parent CROSS JOIN clock
             JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id
@@ -207,6 +209,10 @@ pub(super) fn push_selected<'a>(
              AND {child_readable}
             LEFT JOIN bigname_phase.label_preimages preimage
               ON preimage.labelhash = lower(child.labelhashes[1])
+            -- The registry a registry's labels read is the registration's emitter, as the
+            -- served labels read `raw_fact_refs[0].registration.emitting_address`.
+            LEFT JOIN bigname_phase.normalized_events registration_event
+              ON registration_event.event_identity = registration.event_identity
             WHERE parent.raw_name <> ''
         ), selected AS (
             -- publish's arm rule: the child's selected arm, or the only arm when none is selected;
@@ -236,22 +242,17 @@ pub(super) fn push_selected<'a>(
             "subregistry.chain_id",
             "subregistry.subregistry_address"
         ),
-        zero_owner = attributed_zero_owner(
-            "edge.chain_id",
-            "edge.namespace || ':' || edge.child_node",
-            "edge.child_node",
-            "clock.block_number"
-        ),
+        zero_owner = zero_owner("edge.chain_id", "edge.namespace || ':' || edge.child_node"),
         other_position = row_position("other"),
         edge_position = row_position("edge"),
         candidate_position = row_position("candidate"),
-        serving = serving_row_exists("edge.child_logical_name_id"),
+        serving = serving("edge.chain_id", "edge.child_logical_name_id"),
         fuses = effective_child_fuses(
             "edge.chain_id",
             "edge.child_logical_name_id",
             "clock.epoch_seconds"
         ),
-        arm = selected_authority_arm("candidate.child_logical_name_id"),
+        arm = selected_authority_arm("candidate.chain_id", "candidate.child_logical_name_id"),
         v1_raw_name = label_raw_name("parent.raw_name = ''"),
         v1_decoded_name = label_decoded_name("parent.raw_name = ''"),
         v2_raw_name = label_raw_name("FALSE"),

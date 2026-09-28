@@ -9,6 +9,13 @@
 //! - subnames: every parent the served table or the edge families name, paged through
 //!   `load_children_current_page_filtered` and `load_children_shadow_page` with the same filter,
 //!   page size and cursors; rows over the wire fields, next cursors and totals;
+//! - name summaries (TYR-36 step 7b slice 2b): every stored `project_name_summary` row against
+//!   a fresh `compose_name_summaries` of every surfaced name at the marker, so a name the writer's
+//!   work list missed is a mismatch; the child counts of every parent and every listed child
+//!   (`load_children_current_summaries` against `count_children_shadow`); and the registry labels
+//!   of every (parent, registry) pair the served table or the parent subregistries name, paged
+//!   through `load_registry_children_current_page` and `load_registry_children_shadow_page`, with
+//!   `count_registry_children_current` against the shadow total;
 //! - topology: the alias and wildcard arms of `declared_summary.topology` for every name whose
 //!   selected binding is on those arms, or that the shadow gives a topology;
 //! - resolvers: for every resolver the served table or the families name, the overview's mirror
@@ -104,6 +111,12 @@ pub struct Report {
     pub bound_names_composed: usize,
     /// Listings compared as one sequence without the names left to the control comparison.
     pub listing_excused: usize,
+    /// Names whose stored summary was compared with a fresh composition, parents whose child
+    /// count was compared, and (parent, registry) pairs and label rows compared.
+    pub summary_names: usize,
+    pub count_parents: usize,
+    pub registries: usize,
+    pub label_rows: usize,
     /// The names the name comparison leaves to the control comparison (`name_shadow.rs`,
     /// `covered_names`), read once per comparison.
     pub excused: BTreeSet<String>,
@@ -127,9 +140,14 @@ pub struct Report {
 
 impl Report {
     fn time(&mut self, reader: &'static str, started: Instant) {
+        self.time_keys(reader, started, 1);
+    }
+
+    /// One read of `keys` keys.
+    fn time_keys(&mut self, reader: &'static str, started: Instant, keys: usize) {
         let entry = self.timings.entry(reader).or_default();
         entry.0 += started.elapsed().as_micros();
-        entry.1 += 1;
+        entry.1 += keys;
     }
 
     fn mismatch(&mut self, key: String, detail: String) {
@@ -149,8 +167,9 @@ impl Report {
         format!(
             "SEPOLIA_END_TO_END_SHADOW target={} parents={} child_rows={} child_pages={} \
              topology_names={} resolvers={} bound_names={} aliases={} links={} roles={} \
-             expiring_rows={} search_rows={} bound_names_composed={} listing_excused={} f3_unfilled={} f3_unfilled_mirror_differs={} f3_extra_not_active={} mismatches={} \
-             {timings}",
+             expiring_rows={} search_rows={} bound_names_composed={} listing_excused={} \
+             summary_names={} count_parents={} registries={} label_rows={} f3_unfilled={} \
+             f3_unfilled_mirror_differs={} f3_extra_not_active={} mismatches={} {timings}",
             self.target,
             self.parents,
             self.child_rows,
@@ -165,6 +184,10 @@ impl Report {
             self.search_rows,
             self.bound_names_composed,
             self.listing_excused,
+            self.summary_names,
+            self.count_parents,
+            self.registries,
+            self.label_rows,
             self.f3_unfilled,
             self.f3_unfilled_mirror_differs,
             self.f3_extra_not_active.len(),
@@ -234,7 +257,24 @@ pub async fn compare(pool: &PgPool, chain: &str, settings: Settings) -> Result<R
     report.excused = crate::name_shadow::compare(pool, chain, report.target)
         .await?
         .covered_names;
-    children(pool, chain, settings, start.clock, &mut report).await?;
+    summaries(pool, chain, &mut report).await?;
+    let parents = children(pool, chain, settings, start.clock, &mut report).await?;
+    // The counts `include=counts` asks for: every parent's, and every listed child's (mostly
+    // leaves).
+    let mut counted: BTreeSet<String> = parents.into_iter().collect();
+    counted.extend(
+        sqlx::query_scalar::<_, String>(
+            "SELECT current.child_logical_name_id FROM children_current current
+             JOIN name_surfaces parent_surface
+               ON parent_surface.logical_name_id = current.parent_logical_name_id
+             WHERE parent_surface.chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_all(pool)
+        .await?,
+    );
+    child_counts(pool, &counted.into_iter().collect::<Vec<_>>(), &mut report).await?;
+    registry_labels(pool, chain, settings, &mut report).await?;
     topology(pool, chain, &mut report).await?;
     resolvers(pool, chain, start.block_number, settings, &mut report).await?;
     listings(pool, chain, settings, &mut report).await?;
@@ -365,7 +405,7 @@ async fn children(
     settings: Settings,
     clock: OffsetDateTime,
     report: &mut Report,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let parents: Vec<String> = sqlx::query_scalar(
         "SELECT current.parent_logical_name_id FROM children_current current
          JOIN name_surfaces parent_surface
@@ -391,6 +431,7 @@ async fn children(
             let mut served_cursor: Option<ChildrenCurrentKeysetCursor> = None;
             let mut shadow_cursor: Option<ChildrenCurrentKeysetCursor> = None;
             loop {
+                let started = Instant::now();
                 let served = load_children_current_page_filtered(
                     pool,
                     parent,
@@ -399,6 +440,7 @@ async fn children(
                     settings.children_page,
                 )
                 .await?;
+                report.time("children_served", started);
                 let started = Instant::now();
                 let shadow = family::load_children_shadow_page(
                     pool,
@@ -440,6 +482,163 @@ async fn children(
                     None => break,
                 }
             }
+        }
+    }
+    Ok(parents)
+}
+
+/// Every stored name summary must equal a fresh composition of its name at the marker: the
+/// writer's work list missed a name when they differ.
+async fn summaries(pool: &PgPool, chain: &str, report: &mut Report) -> Result<()> {
+    let publication = family_name::load_family_publication(pool, chain)
+        .await?
+        .context("the families have no publication")?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT logical_name_id FROM name_surfaces
+         WHERE chain_id = $1 AND block_number <= $2
+         UNION SELECT logical_name_id FROM project_name_summary WHERE chain_id = $1
+         ORDER BY 1",
+    )
+    .bind(chain)
+    .bind(publication.block_number)
+    .fetch_all(pool)
+    .await?;
+    let mut conn = pool.acquire().await?;
+    for chunk in names.chunks(1000) {
+        let started = Instant::now();
+        let fresh = family_name::compose_name_summaries(&mut conn, &publication, chunk).await?;
+        report.time_keys("summaries", started, chunk.len());
+        let stored: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
+            "SELECT logical_name_id, to_jsonb(summary) FROM project_name_summary summary
+             WHERE chain_id = $1 AND logical_name_id = ANY($2)",
+        )
+        .bind(chain)
+        .bind(chunk)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .collect();
+        for name in chunk {
+            report.summary_names += 1;
+            let (stored, fresh) = (stored.get(name), fresh.get(name));
+            if stored != fresh {
+                report.mismatch(
+                    format!("summary of {name}"),
+                    format!("stored {stored:?}, composed {fresh:?}"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every parent's served child count against the shadow count.
+async fn child_counts(pool: &PgPool, parents: &[String], report: &mut Report) -> Result<()> {
+    for chunk in parents.chunks(100) {
+        let started = Instant::now();
+        let served = bigname_storage::load_children_current_summaries(pool, chunk).await?;
+        report.time_keys("child_counts_served", started, chunk.len());
+        let started = Instant::now();
+        let shadow = family::count_children_shadow(pool, chunk).await?;
+        report.time_keys("child_counts", started, chunk.len());
+        for (served, (parent, shadow)) in served.iter().zip(&shadow) {
+            report.count_parents += 1;
+            if u64::try_from(served.child_count).ok() != Some(*shadow) {
+                report.mismatch(
+                    format!("child count of {parent}"),
+                    format!("served {}, shadow {shadow}", served.child_count),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every (parent, registry) pair's labels, page by page, and its count.
+async fn registry_labels(
+    pool: &PgPool,
+    chain: &str,
+    settings: Settings,
+    report: &mut Report,
+) -> Result<()> {
+    let pairs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT current.parent_logical_name_id,
+                lower(current.provenance #>> '{raw_fact_refs,0,registration,emitting_address}')
+         FROM children_current current
+         JOIN name_surfaces parent_surface
+           ON parent_surface.logical_name_id = current.parent_logical_name_id
+         WHERE parent_surface.chain_id = $1
+           AND current.provenance #>> '{raw_fact_refs,0,registration,emitting_address}'
+               IS NOT NULL
+         UNION
+         SELECT logical_name_id, subregistry_address FROM project_parent_subregistry
+         WHERE chain_id = $1
+           AND subregistry_address NOT IN ('', '0x0000000000000000000000000000000000000000')
+         ORDER BY 1, 2",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    for (parent, registry) in pairs {
+        report.registries += 1;
+        let key = format!("labels of {registry} under {parent}");
+        let mut cursor: Option<ChildrenCurrentKeysetCursor> = None;
+        loop {
+            let started = Instant::now();
+            let served = bigname_storage::load_registry_children_current_page(
+                pool,
+                &parent,
+                &registry,
+                cursor.as_ref(),
+                settings.children_page,
+            )
+            .await?;
+            report.time("registry_labels_served", started);
+            let started = Instant::now();
+            let shadow = family::load_registry_children_shadow_page(
+                pool,
+                &parent,
+                &registry,
+                cursor.as_ref(),
+                settings.children_page,
+            )
+            .await?;
+            report.time("registry_labels", started);
+            let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(wire).collect();
+            report.label_rows += served_rows.len();
+            if served_rows != shadow.rows
+                || u64::try_from(served.label_count).ok() != Some(shadow.total_count)
+                || served.next_cursor != shadow.next_cursor
+            {
+                report.mismatch(
+                    key.clone(),
+                    format!(
+                        "served count {} rows {served_rows:?} next {:?}; \
+                         shadow count {} rows {:?} next {:?}",
+                        served.label_count,
+                        served.next_cursor,
+                        shadow.total_count,
+                        shadow.rows,
+                        shadow.next_cursor
+                    ),
+                );
+                break;
+            }
+            match served.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        let served =
+            bigname_storage::count_registry_children_current(pool, &parent, &registry).await?;
+        let shadow = family::load_registry_children_shadow_page(pool, &parent, &registry, None, 1)
+            .await?
+            .total_count;
+        if u64::try_from(served).ok() != Some(shadow) {
+            report.mismatch(
+                format!("label count of {registry} under {parent}"),
+                format!("served {served}, shadow {shadow}"),
+            );
         }
     }
     Ok(())

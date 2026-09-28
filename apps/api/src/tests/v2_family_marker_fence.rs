@@ -246,62 +246,23 @@ async fn v2_collection_expiry_clock_is_the_published_block_time_with_the_switch_
     database.cleanup().await
 }
 
-/// A child whose expiry lies after the published block's time but before the request time: live
-/// at the publication, expired by the wall clock.
-async fn seed_subname_expiring_after_the_publication(database: &TestDatabase) -> Result<()> {
-    seed_v2_subnames_bound_child(
-        database,
-        "ens:zeta.parent.eth",
-        "zeta.parent.eth",
-        "node:zeta.parent.eth",
-        86,
-        Uuid::from_u128(0x4040),
-        Uuid::from_u128(0x5040),
-        Uuid::from_u128(0x6040),
-        json!({
-            "registration": {
-                "status": "active",
-                "authority_kind": "registrar",
-                "registrant": "0x00000000000000000000000000000000000000fB",
-                "registered_at": "2025-01-02T03:04:05Z",
-                "expiry": "2026-06-01T00:00:00Z"
-            },
-            "control": {
-                "registry_owner": "0x00000000000000000000000000000000000000fA"
-            }
-        }),
-    )
-    .await?;
-    upsert_phase_children_current_rows(
-        &database.pool,
-        &[v2_subnames_declared_child_row(
-            "ens:parent.eth",
-            "ens:zeta.parent.eth",
-            "zeta.parent.eth",
-            "node:zeta.parent.eth",
-            906,
-            86,
-        )],
-    )
-    .await?;
-    Ok(())
-}
-
+/// With the switch on the subnames page reads the child families (TYR-36 step 7b slice 2b), so
+/// the fixture is built by Project and the families from events: two.alpha.eth expires after the
+/// published block's time but before the request time, live at the publication and expired by
+/// the wall clock.
 #[tokio::test]
 async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_block_time()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_subname_expiring_after_the_publication(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
-    let filtered = "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1";
+    seed_switch_children_fixture_expiring(&database, 1_750_000_000).await?;
+    let filtered = "/v1/names/alpha.eth/subnames?include_expired=false&page_size=1";
 
     bigname_storage::publication_source::with_serve_from_families(true, async {
         let mut names = Vec::new();
         let mut uri = filtered.to_owned();
         loop {
             let payload = v2_subnames_payload_for_database(&database, &uri).await?;
-            assert_eq!(payload["page"]["total_count"], json!(3), "{uri}");
+            assert_eq!(payload["page"]["total_count"], json!(4), "{uri}");
             names.extend(v2_subname_names(&payload));
             let Some(cursor) = payload["page"]["next_cursor"].as_str() else {
                 break;
@@ -310,8 +271,8 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
         }
         assert_eq!(
             names,
-            vec!["alpha.parent.eth", "gamma.parent.eth", "zeta.parent.eth"],
-            "zeta expires after the published block, so every page keeps it"
+            vec!["carol.alpha.eth", "dave.alpha.eth", "one.alpha.eth", "two.alpha.eth"],
+            "two expires after the published block, so every page keeps it"
         );
         anyhow::Ok(())
     })
@@ -320,13 +281,13 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
     bigname_storage::publication_source::with_serve_from_families(false, async {
         let payload = v2_subnames_payload_for_database(
             &database,
-            "/v1/names/Parent.eth/subnames?include_expired=false",
+            "/v1/names/alpha.eth/subnames?include_expired=false",
         )
         .await?;
         assert_eq!(
             v2_subname_names(&payload),
-            vec!["alpha.parent.eth", "gamma.parent.eth"],
-            "switch off: zeta has expired by the request time"
+            vec!["carol.alpha.eth", "dave.alpha.eth", "one.alpha.eth"],
+            "switch off: two has expired by the request time"
         );
         anyhow::Ok(())
     })
@@ -362,9 +323,10 @@ async fn api_preflight_requires_the_family_marker_only_with_the_switch_on() -> R
 #[tokio::test]
 async fn v2_a_cursor_restarts_once_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
-    let first_page = "/v1/names/Parent.eth/subnames?page_size=1";
+    // The subnames page reads the child families with the switch on, so both publications are
+    // built from events.
+    seed_switch_children_fixture(&database).await?;
+    let first_page = "/v1/names/alpha.eth/subnames?page_size=1";
     let next_cursor = |payload: &Value| {
         payload["page"]["next_cursor"]
             .as_str()
