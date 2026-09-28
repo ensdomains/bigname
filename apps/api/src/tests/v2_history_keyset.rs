@@ -102,7 +102,8 @@ async fn hk_publish_block(database: &TestDatabase, block: i64, with_row: bool) -
         &hash,
         &crate::v2::format_timestamp(timestamp),
     )
-    .await
+    .await?;
+    rebuild_fixture_families(&database.pool, HK_CHAIN, block, &hash).await
 }
 
 /// A redo of `phase` begins and finishes, moving the phase row as the phase runner does.

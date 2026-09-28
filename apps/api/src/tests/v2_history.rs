@@ -229,6 +229,8 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     )
     .await?;
 
+    seed_schema_v2_ens_lookup_head(&database.pool, 132, "0xhistory132", "2023-11-14T22:15:32Z").await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 132, "0xhistory132").await?;
     // With `include=child_registrations` the name arm reads the same attributed writes.
     for include in ["", "&include=child_registrations"] {
         for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
@@ -2620,6 +2622,7 @@ async fn v2_history_continuation_reads_interpret_events_once_published() -> Resu
         "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
         "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
     }})).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_004, "0xhistory21000004").await?;
     // Once published, the continuation reads it: the count grows, and the newest-first walk
     // still continues below its anchor.
     let published =
