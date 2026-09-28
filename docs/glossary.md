@@ -2555,12 +2555,14 @@ last block read. A block, range or undo applies only against the generation it
 planned from.
 
 While the [publication switch](#publication-switch) is on, the marker is also
-what the API serves from: snapshot selection, the verified lookup's admission
-and `/v1/status`'s generation check accept a chain's publication only while its
-marker is `live` (never `bootstrap_pending`, the state of a rebuild still
-populating the families), belongs to this build's interpreter, sits on readable
-lineage and trails the stored head by at most one block, and the marker's
-`sequence` is the served generation a same-request recheck compares.
+what the API serves from: snapshot selection and the verified lookup's
+admission accept a chain's publication only while its marker is `live` (never
+`bootstrap_pending`, the state of a rebuild still populating the families),
+belongs to this build's interpreter, sits on readable lineage and trails the
+stored head by at most one block, and the marker's `sequence` is the served
+generation a same-request recheck compares. `/v1/status` is mixed-source until
+the flip: its generation check applies the same rule to the marker, while its
+projected block and Project phase state still come from the Project row.
 
 ## Publication switch
 

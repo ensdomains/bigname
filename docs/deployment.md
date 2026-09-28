@@ -159,6 +159,19 @@ A directly launched API can configure its metrics listener with
 container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 `BIGNAME_API_METRICS_PORT` change only its host port mapping.
 
+### Publication switch
+
+`BIGNAME_SERVE_FROM_FAMILIES` is the
+[publication switch](glossary.md#publication-switch). The server Compose file
+forwards it from the host environment or `.env.server` to both the `api` and
+the `phase-runner` services; Compose forwards only the variables it lists, so
+without that entry the containers would never see it. Unset or empty means
+off, and only `1` or `true` turns it on. Both binaries read it once at startup,
+so set it the same for both and restart both to change it. Production leaves it
+off until the row and guard cutovers are complete: with it on, served-table
+reads can return inconsistent membership or counts (see
+[`api-v1.md`](api-v1.md), the publication switch paragraph).
+
 ## Phase-runner configuration
 
 The implemented phases use:

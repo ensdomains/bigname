@@ -56,11 +56,29 @@ impl PublicNamespaceSet {
                 })
             })
             .collect::<Vec<_>>();
-        let encoded = serde_json::to_vec(&json!({
-            "version": 1, "deployments": deployments, "manifests": manifests,
-        }))
-        .expect("collection read identity must serialize");
+        let encoded = publication_source_tagged(
+            serde_json::to_string(&json!({
+                "version": 1, "deployments": deployments, "manifests": manifests,
+            }))
+            .expect("collection read identity must serialize"),
+        );
         format!("publication-{}", alloy_primitives::keccak256(encoded))
+    }
+}
+
+/// Tags a publication-bound current-state cursor identity with the publication source. With the
+/// [publication switch](bigname_storage::publication_source) off the identity is returned
+/// unchanged, so every cursor token is byte-identical to one issued before the switch existed;
+/// with it on the identity is prefixed with `families:`. The two sources' generations are both
+/// untagged decimal strings (the Project row's `xmin`, the family marker's `sequence`) and can
+/// coincide at the same position, so without the tag a cursor issued on one side of a flip could
+/// pass validation on the other while its expiry clock changes. History cursors bind no
+/// publication and are not tagged.
+pub(crate) fn publication_source_tagged(identity: String) -> String {
+    if bigname_storage::publication_source::serve_from_families() {
+        format!("families:{identity}")
+    } else {
+        identity
     }
 }
 

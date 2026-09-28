@@ -144,8 +144,9 @@ pub(crate) async fn get_resolver(
     };
     require_phase_target_snapshot(&row.chain_positions, &row.chain_id, &selected_snapshot)?;
     let snapshot_token = encode_at_token(&selected_snapshot);
-    let resolver_generation =
-        serde_json::to_string(&project_generations).expect("resolver generation map serializes");
+    let resolver_generation = crate::v2::support::publication_source_tagged(
+        serde_json::to_string(&project_generations).expect("resolver generation map serializes"),
+    );
     let cursor_binding = BoundNamesCursorBinding {
         chain_id: numeric_chain_id,
         resolver_address: &normalized_address,

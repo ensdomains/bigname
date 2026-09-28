@@ -476,3 +476,61 @@ async fn the_stale_message_names_the_family_marker_only_with_the_switch_on() -> 
     drop(pool);
     database.cleanup().await
 }
+
+/// `/v1/status`'s `project_generation_current` applies the serving fence's rule to the marker
+/// with the switch on: live, this build's interpreter hash, readable lineage at the marker's
+/// block and hash, and at most the lag tolerance behind the head. With the switch off the
+/// Project row at the head keeps it true throughout.
+#[tokio::test]
+async fn status_generation_current_applies_the_serving_fence_rule_with_the_switch_on() -> Result<()>
+{
+    let database = fixture("family_marker_fence_status_rule").await?;
+    let pool = database.pool().clone();
+
+    for (hash, current, why) in [
+        (
+            HASH_9,
+            false,
+            "two blocks behind head 11 is beyond the lag tolerance",
+        ),
+        (
+            HASH_10,
+            true,
+            "one block behind the head is within the lag tolerance",
+        ),
+        (HASH_11, true, "at the head"),
+        (
+            HASH_11_ORPHANED,
+            false,
+            "the marker's block is not on the readable lineage",
+        ),
+    ] {
+        move_marker(&pool, hash).await?;
+        assert_eq!(
+            generation_current(&pool, true).await?,
+            current,
+            "switch on: {why}"
+        );
+        assert!(
+            generation_current(&pool, false).await?,
+            "switch off: the Project row at the head governs ({why})"
+        );
+    }
+
+    // Readable lineage is checked at the marker's own number and hash: block 10's lineage row
+    // orphaned under a marker at block 10.
+    move_marker(&pool, HASH_10).await?;
+    update(
+        &pool,
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE block_number = 10",
+    )
+    .await?;
+    assert!(
+        !generation_current(&pool, true).await?,
+        "switch on: an orphaned block under the marker"
+    );
+    assert!(generation_current(&pool, false).await?);
+
+    drop(pool);
+    database.cleanup().await
+}

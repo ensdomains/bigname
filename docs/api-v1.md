@@ -754,7 +754,11 @@ for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
 publication has the stored head's exact block hash. With the
 [publication switch](glossary.md#publication-switch) on, those last two checks
-read the [family marker](glossary.md#family-marker), which must also be `live`.
+read the [family marker](glossary.md#family-marker), which must also pass the
+rest of the serving fence: `live`, on readable lineage, and at most one block
+behind the stored head. Status is mixed-source until the flip: the projected
+block, its timestamp and the Project phase state still come from the project
+row.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -881,8 +885,12 @@ at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
 for equality, so nothing changes on the wire, except that turning the switch on
-or off makes every continuation cursor issued before the change return
-`409 stale` once, asking the client to restart pagination without the cursor.
+or off makes publication-bound current-state continuation cursors (history
+cursors carry no publication token) issued before the change return
+`409 stale`, asking the client to restart pagination without the cursor. Such a
+cursor stays rejected until the client restarts pagination. The API tags these
+cursors with the publication source, so this holds even when the project row's
+version and the marker's `sequence` happen to be the same number.
 Until the later step 7b slices move a route's rows onto the families, that
 route still reads the served tables while the switch is on. The served rows are
 committed before the family marker moves, so a served batch that lands between
@@ -891,12 +899,20 @@ and the check that refuses a read when the publication changed while the
 request was being read does not refuse it. The per-row snapshot checks still
 refuse any row newer than the selected position.
 
+So with the switch on, served-table reads can return inconsistent membership or
+counts despite those per-row target checks, which only drop rows newer than the
+selected position and cannot restore rows or counts from the publication a read
+started on. Production leaves the switch off until the row and guard cutovers
+are complete.
+
 With the switch on, collection expiry filters, such as `include_expired=false`
 on subnames, are evaluated at the published block's timestamp on the first page
 and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
-its post-call guard still compares the project row's generation.
+its post-call guard still compares the project row's generation. The lookup
+engine keeps reading the served tables, and its database guard moves to the
+marker in the flip slice; no lookup input moves to the families before that.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
