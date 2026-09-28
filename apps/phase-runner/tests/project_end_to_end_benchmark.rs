@@ -637,6 +637,23 @@ async fn run(
                 "the family readers differ from the served readers at {number}: {:#}",
                 topology_shadow::describe(&report)
             );
+            // The listings compared as one sequence without the names the control comparison
+            // decides, and those names, are pinned for the fixture, so a growing excuse list
+            // fails rather than hiding a difference.
+            if corpus {
+                let excused: Vec<&str> = report.excused.iter().map(String::as_str).collect();
+                ensure!(
+                    FIXTURE_LISTING_EXCUSES
+                        .iter()
+                        .any(|(target, listings, names)| {
+                            (*target, *listings, *names)
+                                == (number, report.listing_excused, &excused[..])
+                        }),
+                    "at {number} {} listings were compared without {excused:?}; the fixture \
+                     expects {FIXTURE_LISTING_EXCUSES:?}",
+                    report.listing_excused
+                );
+            }
             // Step 2 fills project_resolver_classification block by block and the comparison runs
             // once the families have caught up, so every resolver is read from its row and
             // compared in full. A resolver on the declaration fallback, or with no shadow
@@ -692,6 +709,30 @@ async fn run(
     );
     Ok((compared, shadows))
 }
+
+/// Per fixture target: how many composed listings are compared without the excused names, and
+/// those names, the ones the name comparison leaves to the control comparison because of the
+/// served bug `served_membership_skips_unnamed_path_expiry` (project_end_to_end/shadow.rs).
+const FIXTURE_LISTING_EXCUSES: &[(i64, usize, &[&str])] = &[
+    (
+        35,
+        7,
+        &[
+            "ens:0xb5048aa885a2dbcb32dd2db99146b96e27fbf55bf9f0105f920b797eaa46b792",
+            "ens:0xb555773768bc1a672947d7f41f9c247f36604411a85db2bd9e97e22bfb5b692d",
+        ],
+    ),
+    (
+        40,
+        7,
+        &[
+            "ens:0x85386162967e21a9847e97d2771fe4ae05ea0654df27241b8d244a19258f8adc",
+            "ens:0xac2bb57e8f734fa733cc2a7982b075afad50e612c90034101b81f34fffe65f85",
+            "ens:0xb5048aa885a2dbcb32dd2db99146b96e27fbf55bf9f0105f920b797eaa46b792",
+            "ens:0xb555773768bc1a672947d7f41f9c247f36604411a85db2bd9e97e22bfb5b692d",
+        ],
+    ),
+];
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
 /// reads them again and compares. A row that differs must be one the batch was allowed to keep
