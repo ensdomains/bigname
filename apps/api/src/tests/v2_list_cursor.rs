@@ -343,6 +343,9 @@ async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors(
     database.cleanup().await
 }
 
+/// Position fields to write into an issued cursor.
+type ListCursorPosition<'a> = Vec<(&'a str, &'a str)>;
+
 /// A well-formed cursor whose position lies after the last row answers an empty last page, and
 /// one whose position no row holds continues from where that row would sort.
 #[tokio::test]
@@ -358,7 +361,7 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
         for (uri, holder) in &routes {
             let (_, next) = list_cursor_page(&database, on, uri, holder).await?;
             let next = next.context("a continuation")?;
-            let (past_end, gap, gap_expects): (Vec<(&str, &str)>, Vec<(&str, &str)>, &str) =
+            let (past_end, gap, gap_expects): (ListCursorPosition, ListCursorPosition, &str) =
                 if uri.starts_with("/v1/search") {
                     (
                         vec![("display_name", "zzzz.eth"), ("normalized_name", "zzzz.eth"),
