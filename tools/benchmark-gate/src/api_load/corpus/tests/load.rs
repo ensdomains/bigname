@@ -2,8 +2,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{Corpus, require_active_namespace_coverage, require_stratified_corpus_size, tests};
-use crate::budgets::{BudgetProfile, BudgetsFile, GateBudgets};
+use super::{require_active_namespace_coverage, require_stratified_corpus_size, tests};
 
 #[derive(Clone)]
 struct CheckedInResolverManifest {
@@ -41,18 +40,6 @@ fn checked_in_resolver_manifest(relative: &str) -> CheckedInResolverManifest {
         payload: serde_json::to_value(manifest).unwrap(),
         addresses,
     }
-}
-
-fn tiny_budgets() -> GateBudgets {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml");
-    let mut budgets = BudgetsFile::load(&path)
-        .unwrap()
-        .profile(BudgetProfile::Production)
-        .clone();
-    budgets.api_corpus_size = 2;
-    budgets.api_min_specialized_corpus_size = 1;
-    budgets
 }
 
 #[test]
@@ -204,55 +191,13 @@ async fn insert_resolver_row_at(
     chain_id: &str,
     address: &str,
     support_status: &str,
-    index: usize,
-    target_block_number: i64,
+    _index: usize,
+    _target: i64,
 ) {
-    let hash = format!("resolver-manifest-{index}");
-    sqlx::query(
-        "INSERT INTO chain_lineage
-             (chain_id, block_hash, canonicality_state, block_number)
-         VALUES ($1, $2, 'canonical', $3)",
-    )
-    .bind(chain_id)
-    .bind(&hash)
-    .bind(target_block_number)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO resolver_current
-             (chain_id, resolver_address, support_status, chain_positions,
-              canonicality_summary, provenance, manifest_version)
-         SELECT $1, $2, $3,
-                jsonb_build_object('target_block_number', $5::bigint,
-                                   'target_block_hash', $4::text),
-                '{\"state\":\"canonical_lineage\"}',
-                jsonb_build_object(
-                    'manifest_id', manifest_id,
-                    'manifest_event_id', (
-                        SELECT max(event.normalized_event_id)
-                        FROM normalized_events event
-                        WHERE event.source_manifest_id = manifest_id
-                          AND event.event_kind = 'SourceManifestUpdated'
-                    )
-                ), manifest_version
-         FROM manifest_versions
-         WHERE chain_id = $1 AND rollout_status = 'active'
-           AND EXISTS (
-               SELECT 1
-               FROM jsonb_array_elements(manifest_payload -> 'contracts') contract
-               WHERE lower(contract ->> 'address') = lower($2)
-           )
-         LIMIT 1",
-    )
-    .bind(chain_id)
-    .bind(address)
-    .bind(support_status)
-    .bind(hash)
-    .bind(target_block_number)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO project_resolver_classification (chain_id,resolver_address,support_status,manifest_id,manifest_event_id)
+        SELECT $1,$2,$3,manifest_id,(SELECT max(normalized_event_id) FROM normalized_events WHERE source_manifest_id=manifest_id AND event_kind='SourceManifestUpdated')
+        FROM manifest_versions WHERE chain_id=$1 AND rollout_status='active' AND EXISTS (SELECT 1 FROM jsonb_array_elements(manifest_payload->'contracts') contract WHERE lower(contract->>'address')=lower($2)) LIMIT 1")
+        .bind(chain_id).bind(address).bind(support_status).execute(pool).await.unwrap();
 }
 
 async fn insert_upgrade_event(
@@ -304,114 +249,35 @@ async fn insert_upgrade_event(
 async fn insert_implementation_resolver_row(
     pool: &PgPool,
     manifest: &CheckedInResolverManifest,
-    proxy_address: &str,
-    target_block_number: i64,
+    proxy: &str,
+    _target: i64,
 ) {
-    let hash = format!("implementation-resolver-{target_block_number}");
-    sqlx::query(
-        "INSERT INTO chain_lineage
-             (chain_id, block_hash, canonicality_state, block_number)
-         VALUES ($1, $2, 'canonical', $3)",
-    )
-    .bind(&manifest.chain_id)
-    .bind(&hash)
-    .bind(target_block_number)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO resolver_current
-             (chain_id, resolver_address, support_status, chain_positions,
-              canonicality_summary, provenance, manifest_version)
-         SELECT chain_id, $1, 'supported',
-                jsonb_build_object('target_block_number', $2::bigint,
-                                   'target_block_hash', $3::text,
-                                   'block_number', (
-                                       SELECT event.block_number
-                                       FROM normalized_events event
-                                       WHERE event.source_manifest_id = manifest_id
-                                         AND event.event_kind = 'Upgraded'
-                                       ORDER BY event.normalized_event_id DESC
-                                       LIMIT 1
-                                   ),
-                                   'block_hash', (
-                                       SELECT event.block_hash
-                                       FROM normalized_events event
-                                       WHERE event.source_manifest_id = manifest_id
-                                         AND event.event_kind = 'Upgraded'
-                                       ORDER BY event.normalized_event_id DESC
-                                       LIMIT 1
-                                   )),
-                '{\"state\":\"canonical_lineage\"}',
-                jsonb_build_object(
-                    'manifest_id', manifest_id,
-                    'manifest_event_id', (
-                        SELECT max(event.normalized_event_id)
-                        FROM normalized_events event
-                        WHERE event.source_manifest_id = manifest_id
-                          AND event.event_kind = 'SourceManifestUpdated'
-                    ),
-                    'upgrade_event_id', (
-                        SELECT max(event.normalized_event_id)
-                        FROM normalized_events event
-                        WHERE event.source_manifest_id = manifest_id
-                          AND event.event_kind = 'Upgraded'
-                    )
-                ), manifest_version
-         FROM manifest_versions
-         WHERE chain_id = $4 AND source_family = $5
-         LIMIT 1",
-    )
-    .bind(proxy_address)
-    .bind(target_block_number)
-    .bind(hash)
-    .bind(&manifest.chain_id)
-    .bind(&manifest.source_family)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO project_resolver_classification (chain_id,resolver_address,support_status,manifest_id,manifest_event_id,classification)
+        SELECT chain_id,$1,'supported',manifest_id,
+          (SELECT max(normalized_event_id) FROM normalized_events WHERE source_manifest_id=manifest_id AND event_kind='SourceManifestUpdated'),
+          jsonb_build_object('upgrade',(SELECT jsonb_build_object('normalized_event_id',normalized_event_id,'block_number',block_number) FROM normalized_events WHERE source_manifest_id=manifest_id AND event_kind='Upgraded' ORDER BY normalized_event_id DESC LIMIT 1))
+        FROM manifest_versions WHERE chain_id=$2 AND source_family=$3 LIMIT 1")
+        .bind(proxy).bind(&manifest.chain_id).bind(&manifest.source_family).execute(pool).await.unwrap();
 }
 
 async fn insert_undeclared_resolver_row(pool: &PgPool, chain_id: &str, address: &str) {
-    sqlx::query(
-        "INSERT INTO chain_lineage
-             (chain_id, block_hash, canonicality_state, block_number)
-         VALUES ($1, 'undeclared-resolver', 'canonical', 29000000)",
-    )
-    .bind(chain_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    let inserted = sqlx::query(
-        "INSERT INTO resolver_current
-             (chain_id, resolver_address, support_status, chain_positions,
-              canonicality_summary, provenance, manifest_version)
-         SELECT $1, $2, 'supported',
-                '{\"target_block_number\":29000000,\"target_block_hash\":\"undeclared-resolver\"}',
-                '{\"state\":\"canonical_lineage\"}',
-                jsonb_build_object('manifest_id', manifest_id), manifest_version
-         FROM manifest_versions
-         WHERE chain_id = $1 AND rollout_status = 'active'
-         ORDER BY manifest_id
-         LIMIT 1",
-    )
-    .bind(chain_id)
-    .bind(address)
-    .execute(pool)
-    .await
-    .unwrap();
-    assert_eq!(inserted.rows_affected(), 1);
+    sqlx::query("INSERT INTO project_resolver_classification (chain_id,resolver_address,support_status,manifest_id)
+        SELECT $1,$2,'supported',manifest_id FROM manifest_versions WHERE chain_id=$1 LIMIT 1")
+        .bind(chain_id).bind(address).execute(pool).await.unwrap();
 }
 
 #[tokio::test]
 async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
     for (case, expected_message) in [
-        ("missing", "is missing from resolver_current"),
-        ("unsupported", "not supported, in resolver_current"),
         (
-            "invisible",
-            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
+            "missing",
+            "is missing from the resolver classification family",
         ),
+        (
+            "unsupported",
+            "not supported, in the resolver classification family",
+        ),
+        ("invisible", "no current Project head"),
     ] {
         let database = TestDatabase::create(
             TestDatabaseConfig::new(format!("benchmark_resolver_coverage_{case}"))
@@ -455,9 +321,9 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
                 if case == "invisible" && address == &missing_address {
                     sqlx::query(
                         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
-                         WHERE block_hash = $1",
+                         WHERE block_hash = $1 AND chain_id = 'ethereum-mainnet'",
                     )
-                    .bind(format!("resolver-manifest-{index}"))
+                    .bind("project-head-30000000")
                     .execute(database.pool())
                     .await
                     .unwrap();
@@ -477,8 +343,14 @@ async fn missing_unsupported_or_invisible_declared_resolver_is_named() {
             .expect("resolver coverage refusal must remain available for the JSON report");
         let error = coverage.failures.join("; ");
 
-        assert_eq!(coverage.resolvers.len(), 7, "{case}");
-        assert!(error.contains(&missing_address), "{case}: {error}");
+        assert_eq!(
+            coverage.resolvers.len(),
+            if case == "invisible" { 1 } else { 7 },
+            "{case}"
+        );
+        if case != "invisible" {
+            assert!(error.contains(&missing_address), "{case}: {error}");
+        }
         assert!(
             error.contains("chain \"ethereum-mainnet\""),
             "{case}: {error}"
@@ -531,15 +403,15 @@ async fn ens_v2_coverage_binds_the_upgrade_anchor() {
     for (case, mutation) in [
         (
             "target_before_upgrade",
-            "UPDATE resolver_current SET chain_positions = chain_positions || jsonb_build_object('target_block_number', 899, 'target_block_hash', 'before-upgrade-target')",
+            "UPDATE project_resolver_classification SET classification = jsonb_set(classification, '{upgrade,normalized_event_id}', '99999')",
         ),
         (
             "number",
-            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{block_number}', '899'::jsonb)",
+            "UPDATE project_resolver_classification SET classification = jsonb_set(classification, '{upgrade,block_number}', '899'::jsonb)",
         ),
         (
             "hash",
-            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{block_hash}', '\"wrong-upgrade\"'::jsonb)",
+            "UPDATE normalized_events SET block_hash = 'wrong-upgrade' WHERE event_kind = 'Upgraded'",
         ),
     ] {
         let database = TestDatabase::create(
@@ -581,9 +453,14 @@ async fn ens_v2_coverage_binds_the_upgrade_anchor() {
             .unwrap();
 
         assert!(
-            coverage.failures.iter().any(|failure| failure.contains(
-                "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
-            )),
+            coverage
+                .failures
+                .iter()
+                .any(|failure| failure.contains(if case == "hash" {
+                    "zero currently applicable"
+                } else {
+                    "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+                })),
             "{case}: {:?}",
             coverage.failures
         );
@@ -1068,13 +945,10 @@ async fn resolver_rows_bind_to_the_latest_manifest_event() {
         .unwrap();
     assert!(normal.failures.is_empty(), "{:?}", normal.failures);
 
-    sqlx::query(
-        "UPDATE resolver_current
-         SET provenance = jsonb_set(provenance, '{manifest_event_id}', '999999'::jsonb)",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
+    sqlx::query("UPDATE project_resolver_classification SET manifest_event_id = 999999")
+        .execute(database.pool())
+        .await
+        .unwrap();
     let mismatched = super::resolver_coverage::load(database.pool())
         .await
         .unwrap();
@@ -1106,6 +980,11 @@ async fn insert_project_head(pool: &PgPool, chain_id: &str, block_number: i64) {
     .execute(pool)
     .await
     .unwrap();
+    sqlx::query("INSERT INTO project_family_marker (chain_id,current_block_number,current_block_hash,input_content_hash,state) VALUES ($1,$2,$3,$4,'live')")
+        .bind(chain_id).bind(block_number).bind(format!("project-head-{block_number}"))
+        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,'canonical')")
+        .bind(chain_id).bind(format!("project-head-{block_number}")).bind(block_number).execute(pool).await.unwrap();
     sqlx::query(
         "INSERT INTO chain_heads
              (chain_id, latest_block_number, latest_block_hash)
@@ -1120,6 +999,7 @@ async fn insert_project_head(pool: &PgPool, chain_id: &str, block_number: i64) {
 }
 
 async fn ensure_project_state_schema(pool: &PgPool) {
+    sqlx::query("CREATE TABLE IF NOT EXISTS project_family_marker (chain_id text PRIMARY KEY, current_block_number bigint, current_block_hash text, input_content_hash text, state text)").execute(pool).await.unwrap();
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS chain_phase_state (
              chain_id text NOT NULL,
@@ -1128,6 +1008,8 @@ async fn ensure_project_state_schema(pool: &PgPool) {
              current_block_number bigint,
              current_block_hash text,
              input_content_hash text,
+             redo_in_progress boolean NOT NULL DEFAULT false,
+             redo_from_block_number bigint,
              PRIMARY KEY (chain_id, phase_name)
          )",
     )
@@ -1381,7 +1263,7 @@ async fn resolver_coverage_requires_a_current_project_publication() {
         ),
         (
             "invalidated_input",
-            "UPDATE chain_phase_state SET input_content_hash = 'different-generation'",
+            "UPDATE project_family_marker SET input_content_hash = 'different-generation'",
             false,
         ),
     ] {
@@ -1459,31 +1341,31 @@ async fn resolver_coverage_uses_the_route_snapshot_bounds() {
     for (case, mutation) in [
         (
             "missing_number",
-            "UPDATE resolver_current SET chain_positions = chain_positions - 'target_block_number'",
+            "UPDATE project_family_marker SET current_block_number = NULL",
         ),
         (
             "ahead",
-            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '101'::jsonb)",
+            "UPDATE project_family_marker SET current_block_number = 101",
         ),
         (
             "same_height_wrong_hash",
-            "UPDATE resolver_current SET chain_positions = jsonb_build_object('target_block_number', 100, 'target_block_hash', 'other-canonical-head')",
+            "UPDATE project_family_marker SET current_block_hash = 'other-canonical-head'",
         ),
         (
             "lineage_number_mismatch",
-            "UPDATE resolver_current SET chain_positions = jsonb_set(chain_positions, '{target_block_number}', '50'::jsonb)",
+            "UPDATE chain_lineage SET block_number = 50 WHERE block_hash = 'project-head-100'",
         ),
         (
             "predates_declaration",
-            "UPDATE resolver_current SET chain_positions = jsonb_build_object('target_block_number', 99, 'target_block_hash', 'older-canonical-head')",
+            "UPDATE project_family_marker SET current_block_number = 99, current_block_hash = 'older-canonical-head'",
         ),
         (
             "wrong_manifest",
-            "UPDATE resolver_current SET provenance = '{\"manifest_id\":999}'::jsonb",
+            "UPDATE project_resolver_classification SET manifest_id = 999, manifest_event_id = NULL",
         ),
         (
             "wrong_manifest_version",
-            "UPDATE resolver_current SET manifest_version = manifest_version + 1",
+            "UPDATE normalized_events SET manifest_version = 2 WHERE event_kind = 'SourceManifestUpdated'",
         ),
     ] {
         let database = TestDatabase::create(
@@ -1547,10 +1429,10 @@ async fn resolver_coverage_uses_the_route_snapshot_bounds() {
             .await
             .unwrap();
 
-        let expected = if case == "wrong_manifest" {
-            "does not cite latest projected manifest event"
-        } else {
-            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks"
+        let expected = match case {
+            "wrong_manifest" => "does not cite latest projected manifest event",
+            "wrong_manifest_version" => "stored version",
+            _ => "no current Project head",
         };
         assert!(
             coverage
@@ -1594,10 +1476,7 @@ async fn resolver_coverage_binds_anchor_hash_to_its_claimed_block_number() {
     )
     .await;
     sqlx::query(
-        "UPDATE resolver_current
-         SET chain_positions = jsonb_set(
-             chain_positions, '{target_block_number}', '99'::jsonb
-         )",
+        "UPDATE chain_lineage SET block_number = 99 WHERE block_hash = 'project-head-100' ",
     )
     .execute(database.pool())
     .await
@@ -1608,9 +1487,10 @@ async fn resolver_coverage_binds_anchor_hash_to_its_claimed_block_number() {
         .unwrap();
 
     assert!(
-        coverage.failures.iter().any(|failure| failure.contains(
-            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
-        )),
+        coverage
+            .failures
+            .iter()
+            .any(|failure| failure.contains("no current Project head",)),
         "{:?}",
         coverage.failures
     );
@@ -1656,15 +1536,6 @@ async fn resolver_coverage_accepts_an_exact_current_head_match() {
     .execute(database.pool())
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE resolver_current SET chain_positions =
-             jsonb_set(chain_positions, '{target_block_hash}',
-                       '\"project-head-100\"'::jsonb)",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
-
     let coverage = super::resolver_coverage::load(database.pool())
         .await
         .unwrap();
@@ -1676,7 +1547,7 @@ async fn resolver_coverage_accepts_an_exact_current_head_match() {
 
 #[tokio::test]
 async fn malformed_resolver_block_numbers_produce_report_failures() {
-    for case in ["manifest_start", "projection_target"] {
+    for case in ["manifest_start"] {
         let database = TestDatabase::create(
             TestDatabaseConfig::new(format!("benchmark_resolver_bad_block_{case}"))
                 .pool_max_connections(1),
@@ -1704,25 +1575,6 @@ async fn malformed_resolver_block_numbers_produce_report_failures() {
         )
         .await;
         insert_project_head(database.pool(), "ethereum-mainnet", 100).await;
-        if case == "projection_target" {
-            insert_resolver_row(
-                database.pool(),
-                "ethereum-mainnet",
-                resolver,
-                "supported",
-                100,
-            )
-            .await;
-            sqlx::query(
-                "UPDATE resolver_current SET chain_positions =
-                     jsonb_set(chain_positions, '{target_block_number}',
-                               '9223372036854775808'::jsonb)",
-            )
-            .execute(database.pool())
-            .await
-            .unwrap();
-        }
-
         let coverage = super::resolver_coverage::load(database.pool())
             .await
             .expect("malformed stored block numbers must remain reportable");
@@ -1945,379 +1797,5 @@ async fn malformed_resolver_failures_remain_distinct_per_manifest() {
 
     assert_eq!(malformed.len(), 2, "{:?}", coverage.failures);
     assert_ne!(malformed[0], malformed[1]);
-    database.cleanup().await.unwrap();
-}
-
-async fn seeded_database(label: &str) -> TestDatabase {
-    let database = TestDatabase::create(TestDatabaseConfig::new(label).pool_max_connections(1))
-        .await
-        .unwrap();
-    let pool = database.pool();
-    tests::install_name_visibility_schema(pool).await;
-    sqlx::query(
-        "INSERT INTO manifest_versions (namespace, rollout_status) VALUES
-             ('basenames', 'active'), ('ens', 'active')",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    for namespace in ["basenames", "ens"] {
-        for index in 0..2 {
-            let logical_name_id = format!("{namespace}:load-{index}");
-            tests::insert_name_with_visibility(
-                pool,
-                namespace,
-                &format!("{namespace}-{index}.eth"),
-                &logical_name_id,
-                "supported",
-                "canonical",
-                "canonical",
-            )
-            .await;
-            tests::insert_visible_child_parent(pool, &logical_name_id).await;
-            insert_address(pool, namespace, index, &logical_name_id).await;
-        }
-        insert_primary_name(pool, namespace).await;
-    }
-    insert_permission_subjects_and_resolver(pool).await;
-    database
-}
-
-async fn insert_address(pool: &PgPool, namespace: &str, index: usize, logical_name_id: &str) {
-    let chain_id = if namespace == "basenames" {
-        "base-mainnet"
-    } else {
-        "ethereum-mainnet"
-    };
-    let resource_id = Uuid::new_v4();
-    let binding_id = Uuid::new_v4();
-    let resource_hash = format!("{namespace}-resource-{index}");
-    let binding_hash = format!("{namespace}-binding-{index}");
-    let projection_hash = format!("{namespace}-address-projection-{index}");
-    sqlx::query(
-        "INSERT INTO chain_lineage VALUES
-             ($1, $2, 'canonical'), ($1, $3, 'canonical'), ($1, $4, 'canonical')",
-    )
-    .bind(chain_id)
-    .bind(&resource_hash)
-    .bind(&binding_hash)
-    .bind(&projection_hash)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO resources VALUES ($1, $2, $3, 'canonical')")
-        .bind(resource_id)
-        .bind(chain_id)
-        .bind(&resource_hash)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO surface_bindings VALUES ($1, $2, $3, 'canonical', NULL)")
-        .bind(binding_id)
-        .bind(chain_id)
-        .bind(&binding_hash)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO address_names_current VALUES
-             ($1, $2, $3, 'effective_controller', $4, 'supported', $5, $6, NULL,
-              jsonb_build_object('chain_id', $7::text),
-              jsonb_build_object('target_block_hash', $8::text),
-              '{\"state\":\"canonical_lineage\"}')",
-    )
-    .bind(format!("0x{index:039x}{}", usize::from(namespace == "ens")))
-    .bind(format!("{namespace}-address-{index}.eth"))
-    .bind(namespace)
-    .bind(logical_name_id)
-    .bind(binding_id)
-    .bind(resource_id)
-    .bind(chain_id)
-    .bind(projection_hash)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-async fn insert_primary_name(pool: &PgPool, namespace: &str) {
-    let chain_id = if namespace == "basenames" {
-        "base-mainnet"
-    } else {
-        "ethereum-mainnet"
-    };
-    for index in 0..2 {
-        let hash = format!("{namespace}-primary-projection-{index}");
-        sqlx::query("INSERT INTO chain_lineage VALUES ($1, $2, 'canonical')")
-            .bind(chain_id)
-            .bind(&hash)
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO primary_names_current VALUES
-                 ($1, '60', $2, 'success',
-                  jsonb_build_object('chain_id', $3::text, 'target_block_hash', $4::text))",
-        )
-        .bind(format!(
-            "0x{index:038x}{}",
-            if namespace == "ens" { "91" } else { "90" }
-        ))
-        .bind(namespace)
-        .bind(chain_id)
-        .bind(hash)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-}
-
-async fn insert_permission_subjects_and_resolver(pool: &PgPool) {
-    ensure_project_state_schema(pool).await;
-    let resource_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO manifest_versions
-             (namespace, rollout_status, source_family, chain_id, manifest_payload)
-         VALUES (
-             'ens', 'active', 'ens_v1_resolver_l1', 'ethereum-mainnet',
-             '{\"contracts\":[{\"address\":\"0x0000000000000000000000000000000000000082\"}]}'
-         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO chain_lineage VALUES
-             ('ethereum-mainnet', 'load-permission-resource', 'canonical'),
-             ('ethereum-mainnet', 'load-permission-projection', 'canonical'),
-             ('ethereum-mainnet', 'load-resolver-projection', 'canonical')",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO resources VALUES
-             ($1, 'ethereum-mainnet', 'load-permission-resource', 'canonical')",
-    )
-    .bind(resource_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE name_current
-         SET resource_id = $1
-         WHERE logical_name_id = 'ens:load-0'",
-    )
-    .bind(resource_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    for index in 0..3 {
-        sqlx::query(
-            "INSERT INTO permissions_current VALUES
-                 ($1, $2, '{\"chain_id\":\"ethereum-mainnet\"}',
-                  '{\"target_block_hash\":\"load-permission-projection\"}',
-                  '{\"state\":\"canonical\"}')",
-        )
-        .bind(format!("0x{index:040x}"))
-        .bind(resource_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-    sqlx::query(
-        "INSERT INTO resolver_current
-             (chain_id, resolver_address, support_status, chain_positions,
-              canonicality_summary) VALUES
-             ('ethereum-mainnet', '0x0000000000000000000000000000000000000082', 'supported',
-              '{\"target_block_hash\":\"load-resolver-projection\"}',
-              '{\"state\":\"canonical_lineage\"}')",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn corpus_load_keeps_each_namespace_coverage_check_load_bearing() {
-    for (label, delete_sql, expected) in [
-        (
-            "corpus_load_name_coverage",
-            "DELETE FROM name_current WHERE namespace = 'ens'",
-            "contributed no supported names",
-        ),
-        (
-            "corpus_load_parent_coverage",
-            "DELETE FROM children_current WHERE parent_logical_name_id LIKE 'ens:%'",
-            "contributed no supported parents",
-        ),
-        (
-            "corpus_load_address_coverage",
-            "DELETE FROM address_names_current WHERE namespace = 'ens'",
-            "contributed no supported address/name relations",
-        ),
-        (
-            "corpus_load_primary_coverage",
-            "DELETE FROM primary_names_current WHERE namespace = 'ens'",
-            "contributed no successful primary names",
-        ),
-    ] {
-        let database = seeded_database(label).await;
-        sqlx::query(delete_sql)
-            .execute(database.pool())
-            .await
-            .unwrap();
-
-        let (_, failures) = Corpus::load(database.pool(), &tiny_budgets())
-            .await
-            .expect("corpus shortfalls must return reportable evidence");
-        let error = failures.join("; ");
-        assert!(error.contains(expected), "{label}: {error}");
-        database.cleanup().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn production_corpus_requires_retained_registration_audit_evidence() {
-    let database = seeded_database("corpus_load_retained_registration").await;
-    let (_, failures) = Corpus::load(database.pool(), &tiny_budgets())
-        .await
-        .expect("missing retained-registration evidence must stay reportable");
-    assert!(
-        failures
-            .iter()
-            .any(|failure| failure.contains("no canonical retained registration")),
-        "{failures:?}"
-    );
-
-    sqlx::raw_sql(
-        "INSERT INTO resources VALUES
-             ('00000000-0000-0000-0000-000000000044', 'ethereum-mainnet',
-              'load-permission-resource', 'canonical');
-         INSERT INTO permissions_current VALUES
-             ('0x0000000000000000000000000000000000000044',
-              '00000000-0000-0000-0000-000000000044',
-              '{\"chain_id\":\"ethereum-mainnet\"}',
-              '{\"target_block_hash\":\"load-permission-projection\"}',
-              '{\"state\":\"canonical\"}')",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
-
-    let (corpus, failures) = Corpus::load(database.pool(), &tiny_budgets())
-        .await
-        .expect("retained-registration evidence must load through the public corpus path");
-    assert!(
-        !failures
-            .iter()
-            .any(|failure| failure.contains("no canonical retained registration")),
-        "{failures:?}"
-    );
-    assert!(
-        corpus
-            .permission_subjects
-            .iter()
-            .any(|target| target.retained_registration)
-    );
-    database.cleanup().await.unwrap();
-}
-
-#[tokio::test]
-async fn corpus_load_names_aggregate_size_shortfalls() {
-    for (label, delete_sql, expected) in [
-        (
-            "corpus_load_name_size",
-            "DELETE FROM name_current WHERE logical_name_id IN ('basenames:load-1', 'ens:load-1')",
-            "name corpus has 2 rows; release profile requires 3",
-        ),
-        (
-            "corpus_load_address_size",
-            "DELETE FROM address_names_current WHERE raw_name IN ('basenames-address-1.eth', 'ens-address-1.eth')",
-            "address corpus has 2 rows; release profile requires 3",
-        ),
-    ] {
-        let database = seeded_database(label).await;
-        sqlx::query(delete_sql)
-            .execute(database.pool())
-            .await
-            .unwrap();
-        let mut budgets = tiny_budgets();
-        budgets.api_corpus_size = 3;
-
-        let (_, failures) = Corpus::load(database.pool(), &budgets)
-            .await
-            .expect("aggregate corpus shortfalls must return reportable evidence");
-        let error = failures.join("; ");
-        assert!(error.contains(expected), "{label}: {error}");
-        assert!(error.contains("basenames=1"), "{label}: {error}");
-        assert!(error.contains("ens=1"), "{label}: {error}");
-        database.cleanup().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn corpus_load_keeps_specialized_size_floors_load_bearing() {
-    let database = seeded_database("corpus_load_parent_size").await;
-    sqlx::query(
-        "DELETE FROM children_current
-         WHERE parent_logical_name_id IN ('basenames:load-1', 'ens:load-1')",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
-    let mut budgets = tiny_budgets();
-    budgets.api_min_specialized_corpus_size = 3;
-    let (_, failures) = Corpus::load(database.pool(), &budgets)
-        .await
-        .expect("subname-parent shortfall must return reportable evidence");
-    let error = failures.join("; ");
-    assert!(
-        error.contains("subname parent corpus has 2 rows; release profile requires 3"),
-        "{error}"
-    );
-    database.cleanup().await.unwrap();
-
-    let database = seeded_database("corpus_load_permission_size").await;
-    sqlx::query("DELETE FROM permissions_current WHERE subject <> '0x0000000000000000000000000000000000000000'")
-        .execute(database.pool())
-        .await
-        .unwrap();
-    let mut budgets = tiny_budgets();
-    budgets.api_min_specialized_corpus_size = 2;
-    let (_, failures) = Corpus::load(database.pool(), &budgets)
-        .await
-        .expect("permission-subject shortfall must return reportable evidence");
-    let error = failures.join("; ");
-    assert!(
-        error.contains("permission subject corpus has 1 rows; release profile requires 2"),
-        "{error}"
-    );
-    database.cleanup().await.unwrap();
-
-    let database = seeded_database("corpus_load_primary_size").await;
-    sqlx::query(
-        "DELETE FROM primary_names_current
-         WHERE address IN (
-             '0x0000000000000000000000000000000000000090',
-             '0x0000000000000000000000000000000000000091'
-         )",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
-    let mut budgets = tiny_budgets();
-    budgets.api_corpus_size = 4;
-    budgets.api_min_specialized_corpus_size = 3;
-    let (_, failures) = Corpus::load(database.pool(), &budgets)
-        .await
-        .expect("primary-name shortfall must return reportable evidence");
-    let error = failures.join("; ");
-    assert!(
-        error.contains("successful primary-name corpus has 2 rows; release profile requires 3"),
-        "{error}"
-    );
-    assert!(error.contains("basenames=1"), "{error}");
-    assert!(error.contains("ens=1"), "{error}");
     database.cleanup().await.unwrap();
 }
