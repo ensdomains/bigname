@@ -1223,6 +1223,7 @@ jobs:
       - test_shard
       - phase_runner
       - e2e
+      - site
     if: always()
     steps:
       - name: Check test shards
@@ -1241,6 +1242,10 @@ jobs:
           fi
           if [ "${{ needs.e2e.result }}" != "success" ]; then
             echo "e2e finished with result: ${{ needs.e2e.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.site.result }}" != "success" ]; then
+            echo "site finished with result: ${{ needs.site.result }}"
             exit 1
           fi
 
