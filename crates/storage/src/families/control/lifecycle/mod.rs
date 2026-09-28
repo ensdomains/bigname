@@ -36,7 +36,7 @@ use super::{
     rows::{self, BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
-pub use load::{load_name_facts, load_name_facts_on, load_shadow_names, namespace_of};
+pub use load::{load_name_facts, load_name_facts_on, namespace_of};
 
 /// The F1 selection outputs the admission reads (name_authority/build.sql:561-603), as the
 /// served row's `provenance.authority_selection` carries them.
@@ -47,9 +47,8 @@ pub struct AuthoritySelection {
     pub resource_id: Option<String>,
     /// `authority_epoch_start_position` as a three-part bound.
     pub epoch_start: Option<(i64, i64, i64)>,
-    /// Whether an authority proof event exists. Selection history only: since TYR-36 step 6
-    /// (de24ff32) no admission rule reads it, and only the migrated-name fixture
-    /// (crates/project/tests/families_shadow_order.rs) checks it.
+    /// Whether an authority proof event exists. Selection history only: no admission rule
+    /// reads it.
     pub has_proof: bool,
     pub unsupported_reason: Option<String>,
     pub ownerless_registry: bool,
@@ -103,7 +102,7 @@ pub struct NameInput {
 }
 
 /// The publication the read is for: its block and the block's timestamp, the clock every
-/// wrapper mask uses (D6).
+/// wrapper mask uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Clock {
     pub block_number: i64,

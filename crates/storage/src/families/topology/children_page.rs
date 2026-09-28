@@ -51,56 +51,6 @@ pub struct FamilyChildrenPage {
     pub next_cursor: Option<ChildrenCurrentKeysetCursor>,
 }
 
-/// The shadow of `load_children_current_page_filtered`: the same rows in the same order with the
-/// same cursor semantics, read from the child edge families.
-pub async fn load_children_shadow_page(
-    pool: &PgPool,
-    parent_logical_name_id: &str,
-    filter: &ChildrenCurrentPageFilter<'_>,
-    cursor: Option<&ChildrenCurrentKeysetCursor>,
-    page_size: u64,
-) -> Result<FamilyChildrenPage> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection")?;
-    page(
-        &mut conn,
-        parent_logical_name_id,
-        filter,
-        None,
-        cursor,
-        page_size,
-    )
-    .await
-}
-
-/// The shadow of `load_registry_children_current_page`: the ENSv2 children of
-/// `parent_logical_name_id` whose registration the registry `registry_address` holds, by name,
-/// with the exact count of every such child as the page total.
-pub async fn load_registry_children_shadow_page(
-    pool: &PgPool,
-    parent_logical_name_id: &str,
-    registry_address: &str,
-    cursor: Option<&ChildrenCurrentKeysetCursor>,
-    page_size: u64,
-) -> Result<FamilyChildrenPage> {
-    let registry = registry_address.to_ascii_lowercase();
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire a connection")?;
-    page(
-        &mut conn,
-        parent_logical_name_id,
-        &ChildrenCurrentPageFilter::default(),
-        Some(&registry),
-        cursor,
-        page_size,
-    )
-    .await
-}
-
 /// The exact unfiltered child count of each parent, in `parent_logical_name_ids` order, the
 /// count `load_children_current_summaries` serves; one count per parent, all in one read-only
 /// snapshot.

@@ -64,16 +64,6 @@ async fn rows_for(
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
 
-/// Load and evaluate the permission shadow of `resources` at `clock`.
-pub async fn load_shadow_permissions(
-    pool: &PgPool,
-    chain_id: &str,
-    clock: &Clock,
-    resources: &[ResourceInput],
-) -> Result<BTreeMap<String, ShadowPermissions>> {
-    load_shadow_permissions_in(pool, chain_id, clock, resources, &EventOrder::Canonical).await
-}
-
 /// The permission shadow read in `order`. In the canonical order the path-expiry drop reads the
 /// stored F2a key states; in any other order it reads each key state folded again from the
 /// resource's retained events in that order (the harness's same-block counterfactual).
@@ -368,20 +358,6 @@ impl ServedApproval {
     }
 }
 
-/// Every F9 approval of the chain.
-pub async fn load_shadow_approvals(pool: &PgPool, chain_id: &str) -> Result<Vec<ServedApproval>> {
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.permissions.approvals */ SELECT to_jsonb(approval)
-         FROM bigname_phase.project_account_approval approval
-         WHERE approval.chain_id = $1",
-    )
-    .bind(chain_id)
-    .fetch_all(pool)
-    .await
-    .context("failed to load account approvals")?;
-    Ok(rows.iter().filter_map(ServedApproval::from_row).collect())
-}
-
 /// One registry-operator row the effective-permission reader adds for a resource.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OperatorRow {
@@ -440,18 +416,3 @@ pub fn effective_operator_rows(
     rows
 }
 
-/// A served grant as the JSON the harness compares.
-pub fn grant_json(grant: &ServedGrant) -> Value {
-    json!({
-        "resource_id": grant.resource_id,
-        "subject": grant.subject,
-        "scope": grant.scope,
-        "scope_kind": grant.scope_kind,
-        "scope_detail": grant.scope_detail,
-        "effective_powers": grant.effective_powers,
-        "grant_source": grant.grant_source,
-        "revocation_source": grant.revocation_source,
-        "inheritance_path": grant.inheritance_path,
-        "transfer_behavior": grant.transfer_behavior,
-    })
-}

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 
-use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, admission::REGISTRAR, evaluate};
+use super::{NameFacts, NameInput, TripleFacts, admission::REGISTRAR};
 use crate::families::control::{
     position::{EventOrder, Position},
     registry::load_registry_nodes_on,
@@ -40,24 +40,6 @@ async fn json_rows(
 pub fn namespace_of(name: &str) -> &str {
     name.split_once(':')
         .map_or("ens", |(namespace, _)| namespace)
-}
-
-/// Load and evaluate the shadow registration and control blocks of `names` at `clock`.
-pub async fn load_shadow_names(
-    pool: &PgPool,
-    chain_id: &str,
-    clock: &Clock,
-    names: &[NameInput],
-) -> Result<BTreeMap<String, ShadowName>> {
-    let facts = load_name_facts(pool, chain_id, names).await?;
-    facts
-        .into_iter()
-        .map(|facts| {
-            let shadow = evaluate(&facts, clock)
-                .with_context(|| format!("the shadow read of {}", facts.input.logical_name_id))?;
-            Ok((facts.input.logical_name_id, shadow))
-        })
-        .collect()
 }
 
 /// Load every fact the lifecycle read of `names` reads.

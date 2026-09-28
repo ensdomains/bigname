@@ -371,22 +371,6 @@ impl RegistryBinding {
     }
 }
 
-/// Every registry-binding observation of the chain. A resource's binding can come from a row
-/// keyed by any name whose target it is, which no column indexes, so the read takes the table
-/// whole; it serves the harness only.
-pub async fn load_observations(pool: &PgPool, chain_id: &str) -> Result<Vec<Observation>> {
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.registry.observations */ SELECT to_jsonb(observation)
-         FROM bigname_phase.project_registry_binding_observation observation
-         WHERE observation.chain_id = $1",
-    )
-    .bind(chain_id)
-    .fetch_all(pool)
-    .await
-    .context("failed to load registry-binding observations")?;
-    Ok(rows.iter().filter_map(Observation::from_row).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
