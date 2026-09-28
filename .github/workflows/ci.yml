@@ -161,6 +161,28 @@ jobs:
       - name: cargo clippy (e2e workspace)
         run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
 
+  site:
+    # The landing page and API reference are a static site with no build step
+    # (site/README.md). Check it and keep the exact files as an artifact the
+    # hosting side can pick up; the API crate's site_pages tests hold the
+    # reference to the router.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check the site
+        run: scripts/check-site
+
+      - name: Upload the site
+        uses: actions/upload-artifact@v7
+        with:
+          name: site-${{ github.run_id }}-${{ github.run_attempt }}
+          path: site/
+          retention-days: 7
+          if-no-files-found: error
+
   schema_v2:
     name: test (schema v2)
     runs-on: ubuntu-latest

@@ -459,12 +459,12 @@ const GLYPHS = {
   tryForm.addEventListener('submit', async e => {
     e.preventDefault();
     if (tryBusy) return;
-    const gen = ++tryGen, u = NET.apiBase() + tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
+    const gen = ++tryGen, u = tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
     setTryBusy(true); tryOut.className = 'out';
     tryOut.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
     const t0 = performance.now();
     try {
-      const res = await fetch(u, { headers: { accept: 'application/json' } });
+      const res = await fetch(NET.apiBase() + u, { headers: { accept: 'application/json' } });
       const ms = Math.round(performance.now() - t0), text = await res.text();
       if (gen !== tryGen) return;
       let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
