@@ -177,13 +177,11 @@ async fn load(
     Ok(out)
 }
 
-/// One composed name: its row, whether its node's latest registry transfer names the zero owner
-/// (the selection's `ownerless_transfer`), which the child lists read, and the first clock second
-/// after the publication at which the composition can change with no fact changing: a binding
-/// interval opening or closing, or a NameWrapper expiry or grace boundary.
+/// One composed name: its row, and the first clock second after the publication at which the
+/// composition can change with no fact changing: a binding interval opening or closing, or a
+/// NameWrapper expiry or grace boundary.
 pub(super) struct Composed {
     pub(super) row: NameCurrentRow,
-    pub(super) zero_owner: bool,
     pub(super) recompose_at: Option<i64>,
 }
 
@@ -340,7 +338,6 @@ pub(super) async fn compose_chain(
             name.to_owned(),
             Composed {
                 row,
-                zero_owner: decided.ownerless_transfer.is_some(),
                 recompose_at: recompose_at(facts, clock.timestamp_seconds),
             },
         );

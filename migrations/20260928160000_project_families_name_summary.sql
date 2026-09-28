@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_name_summary (
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_name_summary IS
-    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family; a name the composed reader serves no row for has none. Each column is the value the served lists read from the name''s name_current row.'
+    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no arm, serving resource, registration or clock boundary. Each column but zero_owner is the value the served lists read from the name''s name_current row.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_name_summary.chain_id IS
@@ -105,7 +105,7 @@ COMMENT ON COLUMN bigname_phase.project_name_summary.registered_at IS
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_name_summary.zero_owner IS
-    'This value is whether the latest registry transfer of the name''s node names the zero owner, which zeroes a registry child''s owner.'
+    'This value is whether the latest ENSv1 or Basenames registry Transfer attributed to the name names the zero owner, which zeroes a registry child''s owner. A Transfer is attributed as the served child build does: by the name it carries, else the latest named registry owner event of its resource and family, else an active, readable surface at its node.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_name_summary.recompose_at IS
@@ -117,7 +117,9 @@ CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     WHERE recompose_at IS NOT NULL
 $ddl$;
 -- The work list of the summary writer finds the names that read a changed
--- resource through these (crates/project families/derived/summary.rs).
+-- resource through these (crates/project families/derived/summary.rs), and
+-- the summary's zero-owner attribution reads a name's registry owner events
+-- by name and by resource (crates/storage families/name/summary.rs).
 EXECUTE $ddl$
 CREATE INDEX IF NOT EXISTS project_binding_candidate_predecessor_idx
     ON bigname_phase.project_binding_candidate (chain_id, predecessor_resource_id)
@@ -132,6 +134,11 @@ EXECUTE $ddl$
 CREATE INDEX IF NOT EXISTS project_lifecycle_association_target_idx
     ON bigname_phase.project_lifecycle_association (chain_id, target_resource_id)
     WHERE target_resource_id IS NOT NULL
+$ddl$;
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_registry_owner_event_name_idx
+    ON bigname_phase.project_registry_owner_event (chain_id, logical_name_id)
+    WHERE logical_name_id IS NOT NULL
 $ddl$;
 EXECUTE $ddl$
 CREATE INDEX IF NOT EXISTS project_registry_owner_event_resource_idx

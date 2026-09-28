@@ -1927,7 +1927,11 @@ COMMENT ON COLUMN project_registry_owner_event.registry_owner IS
 COMMENT ON COLUMN project_registry_owner_event.owner_word_unmasked IS
     'This value is the owner_word_unmasked flag of the event, as the node row keeps it for its latest event.';
 
--- The name summary writer's work list (crates/project families/derived/summary.rs).
+-- The name summary writer's work list (crates/project families/derived/summary.rs) and its
+-- zero-owner attribution (crates/storage families/name/summary.rs).
+CREATE INDEX IF NOT EXISTS project_registry_owner_event_name_idx
+    ON project_registry_owner_event (chain_id, logical_name_id)
+    WHERE logical_name_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS project_registry_owner_event_resource_idx
     ON project_registry_owner_event (chain_id, resource_id)
     WHERE resource_id IS NOT NULL;
@@ -3154,7 +3158,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
-    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family; a name the composed reader serves no row for has none. Each column is the value the served lists read from the name''s name_current row.';
+    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no arm, serving resource, registration or clock boundary. Each column but zero_owner is the value the served lists read from the name''s name_current row.';
 COMMENT ON COLUMN project_name_summary.chain_id IS
     'This value is the chain of the name''s surface.';
 COMMENT ON COLUMN project_name_summary.logical_name_id IS
@@ -3172,7 +3176,7 @@ COMMENT ON COLUMN project_name_summary.expires_at IS
 COMMENT ON COLUMN project_name_summary.registered_at IS
     'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.';
 COMMENT ON COLUMN project_name_summary.zero_owner IS
-    'This value is whether the latest registry transfer of the name''s node names the zero owner, which zeroes a registry child''s owner.';
+    'This value is whether the latest ENSv1 or Basenames registry Transfer attributed to the name names the zero owner, which zeroes a registry child''s owner. A Transfer is attributed as the served child build does: by the name it carries, else the latest named registry owner event of its resource and family, else an active, readable surface at its node.';
 COMMENT ON COLUMN project_name_summary.recompose_at IS
     'This value is the first second after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary. The family step composes the name again at the first block whose time reaches it; null when no such second exists.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
