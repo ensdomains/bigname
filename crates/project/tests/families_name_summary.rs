@@ -19,6 +19,8 @@ const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const V1_REGISTRAR: &str = "ens_v1_registrar_l1";
+const V1_REGISTRY: &str = "ens_v1_registry_l1";
+const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
 fn name(n: u64) -> String {
     format!("ens:0x{n:064x}")
@@ -295,5 +297,102 @@ async fn a_binding_that_closes_by_the_clock_is_composed_again_at_the_first_block
         "block 8 rewrote the summary of a name the clock does not change"
     );
     fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+/// Tuples the current transaction has read from `table` and its indexes.
+async fn tuples_read(connection: &mut sqlx::PgConnection, table: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(sum(pg_stat_get_xact_tuples_returned(relation)
+                             + pg_stat_get_xact_tuples_fetched(relation)), 0)::bigint
+         FROM (SELECT $1::regclass::oid AS relation
+               UNION ALL
+               SELECT indexrelid FROM pg_index WHERE indrelid = $1::regclass) relations",
+    )
+    .bind(table)
+    .fetch_one(connection)
+    .await?)
+}
+
+// A name's zero-owner candidates are its own registry Transfers, the unnamed ones at its node and
+// the unnamed ones of a resource its named registry events carry. Other names' resources are not
+// candidates, so composing one name's summary reads a bounded number of registry owner events and
+// registry events however many other names' resources carry unnamed Transfers. Counted in tuples
+// read, with sequential scans off so the count follows the plan's selectivity, not the table size.
+#[tokio::test]
+async fn composing_one_summary_reads_only_that_names_zero_owner_candidates() -> Result<()> {
+    const OTHERS: u64 = 60;
+    let fixture = Fixture::new("families_name_summary_cost", 12).await?;
+    registered(&fixture, 1, 2, 2_000_000_000).await?;
+    for n in 0..OTHERS {
+        let other = name(200 + n);
+        let resource = uuid(0x5000 + u32::try_from(n)?);
+        fixture
+            .surface(&other, &format!("0x{:064x}", 200 + n))
+            .await?;
+        fixture.resource(&resource).await?;
+        let named = format!("named-transfer:{n}");
+        fixture
+            .event(
+                Event::new(
+                    &named,
+                    3,
+                    i64::try_from(n)?,
+                    "AuthorityTransferred",
+                    V1_REGISTRY,
+                )
+                .name(&other)
+                .resource(&resource)
+                .after(
+                    json!({"source_event": "Transfer", "node": format!("0x{:064x}", 200 + n),
+                                  "owner": OWNER, "owner_getter": OWNER}),
+                ),
+            )
+            .await?;
+        let unnamed = format!("unnamed-transfer:{n}");
+        fixture
+            .event(
+                Event::new(
+                    &unnamed,
+                    4,
+                    i64::try_from(n)?,
+                    "AuthorityTransferred",
+                    V1_REGISTRY,
+                )
+                .resource(&resource)
+                .after(json!({"source_event": "Transfer",
+                                  "node": format!("0x{:064x}", 0x9000 + n),
+                                  "owner": ZERO, "owner_getter": ZERO})),
+            )
+            .await?;
+    }
+    publish(&fixture, 5).await?;
+    let publication =
+        bigname_storage::families::name::load_family_publication(&fixture.pool, CHAIN)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("nothing is published"))?;
+    let mut transaction = fixture.pool.begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    let owner_events_before = tuples_read(&mut transaction, "project_registry_owner_event").await?;
+    let events_before = tuples_read(&mut transaction, "normalized_events").await?;
+    let composed = bigname_storage::families::name::compose_name_summaries(
+        &mut transaction,
+        &publication,
+        &[name(1)],
+    )
+    .await?;
+    ensure!(composed.contains_key(&name(1)), "{composed:?}");
+    let owner_events =
+        tuples_read(&mut transaction, "project_registry_owner_event").await? - owner_events_before;
+    let events = tuples_read(&mut transaction, "normalized_events").await? - events_before;
+    transaction.rollback().await?;
+    let bound = i64::try_from(OTHERS / 4)?;
+    ensure!(
+        owner_events <= bound && events <= bound,
+        "composing one name read {owner_events} registry owner event and {events} event tuples \
+         with {OTHERS} other names' unnamed Transfers on the chain"
+    );
     fixture.cleanup().await
 }

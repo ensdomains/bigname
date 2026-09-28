@@ -155,10 +155,10 @@ const ZERO_OWNER: &str = "COALESCE((
             SELECT candidate.* FROM bigname_phase.project_registry_owner_event candidate
             WHERE candidate.chain_id = $1 AND candidate.logical_name_id IS NULL
               AND candidate.resource_id IN (
-                  SELECT named.resource_id FROM bigname_phase.project_registry_owner_event named
-                  WHERE named.chain_id = $1 AND named.logical_name_id = named.logical_name_id
-                    AND named.resource_id IS NOT NULL
-                    AND named.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry'))
+                  SELECT own.resource_id FROM bigname_phase.project_registry_owner_event own
+                  WHERE own.chain_id = $1 AND own.logical_name_id = named.logical_name_id
+                    AND own.resource_id IS NOT NULL
+                    AND own.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry'))
         ) transfer
         LEFT JOIN LATERAL (
             SELECT named.logical_name_id
