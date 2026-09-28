@@ -1596,6 +1596,7 @@ dependencies = [
  "bigname-adapters",
  "bigname-content-hash",
  "bigname-domain",
+ "bigname-interpret",
  "bigname-lookup",
  "bigname-manifests",
  "bigname-metrics",
