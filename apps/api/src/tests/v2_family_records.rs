@@ -1,37 +1,40 @@
 
-const FAMILY_REVERSE_NODE: &str =
-    "0x00000000000000000000000000000000000000000000000000000000000abcde";
-
-/// alice's direct primary claim of alpha.eth: a ReverseChanged at 210 and the reverse resolver's
-/// name record naming the tuple at 211.
+/// alice's primary claim of alpha.eth as the ENS reverse sources emit it: ReverseClaimed and the
+/// registry pointing her reverse node at the resolver at 210, then the resolver's name record
+/// for that node at 211. The name record is last.
 fn family_primary_claim_events() -> Vec<NormalizedEvent> {
-    let reverse = family_event(
-        "family-alice-reverse",
-        None,
-        None,
-        "ReverseChanged",
-        "ens_v1_reverse_registrar_l1",
-        210,
-        0,
-        json!({"address": FAMILY_ALICE, "coin_type": "60", "namespace": "ens",
-               "reverse_node": FAMILY_REVERSE_NODE, "source_event": "NameForAddrChanged",
-               "claim_provenance": {"source": "reverse_registrar"}}),
-    );
-    let claim = family_event(
-        "family-alice-claim",
-        None,
-        None,
-        "RecordChanged",
-        "ens_v1_resolver_l1",
-        211,
-        0,
-        json!({"node": FAMILY_REVERSE_NODE, "record_key": "name",
-               "source_event": "NameForAddrChanged", "raw_name": "alpha.eth",
-               "primary_claim_source": {"address": FAMILY_ALICE, "coin_type": "60",
-                                        "namespace": "ens",
-                                        "reverse_node": FAMILY_REVERSE_NODE}}),
-    );
-    vec![reverse, claim]
+    let claim = primary_claim_events(
+        "ens",
+        FAMILY_ALICE,
+        b"alpha.eth",
+        Uuid::from_u128(0x7e7e_0001),
+        Uuid::from_u128(0x7e7e_0002),
+    )
+    .expect("an ENS claim of alpha.eth");
+    let positions = [
+        ("family-alice-reverse", 210, 0),
+        ("family-alice-pointer", 210, 1),
+        ("family-alice-claim", 211, 0),
+    ];
+    claim
+        .into_iter()
+        .zip(positions)
+        .map(|(event, (identity, block, log))| {
+            let mut normalized = family_event(
+                identity,
+                None,
+                None,
+                event.kind,
+                event.family,
+                block,
+                log,
+                event.after,
+            );
+            normalized.derivation_kind = primary_claim_derivation(event.family).to_owned();
+            normalized.raw_fact_ref["emitting_address"] = json!(event.emitter);
+            normalized
+        })
+        .collect()
 }
 
 async fn seed_family_records_fixture(database: &TestDatabase) -> Result<()> {

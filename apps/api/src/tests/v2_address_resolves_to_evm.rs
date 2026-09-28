@@ -315,45 +315,31 @@ async fn v2_resolves_to_evm_registration_dedupe_paginates() -> Result<()> {
     database.cleanup().await
 }
 
-fn v2_evm_primary_claim(coin_type: &str, name: &str) -> PrimaryNameCurrentSnapshot {
-    PrimaryNameCurrentSnapshot {
-        row: PrimaryNameCurrentRow {
-            address: V2_ADDRESS.to_owned(),
-            namespace: "ens".to_owned(),
-            coin_type: coin_type.to_owned(),
-            claim_status: PrimaryNameClaimStatus::Success,
-            raw_claim_name: None,
-            claim_provenance: json!({
-                "source_family": "ens_v1_reverse_l1",
-                "contract_role": "reverse_registrar",
-            }),
-        },
-        normalized_claim_name: Some(name.to_owned()),
-        claim_name_is_normalized: true,
-    }
-}
-
+// The admitted ENS reverse registrar claims coin type 60 only, so every ENS claim here is a
+// coin-60 claim; one naming a row that did not match coin 60 does not mark it.
 #[tokio::test]
 async fn v2_resolves_to_evm_is_primary_counts_only_the_row_matched_coins() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_resolves_to_evm_records(&database).await?;
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[
-            // gamma matched only coin 60, so a claim naming it for another chain does not count.
-            v2_evm_primary_claim(V2_RESOLVES_TO_OTHER_EVM_COIN, "gamma.eth"),
-            v2_evm_primary_claim(V2_ENSIP19_DEFAULT_COIN, "shared-one.eth"),
-        ],
-    )
-    .await?;
 
     let rows = v2_resolves_to_evm_rows(&database, "").await?;
     // The fixture's coin-60 claim names alpha, which matched coin 60.
     assert_eq!(row_named(&rows, "alpha.eth")["is_primary"], json!(true));
     assert_eq!(row_named(&rows, "gamma.eth")["is_primary"], json!(false));
     assert_eq!(row_named(&rows, "beta.eth")["is_primary"], json!(false));
-    assert_eq!(row_named(&rows, "shared-one.eth")["is_primary"], json!(true));
+    assert_eq!(row_named(&rows, "shared-one.eth")["is_primary"], json!(false));
+
+    // beta and shared-one matched only other EVM coin types, so a coin-60 claim naming either
+    // one leaves it unmarked.
+    for name in ["beta.eth", "shared-one.eth"] {
+        publish_primary_claim(&database.pool, "ens", V2_ADDRESS, name.as_bytes()).await?;
+        let rows = v2_resolves_to_evm_rows(&database, "").await?;
+        assert!(
+            rows.iter().all(|row| row["is_primary"] == json!(false)),
+            "{name}: {rows:#?}"
+        );
+    }
 
     database.cleanup().await
 }

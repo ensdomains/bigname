@@ -308,27 +308,9 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
 async fn v2_get_address_names_marks_primary_for_a_successful_non_normalized_claim() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    // The projection stores the raw claim spelling and a false is-normalized marker for a valid
-    // claim whose bytes were not already normalized. It is still a successful claim for alpha.eth.
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: V2_ADDRESS.to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::Success,
-                raw_claim_name: Some("Alpha.eth".to_owned()),
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                }),
-            },
-            normalized_claim_name: None,
-            claim_name_is_normalized: false,
-        }],
-    )
-    .await?;
+    // The address names itself in a spelling that is valid but not normalized. The claim reducer
+    // keeps the raw spelling; it is still a successful claim for alpha.eth.
+    publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"Alpha.eth").await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -358,26 +340,8 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    // The reverse reducer classifies these retained invalid name bytes before the page reads them.
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: V2_ADDRESS.to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::InvalidName,
-                raw_claim_name: Some("alpha..eth".to_owned()),
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                }),
-            },
-            normalized_claim_name: None,
-            claim_name_is_normalized: false,
-        }],
-    )
-    .await?;
+    // The address names itself with bytes that do not normalize.
+    publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"alpha..eth").await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -398,25 +362,8 @@ async fn v2_get_address_names_serves_the_page_when_a_primary_claim_no_longer_nor
 async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: V2_ADDRESS.to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::NotFound,
-                raw_claim_name: None,
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                }),
-            },
-            normalized_claim_name: None,
-            claim_name_is_normalized: false,
-        }],
-    )
-    .await?;
+    // Setting an empty name replaces the reverse node's name record, leaving no claimed name.
+    publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"").await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -1267,25 +1214,7 @@ async fn seed_v2_address_names_fixture(database: &TestDatabase) -> Result<()> {
     publish_v2_address_name_inputs(database, &specs).await?;
     assert_v2_address_name_relations(database, &specs).await?;
     seed_v2_address_name_permissions(database, &specs).await?;
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: V2_ADDRESS.to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: PrimaryNameClaimStatus::Success,
-                raw_claim_name: None,
-                claim_provenance: json!({
-                    "source_family": "ens_v1_reverse_l1",
-                    "contract_role": "reverse_registrar",
-                }),
-            },
-            normalized_claim_name: Some("alpha.eth".to_owned()),
-            claim_name_is_normalized: true,
-        }],
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"alpha.eth").await?;
     Ok(())
 }
 

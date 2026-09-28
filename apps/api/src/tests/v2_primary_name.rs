@@ -109,24 +109,13 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
     database
         .seed_default_ens_primary_name_fallback_context()
         .await?;
-    database
-        .insert_primary_name_current_claim_row(
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            Some("legacy-worker.eth"),
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            Some("legacy-worker.eth"),
-            true,
-        )
-        .await?;
+    publish_primary_claim(
+        &database.pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"legacy-worker.eth",
+    )
+    .await?;
     let lookup_pool = database.lookup_pool().await?;
     seed_schema_v2_ens_primary_name_authority(
         &lookup_pool,
@@ -135,13 +124,11 @@ async fn v2_get_primary_name_uses_one_phase_position_without_legacy_checkpoint()
         "2026-04-17T00:00:04Z",
     )
     .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "taytems.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -221,24 +208,13 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
     database
         .seed_default_ens_primary_name_fallback_context()
         .await?;
-    database
-        .insert_primary_name_current_claim_row(
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            PrimaryNameClaimStatus::Success,
-            Some("taytems.eth"),
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
-            "ens",
-            "60",
-            Some("taytems.eth"),
-            true,
-        )
-        .await?;
+    publish_primary_claim(
+        &database.pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
+    )
+    .await?;
     let lookup_pool = database.lookup_pool().await?;
     seed_schema_v2_ens_primary_name_authority(
         &lookup_pool,
@@ -247,13 +223,11 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "taytems.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -318,13 +292,11 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
             }
         }))
         .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "Taytems.eth",
-        false,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"Taytems.eth",
     )
     .await?;
 
@@ -362,13 +334,11 @@ async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_n
         .await?;
     // Invalid bytes are retained by the claim reducer and reported with the invalid-name
     // vocabulary through the indexed route.
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "taytems..eth",
-        false,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems..eth",
     )
     .await?;
 
@@ -405,13 +375,11 @@ async fn v2_get_primary_name_publishes_an_already_normalized_claim_as_stored() -
         }))
         .await?;
     // An already normalized event claim is published unchanged by the indexed route.
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "taytems.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
 
@@ -447,13 +415,11 @@ async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> 
             }
         }))
         .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "orphaned.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"orphaned.eth",
     )
     .await?;
     sqlx::query(
@@ -468,12 +434,14 @@ async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> 
     )
     .execute(&database.lookup_pool)
     .await?;
+    // The claim's transaction (ReverseClaimed, NewResolver, NameChanged) moves to the orphaned
+    // block.
     let updated = sqlx::query(
         "UPDATE bigname_phase.normalized_events
          SET block_number = 21000004, block_hash = '0xorphaned-primary-target', canonicality_state = 'orphaned'
-         WHERE event_kind IN ('ReverseChanged', 'RecordChanged')",
+         WHERE event_kind IN ('ReverseChanged', 'ResolverChanged', 'RecordChanged')",
     ).execute(&database.lookup_pool).await?;
-    assert_eq!(updated.rows_affected(), 2);
+    assert_eq!(updated.rows_affected(), 3);
     rebuild_fixture_families(&database.lookup_pool, "ethereum-mainnet", 21_000_005,
         "0xprimary-readable-head").await?;
 
@@ -505,13 +473,11 @@ async fn v2_get_primary_name_rejects_project_change_after_indexed_read() -> Resu
             }
         }))
         .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "before.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"before.eth",
     )
     .await?;
     let (_guard, control) =
@@ -531,13 +497,11 @@ async fn v2_get_primary_name_rejects_project_change_after_indexed_read() -> Resu
     });
 
     control.wait_until_reached().await;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &database.lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "after.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"after.eth",
     )
     .await?;
     let (block, hash): (i64, String) = sqlx::query_as(
@@ -572,13 +536,11 @@ async fn v2_get_primary_name_rejects_same_head_republication_during_mixed_read()
         "2026-04-17T00:00:07Z",
     )
     .await?;
-    seed_schema_v2_primary_name_claim(
+    publish_primary_claim(
         &lookup_pool,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
         "ens",
-        "60",
-        "taytems.eth",
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -795,15 +757,7 @@ async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped
     seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
     // The published name record contains valid but non-normalized bytes. F12 derives the
     // normalization gate from that input; the fixture does not overwrite its verdict.
-    database
-        .insert_primary_name_current_claim_row(
-            address,
-            "basenames",
-            V2_BASENAMES_PRIMARY_COIN_TYPE,
-            PrimaryNameClaimStatus::Success,
-            Some("Alice.base.eth"),
-        )
-        .await?;
+    publish_primary_claim(&database.pool, "basenames", address, b"Alice.base.eth").await?;
     let verified = v2_primary_name_payload_for_database(
         &database,
         &format!(
@@ -838,33 +792,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000bce";
     seed_v2_basenames_primary_name_base_snapshot_position(&database).await?;
-    database
-        .insert_primary_name_current_claim_row(
-            address,
-            "basenames",
-            V2_BASENAMES_PRIMARY_COIN_TYPE,
-            PrimaryNameClaimStatus::Success,
-            Some("alice.base.eth"),
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            address,
-            "basenames",
-            V2_BASENAMES_PRIMARY_COIN_TYPE,
-            Some("alice.base.eth"),
-            true,
-        )
-        .await?;
-    seed_schema_v2_primary_name_claim(
-        &database.lookup_pool,
-        address,
-        "basenames",
-        V2_BASENAMES_PRIMARY_COIN_TYPE,
-        "alice.base.eth",
-        true,
-    )
-    .await?;
+    publish_primary_claim(&database.pool, "basenames", address, b"alice.base.eth").await?;
 
     let verified = v2_primary_name_payload_for_database(
         &database,
@@ -970,14 +898,11 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+    publish_primary_claim(
+        &database.pool,
         "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("taytems.eth"),
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
@@ -1051,14 +976,11 @@ async fn v2_get_primary_name_verifies_a_supported_ens_v2_arm_claim_through_an_ad
     )
     .await?;
     admit_ens_v2_arm_on_execution_entrypoint(&lookup_pool).await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+    publish_primary_claim(
+        &database.pool,
         "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("taytems.eth"),
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
@@ -1135,14 +1057,11 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+    publish_primary_claim(
+        &database.pool,
         "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("taytems.eth"),
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
     )
     .await?;
     // The claimed name's exact-name authority is unsupported: no registration is selected for it,
@@ -1442,59 +1361,11 @@ async fn primary_fixture_name(
     .context("the primary fixture produced its composed name")
 }
 
-async fn seed_schema_v2_primary_name_claim(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-    name: &str,
-    claim_name_is_normalized: bool,
-) -> Result<()> {
-    let status = if bigname_domain::normalization::normalize_name(name).is_ok() {
-        PrimaryNameClaimStatus::Success
-    } else {
-        PrimaryNameClaimStatus::InvalidName
-    };
-    upsert_primary_name_current_snapshots(
-        pool,
-        &[PrimaryNameCurrentSnapshot {
-            row: PrimaryNameCurrentRow {
-                address: address.to_owned(),
-                namespace: namespace.to_owned(),
-                coin_type: coin_type.to_owned(),
-                claim_status: status,
-                raw_claim_name: Some(name.to_owned()),
-                claim_provenance: json!({}),
-            },
-            normalized_claim_name: None,
-            claim_name_is_normalized,
-        }],
-    )
-    .await
-}
-
 async fn seed_v2_basenames_primary_name_claim(
     database: &TestDatabase,
     address: &str,
 ) -> Result<()> {
-    database
-        .insert_primary_name_current_claim_row(
-            address,
-            "basenames",
-            V2_BASENAMES_PRIMARY_COIN_TYPE,
-            PrimaryNameClaimStatus::Success,
-            Some("alice.base.eth"),
-        )
-        .await?;
-    database
-        .insert_primary_name_current_normalized_claim_name(
-            address,
-            "basenames",
-            V2_BASENAMES_PRIMARY_COIN_TYPE,
-            Some("alice.base.eth"),
-            true,
-        )
-        .await?;
+    publish_primary_claim(&database.pool, "basenames", address, b"alice.base.eth").await?;
     Ok(())
 }
 
@@ -1685,14 +1556,11 @@ async fn a_live_authority_refusal_overrides_a_different_projected_tuple_for_resp
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+    publish_primary_claim(
+        &database.pool,
         "ens",
-        "60",
-        PrimaryNameClaimStatus::Success,
-        Some("alice.eth"),
-        true,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"alice.eth",
     )
     .await?;
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "alice.eth", None, "ens_v1").await?;

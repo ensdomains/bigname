@@ -866,23 +866,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
             database
                 .seed_default_ens_snapshot_selector_position()
                 .await?;
-            database
-                .insert_primary_name_current_claim_row(
-                    V2_PRIMARY_NAME_ADDRESS,
-                    "ens",
-                    "60",
-                    PrimaryNameClaimStatus::Success,
-                    Some("alice.eth"),
-                )
-                .await?;
-            database
-                .insert_primary_name_current_normalized_claim_name(
-                    V2_PRIMARY_NAME_ADDRESS,
-                    "ens",
-                    "60",
-                    Some("alice.eth"),
-                    true,
-                )
+            publish_primary_claim(&database.pool, "ens", V2_PRIMARY_NAME_ADDRESS, b"alice.eth")
                 .await?;
             let payload = v2_primary_name_payload_for_database(
                 &database,
