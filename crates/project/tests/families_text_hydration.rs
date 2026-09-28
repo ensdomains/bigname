@@ -261,3 +261,91 @@ async fn text_read_rejects_orphaned_hydration_and_follow_invalidates_old_record_
     assert_eq!(rpc.calls().len(), 2, "retained values need no call");
     fixture.cleanup().await
 }
+
+async fn keyed_text(fixture: &Fixture, block: i64, log: i64, key: &str) -> Result<()> {
+    fixture
+        .event(
+            Event::new(
+                &format!("text:{block}:{key}"),
+                block,
+                log,
+                "RecordChanged",
+                "ens_v1_resolver_l1",
+            )
+            .on(CHAIN)
+            .after(
+                json!({"node":NODE,"resolver":RESOLVER,"record_key":format!("text:{key}"),
+                "record_family":"text","selector_key":key,"source_event":"TextChanged"}),
+            )
+            .raw(json!({"emitting_address":RESOLVER})),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Each key's `hydrated_at_block` and overlay status, in key order.
+async fn attempts(fixture: &Fixture) -> Result<Vec<(String, Option<i64>, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "SELECT selector_key, hydrated_at_block, hydrated_value ->> 'status'
+        FROM project_node_record_value ORDER BY record_key",
+    )
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+fn keys_at(rows: &[(String, Option<i64>, Option<String>)], block: i64) -> Vec<String> {
+    rows.iter()
+        .filter(|(_, at, _)| *at == Some(block))
+        .map(|(key, _, _)| key.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_first() -> Result<()> {
+    const BACKLOG: usize = 600;
+    let key = |index: usize| format!("k{index:04}");
+    let range = |from: usize, to: usize| (from..to).map(key).collect::<Vec<_>>();
+    let (fixture, rpc) = fixture().await?;
+    for index in 0..BACKLOG {
+        keyed_text(&fixture, 1, index as i64 + 2, &key(index)).await?;
+    }
+    // A rebuild never hydrates, so every eligible selector is left with a null overlay.
+    run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
+    assert!(rpc.calls().is_empty());
+    // Block 2's reads fail: the first 250 keys are stamped with the attempt and nothing is served.
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    let rows = attempts(&fixture).await?;
+    assert_eq!(keys_at(&rows, 2), range(0, 250));
+    assert!(rows.iter().all(|(_, _, status)| status.is_none()));
+    // Block 3 writes a key that sorts last: it is read first, then never-read keys, not retries.
+    keyed_text(&fixture, 3, 2, "zz").await?;
+    for block in 3..=6 {
+        rpc.answer(block, Some("hydrated"));
+    }
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    let mut expected = range(250, 499);
+    expected.push("zz".to_owned());
+    assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
+    // Then the rest of the never-read keys, then the oldest failed attempts.
+    run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    let mut expected = range(0, 149);
+    expected.extend(range(499, BACKLOG));
+    assert_eq!(keys_at(&attempts(&fixture).await?, 4), expected);
+    run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(keys_at(&attempts(&fixture).await?, 5), range(149, 250));
+    run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
+    let rows = attempts(&fixture).await?;
+    assert_eq!(rows.len(), BACKLOG + 1);
+    assert!(
+        rows.iter()
+            .all(|(_, _, status)| status.as_deref() == Some("success")),
+        "the whole backlog is hydrated"
+    );
+    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(
+        per_call,
+        vec![250, 250, 250, 101],
+        "one bounded batch per block, none once the backlog is drained"
+    );
+    fixture.cleanup().await
+}
