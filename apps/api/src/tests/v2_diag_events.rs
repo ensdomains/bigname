@@ -252,23 +252,6 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
     )
     .await?;
 
-    upsert_phase_address_names_current_rows(
-        &database.pool,
-        &[address_name_current_row(
-            DIAG_EVENTS_ADDRESS,
-            DIAG_EVENTS_LOGICAL_NAME_ID,
-            bigname_storage::AddressNameRelation::Registrant,
-            "Diag.eth",
-            DIAG_EVENTS_NAME,
-            "node:diag.eth",
-            surface_binding_id,
-            resource_id,
-            Some(token_lineage_id),
-            303,
-        )],
-    )
-    .await?;
-
     upsert_phase_raw_blocks(
         &database.pool,
         &[
@@ -296,6 +279,21 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
     .execute(&database.pool)
     .await?;
 
+    // The registrar grant names the address as the registrant of diag.eth.
+    let mut registration = v2_diag_event(
+        "diag:registration",
+        "ens",
+        None,
+        Some(resource_id),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        "ethereum-mainnet",
+        303,
+        "0xdiag303",
+    );
+    registration.after_state["authority_kind"] = json!("registrar");
+    registration.after_state["registrant"] = json!(DIAG_EVENTS_ADDRESS);
+    registration.after_state["namehash"] = json!(bigname_lookup::ens_namehash_hex(DIAG_EVENTS_NAME)?);
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -332,17 +330,7 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
                 304,
                 "0xdiag304",
             ),
-            v2_diag_event(
-                "diag:registration",
-                "ens",
-                None,
-                Some(resource_id),
-                "RegistrationGranted",
-                "ens_v1_registrar_l1",
-                "ethereum-mainnet",
-                303,
-                "0xdiag303",
-            ),
+            registration,
             v2_diag_event(
                 "diag:token-regenerated",
                 "ens",
@@ -368,8 +356,7 @@ async fn seed_v2_diag_events_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
-
-    Ok(())
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 #[allow(clippy::too_many_arguments)]
