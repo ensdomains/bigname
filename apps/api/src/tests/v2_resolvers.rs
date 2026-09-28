@@ -1413,3 +1413,41 @@ async fn seed_ownerless_resolver_name(database: &TestDatabase, basenames: bool) 
     );
     Ok(())
 }
+
+/// A declared mirror and its retained same-namespace discovery admission.
+async fn declare_audit_mirror_resolver(
+    database: &TestDatabase,
+    chain: &str,
+    resolver: &str,
+    registry: &str,
+) -> Result<()> {
+    let declaration = json!({"deployment_epoch":"fixture", "correlation_addresses":{"ens_v1_registry":registry},
+        "contracts":[{"role":"ensv1_mirror_resolver","address":resolver,"proxy_kind":"none","start_block":0}]});
+    let mut origin_manifest = 0;
+    for (family, payload) in [
+        ("ens_v1_registry_l1", json!({"contracts":[]})),
+        ("ens_v2_resolver_l1", declaration),
+    ] {
+        let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload)
+            VALUES (1,'ens',$1,$2,'fixture','active','fixture',$3,$4) RETURNING manifest_id")
+            .bind(family).bind(chain).bind(format!("fixture/audit-{family}.toml")).bind(&payload).fetch_one(&database.pool).await?;
+        seed_fixture_manifest_update(&database.pool, manifest, chain, "ens", family, &payload)
+            .await?;
+        if family == "ens_v1_registry_l1" {
+            origin_manifest = manifest;
+        }
+    }
+    let origin = Uuid::from_u128(0xa901);
+    let mirror = Uuid::from_u128(0xa902);
+    for instance in [origin, mirror] {
+        sqlx::query("INSERT INTO contract_instances (contract_instance_id,chain_id,contract_kind) VALUES ($1,$2,'contract')")
+            .bind(instance).bind(chain).execute(&database.pool).await?;
+    }
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id,chain_id,address,source_manifest_id,active_from_block_number,active_from_block_hash)
+        VALUES ($1,$2,$3,$4,120,'0xhistory120')")
+        .bind(mirror).bind(chain).bind(resolver).bind(origin_manifest).execute(&database.pool).await?;
+    sqlx::query("INSERT INTO discovery_edges (chain_id,edge_kind,from_contract_instance_id,to_contract_instance_id,discovery_source,admission_basis,source_manifest_id,active_from_block_number,active_from_block_hash,canonicality_state)
+        VALUES ($1,'resolver',$2,$3,'ResolverChanged','registry_pointer',$4,120,'0xhistory120','canonical')")
+        .bind(chain).bind(origin).bind(mirror).bind(origin_manifest).execute(&database.pool).await?;
+    Ok(())
+}

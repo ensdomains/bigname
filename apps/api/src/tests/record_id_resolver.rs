@@ -1,32 +1,19 @@
 #[tokio::test]
 async fn record_id_resolver_inventory_serves_explicit_empty_values() -> Result<()> {
-    let payload = v2_name_records_payload_with_row_and_setup(
-        "/v1/names/alice.eth/records?keys=text:url,addr:60,contenthash&include=inventory",
-        |row| {
-            row.declared_summary["topology"] = json!({"version_boundaries":{"record_version_boundary":record_inventory_boundary_with_pointer(&bigname_storage::logical_name_id_for_name("ens", "alice.eth"), row.resource_id.unwrap(), Some(808), Some("ResolverRecordLinked"))}});
-        },
-        |_, _, inventory| {
-            inventory.record_version_boundary["normalized_event_id"] = json!(808);
-            inventory.record_version_boundary["event_kind"] = json!("ResolverRecordLinked");
-            inventory.selectors = json!([
-                {"record_key":"addr:60","record_family":"addr","selector_key":"60","cacheable":true},
-                {"record_key":"contenthash","record_family":"contenthash","selector_key":null,"cacheable":true},
-                {"record_key":"text:url","record_family":"text","selector_key":"url","cacheable":true}
-            ]);
-            inventory.entries = json!([
-                {"record_key":"text:url","record_family":"text","selector_key":"url","status":"success","value":""},
-                {"record_key":"addr:60","record_family":"addr","selector_key":"60","status":"not_found"},
-                {"record_key":"contenthash","record_family":"contenthash","selector_key":null,"status":"not_found"}
-            ]);
-            inventory.provenance["record_link_event_ids"] = json!([808]);
-        },
-    ).await?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_record_id_resolver_inputs(&database, &[
+        family_fixture_record_write("text:url", Some(json!(""))),
+        family_fixture_record_write("addr:60", Some(json!("0x"))),
+        family_fixture_record_write("contenthash", Some(json!("0x"))),
+    ], false).await?;
+    let payload = v2_name_record_payload_for_database(&database,
+        "/v1/names/alice.eth/records?keys=text:url,addr:60,contenthash&include=inventory").await?;
     assert_eq!(payload["data"]["records"]["text:url"]["status"], "ok");
     assert_eq!(payload["data"]["records"]["text:url"]["value"], "");
     for key in ["addr:60", "contenthash"] {
         assert_eq!(payload["data"]["records"][key]["status"], "not_found");
     }
-    Ok(())
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -187,26 +174,13 @@ async fn record_id_resolver_permissions_describe_the_argument_scoped_record() ->
 
 #[tokio::test]
 async fn record_id_resolver_default_rule_derives_eth_address_in_indexed_and_auto() -> Result<()> {
-    // The Project regression loads the actual manifest and checks rule emission;
-    // this route fixture checks both consumer modes using that projected rule.
+    let database = TestDatabase::new_migrated().await?;
+    seed_record_id_resolver_inputs(&database, &[
+        family_fixture_record_write("addr:2147483648", Some(json!("0x3333333333333333333333333333333333333333"))),
+    ], true).await?;
     for source in ["indexed", "auto"] {
-        let payload = v2_name_records_payload_with_setup(
-            &format!("/v1/names/alice.eth/records?source={source}&keys=addr:60"),
-            |_, _, inventory| {
-                inventory.selectors = json!([{
-                    "record_key":"addr:2147483648","record_family":"addr","selector_key":"2147483648","cacheable":true
-                }]);
-                inventory.entries = json!([{
-                    "record_key":"addr:2147483648","record_family":"addr","selector_key":"2147483648",
-                    "status":"success","value":"0x3333333333333333333333333333333333333333"
-                }]);
-                inventory.provenance["read_rules"] = json!([{
-                    "kind":"ensip19_default_address","source_record_key":"addr:2147483648"
-                }]);
-                inventory.explicit_gaps = json!([]);
-                inventory.unsupported_families = json!([]);
-            },
-        ).await?;
+        let payload = v2_name_record_payload_for_database(&database,
+            &format!("/v1/names/alice.eth/records?source={source}&keys=addr:60")).await?;
         assert_eq!(payload["meta"]["source"], "indexed");
         assert_eq!(payload["data"]["records"]["addr:60"]["status"], "ok");
         assert_eq!(
@@ -218,5 +192,56 @@ async fn record_id_resolver_default_rule_derives_eth_address_in_indexed_and_auto
             "ensip19_default_address"
         );
     }
-    Ok(())
+    database.cleanup().await
+}
+
+/// Publish linked record-ID writes with a retained upgrade to a declared implementation.
+async fn seed_record_id_resolver_inputs(
+    database: &TestDatabase,
+    writes: &[Value],
+    default_address: bool,
+) -> Result<()> {
+    seed_unknown_resolver_inputs(database, writes).await?;
+    let implementation = "0x0000000000000000000000000000000000000fed";
+    let (manifest, mut payload): (i64, Value) = sqlx::query_as(
+        "SELECT manifest_id,manifest_payload FROM manifest_versions
+        WHERE source_family = 'ens_v2_resolver_l1'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    payload["resolver_implementations"] = json!([{"role":"permissioned_resolver","address":implementation,
+        "read_features":if default_address { json!(["ensip19_default_address"]) } else { json!([]) }}]);
+    sqlx::query("UPDATE manifest_versions SET manifest_payload=$2 WHERE manifest_id=$1")
+        .bind(manifest)
+        .bind(&payload)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        manifest,
+        "ethereum-mainnet",
+        "ens",
+        "ens_v2_resolver_l1",
+        &payload,
+    )
+    .await?;
+    let mut upgrade = history_event(
+        "record-id-fixture-upgrade",
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(21_000_003),
+        Some("0xbinding"),
+        Some("0xrecord-id-upgrade"),
+        Some(10),
+        CanonicalityState::Canonical,
+    );
+    upgrade.event_kind = "Upgraded".into();
+    upgrade.source_family = "ens_v2_resolver_l1".into();
+    upgrade.source_manifest_id = Some(manifest);
+    upgrade.manifest_version = 1;
+    upgrade.before_state = json!({});
+    upgrade.after_state = json!({"source_event":"Upgraded", "proxy_address":"0x0000000000000000000000000000000000000abc", "implementation":implementation});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgrade]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }

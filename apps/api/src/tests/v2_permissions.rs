@@ -1742,8 +1742,10 @@ async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
 
 async fn v2_permissions_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_permissions_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let body: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Ok(body)
 }
 
 async fn v2_permissions_response_for_database(
