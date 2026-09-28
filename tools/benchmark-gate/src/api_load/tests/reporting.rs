@@ -142,7 +142,7 @@ fn preflight_failure_report_records_observed_totals_and_floors() {
         },
         "keccak256:database".to_owned(),
         Some("release"),
-        vec!["name_current is below its floor".to_owned()],
+        vec!["supported names are below their floor".to_owned()],
     );
 
     assert!(!report.green);
