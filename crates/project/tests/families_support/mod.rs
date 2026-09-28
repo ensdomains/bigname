@@ -600,12 +600,31 @@ impl Fixture {
         Ok(())
     }
 
+    /// Rebuild changes only operational timestamps of retained child-history rows. Undo
+    /// comparisons still use exact(), preserving every restored timestamp byte for byte.
+    async fn rebuild_state(&self) -> Result<Vec<(String, String)>> {
+        let mut state = self.exact().await?;
+        for (table, rows) in &mut state {
+            if table == "child_registration_events" {
+                let mut values: Vec<Value> = serde_json::from_str(rows)?;
+                for value in &mut values {
+                    let row = value.as_object_mut().expect("child history row object");
+                    row.remove("inserted_at");
+                    row.remove("last_recomputed_at");
+                }
+                values.sort_by_key(Value::to_string);
+                *rows = serde_json::to_string(&values)?;
+            }
+        }
+        Ok(state)
+    }
+
     /// The families after the incremental run must equal a rebuild from scratch at `target`,
     /// both a rebuild that applies every work block below the target in ranges and one that
     /// applies each block in a transaction of its own. The per-block rebuild runs last, so the
     /// fixture is left as a per-block rebuild leaves it.
     pub async fn assert_rebuild_equal(&self, target: i64) -> Result<()> {
-        let incremental = self.exact().await?;
+        let incremental = self.rebuild_state().await?;
         for (label, ranges) in [
             ("in ranges", RebuildRanges::Through(target)),
             ("block by block", RebuildRanges::Off),
@@ -624,7 +643,7 @@ impl Fixture {
                 rebuilt.blocks,
                 rebuilt.ranges
             );
-            let fresh = self.exact().await?;
+            let fresh = self.rebuild_state().await?;
             for ((table, was), (_, now)) in incremental.iter().zip(&fresh) {
                 anyhow::ensure!(
                     was == now,

@@ -104,3 +104,118 @@ async fn controller_history_uses_its_actual_event_and_undo_restores_the_previous
     assert_eq!(history(&fixture, 3).await?, visible);
     fixture.cleanup().await
 }
+
+async fn diagnostic_history(fixture: &Fixture) -> Result<Vec<String>> {
+    let filter = bigname_storage::EventHistoryFilter {
+        namespace: Some("ens".to_owned()),
+        address: Some(bigname_storage::EventHistoryAddressFilter {
+            address: CONTROLLER.to_owned(),
+            relation: Some(AddressNameRelation::EffectiveController),
+        }),
+        ..Default::default()
+    };
+    Ok(bigname_storage::load_event_history_page(
+        &fixture.pool,
+        filter,
+        true,
+        None,
+        50,
+        HistorySummaryMode::Count,
+        true,
+    )
+    .await?
+    .rows
+    .into_iter()
+    .map(|row| row.event_identity)
+    .collect())
+}
+
+#[tokio::test]
+async fn raw_controller_audit_survives_revocation_and_family_reset() -> Result<()> {
+    let fixture = Fixture::new("family_controller_audit", 5).await?;
+    let name = format!("ens:0x{:064x}", 2);
+    let resource = uuid(2);
+    fixture
+        .binding(&uuid(102), &name, &resource, "ens_v1", 0, 0, None)
+        .await?;
+    fixture
+        .write(
+            1,
+            0,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name),
+            Some(&resource),
+            json!({"authority_kind":"registrar", "status":"registered", "registrant":OWNER,
+               "expiry":2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    let granted = json!({"subject":CONTROLLER, "scope":{"kind":"resource"},
+        "effective_powers":["resource_control"]});
+    fixture
+        .event(
+            Event::new(
+                "audit-control-grant",
+                3,
+                0,
+                "PermissionChanged",
+                "ens_v1_registrar_l1",
+            )
+            .name(&name)
+            .resource(&resource)
+            .after(granted.clone()),
+        )
+        .await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    assert!(!history(&fixture, 3).await?.is_empty());
+    fixture
+        .event(
+            Event::new(
+                "audit-control-revoke",
+                4,
+                0,
+                "PermissionChanged",
+                "ens_v1_registrar_l1",
+            )
+            .name(&name)
+            .resource(&resource)
+            .before(granted)
+            .after(
+                json!({"subject":CONTROLLER, "scope":{"kind":"resource"}, "effective_powers":[]}),
+            ),
+        )
+        .await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    assert!(
+        history(&fixture, 4).await?.is_empty(),
+        "product history retains current-controller admission"
+    );
+    let retained = diagnostic_history(&fixture).await?;
+    assert!(
+        retained.contains(&"audit-control-grant".to_owned()),
+        "{retained:?}"
+    );
+    assert!(
+        retained.contains(&"audit-control-revoke".to_owned()),
+        "{retained:?}"
+    );
+    assert!(
+        retained.contains(&"RegistrationGranted:1:0".to_owned()),
+        "{retained:?}"
+    );
+
+    let mut options = bigname_project::families::FamilyOptions::new(support::CONTENT_HASH);
+    options.max_blocks_per_run = 0;
+    fixture.apply_with(4, FamilyMode::Rebuild, &options).await?;
+    assert!(fixture.rows("project_address_name_index").await?.is_empty());
+    assert_eq!(
+        diagnostic_history(&fixture).await?,
+        retained,
+        "raw evidence survives cleared families"
+    );
+    fixture.apply(4, FamilyMode::Normal).await?;
+    assert_eq!(diagnostic_history(&fixture).await?, retained);
+    assert!(history(&fixture, 4).await?.is_empty());
+    fixture.cleanup().await
+}
