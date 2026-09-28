@@ -294,7 +294,7 @@ impl PipelineMetrics {
 
     async fn refresh_served_lag(&self, pool: &PgPool) -> Result<()> {
         self.served_lag
-            .apply(&served_lag::load(pool, self.served_lag.from_families()).await?);
+            .apply(&served_lag::load(pool, self.served_lag.reads_families()).await?);
         Ok(())
     }
 

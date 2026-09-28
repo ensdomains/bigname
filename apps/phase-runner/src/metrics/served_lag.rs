@@ -116,7 +116,7 @@ impl ServedLagGauges {
         })
     }
 
-    pub(super) fn from_families(&self) -> bool {
+    pub(super) fn reads_families(&self) -> bool {
         self.from_families
     }
 
