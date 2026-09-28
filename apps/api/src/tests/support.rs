@@ -3287,92 +3287,6 @@ fn record_inventory_current_row(
     }
 }
 
-fn worker_record_inventory_current_row(
-    logical_name_id: &str,
-    resource_id: Uuid,
-) -> bigname_storage::RecordInventoryCurrentRow {
-    bigname_storage::RecordInventoryCurrentRow {
-        resource_id,
-        record_version_boundary: record_inventory_boundary_with_pointer(
-            logical_name_id,
-            resource_id,
-            Some(1201),
-            Some("RecordVersionChanged"),
-        ),
-        enumeration_basis: json!({
-            "observed_selectors": true,
-            "capability_declared_families": true,
-            "globally_enumerable": false
-        }),
-        selectors: json!([
-            {
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "cacheable": true
-            },
-            {
-                "record_key": "text",
-                "record_family": "text",
-                "selector_key": null,
-                "cacheable": true
-            }
-        ]),
-        explicit_gaps: json!([]),
-        unsupported_families: json!([]),
-        last_change: Some(json!({
-            "normalized_event_id": 1202,
-            "event_kind": "RecordChanged",
-            "chain_position": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_004,
-                "block_hash": "0xlastchange",
-                "timestamp": "2026-04-17T00:00:04Z"
-            }
-        })),
-        entries: json!([
-            {
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "status": "unsupported",
-                "unsupported_reason": "value_not_retained_in_normalized_events"
-            },
-            {
-                "record_key": "text",
-                "record_family": "text",
-                "selector_key": null,
-                "status": "unsupported",
-                "unsupported_reason": "value_not_retained_in_normalized_events"
-            }
-        ]),
-        provenance: json!({
-            "normalized_event_ids": [1201, 1202],
-            "derivation_kind": "record_inventory_current_rebuild"
-        }),
-        coverage: json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "enumeration_basis": "declared_record_inventory"
-        }),
-        chain_positions: json!({
-            "ethereum-mainnet": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
-            }
-        }),
-        canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {
-                "ethereum-mainnet": "finalized"
-            }
-        }),
-        manifest_version: 3,
-        last_recomputed_at: timestamp(1_717_171_719),
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 fn address_name_name_current_row(
@@ -3501,12 +3415,6 @@ fn chain_slot_for_namespace(namespace: &str) -> &'static str {
     }
 }
 
-fn source_family_for_namespace(namespace: &str) -> &'static str {
-    match namespace {
-        "basenames" => "basenames_base_registry",
-        _ => "ens_v1_registry_l1",
-    }
-}
 
 fn address_name_token_lineage(
     token_lineage_id: Uuid,
