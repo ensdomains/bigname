@@ -57,12 +57,6 @@ justification = "The benchmark API orchestrator keeps target-identity boundaries
 review_justification = "Reviewed as non-serving release tooling: the file is below the 1200 LOC ceiling, its route workload builders and corpus loading are split into child modules, and its remaining code is one auditable gate sequence plus focused tests."
 
 [[files]]
-path = "tools/benchmark-gate/src/api_load/corpus.rs"
-loc = 986
-justification = "Production-scale corpus queries, their shared API-visibility filters, scale floors, namespace coverage, and database regressions remain together so the sampled and counted populations cannot drift apart."
-review_justification = "Reviewed as non-serving release tooling: the file remains below the 1200 LOC ceiling, production query assembly is compact, and most of its size is database-backed coverage proving every sampled corpus family follows its serving-read visibility predicate."
-
-[[files]]
 path = "tools/benchmark-gate/src/api_load/preflight.rs"
 loc = 621
 justification = "API build, database, Interpret redo, Project publication, and manifest-authority snapshots remain one preflight and endpoint-boundary contract; focused database tests account for most of the excess over the normal file target."

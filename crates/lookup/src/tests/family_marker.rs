@@ -1,160 +1,85 @@
-//! The verified lookup's publication fence under the publication switch (TYR-36 step 7b): with
-//! the switch on, a family marker that is not `live` (a rebuild still populating the owned key
-//! families) makes the lookup stale; with the switch off the marker is ignored.
-
+//! Verified lookups hold the real family publication across provider execution.
 use super::*;
+use bigname_project::families::{FamilyMode, FamilyOptions};
 
-async fn seed_family_marker(pool: &PgPool, state: &str) -> AnyResult<()> {
-    sqlx::query(
-        "INSERT INTO project_family_marker
-             (chain_id, current_block_number, current_block_hash, block_timestamp,
-              input_content_hash, sequence, state)
-         SELECT project.chain_id, project.current_block_number, project.current_block_hash,
-                lineage.block_timestamp, project.input_content_hash, 1, $2
-         FROM chain_phase_state project
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = project.chain_id
-          AND lineage.block_number = project.current_block_number
-          AND lineage.block_hash = project.current_block_hash
-         WHERE project.chain_id = $1 AND project.phase_name = 'project'",
+pub(super) async fn reset_lookup_families(pool: &PgPool) -> AnyResult<()> {
+    let token = bigname_project::families::input_token(pool, ETHEREUM).await?;
+    let mut options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    options.max_blocks_per_run = 0;
+    let outcome = bigname_project::families::apply(
+        pool,
+        ETHEREUM,
+        &bigname_project::Marker {
+            number: 10,
+            hash: ETHEREUM_HASH.into(),
+        },
+        FamilyMode::Rebuild,
+        &token,
+        &options,
     )
-    .bind(ETHEREUM)
-    .bind(state)
-    .execute(pool)
     .await?;
+    anyhow::ensure!(
+        outcome.reset && outcome.budget_exhausted && outcome.marker.is_none(),
+        "incomplete rebuild: {outcome:?}"
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn lookup_is_stale_while_the_family_marker_bootstraps_with_the_switch_on() -> AnyResult<()> {
+async fn lookup_is_stale_while_the_family_marker_bootstraps() -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    seed_family_marker(fixture.pool(), "bootstrap_pending").await?;
-
-    let error = bigname_storage::publication_source::with_serve_from_families(
-        true,
-        lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
-            .lookup(lookup_request(&fixture.logical_name_id)?),
-    )
-    .await
-    .expect_err("a marker still populating the families is not servable");
+    reset_lookup_families(fixture.pool()).await?;
+    let error = run_lookup(&fixture, "http://127.0.0.1:1")
+        .await
+        .expect_err("a reset before replay has no published family state");
     assert_eq!(error.kind(), ErrorKind::Stale);
     fixture.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn lookup_ignores_the_family_marker_with_the_switch_off() -> AnyResult<()> {
-    for (on, state) in [(false, "live"), (false, "bootstrap_pending")] {
+async fn lookup_is_stale_before_the_first_family_publication() -> AnyResult<()> {
+    let fixture = fixture::setup_unpublished_fixture().await?;
+    let error = run_lookup(&fixture, "http://127.0.0.1:1")
+        .await
+        .expect_err("interpreted inputs without a family publication cannot be served");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_family_rebuild_during_provider_execution_refuses_the_comparison_write() -> AnyResult<()>
+{
+    for complete in [false, true] {
         let (rpc_url, rpc_handle) =
             spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
         let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-        seed_family_marker(fixture.pool(), state).await?;
-        let response = bigname_storage::publication_source::with_serve_from_families(
-            on,
-            run_lookup(&fixture, &rpc_url),
-        )
-        .await?;
+        let pool = fixture.pool().clone();
+        let result = lookup_engine(fixture.pool(), &rpc_url)?
+            .lookup_with_before_persist(
+                lookup_request(&fixture.logical_name_id)?,
+                move || async move {
+                    reset_lookup_families(&pool)
+                        .await
+                        .expect("reset real family publication");
+                    if complete {
+                        publish_lookup_families(&pool, ETHEREUM, 10, FamilyMode::Normal)
+                            .await
+                            .expect("complete replacement publication");
+                    }
+                },
+            )
+            .await;
+        let error = result.expect_err("a changed held publication must prevent the ledger write");
         assert_eq!(
-            response.records[0].value,
-            Some(json!(LIVE_VALUE)),
-            "switch {on}, marker {state}"
+            error.kind(),
+            ErrorKind::ConcurrentState,
+            "completed rebuild {complete}: {error}"
         );
+        assert_eq!(ledger_count(fixture.pool()).await?, 0);
         fixture.cleanup().await?;
         join_rpc(rpc_handle).await?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn lookup_is_stale_without_a_family_marker_row_with_the_switch_on() -> AnyResult<()> {
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    let lookup = |on| {
-        bigname_storage::publication_source::with_serve_from_families(
-            on,
-            run_lookup(&fixture, "http://127.0.0.1:1"),
-        )
-    };
-
-    let error = lookup(true)
-        .await
-        .expect_err("a chain without a marker row has no published families");
-    assert_eq!(error.kind(), ErrorKind::Stale);
-
-    // Switch off, the Project row governs and the wording is unchanged.
-    sqlx::query(
-        "UPDATE chain_phase_state SET input_content_hash = 'another-build' WHERE phase_name = 'project'",
-    )
-    .execute(fixture.pool())
-    .await?;
-    let error = lookup(false)
-        .await
-        .expect_err("a Project row from another build is not servable");
-    assert_eq!(error.kind(), ErrorKind::Stale);
-    assert_eq!(
-        error.message(),
-        format!("projected state has not reached the newest processed {ETHEREUM} block")
-    );
-    fixture.cleanup().await?;
-    Ok(())
-}
-
-/// Runs a lookup whose provider call has answered, then `mutate`s the database before the guarded
-/// comparison write, as a publication landing during provider execution would.
-async fn lookup_mutated_during_execution(
-    on: bool,
-    state: &str,
-    mutate: &'static str,
-) -> AnyResult<(crate::Result<LookupResponse>, i64)> {
-    let (rpc_url, rpc_handle) =
-        spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
-    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
-    seed_family_marker(fixture.pool(), state).await?;
-    let pool = fixture.pool().clone();
-    let update_pool = pool.clone();
-    let result = bigname_storage::publication_source::with_serve_from_families(
-        on,
-        lookup_engine(&pool, &rpc_url)?.lookup_with_before_persist(
-            lookup_request(&fixture.logical_name_id)?,
-            move || async move {
-                sqlx::query(mutate)
-                    .execute(&update_pool)
-                    .await
-                    .expect("mutate the publication during provider execution");
-            },
-        ),
-    )
-    .await;
-    let ledger = ledger_count(&pool).await?;
-    fixture.cleanup().await?;
-    join_rpc(rpc_handle).await?;
-    Ok((result, ledger))
-}
-
-const REPUBLISH_PROJECT_ROW: &str = "UPDATE chain_phase_state \
-     SET current_block_number = current_block_number WHERE phase_name = 'project'";
-const ADVANCE_FAMILY_SEQUENCE: &str = "UPDATE project_family_marker SET sequence = sequence + 1";
-const START_FAMILY_REBUILD: &str = "UPDATE project_family_marker \
-     SET state = 'bootstrap_pending', sequence = sequence + 1";
-
-// These served-only fixtures exercise the switch-off path. Switch-on comparison and guard
-// coverage lives in API v2_switch_lookup.rs, seeded through the actual family reducers.
-#[tokio::test]
-async fn a_project_republish_during_execution_is_refused_with_the_switch_off() -> AnyResult<()> {
-    let (served, ledger) =
-        lookup_mutated_during_execution(false, "live", REPUBLISH_PROJECT_ROW).await?;
-    let error = served.expect_err("a republished Project row refuses the served lookup");
-    assert_eq!(error.kind(), ErrorKind::ConcurrentState);
-    assert_eq!(ledger, 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_family_publication_or_rebuild_is_ignored_with_the_switch_off() -> AnyResult<()> {
-    for mutate in [ADVANCE_FAMILY_SEQUENCE, START_FAMILY_REBUILD] {
-        let (served, ledger) = lookup_mutated_during_execution(false, "live", mutate).await?;
-        let response = served?;
-        assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
-        assert_eq!(ledger, 1);
     }
     Ok(())
 }
