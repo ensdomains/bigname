@@ -462,81 +462,6 @@ async fn upsert_phase_address_names_current_rows(
     Ok(rows.to_vec())
 }
 
-async fn upsert_phase_children_current_rows(
-    pool: &PgPool,
-    rows: &[bigname_storage::ChildrenCurrentRow],
-) -> Result<Vec<bigname_storage::ChildrenCurrentRow>> {
-    for row in rows {
-        let parent_name = row
-            .parent_logical_name_id
-            .split_once(':')
-            .map(|(_, name)| name)
-            .unwrap_or(&row.parent_logical_name_id);
-        let (parent_logical_name_id, _) =
-            phase_logical_identity(&row.namespace, parent_name)?;
-        let (child_logical_name_id, namehash) =
-            phase_logical_identity(&row.namespace, &row.normalized_name)?;
-        let chain_id = phase_projection_source_position(&row.chain_positions)?
-            .get("chain_id")
-            .and_then(Value::as_str)
-            .context("children_current fixture position must include chain_id")?
-            .to_owned();
-        let (target_block_number, target_block_hash) =
-            phase_projection_target_for_chain(pool, &chain_id, &row.chain_positions).await?;
-        let mut provenance = row.provenance.clone();
-        provenance
-            .as_object_mut()
-            .context("children_current fixture provenance must be an object")?
-            .insert("chain_id".to_owned(), json!(chain_id));
-        let chain_positions =
-            phase_flat_projection_position(target_block_number, &target_block_hash);
-        let canonicality_summary = json!({
-            "state": "canonical",
-            "target_block_number": target_block_number,
-            "target_block_hash": target_block_hash,
-        });
-        sqlx::query(
-            r#"
-            INSERT INTO bigname_phase.children_current (
-                parent_logical_name_id, child_logical_name_id, surface_class,
-                namespace, raw_name, decoded_name, namehash, labelhash, owner,
-                registrant, provenance, chain_positions, canonicality_summary,
-                manifest_version, last_recomputed_at
-            )
-            VALUES ($1, $2, $3, $4, convert_to($5, 'UTF8'), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (parent_logical_name_id, child_logical_name_id, surface_class)
-            DO UPDATE SET
-                raw_name = EXCLUDED.raw_name,
-                decoded_name = EXCLUDED.decoded_name,
-                owner = EXCLUDED.owner,
-                registrant = EXCLUDED.registrant,
-                provenance = EXCLUDED.provenance,
-                chain_positions = EXCLUDED.chain_positions,
-                canonicality_summary = EXCLUDED.canonicality_summary,
-                manifest_version = EXCLUDED.manifest_version,
-                last_recomputed_at = EXCLUDED.last_recomputed_at
-            "#,
-        )
-        .bind(parent_logical_name_id)
-        .bind(child_logical_name_id)
-        .bind(&row.surface_class)
-        .bind(&row.namespace)
-        .bind(&row.normalized_name)
-        .bind(namehash)
-        .bind(row.labelhash.as_deref().unwrap_or(&row.namehash))
-        .bind(&row.owner)
-        .bind(&row.registrant)
-        .bind(provenance)
-        .bind(chain_positions)
-        .bind(canonicality_summary)
-        .bind(row.manifest_version)
-        .bind(row.last_recomputed_at)
-        .execute(pool)
-        .await?;
-    }
-    Ok(rows.to_vec())
-}
-
 async fn upsert_phase_permissions_current_rows(
     pool: &PgPool,
     rows: &[PermissionsCurrentRow],
@@ -1322,56 +1247,6 @@ impl TestDatabase {
             }],
         )
         .await?;
-        Ok(())
-    }
-
-    async fn seed_name_current_binding_migrated(
-        &self,
-        logical_name_id: &str,
-        resource_id: Uuid,
-        token_lineage_id: Uuid,
-        surface_binding_id: Uuid,
-    ) -> Result<()> {
-        upsert_phase_raw_blocks(
-            &self.pool,
-            &[
-                raw_block("ethereum-mainnet", "0xsurface", None, 98, 1_717_171_698),
-                raw_block("ethereum-mainnet", "0xresource", None, 99, 1_717_171_699),
-                raw_block("ethereum-mainnet", "0xbinding", None, 100, 1_717_171_700),
-            ],
-        )
-        .await?;
-        upsert_test_name_surfaces(&self.pool, &[name_surface(logical_name_id)]).await?;
-        upsert_test_token_lineages(
-            &self.pool,
-            &[address_name_token_lineage(
-                token_lineage_id,
-                "0xresource",
-                99,
-            )],
-        )
-        .await?;
-        upsert_test_resources(
-            &self.pool,
-            &[address_name_resource(
-                resource_id,
-                Some(token_lineage_id),
-                "0xresource",
-                99,
-            )],
-        )
-        .await?;
-        upsert_test_surface_bindings(
-            &self.pool,
-            &[surface_binding(
-                surface_binding_id,
-                logical_name_id,
-                resource_id,
-                timestamp(1_717_171_700),
-            )],
-        )
-        .await?;
-
         Ok(())
     }
 
@@ -3601,64 +3476,6 @@ fn collection_name_surface(
         block_number,
         provenance: json!({"seed": "children_surface"}),
         canonicality_state: CanonicalityState::Finalized,
-    }
-}
-
-fn declared_child_row(
-    parent_logical_name_id: &str,
-    child_logical_name_id: &str,
-    display_name: &str,
-    namehash: &str,
-    normalized_event_id: i64,
-    block_number: i64,
-) -> bigname_storage::ChildrenCurrentRow {
-    let namespace = parent_logical_name_id
-        .split_once(':')
-        .map(|(namespace, _)| namespace)
-        .expect("parent_logical_name_id must include namespace");
-    let chain_id = chain_id_for_namespace(namespace);
-    let chain_slot = chain_slot_for_namespace(namespace);
-
-    bigname_storage::ChildrenCurrentRow {
-        parent_logical_name_id: parent_logical_name_id.to_owned(),
-        child_logical_name_id: child_logical_name_id.to_owned(),
-        surface_class: "declared".to_owned(),
-        namespace: namespace.to_owned(),
-        canonical_display_name: display_name.to_owned(),
-        normalized_name: display_name.to_owned(),
-        namehash: namehash.to_owned(),
-        labelhash: labelhash_for_display_name(display_name),
-        owner: None,
-        registrant: None,
-        provenance: json!({
-            "normalized_event_ids": [normalized_event_id],
-            "raw_fact_refs": [{
-                "kind": "raw_log",
-                "block_number": block_number,
-            }],
-            "manifest_versions": [{
-                "manifest_version": 1,
-                "source_family": source_family_for_namespace(namespace),
-                "source_manifest_id": null,
-            }],
-            "derivation_kind": "children_current_rebuild",
-        }),
-        chain_positions: json!({
-            chain_slot: {
-                "chain_id": chain_id,
-                "block_number": block_number,
-                "block_hash": format!("0xblock{block_number:02x}"),
-                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
-            }
-        }),
-        canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {
-                chain_id: "finalized"
-            }
-        }),
-        manifest_version: 1,
-        last_recomputed_at: timestamp(1_717_172_000 + block_number),
     }
 }
 
