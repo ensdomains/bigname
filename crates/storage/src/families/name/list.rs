@@ -322,36 +322,64 @@ fn truncate(mut page: NameCurrentListPage, page_size: u64) -> NameCurrentListPag
     page
 }
 
-/// Names of `namespace` with a retained lifecycle event whose expiry is a JSON number but not an
-/// integral second: the walk cannot place them, so they are always considered.
+/// The names a retained lifecycle event or NameWrapper state (`hits`) can load
+/// (control::lifecycle::load): the event's own names, the triple's name, and the names whose
+/// binding candidates, associations or key states name the resource it sits on. Both walks use
+/// it, so a name reached only through its resource is found whether its expiry is integral or
+/// not. `$NAMESPACE` stands for the namespace's parameter.
+const EXPIRY_HIT_NAMES: &str = "
+             CROSS JOIN LATERAL (
+                 SELECT hits.original_logical_name_id
+                 UNION SELECT hits.decoded_logical_name_id
+                 UNION SELECT hits.state_key::jsonb ->> 0 WHERE hits.state_kind = 'triple'
+                 UNION SELECT candidate.logical_name_id
+                 FROM bigname_phase.project_binding_candidate candidate
+                 WHERE candidate.chain_id = hits.chain_id
+                   AND hits.resource_id IN (
+                       candidate.resource_id, candidate.wrapped_registrar_resource_id,
+                       candidate.predecessor_resource_id, candidate.lease_resource_id)
+                 UNION SELECT association.logical_name_id
+                 FROM bigname_phase.project_lifecycle_association association
+                 WHERE association.chain_id = hits.chain_id
+                   AND association.target_resource_id = hits.resource_id
+                 UNION SELECT state.logical_name_id
+                 FROM bigname_phase.project_lifecycle_key_state state
+                 WHERE state.chain_id = hits.chain_id AND state.resource_id = hits.resource_id
+             ) name(logical_name_id)
+             WHERE name.logical_name_id IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM bigname_phase.name_surfaces surface
+                   WHERE surface.logical_name_id = name.logical_name_id
+                     AND surface.namespace = $NAMESPACE)";
+
+/// Names of `namespace` a retained lifecycle event whose expiry is a JSON number but not an
+/// integral second can load ([`EXPIRY_HIT_NAMES`]): the walk cannot place them, so they are
+/// always considered.
 async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Result<Vec<String>> {
-    sqlx::query_scalar(
+    let sql = format!(
         "/* storage:families.name.inexact_expiry_names */
+         WITH hits AS (
+             SELECT event.chain_id, event.state_kind, event.state_key,
+                    CASE WHEN event.state_kind = 'resource' THEN event.state_key::uuid END
+                        AS resource_id,
+                    event.original_logical_name_id, event.decoded_logical_name_id
+             FROM bigname_phase.project_lifecycle_event event
+             WHERE event.expiry_seconds IS NULL AND jsonb_typeof(event.expiry) = 'number'
+         )
          SELECT DISTINCT name.logical_name_id
-         FROM bigname_phase.project_lifecycle_event event
-         CROSS JOIN LATERAL (
-             SELECT event.original_logical_name_id
-             UNION SELECT event.decoded_logical_name_id
-             UNION SELECT event.state_key::jsonb ->> 0 WHERE event.state_kind = 'triple'
-         ) name(logical_name_id)
-         WHERE event.expiry_seconds IS NULL AND jsonb_typeof(event.expiry) = 'number'
-           AND name.logical_name_id IS NOT NULL
-           AND EXISTS (
-               SELECT 1 FROM bigname_phase.name_surfaces surface
-               WHERE surface.logical_name_id = name.logical_name_id
-                 AND surface.namespace = $1)",
-    )
-    .bind(namespace)
-    .fetch_all(conn)
-    .await
-    .context("failed to load the names with an inexact expiry")
+         FROM hits{}",
+        EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$1")
+    );
+    sqlx::query_scalar(&sql)
+        .bind(namespace)
+        .fetch_all(conn)
+        .await
+        .context("failed to load the names with an inexact expiry")
 }
 
 /// The next (expiry second, name) pairs of the walk after `after`: every retained lifecycle
 /// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name of
-/// `namespace` whose lifecycle read can load it (control::lifecycle::load): the event's own
-/// names, the triple's name, and the names whose binding candidates, associations or key states
-/// name the resource it sits on.
+/// `namespace` it can load ([`EXPIRY_HIT_NAMES`]).
 async fn expiry_pairs(
     conn: &mut PgConnection,
     namespace: &str,
@@ -386,35 +414,13 @@ async fn expiry_pairs(
                AND ($2::bigint IS NULL OR wrapper.expiry_seconds < $2)
          ), pairs AS (
              SELECT DISTINCT hits.at, name.logical_name_id
-             FROM hits
-             CROSS JOIN LATERAL (
-                 SELECT hits.original_logical_name_id
-                 UNION SELECT hits.decoded_logical_name_id
-                 UNION SELECT hits.state_key::jsonb ->> 0 WHERE hits.state_kind = 'triple'
-                 UNION SELECT candidate.logical_name_id
-                 FROM bigname_phase.project_binding_candidate candidate
-                 WHERE candidate.chain_id = hits.chain_id
-                   AND hits.resource_id IN (
-                       candidate.resource_id, candidate.wrapped_registrar_resource_id,
-                       candidate.predecessor_resource_id, candidate.lease_resource_id)
-                 UNION SELECT association.logical_name_id
-                 FROM bigname_phase.project_lifecycle_association association
-                 WHERE association.chain_id = hits.chain_id
-                   AND association.target_resource_id = hits.resource_id
-                 UNION SELECT state.logical_name_id
-                 FROM bigname_phase.project_lifecycle_key_state state
-                 WHERE state.chain_id = hits.chain_id AND state.resource_id = hits.resource_id
-             ) name(logical_name_id)
-             WHERE name.logical_name_id IS NOT NULL
-               AND EXISTS (
-                   SELECT 1 FROM bigname_phase.name_surfaces surface
-                   WHERE surface.logical_name_id = name.logical_name_id
-                     AND surface.namespace = $6)
+             FROM hits{names}
          )
          SELECT at::text AS at, logical_name_id FROM pairs
          WHERE $3::numeric IS NULL OR (at, logical_name_id) {compare} ($3::numeric, $4)
          ORDER BY at {direction}, logical_name_id {direction}
-         LIMIT $5"
+         LIMIT $5",
+        names = EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$6")
     );
     let rows = sqlx::query(&sql)
         .bind(low)

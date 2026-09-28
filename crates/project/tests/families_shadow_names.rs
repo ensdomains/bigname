@@ -570,3 +570,64 @@ async fn a_shared_resource_serves_each_name_its_own_latest_pointer() -> Result<(
     assert_eq!(bound, [vec![name(1)], vec![name(2)]]);
     fixture.cleanup().await
 }
+
+/// A renewal the registrar emits without a name, on name 1's lease, whose expiry is not an
+/// integral second: staging names it for name 1 through its lease, and the served row then keeps
+/// no expiry, so neither listing shows the name in a window around that expiry. The composed
+/// listing considers the name through its lease (the inexact walk takes the same resource paths
+/// as the integral one) and agrees.
+#[tokio::test]
+async fn an_unnamed_inexact_renewal_lists_the_same_in_the_expiring_listing() -> Result<()> {
+    use bigname_storage::{NameCurrentExpiringFilter, NameCurrentListOrder};
+    let fixture = Fixture::new("families_shadow_names_inexact_unnamed", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    fixture
+        .event(
+            support::Event::new("renewal-12", 12, 1, "RegistrationRenewed", V1_REGISTRAR)
+                .resource(&lease)
+                .after(json!({"namehash": node(1), "authority_kind": "registrar",
+                              "expiry": 2_100_000_000.5}))
+                .raw(json!({"emitting_address": REGISTRAR})),
+        )
+        .await?;
+    publish_and_compare(&fixture, 14).await?;
+    assert_eq!(
+        served(&fixture, 1, "/declared_summary/registration/expiry").await?,
+        Value::Null
+    );
+    let filter = NameCurrentExpiringFilter {
+        namespace: "ens".to_owned(),
+        expires_after: Some(sqlx::types::time::OffsetDateTime::from_unix_timestamp(
+            2_099_000_000,
+        )?),
+        expires_before: Some(sqlx::types::time::OffsetDateTime::from_unix_timestamp(
+            2_101_000_000,
+        )?),
+    };
+    let ids = |page: bigname_storage::NameCurrentListPage| {
+        page.rows
+            .into_iter()
+            .map(|row| row.row.logical_name_id)
+            .collect::<Vec<_>>()
+    };
+    let served_page = ids(bigname_storage::load_name_current_expiring_page(
+        &fixture.pool,
+        &filter,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+    )
+    .await?);
+    let composed_page = ids(bigname_storage::families::name::load_family_expiring_page(
+        &fixture.pool,
+        &filter,
+        NameCurrentListOrder::Asc,
+        None,
+        10,
+        &[support::CHAIN.to_owned()],
+    )
+    .await?);
+    assert_eq!(composed_page, served_page);
+    fixture.cleanup().await
+}
