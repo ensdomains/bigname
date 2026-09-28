@@ -75,7 +75,7 @@ impl PublicNamespaceSet {
 /// pass validation on the other while its expiry clock changes. History cursors bind no
 /// publication and are not tagged.
 pub(crate) fn publication_source_tagged(identity: String) -> String {
-    { format!("families:{identity}") }
+    format!("families:{identity}")
 }
 
 pub(crate) async fn revalidate_collection_namespace_set(

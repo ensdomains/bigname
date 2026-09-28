@@ -135,67 +135,6 @@ pub(crate) async fn load_address_records_evm_page_from(
     })
 }
 
-/// Test support: `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` of the exact statements a
-/// `coin_type=evm` request runs, the continuation check first when `cursor` is present, then the
-/// page statement.
-#[cfg(any(test, feature = "test-support"))]
-pub async fn explain_address_records_current_evm_page_for_test(
-    pool: &PgPool,
-    address: &str,
-    dedupe_by: AddressNamesCurrentDedupe,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-    cursor: Option<&AddressNamesCurrentSortedCursor>,
-    page_size: u64,
-) -> Result<Vec<serde_json::Value>> {
-    use super::resolves_to::{push_cursor_exists_statement, push_page_statement};
-    const EXPLAIN: &str = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ";
-    let filter = AddressRecordsFilter {
-        address,
-        coins: AddressRecordsCoinSelector::Evm,
-        namespaces: None,
-        dedupe_by,
-        q: None,
-        authority: None,
-        source: RowSource::Served,
-    };
-    let mut plans = Vec::new();
-    if let Some(cursor) = cursor {
-        let mut builder = QueryBuilder::<Postgres>::new(EXPLAIN);
-        push_cursor_exists_statement(&mut builder, &filter, sort, cursor);
-        plans.push(builder.build_query_scalar().fetch_one(pool).await?);
-    }
-    let mut builder = QueryBuilder::<Postgres>::new(EXPLAIN);
-    let page_limit = i64::try_from(page_size)? + 1;
-    push_page_statement(&mut builder, &filter, sort, order, cursor, page_limit);
-    plans.push(builder.build_query_scalar().fetch_one(pool).await?);
-    Ok(plans)
-}
-
-/// Test support: the text of the first-page `coin_type=evm` statement, so a test can pin its
-/// shape (for example the materialized address fence) independently of any plan.
-#[cfg(any(test, feature = "test-support"))]
-pub fn address_records_current_evm_page_sql_for_test(
-    address: &str,
-    dedupe_by: AddressNamesCurrentDedupe,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-) -> String {
-    use super::resolves_to::push_page_statement;
-    let filter = AddressRecordsFilter {
-        address,
-        coins: AddressRecordsCoinSelector::Evm,
-        namespaces: None,
-        dedupe_by,
-        q: None,
-        authority: None,
-        source: RowSource::Served,
-    };
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_page_statement(&mut builder, &filter, sort, order, None, 51);
-    builder.sql().to_owned()
-}
-
 pub(super) struct EvmFacets {
     pub(super) resolutions: Vec<AddressRecordCoinMatch>,
     pub(super) representative_coin_types: Vec<String>,

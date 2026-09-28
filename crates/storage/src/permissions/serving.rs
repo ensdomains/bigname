@@ -9,13 +9,9 @@ use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{
-    effective::load_effective_permissions_account_resource_page,
-    resource_summary::load_permissions_current_resource_summaries,
-    types::{
-        EffectivePermissionsAccountResourcePage, PermissionsCurrentAccountResourceCursor,
-        PermissionsCurrentResourceSummary,
-    },
+use super::types::{
+    EffectivePermissionsAccountResourcePage, PermissionsCurrentAccountResourceCursor,
+    PermissionsCurrentResourceSummary,
 };
 use crate::families::control::permissions::page::{
     load_family_effective_permissions_page, load_family_permission_summaries,

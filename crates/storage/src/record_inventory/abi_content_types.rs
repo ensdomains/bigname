@@ -25,8 +25,6 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::phase_projection_reads::DEFAULT_RESOLVER_CURRENT_READ_FILTER;
-
 /// Why an inventory cannot list ABI content types; `as_str` is the public reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AbiContentTypesUnavailable {
@@ -184,7 +182,7 @@ pub async fn load_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
-    load_abi_content_types(pool, inputs, true).await
+    load_abi_content_types(pool, inputs).await
 }
 
 /// [`load_record_inventory_abi_content_types`] for family inventory rows (TYR-36 step 7b, the
@@ -196,16 +194,15 @@ pub async fn load_family_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
-    load_abi_content_types(pool, inputs, false).await
+    load_abi_content_types(pool, inputs).await
 }
 
 async fn load_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
-    confirm_published: bool,
 ) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
-    let classifications = load_classifications(pool, inputs, &plans, confirm_published).await?;
+    let classifications = load_classifications(pool, inputs, &plans).await?;
 
     let mut answers = Vec::with_capacity(plans.len());
     let mut pending = Vec::new();
@@ -311,27 +308,16 @@ fn content_types_from_evidence(
 /// so while the held row is still published the resolver row read here is the one it was built on.
 const ABI_CLASSIFICATION_QUERY: &str = r#"
     SELECT requested.ordinal,
-           $8 OR EXISTS (
-               SELECT 1
-               FROM bigname_phase.record_inventory_current inventory
-               WHERE inventory.resource_id = requested.resource_id
-                 AND inventory.record_version_boundary_key = requested.boundary_key
-                 AND inventory.chain_positions = requested.chain_positions
-                 AND inventory.last_recomputed_at = requested.last_recomputed_at
-           ) AS row_still_published,
            resolver.source_family,
            resolver.role
-    FROM unnest($1::BIGINT[], $2::UUID[], $3::TEXT[], $4::JSONB[], $5::TIMESTAMPTZ[], $6::TEXT[],
-                $7::TEXT[])
-        AS requested(ordinal, resource_id, boundary_key, chain_positions, last_recomputed_at,
-                     chain_id, resolver_address)
+    FROM unnest($1::BIGINT[], $2::TEXT[], $3::TEXT[])
+        AS requested(ordinal, chain_id, resolver_address)
     LEFT JOIN LATERAL (
         SELECT resolver.declared_summary #>> '{classification,source_family}' AS source_family,
                resolver.declared_summary #>> '{classification,role}' AS role
         FROM {RESOLVER_CLASSIFICATION_RELATION} resolver
         WHERE resolver.chain_id = requested.chain_id
           AND resolver.resolver_address = requested.resolver_address
-          {DEFAULT_RESOLVER_CURRENT_READ_FILTER}
     ) resolver ON TRUE
 "#;
 
@@ -339,18 +325,13 @@ const ABI_CLASSIFICATION_QUERY: &str = r#"
 /// held row is no longer the published one.
 async fn load_classifications(
     pool: &PgPool,
-    inputs: &[AbiContentTypesInput<'_>],
+    _inputs: &[AbiContentTypesInput<'_>],
     plans: &[Plan],
-    confirm_published: bool,
 ) -> Result<BTreeMap<usize, std::result::Result<bool, AbiContentTypesUnavailable>>> {
     let mut ordinals = Vec::new();
-    let mut resource_ids = Vec::new();
-    let mut boundary_keys = Vec::new();
-    let mut chain_positions = Vec::new();
-    let mut recomputed_at = Vec::new();
     let mut chain_ids = Vec::new();
     let mut addresses = Vec::new();
-    for (index, (input, plan)) in inputs.iter().zip(plans).enumerate() {
+    for (index, plan) in plans.iter().enumerate() {
         if let Plan::Classify {
             chain_id,
             resolver_address: Some(address),
@@ -359,10 +340,6 @@ async fn load_classifications(
         } = plan
         {
             ordinals.push(i64::try_from(index).context("ABI input index overflows BIGINT")?);
-            resource_ids.push(input.resource_id);
-            boundary_keys.push(input.record_version_boundary_key);
-            chain_positions.push(input.chain_positions.clone());
-            recomputed_at.push(input.last_recomputed_at);
             chain_ids.push(chain_id.clone());
             addresses.push(address.clone());
         }
@@ -370,21 +347,14 @@ async fn load_classifications(
     if ordinals.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let query = ABI_CLASSIFICATION_QUERY
-        .replace(
-            "{RESOLVER_CLASSIFICATION_RELATION}",
-            &crate::families::topology::resolver_classification_relation(),
-        )
-        .replace("{DEFAULT_RESOLVER_CURRENT_READ_FILTER}", { "" });
+    let query = ABI_CLASSIFICATION_QUERY.replace(
+        "{RESOLVER_CLASSIFICATION_RELATION}",
+        &crate::families::topology::resolver_classification_relation(),
+    );
     let rows = sqlx::query(&query)
         .bind(ordinals)
-        .bind(resource_ids)
-        .bind(boundary_keys)
-        .bind(chain_positions)
-        .bind(recomputed_at)
         .bind(chain_ids)
         .bind(addresses)
-        .bind(!confirm_published)
         .fetch_all(pool)
         .await
         .context("failed to load resolver classifications for ABI content types")?;
@@ -394,11 +364,8 @@ async fn load_classifications(
             .context("ABI classification ordinal is negative")?;
         let family: Option<String> = row.try_get("source_family")?;
         let role: Option<String> = row.try_get("role")?;
-        let admitted = if row.try_get("row_still_published")? {
-            Ok(family.is_some_and(|family| admits_abi_observations(&family, role.as_deref())))
-        } else {
-            Err(AbiContentTypesUnavailable::ObservationsStale)
-        };
+        let admitted =
+            Ok(family.is_some_and(|family| admits_abi_observations(&family, role.as_deref())));
         classifications.insert(index, admitted);
     }
     Ok(classifications)

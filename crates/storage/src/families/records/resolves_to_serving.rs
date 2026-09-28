@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::{
     address_names::{name_row, publication_stamps},
-    candidates::{CandidateSource, candidate_resources_from},
+    candidates::candidate_resources_from,
     inventory::{FamilyAttribution, load_family_record_inventory_detail_on},
     resolves_to::{RecordRow, may_fall_back, record_rows},
 };
@@ -141,7 +141,7 @@ async fn compose_address_record_rows(
     let candidates = if coin_types.is_empty() {
         BTreeMap::new()
     } else {
-        candidate_resources_from(conn, &address, coin_types, CandidateSource::Index).await?
+        candidate_resources_from(conn, &address, coin_types).await?
     };
     if candidates.is_empty() {
         // The route's namespace publication fence also covers an empty candidate set.

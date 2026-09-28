@@ -1,4 +1,3 @@
-mod count;
 mod decode;
 mod page;
 mod query;
@@ -9,7 +8,6 @@ mod resolves_to_filter;
 mod resolves_to_page;
 mod source;
 mod types;
-pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub(crate) use page::load_address_names_page_from;
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
@@ -33,11 +31,6 @@ pub(crate) use resolves_to_evm::load_address_records_evm_page_from;
 pub use resolves_to_evm::{
     AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, load_address_records_current_evm_page,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use resolves_to_evm::{
-    address_records_current_evm_page_sql_for_test,
-    explain_address_records_current_evm_page_for_test,
 };
 pub use resolves_to_page::load_address_records_current_page;
 pub(crate) use resolves_to_page::load_address_records_page_from;

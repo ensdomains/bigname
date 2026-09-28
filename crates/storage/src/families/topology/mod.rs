@@ -55,7 +55,4 @@ pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
-pub use resolver::{
-    ClassificationSource, FamilyResolverClassification, load_bound_names_shadow,
-    load_resolver_shadow,
-};
+pub use resolver::{ClassificationSource, FamilyResolverClassification, load_resolver_shadow};

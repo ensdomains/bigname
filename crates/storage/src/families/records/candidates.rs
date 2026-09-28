@@ -33,86 +33,12 @@ pub(crate) struct Candidate {
     pub(crate) indexed_coin_types: BTreeSet<String>,
 }
 
-/// `address` as the text a stored JSON value holds it in, lower-cased.
-const VALUE_TEXT: &str = "lower(CASE WHEN jsonb_typeof(%) = 'string' THEN % #>> '{}'
-                                   ELSE COALESCE(% ->> 'value', % ->> 'bytes') END)";
-
-fn value_text(column: &str) -> String {
-    VALUE_TEXT.replace('%', column)
-}
-
-/// Where the candidates come from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CandidateSource {
-    /// The index rows and the retained-value scan, with mirror resolvers from the family
-    /// classification or the served resolver row: the harness's superset, which names every
-    /// entry the index alone would miss.
-    IndexAndRetained,
-    /// The index rows alone, with mirror resolvers from the family classification alone: the
-    /// production read under the publication switch (TYR-36 step 7b). The harness
-    /// requires the index to miss nothing (`address_index_misses` 0) before a route reads it.
-    Index,
-}
-
-/// The candidate resources of `address` for `coin_types`, keyed by chain and resource.
-pub(crate) async fn candidate_resources(
-    conn: &mut PgConnection,
-    address: &str,
-    coin_types: &[String],
-) -> Result<BTreeMap<(String, Uuid), Candidate>> {
-    candidate_resources_from(conn, address, coin_types, CandidateSource::IndexAndRetained).await
-}
-
 /// The candidate resources of `address` for `coin_types` from `source`.
 pub(crate) async fn candidate_resources_from(
     conn: &mut PgConnection,
     address: &str,
     coin_types: &[String],
-    source: CandidateSource,
 ) -> Result<BTreeMap<(String, Uuid), Candidate>> {
-    let retained = |table: &str, key: &str| {
-        format!(
-            "SELECT chain_id, resolver_address, {key},
-                    selector_key::numeric::text AS coin_type, false AS indexed
-             FROM bigname_phase.{table}
-             WHERE record_family = 'addr' AND selector_key ~ '^[0-9]{{1,30}}$'
-               AND selector_key::numeric::text = ANY($2::text[])
-               AND $1 IN ({}, {}, lower(address_bytes_hex), {})",
-            value_text("value"),
-            if table == "project_node_record_value" {
-                value_text("sibling_value")
-            } else {
-                "NULL".to_owned()
-            },
-            if table == "project_node_record_value" {
-                "lower(sibling_address_bytes_hex)"
-            } else {
-                "NULL"
-            }
-        )
-    };
-    let (retained_keys, served_mirrors) = match source {
-        CandidateSource::IndexAndRetained => (
-            format!(
-                "UNION ALL {} UNION ALL {}",
-                retained(
-                    "project_node_record_value",
-                    "node, NULL::text AS record_id,
-                     CASE WHEN arm = 'named' THEN resource_id END AS named_resource,
-                     CASE WHEN arm = 'named' THEN lower(split_part(arm_identity, ':', 2)) END
-                         AS named_namehash"
-                ),
-                retained(
-                    "project_record_id_value",
-                    "NULL::text, record_id, NULL::uuid, NULL::text"
-                ),
-            ),
-            "SELECT chain_id, resolver_address FROM bigname_phase.resolver_current
-             WHERE declared_summary #>> '{classification,role}' = 'ensv1_mirror_resolver'
-             UNION",
-        ),
-        CandidateSource::Index => (String::new(), ""),
-    };
     // A node-index row written under a name also reaches the pointers at that name's namehash
     // (the named arm admits by logical name, `namespace:namehash`, with no node test).
     let sql = format!(
@@ -128,10 +54,8 @@ pub(crate) async fn candidate_resources_from(
              SELECT chain_id, resolver_address, NULL, record_id, NULL, NULL, coin_type, true
              FROM bigname_phase.project_address_record_id_index
              WHERE address = $1 AND coin_type = ANY($2::text[])
-             {retained_keys}
          ),
          mirrors AS (
-             {served_mirrors}
              SELECT chain_id, resolver_address
              FROM bigname_phase.project_resolver_classification
              WHERE classification ->> 'role' = 'ensv1_mirror_resolver'

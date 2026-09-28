@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
-use serde_json::json;
-use sqlx::{PgPool, Row};
+use anyhow::Result;
+use sqlx::PgPool;
 
 use crate::ResolverCurrentRow;
 

@@ -133,15 +133,8 @@ pub async fn load_family_search_page(
             )
             .await?;
         let source = gathered.source();
-        let page = list_page_from(
-            &mut *snapshot,
-            filter,
-            order,
-            cursor,
-            page_size,
-            Some(&source),
-        )
-        .await?;
+        let page =
+            list_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
         if exhausted || page.next_cursor.is_some() {
             snapshot.commit().await?;
             return Ok(page);
@@ -286,7 +279,7 @@ pub async fn load_family_expiring_page(
             order,
             cursor,
             page_size + 1,
-            Some(&source),
+            &source,
         )
         .await?;
         let settled = page.rows.len() as u64 > page_size

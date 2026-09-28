@@ -7,18 +7,16 @@ mod snapshot;
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::{PgPool, types::Uuid};
 
+pub use expiring::NameCurrentExpiringFilter;
 pub(crate) use expiring::expiring_page_from;
-pub use expiring::{NameCurrentExpiringFilter, load_name_current_expiring_page};
 pub(crate) use list::{COMPOSED_NC_COLUMNS, escape_like_pattern, list_page_from};
 pub use list::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
-    NameCurrentListRow, NameCurrentListSort, count_name_current_list, load_name_current_list_page,
-    load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
+    NameCurrentListRow, NameCurrentListSort, name_current_list_cursor_from_row,
 };
 pub use migration::{
     MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, load_name_migration_transition_timestamps,

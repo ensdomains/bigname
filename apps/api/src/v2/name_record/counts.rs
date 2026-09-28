@@ -71,16 +71,15 @@ pub(super) async fn load_name_counts(
     .next()
     .and_then(|summary| u64::try_from(summary.child_count).ok())
     .unwrap_or_default();
-    let record_count = match bigname_storage::resolution_record_inventory_lookup_key_any_chain(row)
-    {
-        Some(key) => bigname_storage::count_record_inventory_selectors_by_lookup_keys(pool, &[key])
-            .await
-            .map_err(|_| V2Error::internal_error("failed to load record counts"))?
-            .into_iter()
-            .next()
-            .flatten(),
-        None => None,
-    };
+    let record_count = bigname_storage::families::records::load_family_record_counts(pool, &[row])
+        .await
+        .map_err(crate::v2::name_rows_error(
+            crate::v2::SnapshotReadResource::Name,
+            |_| V2Error::internal_error("failed to load record counts"),
+        ))?
+        .into_iter()
+        .next()
+        .flatten();
     Ok(NameCounts {
         subname_count,
         record_count,

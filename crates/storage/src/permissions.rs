@@ -1,38 +1,8 @@
-mod canonicality;
-mod decode;
-mod effective;
-mod paging;
-mod reads;
 mod resource_summary;
 mod serving;
 mod types;
 
-pub use canonicality::{
-    CURRENT_PERMISSION_SUMMARY_READ_FILTER, DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
-};
-
-pub use effective::{
-    ACCOUNT_APPROVAL_READ_FILTER, explain_bounded_effective_permissions_by_resource_ids,
-    explain_effective_permissions_account_resource_page,
-    explain_effective_permissions_account_resource_summary,
-    explain_effective_permissions_by_resource_ids,
-    load_bounded_effective_permissions_by_resource_ids,
-    load_effective_permissions_account_resource_page,
-    load_effective_permissions_account_resource_page_count_summary,
-    load_effective_permissions_by_resource_ids,
-};
-pub use paging::{
-    load_permissions_current_account_resource_page,
-    load_permissions_current_account_resource_page_count_summary, load_permissions_current_page,
-};
-pub use reads::{
-    load_permissions_current, load_permissions_current_by_resource_ids,
-    load_permissions_current_for_resolver_scope,
-    load_permissions_current_for_resolver_scope_subjects,
-    load_permissions_current_resolver_targets,
-};
 pub use resource_summary::{
-    load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
     load_registry_permission_registration_map, permission_resource_matches_namespace,
     resource_is_registry_control_for_registrar_lease, resource_wrapped_a_registrar_lease,
 };
@@ -45,3 +15,16 @@ pub use types::{
     PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
     PermissionsCurrentResourceSummary, PermissionsCurrentRow, ResourcePermissionCoverage,
 };
+
+/// Bounded inline permission expansion using the published family state.
+pub async fn load_bounded_effective_permissions_by_resource_ids(
+    pool: &sqlx::PgPool,
+    ids: &[uuid::Uuid],
+    namespace: Option<&str>,
+    max_rows: u64,
+) -> anyhow::Result<Vec<EffectivePermissionRow>> {
+    crate::families::control::permissions::page::load_family_bounded_permissions(
+        pool, ids, namespace, max_rows,
+    )
+    .await
+}

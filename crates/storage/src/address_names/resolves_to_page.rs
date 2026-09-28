@@ -1,5 +1,5 @@
 //! The `address_records_current` page entry point for one coin type, and its switch branch.
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::{PgConnection, PgPool};
 
 use super::{

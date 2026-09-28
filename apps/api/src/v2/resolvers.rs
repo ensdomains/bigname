@@ -40,8 +40,8 @@ mod snapshot_checks;
 use snapshot_checks::{require_phase_name_snapshot, require_phase_target_snapshot};
 
 use super::{
-    Envelope, Finality, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
+    Envelope, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist, SnapshotReadResource,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
     contains_boundary_vocabulary, encode_at_token, name_record, numeric_to_slug,
     resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
     vocab::{Resolver, Status},

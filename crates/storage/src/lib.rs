@@ -35,27 +35,23 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use address_names::{};
 pub use address_names::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
-    AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
-    AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
-    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
-    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCoinMatch,
-    AddressRecordCurrentEntry, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
-    AddressRecordsCurrentPage, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
-    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
-    EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, count_address_names_current_for_app_filter,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
+    AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
+    AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
+    AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
+    AddressNamesCurrentSummary, AddressRecordCoinMatch, AddressRecordCurrentEntry,
+    AddressRecordEvmEntry, AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
+    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    ENSIP19_DEFAULT_ADDRESS_RECORD_KEY, EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT,
     load_address_names_current, load_address_names_current_for_relations,
     load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
     load_address_records_current_page,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use address_names::{
-    address_records_current_evm_page_sql_for_test,
-    explain_address_records_current_evm_page_for_test,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
@@ -65,7 +61,6 @@ pub use children::{
     ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
     ChildrenCurrentSummary, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
     DEFAULT_CHILDREN_CURRENT_READ_FILTER, RegistryChildrenPage, count_registry_children_current,
-    load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_page_filtered,
     load_children_current_summaries, load_registry_children_current_page,
 };
@@ -111,9 +106,8 @@ pub use identity::{
 pub use identity_facade::{
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
-    IndexingStatusRead, READABLE_REVERSE_IDENTITY_CTES, ReverseIdentityCursor,
-    ReverseIdentityGroup, ReverseIdentityRecordRow, ReverseIdentityRoles,
-    ReverseIdentityStorageInput,
+    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityGroup, ReverseIdentityRecordRow,
+    ReverseIdentityRoles, ReverseIdentityStorageInput,
 };
 pub use label_preimages::{
     ENS_RAINBOW_SOURCE_KIND, LabelPreimageImportSummary,
@@ -131,39 +125,22 @@ pub use name_current::{
     MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, NameCurrentAddressFilter,
     NameCurrentAddressRelationFilter, NameCurrentExpiringFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
-    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, count_name_current_list,
-    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
-    load_name_current_expiring_page, load_name_current_for_snapshot, load_name_current_list_page,
-    load_name_current_list_page_offset, load_name_current_list_row_by_name,
-    load_name_current_list_row_by_namehash, load_name_migration_transition_timestamps,
-    name_current_authority_arm, name_current_is_ownerless_registry,
-    name_current_list_cursor_from_row, name_current_public_authority,
-    name_current_registry_generation, name_current_registry_handoff_block_number,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids,
+    load_name_current, load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    load_name_migration_transition_timestamps, name_current_authority_arm,
+    name_current_is_ownerless_registry, name_current_list_cursor_from_row,
+    name_current_public_authority, name_current_registry_generation,
+    name_current_registry_handoff_block_number,
 };
 pub use normalized_events::*;
 pub use permissions::{
-    ACCOUNT_APPROVAL_READ_FILTER, CURRENT_PERMISSION_SUMMARY_READ_FILTER,
-    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, EffectivePermissionRow, EffectivePermissionScope,
-    EffectivePermissionsAccountResourcePage, PermissionCoverageExhaustiveness,
-    PermissionCoverageStatus, PermissionCoverageUnsupportedReason, PermissionGrantRelation,
-    PermissionScope, PermissionsCurrentAccountResourceCursor,
-    PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
-    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
-    PermissionsCurrentRow, ResourcePermissionCoverage,
-    explain_bounded_effective_permissions_by_resource_ids,
-    explain_effective_permissions_account_resource_page,
-    explain_effective_permissions_account_resource_summary,
-    explain_effective_permissions_by_resource_ids,
-    load_bounded_effective_permissions_by_resource_ids,
-    load_effective_permissions_account_resource_page,
-    load_effective_permissions_account_resource_page_count_summary,
-    load_effective_permissions_by_resource_ids, load_permissions_current,
-    load_permissions_current_account_resource_page,
-    load_permissions_current_account_resource_page_count_summary,
-    load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
-    load_permissions_current_for_resolver_scope_subjects, load_permissions_current_page,
-    load_permissions_current_resolver_targets, load_permissions_current_resource_summaries,
-    load_permissions_current_resource_summary, load_registry_permission_registration_map,
+    EffectivePermissionRow, EffectivePermissionScope, EffectivePermissionsAccountResourcePage,
+    PermissionCoverageExhaustiveness, PermissionCoverageStatus,
+    PermissionCoverageUnsupportedReason, PermissionGrantRelation, PermissionScope,
+    PermissionsCurrentAccountResourceCursor, PermissionsCurrentAccountResourcePage,
+    PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
+    PermissionsCurrentResourceSummary, PermissionsCurrentRow, ResourcePermissionCoverage,
+    load_bounded_effective_permissions_by_resource_ids, load_registry_permission_registration_map,
     load_serving_effective_permissions_page, load_serving_permission_summaries,
     permission_resource_matches_namespace, resource_is_registry_control_for_registrar_lease,
     resource_wrapped_a_registrar_lease,
@@ -172,12 +149,11 @@ pub use phase_projection_reads::{
     DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,
     load_phase_expected_status_chain_ids, load_phase_identity_name_feed_records_by_ids,
     load_phase_identity_records_by_ids, load_phase_indexing_status,
-    load_phase_name_current_rows_by_ids, load_phase_resolver_bound_name_rows,
-    load_phase_resolver_current,
+    load_phase_name_current_rows_by_ids, load_phase_resolver_current,
 };
 pub use primary_name::{
-    DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
-    PrimaryNameCurrentSnapshot, load_primary_name_current, load_primary_name_current_snapshot,
+    PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
+    load_primary_name_current, load_primary_name_current_snapshot,
     load_primary_name_current_snapshots, normalized_claim_name,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -188,10 +164,8 @@ pub use record_inventory::{
     RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
     RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
     RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
-    count_record_inventory_selectors_by_lookup_keys,
     load_family_record_inventory_abi_content_types, load_record_inventory_abi_content_types,
-    load_record_inventory_current, load_record_inventory_current_for_snapshot,
-    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
+    record_version_boundary_storage_key,
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
