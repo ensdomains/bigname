@@ -47,8 +47,8 @@ pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, 
 }
 
 /// The family marker of `chain_id`, the publication a composed row describes, when it is
-/// servable: `live` and written by this build's interpreter, the fence's rule
-/// (snapshot_selection/project.rs). None otherwise.
+/// servable: `live`, written by this build's interpreter, on the readable lineage, and not
+/// overlapped by pending Interpret/Project redo (snapshot_selection/project.rs). None otherwise.
 pub async fn load_family_publication(
     pool: &PgPool,
     chain_id: &str,
@@ -98,7 +98,8 @@ async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<F
         "/* storage:families.name.publication */
          SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,
                 marker.block_timestamp, to_jsonb(marker.block_timestamp) AS block_timestamp_json",
-        crate::snapshot_selection::servable_family_marker!()
+        crate::snapshot_selection::servable_family_marker!(),
+        crate::snapshot_selection::family_inputs_not_in_redo!()
     ))
     .bind(chain_id)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
