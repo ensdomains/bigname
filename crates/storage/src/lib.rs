@@ -34,8 +34,6 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 
-#[cfg(any(test, feature = "test-support"))]
-pub use address_names::{};
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
