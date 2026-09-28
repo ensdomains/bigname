@@ -16,11 +16,9 @@ use std::collections::BTreeMap;
 
 mod bounds;
 mod cli;
-mod docs;
 mod errors;
 mod graphql;
 mod health;
-mod home;
 mod metrics;
 mod name_filter;
 #[path = "support/service.rs"]
@@ -181,9 +179,6 @@ fn app_router_with_bounds(
     let bounded_router = v2::router()
         .with_state(state.clone())
         .merge(graphql::graphql_routes(state.clone()))
-        .route("/", get(home::home))
-        .route("/docs", get(docs::docs))
-        .route("/docs/", get(docs::docs))
         .route_layer(CorsLayer::permissive());
     let health_router = Router::new()
         .route("/healthz", get(health))

@@ -15,10 +15,10 @@ route's "Replaces (v1)" line was removed in C2; this contract took over the
 prefix in #315, and the public edge serves it.
 
 `GET /healthz` remains the unversioned operator health contract outside the
-versioned product routes. `GET /` serves a static landing page
-(`apps/api/src/home.html`) and `GET /docs` serves the static API reference
-page (`apps/api/src/docs.html`); both describe this contract and neither is
-part of it. `GET /openapi.json` is not served.
+versioned product routes. The landing page and the API reference are a
+separate static site ([`site/`](../site/README.md)) outside the API binary;
+both describe this contract and neither is part of it. The API answers `GET /`
+and `GET /docs` like any unknown route. `GET /openapi.json` is not served yet.
 
 ## Shared Route Rules
 
