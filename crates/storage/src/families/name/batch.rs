@@ -17,7 +17,8 @@ use super::{
     compose::{Parts, Surface, compose},
     heads::{Heads, load_heads},
     loaders::{
-        histories, migrations, node_pointers, resource_pointers, resources, root_releases, surfaces,
+        histories, migrations, named_resource_pointers, node_pointers, resource_pointers,
+        resources, root_releases, surfaces,
     },
     selection::select,
     serving::{PointerRow, ownerless_serving, root_tld_serving},
@@ -243,6 +244,28 @@ async fn load_chain(
         })
         .collect();
     let (pointers, roots) = resource_pointers(conn, chain_id, &wanted, &nodes).await?;
+    // A resource whose latest pointer came from another name: the name's own latest pointer on
+    // it is read by (resource, name).
+    let mut contested: BTreeSet<(String, String)> = BTreeSet::new();
+    for facts in &facts {
+        let name = &facts.input.logical_name_id;
+        let resources = facts
+            .candidates
+            .iter()
+            .map(|c| c.resource_id.as_str())
+            .chain(facts.events.iter().filter_map(|e| e.resource_id.as_deref()));
+        for resource in resources {
+            if pointers
+                .get(resource)
+                .is_some_and(|pointer| pointer.logical_name_id.as_deref() != Some(name.as_str()))
+            {
+                contested.insert((resource.to_owned(), name.clone()));
+            }
+        }
+    }
+    let contested: Vec<(String, String)> = contested.into_iter().collect();
+    let named_pointers =
+        named_resource_pointers(conn, chain_id, publication.block_number, &contested).await?;
     let node_pointers = node_pointers(conn, chain_id, &nodes).await?;
     let root_resources: Vec<String> = roots
         .values()
@@ -321,7 +344,12 @@ async fn load_chain(
                 selection: &decided,
                 history,
                 serving: serving.as_ref(),
-                resource_pointer: resolver_resource.and_then(|resource| pointers.get(resource)),
+                resource_pointer: resolver_resource.and_then(|resource| {
+                    pointers
+                        .get(resource)
+                        .filter(|pointer| pointer.logical_name_id.as_deref() == Some(name))
+                        .or_else(|| named_pointers.get(&(resource.to_owned(), name.to_owned())))
+                }),
                 node_pointer: node_pointers.get(&node),
                 heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),
