@@ -271,6 +271,64 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
     database.cleanup().await
 }
 
+// The composed listings walk candidates in batches of at least 200, which a fixture of two names
+// never fills; the test-only seam shrinks the batch so every page below straddles one (the
+// storage-level comparison with cursors is apps/phase-runner/tests/families_shadow_name_batches.rs).
+#[tokio::test]
+async fn v2_name_listings_are_the_same_across_candidate_batches() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
+             declared_summary, support_status, chain_positions, canonicality_summary,
+             manifest_version)
+         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
+                jsonb_build_object('target_block_number', lineage.block_number,
+                                   'target_block_hash', lineage.block_hash),
+                jsonb_build_object('state', 'canonical_lineage'), 1
+         FROM bigname_phase.chain_lineage lineage
+         WHERE lineage.chain_id = $1 AND lineage.block_number = 240",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_RESOLVER)
+    .execute(&database.pool)
+    .await?;
+    let after = switch_timestamp(1_700_000_000)?;
+    let before = switch_timestamp(1_960_000_000)?;
+    for batch in [1, 2] {
+        for uri in [
+            "/v1/search?q=eth&match=contains&page_size=1".to_owned(),
+            "/v1/search?q=a&match=prefix&page_size=1".to_owned(),
+            format!(
+                "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
+                 &order=asc&page_size=1"
+            ),
+            format!(
+                "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
+                 &order=desc&page_size=1"
+            ),
+        ] {
+            let pages = bigname_storage::families::name::seams::with_batch_size(
+                batch,
+                assert_switch_differential_pages(&database, &uri),
+            )
+            .await?;
+            assert!(
+                pages.iter().any(|page| page["data"].as_array().is_some_and(|rows| !rows.is_empty())),
+                "{uri}: {pages:#?}"
+            );
+        }
+        let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+        let pages = bigname_storage::families::name::seams::with_batch_size(
+            batch,
+            assert_switch_differential_pages_in(&database, &uri, "/data/bound_names"),
+        )
+        .await?;
+        assert_eq!(pages.len(), 2, "{pages:#?}");
+    }
+    database.cleanup().await
+}
+
 // A family rebuild in flight (the marker `bootstrap_pending`) leaves the families half built, so
 // no composed row is servable: every route whose name rows are composed answers a stale 409 with
 // the switch on, with its fence's wording when the fence refuses first (the collection routes
