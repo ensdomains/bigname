@@ -57,7 +57,8 @@ pub async fn load_family_resolves_to_page(
         coin_types.push(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY["addr:".len()..].to_owned());
     }
     let mut snapshot = crate::families::read_snapshot(pool).await?;
-    let (rows, names) = compose_address_record_rows(&mut snapshot, address, &coin_types).await?;
+    let (rows, names) =
+        compose_address_record_rows(&mut snapshot, address, &coin_types, namespaces).await?;
     let page = load_address_records_page_from(
         &mut snapshot,
         RowSource::Composed {
@@ -108,7 +109,8 @@ pub async fn load_family_resolves_to_evm_page(
     .fetch_all(&mut *snapshot)
     .await
     .with_context(|| format!("failed to load the indexed coin types of {address}"))?;
-    let (rows, names) = compose_address_record_rows(&mut snapshot, address, &coin_types).await?;
+    let (rows, names) =
+        compose_address_record_rows(&mut snapshot, address, &coin_types, namespaces).await?;
     let page = load_address_records_evm_page_from(
         &mut snapshot,
         RowSource::Composed {
@@ -136,6 +138,7 @@ async fn compose_address_record_rows(
     conn: &mut PgConnection,
     address: &str,
     coin_types: &[String],
+    namespaces: Option<&[String]>,
 ) -> Result<(Value, Value)> {
     let address = address.to_ascii_lowercase();
     let candidates = if coin_types.is_empty() {
@@ -153,6 +156,11 @@ async fn compose_address_record_rows(
     }
     let (mut rows, mut names) = (Vec::new(), Vec::new());
     for (chain_id, resources) in by_chain {
+        // Resolve the requested name scope before a different chain's rebuild can veto it.
+        let ids = names_reaching(conn, &chain_id, &resources, namespaces).await?;
+        if ids.is_empty() {
+            continue;
+        }
         let publication = servable_publication(conn, &chain_id).await?;
         let mut records: BTreeMap<Uuid, Vec<RecordRow>> = BTreeMap::new();
         for resource_id in resources {
@@ -174,8 +182,6 @@ async fn compose_address_record_rows(
         if records.is_empty() {
             continue;
         }
-        let resources: Vec<Uuid> = records.keys().copied().collect();
-        let ids = names_reaching(conn, &chain_id, &resources).await?;
         let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
         for row in composed.values() {
             let Some(record_resource) = serves_records_through(row) else {
@@ -224,9 +230,11 @@ async fn names_reaching(
     conn: &mut PgConnection,
     chain_id: &str,
     resources: &[Uuid],
+    namespaces: Option<&[String]>,
 ) -> Result<Vec<String>> {
     sqlx::query_scalar(
         "/* storage:families.records.names_reaching_resources */
+         SELECT names.logical_name_id FROM (
          SELECT candidate.logical_name_id
          FROM bigname_phase.project_binding_candidate candidate
          WHERE candidate.chain_id = $1 AND candidate.resource_id = ANY($2::uuid[])
@@ -249,10 +257,16 @@ async fn names_reaching(
          JOIN bigname_phase.normalized_events event
            ON event.event_identity = pointer.event_identity
          WHERE pointer.chain_id = $1 AND pointer.resource_id = ANY($2::uuid[])
-           AND event.logical_name_id IS NOT NULL",
+           AND event.logical_name_id IS NOT NULL
+         ) names
+         WHERE $3::text[] IS NULL OR EXISTS (
+             SELECT 1 FROM bigname_phase.name_surfaces surface
+             WHERE surface.logical_name_id = names.logical_name_id
+               AND surface.namespace = ANY($3::text[]))",
     )
     .bind(chain_id)
     .bind(resources)
+    .bind(namespaces)
     .fetch_all(&mut *conn)
     .await
     .context("failed to load the names reaching the record resources")
@@ -276,7 +290,7 @@ fn address_record_row(
         "coin_type": record.coin_type,
         "logical_name_id": row.logical_name_id,
         "namespace": row.namespace,
-        "raw_name": row.normalized_name,
+        "raw_name": row.canonical_display_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
         "resource_id": row.resource_id,
