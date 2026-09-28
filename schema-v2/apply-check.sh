@@ -663,7 +663,8 @@ for migration_file in \
     "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql" \
     "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
-    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql"
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -972,7 +973,9 @@ for migration_file in \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
-    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql"
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4263,6 +4266,7 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_named_resource_pointer'),
             ('project_node_record_partition'),
             ('project_node_record_value'),
             ('project_record_id_value'),
@@ -4368,6 +4372,7 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_named_resource_pointer'),
             ('project_node_record_partition'),
             ('project_node_record_value'),
             ('project_record_id_value'),

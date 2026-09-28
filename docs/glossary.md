@@ -2523,7 +2523,7 @@ the reducer under `crates/project/src/families/` that writes them:
 | F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
 | F3, resolver classification | `project_resolver_classification` | `classification.rs` |
 | F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
-| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer`, `project_named_resource_pointer` | `resolver.rs` |
 | F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
 | F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
 | F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
