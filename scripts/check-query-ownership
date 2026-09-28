@@ -29,17 +29,6 @@ run_rg() {
   esac
 }
 
-storage_graphql_paths="$(
-  find crates/storage/src -type f -print \
-    | run_rg '/graphql[[:alnum:]_]*(\.rs$|/)' \
-    | sort
-)"
-storage_graphql_modules="$(
-  run_rg -n \
-    '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+graphql[[:alnum:]_]*[[:space:]]*[;{]' \
-    crates/storage/src --glob '*.rs'
-)"
-
 # These two API snapshot helpers were individually reviewed. Only these exact files are allowed;
 # children of snapshot-named directories and other snapshot-named paths still fail the heuristic.
 readonly -a REVIEWED_API_STORAGE_HELPERS=(
@@ -76,16 +65,8 @@ api_storage_read_modules="$(
     apps/api/src --glob '*.rs'
 )"
 
-if [[ -n "$storage_graphql_paths" || -n "$storage_graphql_modules" \
-   || -n "$api_storage_read_paths" || -n "$api_storage_read_modules" ]]; then
+if [[ -n "$api_storage_read_paths" || -n "$api_storage_read_modules" ]]; then
   printf '%s\n' 'query ownership check failed:' >&2
-  if [[ -n "$storage_graphql_paths" ]]; then
-    printf '%s\n%s\n' 'GraphQL-named files belong in apps/api:' "$storage_graphql_paths" >&2
-  fi
-  if [[ -n "$storage_graphql_modules" ]]; then
-    printf '%s\n%s\n' 'GraphQL-named storage module declarations are forbidden:' \
-      "$storage_graphql_modules" >&2
-  fi
   if [[ -n "$api_storage_read_paths" ]]; then
     printf '%s\n%s\n' 'Storage-owned read-pattern paths are forbidden in apps/api:' \
       "$api_storage_read_paths" >&2

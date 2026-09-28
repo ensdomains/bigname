@@ -235,7 +235,7 @@ $ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
   <li>When part of an answer could not be established, the response carries <code>meta.completeness</code>, <code>meta.unsupported_fields</code>, or <code>unsupported_reason</code>. An empty array means the index knows the set is empty.</li>
   <li>A query parameter the route does not list is rejected with <code>400 invalid_input</code>.</li>
 </ol>
-<p>The process also serves <a href="#healthz">healthz(8)</a> and <code>POST /graphql</code>, an ENS-subgraph compatibility subset with its own contract that this reference does not cover.</p>` },
+<p>The process also serves <a href="#healthz">healthz(8)</a>.</p>` },
     { h: 'Reading this reference', id: 'reading', html: `<p>Each route has a manual page. The synopsis shows the path with every accepted query parameter; square brackets mark optional ones. The request section is live: edit the line, press enter, and the response prints beneath it. The description covers what the route returns and when. Notes hold the edge cases and are collapsed until you open them.</p><p>Type <code>/</code> to filter the index and <code>[</code> or <code>]</code> to move between pages.</p>` },
   ],
 },
