@@ -810,19 +810,21 @@ may issue 201 provider keys when the primary-address selector was absent; more
 than 200 inventory-derived selectors still returns the same error.
 
 `GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
-typed `verification` shapes. Every indexed answer reads
-`bigname_phase.primary_names_current`; `source` selection only narrows the
-answer list and does not select a different indexed projection. A successful
+typed `verification` shapes. With the
+[publication switch](glossary.md#publication-switch) off, indexed answers read
+`bigname_phase.primary_names_current`; with it on, they read the reverse-claim
+families at their publication. The request’s `source` parameter only narrows
+the answer list and does not override that process-wide publication source. A successful
 stored raw claim is normalized for the indexed product name even when its raw
 spelling was not already normalized. The verified producer is a fresh ENS/60
 lookup at the current readable Ethereum position. It applies the raw-claim
 normalization gate before forward resolution and persists neither a legacy
 execution outcome nor a divergence row. When `source` is omitted, the route
 returns the indexed and verified answers together only if the current Ethereum
-`chain_heads` position and exact completed `project` publication generation
-match that lookup before verified execution and remain unchanged after reading
-the indexed tuple from
-`bigname_phase.primary_names_current`; otherwise the whole
+`chain_heads` position and exact selected publication generation (Project with
+the switch off, the family marker with it on) match that lookup before verified
+execution and remain unchanged after reading the indexed tuple from that
+source; otherwise the whole
 request returns `409 stale` instead of assigning answers from different
 positions to one `meta.as_of`. The indexed answer depends only on the projected
 tuple: a live reverse claim or live lookup failure changes only the verified
@@ -830,7 +832,7 @@ answer. Other verified primary-name tuples are explicit `unsupported`; indexed
 answers remain available where their projection supports the requested tuple.
 Provider transport failures abort this route with `500 internal_error` rather
 than producing a verified answer entry with `status=stale`.
-The post-call guard also revalidates the Ethereum project generation and both
+The post-call guard also revalidates the selected Ethereum publication generation and both
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
@@ -920,7 +922,7 @@ record fields (`GET /v1/names/{name}`, both sources) and for
 `GET /v1/diagnostics/names/{name}/records`, the address-name relations of
 `GET /v1/addresses/{address}/names`, recomputed at read from the address index
 and the composed names, its `relation=resolves_to` pages (both the exact coin
-type and `coin_type=evm`) from the record-id index alone, the record counts of
+type and `coin_type=evm`) from the node-keyed and record-ID inverse address indexes, the record counts of
 `include=counts`, and the indexed primary-name claim of
 `GET /v1/addresses/{address}/primary-name`. The verified lookup engine keeps
 reading the served tables until the flip. The following routes keep their own
