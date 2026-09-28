@@ -265,7 +265,7 @@ async fn load_history_internal(
 
 /// A read-only transaction with one snapshot for every statement of a history read: the
 /// attribution reads, the cursor and summary reads, and the row read.
-async fn begin_history_snapshot(
+pub(super) async fn begin_history_snapshot(
     pool: &PgPool,
     read: &str,
 ) -> Result<sqlx::Transaction<'static, Postgres>> {

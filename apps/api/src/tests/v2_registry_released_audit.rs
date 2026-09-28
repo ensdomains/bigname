@@ -5,7 +5,6 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
     StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
-use bigname_project::{BatchRequest, Engine, RunMode};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
@@ -360,16 +359,7 @@ async fn released_materialized_registry_audits_keep_followable_resource_handles(
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     for (block, handle, status) in [(122, lease, "active"), (123, registry, "released")] {
-        Engine::new(database.pool.clone())
-            .run_batch(BatchRequest {
-                chain_id: CHAIN.into(),
-                target_block: block,
-                affected_from_block: 120,
-                affected_to_block: block,
-                resume_current: None,
-                mode: RunMode::Normal,
-            })
-            .await?;
+        publish_test_families_on(&database.pool, CHAIN, block).await?;
         let mut resolver = resolver_current_row(CHAIN, RESOLVER);
         resolver.chain_positions = json!({CHAIN:{"chain_id":CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":timestamp(if block==123 { RELEASE_TIME } else { 1_700_000_000+block }).format(&time::format_description::well_known::Rfc3339)?}});
         database

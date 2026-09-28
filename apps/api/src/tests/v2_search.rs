@@ -242,21 +242,14 @@ async fn v2_search_normalizes_q_and_filters_namespace() -> Result<()> {
 }
 
 #[tokio::test]
-async fn name_current_contains_nocase_normalizes_ascii_query_without_touching_stored_names(
+async fn v2_search_contains_normalizes_ascii_query_without_touching_stored_names(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
 
-    let count = bigname_storage::count_name_current_list(
-        &database.pool,
-        &bigname_storage::NameCurrentListFilter {
-            namespace: Some("ens".to_owned()),
-            contains_nocase: Some("AL".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await?;
-    assert_eq!(count, 2);
+    let page = v2_search_payload_for_database(&database,
+        "/v1/search?q=AL&match=contains&namespace=ens").await?;
+    assert_eq!(page["data"].as_array().map(Vec::len), Some(2));
 
     database.cleanup().await
 }

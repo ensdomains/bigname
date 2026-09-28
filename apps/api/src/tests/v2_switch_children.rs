@@ -1,8 +1,3 @@
-// The child lists under the publication switch (TYR-36 step 7b slice 2b): the subnames page, the
-// child counts and the registry labels come from the family child relation and the name summary
-// family (`project_name_summary`) with the switch on, and answer the same body as the served
-// `children_current` reads with it off, `meta.as_of` excepted. Project and the owned key
-// families both build the fixture from the same normalized events.
 
 const CHILD_ROOT_REGISTRY: &str = "0x00000000000000000000000000000000000000b0";
 const CHILD_ALPHA_REGISTRY: &str = "0x00000000000000000000000000000000000000b1";
@@ -203,15 +198,15 @@ async fn seed_switch_children_fixture_expiring(
         ],
     )
     .await?;
-    publish_project_and_families(database, 240).await
+    publish_test_families(database, 240).await
 }
 
 #[tokio::test]
-async fn v2_subnames_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+async fn v2_subnames_from_families() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_children_fixture(&database).await?;
     let pages =
-        assert_switch_differential_pages(&database, "/v1/names/alpha.eth/subnames?page_size=1")
+        read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=1")
             .await?;
     let names: Vec<&Value> = pages
         .iter()
@@ -229,7 +224,7 @@ async fn v2_subnames_are_the_same_with_the_switch_off_and_on() -> Result<()> {
         "{pages:#?}"
     );
     assert_eq!(pages[0]["total_count"], json!(4), "{pages:#?}");
-    let counted = assert_switch_differential_pages(
+    let counted = read_family_pages(
         &database,
         "/v1/names/alpha.eth/subnames?include=counts&page_size=5",
     )
@@ -257,30 +252,25 @@ async fn v2_subnames_are_the_same_with_the_switch_off_and_on() -> Result<()> {
         "/v1/names/alpha.eth/subnames?q=o&page_size=2",
         "/v1/names/one.alpha.eth/subnames?include=counts&page_size=2",
     ] {
-        assert_switch_differential_pages(&database, uri).await?;
+        read_family_pages(&database, uri).await?;
     }
     // The name record's subname count reads the same per-parent count.
     let (status, alpha) =
-        assert_switch_differential(&database, "/v1/names/alpha.eth?include=counts").await?;
+        read_family_response(&database, "/v1/names/alpha.eth?include=counts").await?;
     assert_eq!(status, StatusCode::OK, "{alpha:#}");
     let (status, _) =
-        assert_switch_differential(&database, "/v1/names/missing.eth/subnames?page_size=1")
+        read_family_response(&database, "/v1/names/missing.eth/subnames?page_size=1")
             .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_switch_on_ignores_served_tables(
-        &database,
-        "/v1/names/alpha.eth/subnames?include=counts&page_size=5",
-        &["children_current", "name_current"],
-    )
-    .await?;
+
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_registry_labels_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+async fn v2_registry_labels_from_families() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_children_fixture(&database).await?;
-    let pages = assert_switch_differential_pages(
+    let pages = read_family_pages(
         &database,
         &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?page_size=1"),
     )
@@ -296,38 +286,29 @@ async fn v2_registry_labels_are_the_same_with_the_switch_off_and_on() -> Result<
         "{pages:#?}"
     );
     assert_eq!(pages[0]["total_count"], json!(2), "{pages:#?}");
-    assert_switch_differential_pages(
+    read_family_pages(
         &database,
         &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?include=counts&page_size=5"),
     )
     .await?;
-    let (status, registry) = assert_switch_differential(
+    let (status, registry) = read_family_response(
         &database,
         &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}?include=counts"),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{registry:#}");
     assert_eq!(registry["data"]["counts"]["labels"], json!(2), "{registry:#}");
-    assert_switch_differential(&database, &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}"))
+    let (status, registry) = read_family_response(&database, &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}"))
         .await?;
-    assert_switch_differential_pages(
+    assert_eq!(status, StatusCode::OK, "{registry:#}");
+    read_family_pages(
         &database,
         &format!("/v1/registries/1/{CHILD_ROOT_REGISTRY}/labels?page_size=5"),
     )
     .await?;
-    assert_switch_on_ignores_served_tables(
-        &database,
-        &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?page_size=5"),
-        &["children_current"],
-    )
-    .await?;
+
     database.cleanup().await
 }
-
-// A family rebuild that begins after a route's fence passed, or a marker another build wrote,
-// leaves no servable publication: the child reads under the switch fail with
-// `FamilyPublicationUnavailable`, the error the API answers with the stale 409, never an empty
-// list read against a half-built family.
 #[tokio::test]
 async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -349,7 +330,7 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
         let pool = &database.pool;
         let parent = &parent;
         let registry = &registry;
-        bigname_storage::publication_source::with_serve_from_families(true, async move {
+        async move {
             let unavailable = |read: &str, result: Result<(), anyhow::Error>| {
                 let error = result.expect_err(&format!("{label}: {read} must refuse"));
                 assert!(
@@ -390,15 +371,11 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
                     .map(drop),
             );
             anyhow::Ok(())
-        })
+        }
         .await?;
     }
     database.cleanup().await
 }
-
-/// Runs `uri` with the switch on, pausing before every composed or child read's snapshot, and at
-/// the `flip_at`-th pause (from 1; none when 0) runs `flip` on the family marker before resuming.
-/// Returns the answer and how many reads paused.
 async fn v2_get_with_marker_flip_at(
     database: &TestDatabase,
     uri: &str,
@@ -410,10 +387,7 @@ async fn v2_get_with_marker_flip_at(
     let request = bigname_storage::families::name::seams::with_pause_before_snapshot(
         std::sync::Arc::clone(&reached),
         std::sync::Arc::clone(&resume),
-        bigname_storage::publication_source::with_serve_from_families(
-            true,
-            v2_get_response(database, uri),
-        ),
+        v2_get_response(database, uri),
     );
     tokio::pin!(request);
     let mut paused = 0;
