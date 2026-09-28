@@ -13,8 +13,19 @@ async fn mainnet_fixture_head(database: &TestDatabase) -> Result<(i64, String)> 
 
 /// Rebuild the mainnet families at the fixture's selected head after new inputs were added.
 async fn republish_mainnet_fixture(database: &TestDatabase) -> Result<()> {
-    let (block, hash) = mainnet_fixture_head(database).await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+    republish_fixture_chain(database, "ethereum-mainnet").await
+}
+
+/// Rebuild one chain's families at the head the fixture selected for it: Project publishes every
+/// selected head, with or without names on it.
+async fn republish_fixture_chain(database: &TestDatabase, chain: &str) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(&database.pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, chain, block, &hash).await
 }
 
 /// Select and publish a new mainnet head. The families follow their retained inputs to it, so
@@ -42,8 +53,44 @@ struct RelationNameAccounts<'a> {
     resolver: &'a str,
 }
 
-/// An ENSv1 `.eth` name with a registrar grant, a registry transfer, a resolver pointer and a
-/// resolver `addr:60` write, all at `block_number`, then a family rebuild at that block.
+/// The namespace, chain, selector slot and source families of a fixture name: a `.base.eth`
+/// name is a Basenames name on Base, every other name an ENSv1 name on mainnet.
+struct RelationNameSources {
+    namespace: &'static str,
+    chain: &'static str,
+    slot: &'static str,
+    arm: &'static str,
+    registrar: &'static str,
+    registry: &'static str,
+    resolver: &'static str,
+}
+
+fn relation_name_sources(name: &str) -> RelationNameSources {
+    if name.ends_with(".base.eth") {
+        RelationNameSources {
+            namespace: "basenames",
+            chain: "base-mainnet",
+            slot: "base",
+            arm: "basenames",
+            registrar: "basenames_base_registrar",
+            registry: "basenames_base_registry",
+            resolver: "basenames_base_resolver",
+        }
+    } else {
+        RelationNameSources {
+            namespace: "ens",
+            chain: "ethereum-mainnet",
+            slot: "ethereum",
+            arm: "ens_v1",
+            registrar: "ens_v1_registrar_l1",
+            registry: "ens_v1_registry_l1",
+            resolver: "ens_v1_resolver_l1",
+        }
+    }
+}
+
+/// A name with a registrar grant, a registry transfer, a resolver pointer and a resolver
+/// `addr:60` write, all at `block_number`, then a family rebuild of its chain at that block.
 /// `ids` seeds the resource, token lineage and binding identities (`ids`, `ids + 1`, `ids + 2`).
 async fn seed_relation_name(
     database: &TestDatabase,
@@ -52,15 +99,16 @@ async fn seed_relation_name(
     block_number: i64,
     accounts: RelationNameAccounts<'_>,
 ) -> Result<()> {
+    let sources = relation_name_sources(name);
     let hash = format!("0xname{block_number:02x}");
     database
-        .seed_snapshot_selector_chain_positions(&json!({"ethereum": {
-            "chain_id": "ethereum-mainnet", "block_number": block_number, "block_hash": hash,
+        .seed_snapshot_selector_chain_positions(&json!({sources.slot: {
+            "chain_id": sources.chain, "block_number": block_number, "block_hash": hash,
             "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60)
         }}))
         .await?;
     seed_relation_name_inputs_at(database, name, ids, block_number, &hash, accounts).await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block_number, &hash).await
+    rebuild_fixture_families(&database.pool, sources.chain, block_number, &hash).await
 }
 
 /// The inputs of `seed_relation_name` on an existing block, without the rebuild, for fixtures
@@ -73,11 +121,12 @@ async fn seed_relation_name_inputs_at(
     hash: &str,
     accounts: RelationNameAccounts<'_>,
 ) -> Result<()> {
-    let chain = "ethereum-mainnet";
+    let sources = relation_name_sources(name);
+    let chain = sources.chain;
     let resource = Uuid::from_u128(ids);
     let logical = seed_family_identity_inputs(
         &database.pool,
-        "ens",
+        sources.namespace,
         name,
         chain,
         block_number,
@@ -85,14 +134,14 @@ async fn seed_relation_name_inputs_at(
         resource,
         Uuid::from_u128(ids + 1),
         Uuid::from_u128(ids + 2),
-        "ens_v1",
+        sources.arm,
     )
     .await?;
     let manifest = declare_family_fixture_resolver(
         &database.pool,
-        "ens",
+        sources.namespace,
         chain,
-        "ens_v1_resolver_l1",
+        sources.resolver,
         accounts.resolver,
     )
     .await?;
@@ -100,23 +149,23 @@ async fn seed_relation_name_inputs_at(
     let facts = [
         (
             "RegistrationGranted",
-            "ens_v1_registrar_l1",
+            sources.registrar,
             json!({"authority_kind":"registrar", "registrant":accounts.registrant,
                 "expiry":1_900_000_000_i64}),
         ),
         (
             "AuthorityTransferred",
-            "ens_v1_registry_l1",
+            sources.registry,
             json!({"source_event":"Transfer", "node":node, "owner":accounts.controller}),
         ),
         (
             "ResolverChanged",
-            "ens_v1_registry_l1",
+            sources.registry,
             json!({"node":node, "resolver":accounts.resolver}),
         ),
         (
             "RecordChanged",
-            "ens_v1_resolver_l1",
+            sources.resolver,
             json!({"source_event":"AddrChanged", "node":node, "resolver":accounts.resolver,
                 "record_key":"addr:60", "record_family":"addr", "selector_key":"60",
                 "value":"0x0000000000000000000000000000000000000abc"}),
@@ -128,7 +177,7 @@ async fn seed_relation_name_inputs_at(
         .map(|(log, (kind, family, after))| {
             let named = kind != "RecordChanged";
             let mut event = history_event(
-                &format!("relation-{name}-{kind}"),
+                &format!("relation-{ids:x}-{kind}"),
                 named.then_some(logical.as_str()),
                 named.then_some(resource),
                 Some(chain),
@@ -138,6 +187,7 @@ async fn seed_relation_name_inputs_at(
                 Some(log as i64),
                 CanonicalityState::Canonical,
             );
+            event.namespace = sources.namespace.into();
             event.event_kind = kind.into();
             event.source_family = family.into();
             event.manifest_version = 1;

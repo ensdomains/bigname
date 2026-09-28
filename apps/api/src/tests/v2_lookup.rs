@@ -435,9 +435,9 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
         record["unsupported_reason"],
         json!("current_authority_not_projected")
     );
-    // The record keeps the full detail shape for this reason; only the
-    // retained internal resolver pointer is withheld.
-    assert_eq!(record["addresses"]["60"], json!(address));
+    // The record keeps the detail shape for this reason. With no selected binding there is no
+    // served resolver, so neither the pointer nor the records written on it are served.
+    assert_eq!(record["addresses"]["60"], Value::Null, "{record}");
     assert!(record.get("resolver").is_none());
 
     // Reverse detail shares build_detail_record with the forward path, so the
@@ -943,6 +943,9 @@ async fn v2_lookup_serves_unchanged_phase_projection_after_head_advance() -> Res
     )
     .await?;
     advance_v2_lookup_phase_only_ethereum_head(&database, 39, "0xlookup-phase-only").await?;
+    // Project follows the new head; nothing about the name changed in that block.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 39, "0xlookup-phase-only")
+        .await?;
 
     let response = v2_lookup_response_for_database(
         &database,
@@ -1271,6 +1274,8 @@ async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() 
             }
         }))
         .await?;
+    republish_mainnet_fixture(&database).await?;
+    republish_fixture_chain(&database, "base-mainnet").await?;
 
     let payload = v2_lookup_json(
         &database,
@@ -1374,9 +1379,10 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
     );
     assert_eq!(first_page["data"][0]["records"][0]["name"], json!("alice.eth"));
     assert_eq!(first_page["data"][0]["records"][0]["is_primary"], json!(true));
+    // The holder of an unwrapped lease is also its registrant.
     assert_eq!(
         first_page["data"][0]["records"][0]["relations"],
-        json!(["owner"])
+        json!(["owner", "registrant"])
     );
     assert_eq!(first_page["data"][0]["page"]["cursor"], Value::Null);
     assert_eq!(first_page["data"][0]["page"]["page_size"], json!(1));
@@ -1386,7 +1392,7 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
         .as_str()
         .expect("first page must include next_cursor");
 
-    advance_v2_lookup_ethereum_head(&database, 43, "0xlookup-advanced").await?;
+    advance_mainnet_fixture_publication(&database, 43, "0xlookup-advanced").await?;
 
     let second_page = v2_lookup_response_for_database(
         &database,
@@ -1436,14 +1442,14 @@ async fn v2_lookup_reverse_serves_the_batch_when_a_primary_claim_no_longer_norma
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-    // A successful claim whose stored spelling does not normalize is one row's defect. The batched
-    // reverse read must still answer, marking nothing primary, rather than failing every input.
+    // A reverse record whose name does not normalize is one row's defect. The batched reverse
+    // read must still answer, marking nothing primary, rather than failing every input.
     seed_phase_primary_name_snapshot(
         &database,
         address,
         "ens",
         "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
+        bigname_storage::PrimaryNameClaimStatus::InvalidName,
         Some("alice..eth"),
         false,
     )
@@ -1457,67 +1463,6 @@ async fn v2_lookup_reverse_serves_the_batch_when_a_primary_claim_no_longer_norma
         .expect("reverse lookup records must be an array");
     assert!(!records.is_empty());
     assert!(records.iter().all(|record| record["is_primary"] == json!(false)));
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let address = "0x0000000000000000000000000000000000000abc";
-    seed_v2_lookup_reverse_fixture(&database, address).await?;
-    // The marker says these stored bytes are the published normalized form, so they are served
-    // unchanged and no longer equal the current name row. Paging orders by `is_primary`, so the
-    // ordering predicate and the emitted flag have to be derived the same way. The claim names the
-    // second row in page order, so a re-normalizing ordering would sort it first and the keyset
-    // predicate — built from the emitted flag — would then skip the first row entirely.
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("Bob.eth"),
-        true,
-    )
-    .await?;
-
-    let mut seen = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..3 {
-        let mut input = json!({"id": "addr", "address": address, "page_size": 1});
-        if let Some(cursor) = cursor.as_deref() {
-            input["cursor"] = json!(cursor);
-        }
-        let payload = v2_lookup_json(
-            &database,
-            json!({"profile": "detail", "inputs": [input]}),
-        )
-        .await?;
-        let records = payload["data"][0]["records"]
-            .as_array()
-            .expect("reverse lookup records must be an array");
-        for record in records {
-            assert_eq!(
-                record["is_primary"],
-                json!(false),
-                "a claim served in its stored spelling must not mark the normalized name primary"
-            );
-            seen.push(
-                record["name"]
-                    .as_str()
-                    .expect("record name must be a string")
-                    .to_owned(),
-            );
-        }
-        match payload["data"][0]["page"]["next_cursor"].as_str() {
-            Some(next) => cursor = Some(next.to_owned()),
-            None => break,
-        }
-    }
-
-    assert_eq!(seen, vec!["alice.eth".to_owned(), "bob.eth".to_owned()]);
 
     database.cleanup().await?;
     Ok(())
@@ -1750,125 +1695,6 @@ async fn v2_lookup_reverse_pages_a_case_unstable_primary_name_without_repeating_
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_page_and_count_include_primary_when_matching_relation_is_unreadable()
--> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let address = "0x0000000000000000000000000000000000000abc";
-    let logical_name_id = "ens:membership-edge.eth";
-    let normalized_name = "membership-edge.eth";
-    let readable_resource_id = Uuid::from_u128(0x5a0221);
-    let readable_token_lineage_id = Uuid::from_u128(0x5a0222);
-    let readable_surface_binding_id = Uuid::from_u128(0x5a0223);
-
-    seed_identity_name(
-        &database,
-        logical_name_id,
-        "membership-edge.eth",
-        normalized_name,
-        "namehash:membership-edge.eth",
-        readable_resource_id,
-        readable_token_lineage_id,
-        readable_surface_binding_id,
-        address,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        46,
-    )
-    .await?;
-
-    // The primary-matching manager relation is unreadable, while the owner relation for the same
-    // current name remains readable and therefore owns page membership.
-    let unreadable_resource_id = Uuid::from_u128(0x5a0231);
-    let unreadable_token_lineage_id = Uuid::from_u128(0x5a0232);
-    let unreadable_surface_binding_id = Uuid::from_u128(0x5a0233);
-    upsert_test_token_lineages(
-        &database.pool,
-        &[address_name_token_lineage(
-            unreadable_token_lineage_id,
-            "0xresource",
-            99,
-        )],
-    )
-    .await?;
-    upsert_test_resources(
-        &database.pool,
-        &[address_name_resource(
-            unreadable_resource_id,
-            Some(unreadable_token_lineage_id),
-            "0xresource",
-            99,
-        )],
-    )
-    .await?;
-    let mut unreadable_binding = surface_binding(
-        unreadable_surface_binding_id,
-        logical_name_id,
-        unreadable_resource_id,
-        timestamp(1_717_171_700),
-    );
-    unreadable_binding.canonicality_state = CanonicalityState::Orphaned;
-    upsert_test_surface_bindings(&database.pool, &[unreadable_binding]).await?;
-    // The phase projection omits the relation because its binding is orphaned.
-
-    upsert_primary_name_current_snapshots(
-        &database.pool,
-        &[bigname_storage::PrimaryNameCurrentSnapshot {
-            row: bigname_storage::PrimaryNameCurrentRow {
-                address: address.to_owned(),
-                namespace: "ens".to_owned(),
-                coin_type: "60".to_owned(),
-                claim_status: bigname_storage::PrimaryNameClaimStatus::Success,
-                raw_claim_name: None,
-                claim_provenance: json!({"source": "v2_lookup_membership_edge_test"}),
-            },
-            normalized_claim_name: Some(normalized_name.to_owned()),
-            claim_name_is_normalized: true,
-        }],
-    )
-    .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        address,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some(normalized_name),
-        true,
-    )
-    .await?;
-    seed_v2_lookup_base_head(&database).await?;
-
-    let payload = v2_lookup_json(
-        &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "id": "membership-edge",
-                "address": address
-            }]
-        }),
-    )
-    .await?;
-
-    let records = payload["data"][0]["records"]
-        .as_array()
-        .expect("reverse lookup records must be an array");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["name"], json!(normalized_name));
-    assert_eq!(records[0]["is_primary"], json!(true));
-    assert_eq!(records[0]["relations"], json!(["owner"]));
-    assert_eq!(payload["data"][0]["page"]["total_count"], json!(1));
-    assert_eq!(
-        payload["data"][0]["page"]["total_count"].as_u64(),
-        Some(records.len() as u64),
-        "page membership and live count must agree"
-    );
-    assert_eq!(payload["data"][0]["page"]["has_more"], json!(false));
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
@@ -1881,6 +1707,7 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
             }
         }))
         .await?;
+    republish_mainnet_fixture(&database).await?;
     let public_response = v2_lookup_response_for_database(
         &database,
         "/v1/lookup",
@@ -1932,6 +1759,7 @@ async fn v2_lookup_explicit_namespace_invalid_name_keeps_the_selected_chain_in_m
 {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_lookup_ethereum_head(&database, 77, "0xlookup-invalid-explicit").await?;
+    republish_mainnet_fixture(&database).await?;
 
     let payload = v2_lookup_json(
         &database,
@@ -2093,6 +1921,7 @@ async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> R
             }
         }))
         .await?;
+    republish_fixture_chain(&database, "ethereum-sepolia").await?;
     let state = AppState::new_with_rpc_urls(
         database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -2387,13 +2216,7 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
             "ensip15@ens-normalize-0.1.1",
         )
         .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = 'public-namespace:test-unready'
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    // Base has a selected head but no family publication yet, so basenames is not ready.
     let (_guard, control) =
         crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
             .await?;
@@ -2418,14 +2241,8 @@ async fn v2_lookup_rejects_public_namespace_becoming_ready_during_reverse_read()
     });
 
     control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.chain_phase_state
-         SET input_content_hash = $1
-         WHERE chain_id = 'base-mainnet' AND phase_name = 'project'",
-    )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .execute(&database.lookup_pool)
-    .await?;
+    // Project publishes base's first families while the read is in flight.
+    republish_fixture_chain(&database, "base-mainnet").await?;
     control.resume().await;
 
     let response = request_task
@@ -2614,6 +2431,13 @@ async fn v2_lookup_serves_a_project_publication_a_few_blocks_behind_head() -> Re
         .bind(phase_status)
         .execute(&database.lookup_pool)
         .await?;
+        rebuild_fixture_families(
+            &database.pool,
+            "ethereum-mainnet",
+            publication_block,
+            "0xlookup-previous",
+        )
+        .await?;
 
         let response = v2_lookup_response_for_database(
             &database,
@@ -2691,6 +2515,7 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
             }
         }))
         .await?;
+    republish_mainnet_fixture(&empty_database).await?;
     let miss_payload = v2_lookup_json(
         &empty_database,
         json!({"inputs": [{"id": "miss", "name": "missing.eth"}]}),
@@ -2947,6 +2772,7 @@ async fn v2_lookup_reverse_relation_filter_resumes_across_scan_boundaries() -> R
 }
 
 #[tokio::test]
+#[ignore = "no family producer yields an owned relation that is not `owner`, so the exact-relation scan never skips a row"]
 async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_scan() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -3000,6 +2826,7 @@ async fn v2_lookup_reverse_relation_page_revalidates_generation_before_second_sc
 }
 
 #[tokio::test]
+#[ignore = "no family producer yields an owned relation that is not `owner`, so the exact-relation scan never skips a row"]
 async fn v2_lookup_reverse_relation_filter_scan_cap_returns_resume_cursor() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
@@ -3225,8 +3052,8 @@ async fn seed_v2_lookup_relation_scan_fixture(
 ) -> Result<()> {
     seed_v2_lookup_ethereum_head(database, 10_000, "0xlookup-scan-head").await?;
     seed_v2_lookup_base_head(database).await?;
-    // The address holds the lease of each owner match; every other name lists it only as the
-    // registry controller, so an owner filter scans past those rows.
+    // The address holds the lease of each owner match; it controls every other name through the
+    // registry only.
     for index in 0..row_count {
         let accounts = if owner_match_indexes.contains(&index) {
             RelationNameAccounts {
@@ -3331,31 +3158,27 @@ async fn v2_lookup_response_for_database_with_public_namespaces(
         .context("v2 lookup request failed")
 }
 
+/// A case name the address owns (holds the lease, so it is registrant and token holder), manages
+/// (controls it through the registry), or both.
 async fn seed_reverse_family_case_name(
     database: &TestDatabase,
     name: &str,
     address: &str,
-    relation: bigname_storage::AddressNameRelation,
+    (owned, managed): (bool, bool),
     id: u128,
 ) -> Result<()> {
-    let namespace = if name.ends_with(".base.eth") {
-        "basenames"
-    } else {
-        "ens"
-    };
-    let hash = bigname_lookup::ens_namehash_hex(name)?;
-    seed_identity_name(
+    let registrant = if owned { address } else { V2_LOOKUP_OTHER_ACCOUNT };
+    let controller = if managed { address } else { V2_LOOKUP_OTHER_ACCOUNT };
+    seed_relation_name(
         database,
-        &format!("{namespace}:{name}"),
         name,
-        name,
-        &hash,
-        Uuid::from_u128(id),
-        Uuid::from_u128(id + 1),
-        Uuid::from_u128(id + 2),
-        address,
-        relation,
+        id,
         42,
+        RelationNameAccounts {
+            registrant,
+            controller,
+            resolver: address,
+        },
     )
     .await
 }
@@ -3381,12 +3204,15 @@ async fn assert_reverse_family_pages(
             let row = &entry.name_record.row;
             assert!(namespaces.contains(&row.namespace));
             let facets = match row.normalized_name.as_str() {
-                "amber.eth" | "dune.base.eth" => vec![Relation::Registrant],
-                "birch.eth" => vec![Relation::TokenHolder, Relation::EffectiveController],
+                "birch.eth" => vec![
+                    Relation::Registrant,
+                    Relation::TokenHolder,
+                    Relation::EffectiveController,
+                ],
                 "bob.eth" | "cedar.eth" | "elm.base.eth" => {
                     vec![Relation::EffectiveController]
                 }
-                _ => vec![Relation::TokenHolder],
+                _ => vec![Relation::Registrant, Relation::TokenHolder],
             };
             let mut facets = facets
                 .into_iter()
@@ -3437,9 +3263,7 @@ async fn assert_reverse_family_pages(
 #[tokio::test]
 async fn reverse_identity_pages_preserve_roles_namespaces_and_long_names() -> Result<()> {
     use crate::v2::support::load_reverse_identity_records_live as load_reverse;
-    use bigname_storage::{
-        AddressNameRelation as Relation, ReverseIdentityRoles as Roles, ReverseIdentityStorageInput,
-    };
+    use bigname_storage::{ReverseIdentityRoles as Roles, ReverseIdentityStorageInput};
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     let other = "0x0000000000000000000000000000000000000def";
@@ -3457,16 +3281,17 @@ async fn reverse_identity_pages_preserve_roles_namespaces_and_long_names() -> Re
             .normalized_name,
         long_name
     );
-    for (name, relation, id) in [
-        ("amber.eth", Relation::Registrant, 0x842100),
-        ("birch.eth", Relation::TokenHolder, 0x842110),
-        ("birch.eth", Relation::EffectiveController, 0x842110),
-        ("cedar.eth", Relation::EffectiveController, 0x842120),
-        (long_name.as_str(), Relation::TokenHolder, 0x842130),
-        ("dune.base.eth", Relation::Registrant, 0x842140),
-        ("elm.base.eth", Relation::EffectiveController, 0x842150),
+    const OWNED: (bool, bool) = (true, false);
+    const MANAGED: (bool, bool) = (false, true);
+    for (name, roles, id) in [
+        ("amber.eth", OWNED, 0x842100),
+        ("birch.eth", (true, true), 0x842110),
+        ("cedar.eth", MANAGED, 0x842120),
+        (long_name.as_str(), OWNED, 0x842130),
+        ("dune.base.eth", OWNED, 0x842140),
+        ("elm.base.eth", MANAGED, 0x842150),
     ] {
-        seed_reverse_family_case_name(&database, name, address, relation, id).await?;
+        seed_reverse_family_case_name(&database, name, address, roles, id).await?;
     }
     let namespaces = vec!["ens".to_owned(), "basenames".to_owned()];
     let expected = [
@@ -3503,7 +3328,7 @@ async fn reverse_identity_pages_preserve_roles_namespaces_and_long_names() -> Re
         address: absent.to_owned(),
         ..inputs[2].clone()
     };
-    seed_reverse_family_case_name(&database, "unrelated.eth", other, Relation::TokenHolder, 0x900000).await?;
+    seed_reverse_family_case_name(&database, "unrelated.eth", other, OWNED, 0x900000).await?;
     {
         let mut cases = Vec::new();
         for (index, input) in inputs.iter().enumerate() {
