@@ -1679,6 +1679,30 @@ discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
+One family is not event-keyed: the [name summary](glossary.md#name-summary)
+(`project_name_summary`) holds, per name, the fields the child and label lists
+filter, sort and count by inside one statement: the selected authority arm,
+whether the name has a serving resource, the registration status, the expiry
+and registration times, and whether the latest registry Transfer attributed to
+the name names the zero owner, attributed as the served child build attributes
+it (by the name the Transfer carries, else the latest named registry event of
+its resource and family, else an active surface at its node). Every name with a
+surface has a row. A list cannot compose those at read for every child of a parent, so
+the name row is composed at read (ruling J3) except for this summary, which is
+stored. After a block writes its other family rows, and on a block that writes
+none, the family step composes the summary again, with the composed name
+reader's own selection, for every name the block touched: the names, nodes and
+resources of every row its journal names, each resource widened to the names
+whose candidates, key states, association targets, lifecycle events, wrapper
+row, owner events or pointer read it, every name whose surface appeared since
+the family marker's block, and every name whose stored `recompose_at` the
+block's time has reached. `recompose_at` is the first second at which the
+name's composition can change with no fact changing: a binding interval
+opening or closing, or a NameWrapper expiry or grace boundary. A summary that
+changed is journalled and written like any other family row, so an undo
+restores it from the journal and composes nothing; a rebuild composes every
+surfaced name.
+
 These tables are shadows today. No production serving reader reads them, and
 no served value depends on them; only the family reducers, the step 3
 [shadow readers](glossary.md#shadow-read) in the test harnesses, and tests do.
@@ -2180,9 +2204,12 @@ new truth family.
   Project also owns the [owned key families](#owned-key-families), their
   marker, undo journal and repair record. With the
   [publication switch](glossary.md#publication-switch) off, the default, no
-  served path reads them; with it on, only the serving fence reads the marker,
-  and served rows still come from the projection tables. The step 3 shadow
-  readers read the family tables in the test harnesses only.
+  served path reads them; with it on, the serving fence reads the marker, the
+  names group serves [composed name rows](glossary.md#composed-name-row), the
+  subnames page, the child counts and the registry labels read the child
+  families with the [name summary](glossary.md#name-summary), and the other
+  routes still read the projection tables. The shadow readers read the family
+  tables in the test harnesses.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.

@@ -911,6 +911,16 @@ topology (`declared_summary.topology`), which the records route's verified
 lookup admission and avatar readback read; that moves with the record
 inventories.
 
+With the switch on, `GET /v1/names/{name}/subnames` (with and without
+`include=counts`), `GET /v1/registries/{chain_id}/{address}/labels` and the
+registry's `counts.labels` read the child edge families instead of
+`children_current`, with each child's arm, serving resource, zero-owner
+transfer, registration status and times from the stored [name
+summary](glossary.md#name-summary), evaluated against the family marker's
+block. Every per-name child count (`subname_count` under `include=counts`, and
+a name's subname count) is an exact count over the same relation. The bodies
+are meant to be identical to the served ones.
+
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
 Projection publication is incremental, so an unchanged row retains the target of
