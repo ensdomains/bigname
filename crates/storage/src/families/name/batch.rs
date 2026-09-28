@@ -60,28 +60,36 @@ pub async fn load_family_publication(
     publication(&mut conn, chain_id).await
 }
 
-/// Refuses with [`FamilyPublicationUnavailable`] unless every chain of `chain_ids` has a
-/// servable marker. A read that may find no name to compose (an empty walk, a name with no
-/// surface) checks the chains it was asked about with it, so a rebuild answers stale rather than
-/// an empty or missing result.
-pub(super) async fn ensure_published(conn: &mut PgConnection, chain_ids: &[String]) -> Result<()> {
+/// The servable publications of `chain_ids`, refusing with [`FamilyPublicationUnavailable`]
+/// unless every chain has one. A read that may find no name to compose (an empty walk, a name
+/// with no surface) checks the chains it was asked about with it, so a rebuild answers stale
+/// rather than an empty or missing result.
+pub(super) async fn ensure_published(
+    conn: &mut PgConnection,
+    chain_ids: &[String],
+) -> Result<Vec<FamilyPublication>> {
+    let mut out = Vec::with_capacity(chain_ids.len());
     for chain_id in chain_ids {
-        if publication(conn, chain_id).await?.is_none() {
+        let Some(publication) = publication(conn, chain_id).await? else {
             return Err(FamilyPublicationUnavailable {
                 chain_id: chain_id.clone(),
             }
             .into());
-        }
+        };
+        out.push(publication);
     }
-    Ok(())
+    Ok(out)
 }
 
 /// [`ensure_published`] on its own snapshot, for a caller holding a pool.
-pub async fn ensure_family_publications(pool: &PgPool, chain_ids: &[String]) -> Result<()> {
+pub async fn ensure_family_publications(
+    pool: &PgPool,
+    chain_ids: &[String],
+) -> Result<Vec<FamilyPublication>> {
     let mut snapshot = read_snapshot(pool).await?;
-    ensure_published(&mut snapshot, chain_ids).await?;
+    let publications = ensure_published(&mut snapshot, chain_ids).await?;
     snapshot.commit().await?;
-    Ok(())
+    Ok(publications)
 }
 
 /// The chain's servable marker, by the fence's rule (`servable_family_marker`).

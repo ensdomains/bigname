@@ -150,6 +150,7 @@ impl CollectionSnapshot {
         let chains: Vec<String> = self.block_bounds().into_keys().collect();
         bigname_storage::families::name::ensure_family_publications(&state.pool, &chains)
             .await
+            .map(|_| ())
             .map_err(super::name_rows_error(resource, |_| {
                 super::V2Error::internal_error("failed to read the family publication")
             }))

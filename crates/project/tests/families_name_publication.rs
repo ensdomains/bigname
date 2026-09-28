@@ -253,3 +253,38 @@ async fn an_expiring_page_ignores_another_namespaces_rebuild() -> Result<()> {
     assert_eq!(ens_expiring(&fixture).await?, alone);
     fixture.cleanup().await
 }
+
+/// An exact-name read of a name with no composed row at a position below the publication is
+/// stale, as a composed row is: the name may have existed there, and no older position is kept to
+/// say it did not.
+#[tokio::test]
+async fn an_unknown_name_below_the_publication_is_stale() -> Result<()> {
+    let fixture = Fixture::new("families_name_unknown_below", 20).await?;
+    registered(&fixture).await?;
+    let position = |block: i64, timestamp: &str| {
+        ChainPositions::from_value(&json!({
+            "ethereum": {"chain_id": CHAIN, "block_number": block, "block_hash": hash(block),
+                         "timestamp": timestamp}
+        }))
+        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))
+    };
+    let unknown = name(99);
+    let mut answers = Vec::new();
+    for positions in [
+        position(12, "2027-01-15T08:02:24Z")?,
+        position(11, "2027-01-15T08:02:12Z")?,
+    ] {
+        let read = with_serve_from_families(
+            true,
+            load_name_current_for_snapshot(&fixture.pool, &unknown, &positions),
+        )
+        .await;
+        answers.push(match read {
+            Ok(SnapshotProjectionRead::NotFound) => "not found".to_owned(),
+            Ok(_) => "found".to_owned(),
+            Err(error) => format!("{:?}", error.kind()),
+        });
+    }
+    assert_eq!(answers, ["not found", "Stale"]);
+    fixture.cleanup().await
+}
