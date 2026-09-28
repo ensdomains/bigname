@@ -129,7 +129,7 @@ fn latest_v1_lifecycle(facts: &NameFacts) -> Option<&LifecycleEvent> {
                 && LIFECYCLE_KINDS.contains(&event.event_kind.as_str())
                 && staged_as_own(facts, event)
         })
-        .max_by(|left, right| facts.order.lateral(&left.position, &right.position))
+        .max_by(|left, right| left.position.cmp(&right.position))
 }
 
 /// Whether a NameWrapper candidate stands for the released lease `lease`:

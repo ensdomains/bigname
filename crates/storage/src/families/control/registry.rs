@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 
 use super::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::{flag, lower, text},
 };
 
@@ -288,16 +288,6 @@ pub fn registry_bindings(
     observations: &[Observation],
     names: &BTreeMap<String, NameAttribution>,
 ) -> BTreeMap<String, RegistryBinding> {
-    registry_bindings_in(observations, names, &EventOrder::Canonical)
-}
-
-/// `registry_bindings` with the latest observation per resource taken in `order`: the canonical
-/// order, or (block, transaction, log, generated id) under `EventOrder::Generated`.
-pub fn registry_bindings_in(
-    observations: &[Observation],
-    names: &BTreeMap<String, NameAttribution>,
-    order: &EventOrder,
-) -> BTreeMap<String, RegistryBinding> {
     let mut per_resource: BTreeMap<String, &Observation> = BTreeMap::new();
     for observation in observations {
         let resource = match observation
@@ -315,10 +305,7 @@ pub fn registry_bindings_in(
             None => observation.target_resource_id.clone(),
         };
         let entry = per_resource.entry(resource).or_insert(observation);
-        if order
-            .lateral(&observation.position, &entry.position)
-            .is_gt()
-        {
+        if observation.position > entry.position {
             *entry = observation;
         }
     }

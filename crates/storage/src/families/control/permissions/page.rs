@@ -33,7 +33,7 @@ use crate::{
     PermissionGrantRelation, PermissionScope, PermissionsCurrentAccountResourceCursor,
     PermissionsCurrentResourceSummary, ResourcePermissionCoverage,
     families::{
-        control::{lifecycle::Clock, position::EventOrder},
+        control::lifecycle::Clock,
         name::{FamilyPublication, FamilyPublicationUnavailable, publication_on, read_snapshot},
     },
     projection_helpers::{checked_page_limit_i64, checked_page_size_usize, split_keyset_page},
@@ -321,7 +321,6 @@ async fn effective_rows(
             &publication.chain_id,
             &clock(&publication),
             &inputs,
-            &EventOrder::Canonical,
             Some(keys),
         )
         .await?;

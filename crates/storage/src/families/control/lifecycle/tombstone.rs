@@ -108,7 +108,7 @@ pub(super) fn released_fact<'a>(
     // A reservation expired when written is never live and takes no part (:212-239).
     let latest = without_expired(facts, facts_of_the_name)?
         .into_iter()
-        .max_by(|left, right| facts.order.name_membership(&left.position, &right.position));
+        .max_by(|left, right| left.position.cmp(&right.position));
     Ok(latest
         .filter(|latest| latest.event_kind == "RegistrationReleased")
         .map(|latest| Tombstone {
@@ -129,7 +129,7 @@ fn before(witness: &Position, event: &Position) -> bool {
         )
 }
 
-/// The latest of `witnesses` before `event` in the name-membership order.
+/// The latest of `witnesses` before `event` in the canonical order.
 fn latest_before<'a>(
     facts: &'a NameFacts,
     event: &LifecycleEvent,
@@ -143,7 +143,7 @@ fn latest_before<'a>(
                 && witnesses(witness)
                 && before(&witness.position, &event.position)
         })
-        .max_by(|left, right| facts.order.name_membership(&left.position, &right.position))
+        .max_by(|left, right| left.position.cmp(&right.position))
 }
 
 /// The registry identifier and token id of a resource-less event, from its triple key

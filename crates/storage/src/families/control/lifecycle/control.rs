@@ -87,8 +87,7 @@ pub(super) fn control_owner(
     for (position, candidate) in admitted_registry_only(facts, authority, is_v2, selected_key) {
         owners.push((position.clone(), candidate.bound_owner.clone()));
     }
-    let owner = latest(&facts.order, owners, |(position, _)| position).and_then(|(_, owner)| owner);
-    let kind =
-        latest(&facts.order, kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
+    let owner = latest(owners, |(position, _)| position).and_then(|(_, owner)| owner);
+    let kind = latest(kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
     (owner, kind)
 }

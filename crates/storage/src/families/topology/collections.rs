@@ -19,7 +19,6 @@ use crate::families::{
     control::{
         lifecycle::Clock,
         permissions::{ResourceInput, load_shadow_permissions_on, resolver_grant_evidence},
-        position::EventOrder,
     },
     name::{
         CoverageShape, FamilyPublication, FamilyPublicationUnavailable, load_names_on,
@@ -250,14 +249,7 @@ pub async fn load_resolver_roles_shadow(
         block_number: publication.block_number,
         timestamp_seconds: publication.timestamp_seconds(),
     };
-    let shadows = load_shadow_permissions_on(
-        &mut snapshot,
-        chain_id,
-        &clock,
-        &inputs,
-        &EventOrder::Canonical,
-    )
-    .await?;
+    let shadows = load_shadow_permissions_on(&mut snapshot, chain_id, &clock, &inputs).await?;
     let evidence = resolver_grant_evidence(
         &mut snapshot,
         chain_id,
