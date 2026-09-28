@@ -1,130 +1,97 @@
+//! Effective permission contracts over publications produced by the family reducers.
+#[path = "../../project/tests/families_support/mod.rs"]
+mod families_support;
+
 use anyhow::{Result, ensure};
+use bigname_project::families::{FamilyMode, FamilyOptions};
 use bigname_storage::{
-    EffectivePermissionScope, PermissionGrantRelation,
-    explain_effective_permissions_account_resource_page,
-    explain_effective_permissions_account_resource_summary,
-    explain_effective_permissions_by_resource_ids,
-    load_effective_permissions_account_resource_page,
-    load_effective_permissions_account_resource_page_count_summary,
-    load_effective_permissions_by_resource_ids,
+    EffectivePermissionScope, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
+    load_bounded_effective_permissions_by_resource_ids, load_serving_effective_permissions_page,
 };
-use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-use serde_json::Value;
-use sqlx::{PgPool, raw_sql};
+use families_support::{CHAIN, CONTENT_HASH, Event, Fixture};
+use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
-const CHAIN: &str = "effective-permissions-test";
-const HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const NAMESPACE_HASH: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const ORPHAN_HASH: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const OWNER: &str = "0x0000000000000000000000000000000000000a11";
 const SUBJECT: &str = "0x0000000000000000000000000000000000000b22";
 const REGISTRY: &str = "0x0000000000000000000000000000000000000c33";
-const BASELINE: &[&str] = &[
-    include_str!("../../../schema-v2/baseline/01_chain.sql"),
-    include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-    include_str!("../../../schema-v2/baseline/03_identity.sql"),
-    include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-    include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-    include_str!("../../../schema-v2/baseline/06_projections.sql"),
-    include_str!("../../../schema-v2/baseline/07_labels.sql"),
-    include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-    include_str!("../../../schema-v2/baseline/09_divergence.sql"),
-    include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-    include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-    include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
-    include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
-    include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
-];
+const OTHER: &str = "0x0000000000000000000000000000000000000d44";
 
-async fn fixture() -> Result<(TestDatabase, Uuid)> {
-    let db = TestDatabase::create(TestDatabaseConfig::new("effective_permissions")).await?;
-    let mut tx = db.pool().begin().await?;
-    sqlx::query("CREATE SCHEMA bigname_phase")
-        .execute(&mut *tx)
+async fn binding(
+    fixture: &Fixture,
+    resource: Uuid,
+    owner: &str,
+    contract: &str,
+    log: i64,
+) -> Result<()> {
+    fixture
+        .write(
+            1,
+            log,
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            None,
+            Some(&resource.to_string()),
+            json!({"source_event":"Transfer", "owner":owner,
+            "owner_getter":owner, "authority_kind":"registry_only"}),
+            contract,
+        )
         .await?;
-    sqlx::query("SET LOCAL search_path TO bigname_phase,public")
-        .execute(&mut *tx)
+    Ok(())
+}
+
+async fn approval(fixture: &Fixture, owner: &str, log: i64) -> Result<()> {
+    fixture.write(2, log, "AccountPermissionChanged", "ens_v1_registry_l1", None, None,
+        json!({"subject":SUBJECT,"relation_kind":"operator","approved":true,
+            "scope":{"kind":"account","chain_id":CHAIN,"authority_kind":"registry",
+                "authority_contract":REGISTRY,"owner":owner}, "effective_powers":["registry_control"],
+            "grant_source":{"kind":"raw_log","source_event":"ApprovalForAll"},
+            "revocation_source":null,"inheritance_path":[],"transfer_behavior":{}}), REGISTRY).await?;
+    Ok(())
+}
+
+async fn grant(fixture: &Fixture, resource: Uuid, log: i64) -> Result<()> {
+    fixture
+        .write(
+            2,
+            log,
+            "PermissionChanged",
+            "ens_v2_resolver_l1",
+            None,
+            Some(&resource.to_string()),
+            json!({"subject":SUBJECT,"scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":REGISTRY},
+            "effective_powers":["set_text"], "grant_source":{"kind":"raw_log","source_event":"EACRolesChanged"},
+            "revocation_source":null,"inheritance_path":[],"transfer_behavior":{}}),
+            REGISTRY,
+        )
         .await?;
-    for script in BASELINE {
-        raw_sql(script).execute(&mut *tx).await?;
-    }
-    tx.commit().await?;
+    Ok(())
+}
+
+async fn rebuild(fixture: &Fixture) -> Result<()> {
+    let outcome = fixture.apply(2, FamilyMode::Rebuild).await?;
+    ensure!(outcome.marker.as_ref().map(|marker| marker.number) == Some(2));
+    Ok(())
+}
+
+async fn fixture() -> Result<(Fixture, Uuid)> {
+    let fixture = Fixture::new("effective_permissions", 2).await?;
     let resource = Uuid::from_u128(0x60501);
-    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,1,now(),'canonical'),($1,$3,2,now(),'canonical')")
-        .bind(CHAIN).bind(HASH).bind(NAMESPACE_HASH).execute(db.pool()).await?;
-    sqlx::query("INSERT INTO bigname_phase.resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,1,'canonical')")
-        .bind(resource).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
-    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:fixture','ens','fixture.eth',ARRAY['fixture','eth'],'','fixture',ARRAY['fixture','eth'],'test','active',$1,$2,2,'canonical')")
-        .bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
-    sqlx::query("INSERT INTO bigname_phase.surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ('00000000-0000-0000-0000-000000000606','ens:fixture',$1,'declared_registry_path','ens_v1',now(),$2,$3,2,'canonical')")
-        .bind(resource).bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
-    // Namespace membership comes from a retained canonical interpreted event.
-    sqlx::query("INSERT INTO bigname_phase.normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,derivation_kind,canonicality_state) VALUES ('fixture-namespace','ens',$1,'PermissionChanged','ens_v1_registry_l1',1,$2,$3,2,'ens_v1_unwrapped_authority','canonical')")
-        .bind(resource).bind(CHAIN).bind(NAMESPACE_HASH).execute(db.pool()).await?;
-    sqlx::query(
-        r#"INSERT INTO bigname_phase.permissions_current_resource_summary (
-        resource_id,authority_kind,registry_owner,registry_contract,
-        registry_binding_provenance,registry_binding_chain_positions,
-        support_status,unsupported_reason,provenance,chain_positions,
-        canonicality_summary,manifest_version)
-        VALUES ($1,'registrar',$2,$3,jsonb_build_object('chain_id',$4::text),
-        jsonb_build_object('block_hash',$5::text),'unsupported',
-        'operator_approval_surfaces_not_ingested',jsonb_build_object('chain_id',$4::text),
-        jsonb_build_object('target_block_hash',$5::text),'{"state":"canonical_lineage"}',1)"#,
-    )
-    .bind(resource)
-    .bind(OWNER)
-    .bind(REGISTRY)
-    .bind(CHAIN)
-    .bind(HASH)
-    .execute(db.pool())
-    .await?;
-    sqlx::query(
-        r#"INSERT INTO bigname_phase.account_permission_state_current (
-        chain_id,authority_kind,authority_contract,authority_contract_instance_id,
-        owner,subject,relation_kind,approved,effective_powers,grant_source,
-        inheritance_path,transfer_behavior,provenance,chain_positions,
-        canonicality_summary,manifest_version)
-        VALUES ($1,'registry',$2,'00000000-0000-0000-0000-000000000605',$3,$4,
-        'operator',true,'["registry_control"]','{"kind":"event"}','[]','{}',
-        jsonb_build_object('chain_id',$1::text),jsonb_build_object('target_block_hash',$5::text),
-        '{"state":"canonical"}',1)"#,
-    )
-    .bind(CHAIN)
-    .bind(REGISTRY)
-    .bind(OWNER)
-    .bind(SUBJECT)
-    .bind(HASH)
-    .execute(db.pool())
-    .await?;
-    Ok((db, resource))
+    binding(&fixture, resource, OWNER, REGISTRY, 0).await?;
+    approval(&fixture, OWNER, 0).await?;
+    rebuild(&fixture).await?;
+    Ok((fixture, resource))
 }
 
-async fn operator_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
-    Ok(load_effective_permissions_account_resource_page(
+async fn count(pool: &PgPool, resource: Uuid, namespace: Option<&str>) -> Result<usize> {
+    Ok(load_serving_effective_permissions_page(
         pool,
         Some(SUBJECT),
         Some(resource),
+        namespace,
         None,
-        None,
-        10,
-    )
-    .await?
-    .rows
-    .into_iter()
-    .filter(|row| row.grant_relation == Some(PermissionGrantRelation::Operator))
-    .count())
-}
-
-async fn namespaced_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
-    Ok(load_effective_permissions_account_resource_page(
-        pool,
-        Some(SUBJECT),
-        Some(resource),
-        Some("ens"),
-        None,
-        10,
+        100,
     )
     .await?
     .rows
@@ -133,90 +100,93 @@ async fn namespaced_count(pool: &PgPool, resource: Uuid) -> Result<usize> {
 
 #[tokio::test]
 async fn effective_permissions_require_matching_chain_contract_and_owner() -> Result<()> {
-    for column in ["registry_owner", "registry_contract"] {
-        let (db, resource) = fixture().await?;
-        assert_eq!(operator_count(db.pool(), resource).await?, 1);
-        sqlx::query(&format!("UPDATE bigname_phase.permissions_current_resource_summary SET {column}='0x0000000000000000000000000000000000000d44' WHERE resource_id=$1"))
-            .bind(resource).execute(db.pool()).await?;
-        assert_eq!(operator_count(db.pool(), resource).await?, 0, "{column}");
-        db.cleanup().await?;
+    for (owner, contract) in [(OTHER, REGISTRY), (OWNER, OTHER)] {
+        let (fixture, resource) = fixture().await?;
+        assert_eq!(count(&fixture.pool, resource, None).await?, 1);
+        binding(&fixture, resource, owner, contract, 1).await?;
+        rebuild(&fixture).await?;
+        assert_eq!(count(&fixture.pool, resource, None).await?, 0);
+        fixture.cleanup().await?;
     }
-    let (db, resource) = fixture().await?;
-    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET chain_id='other-chain'")
-        .execute(db.pool())
-        .await?;
-    assert_eq!(operator_count(db.pool(), resource).await?, 0, "chain_id");
-    db.cleanup().await?;
-    Ok(())
+    let (fixture, resource) = fixture().await?;
+    fixture.lineage("other-chain", 2).await?;
+    sqlx::query("UPDATE normalized_events SET chain_id='other-chain' WHERE event_kind='AccountPermissionChanged'")
+        .execute(&fixture.pool).await?;
+    rebuild(&fixture).await?;
+    fixture.apply_on("other-chain", 2).await?;
+    assert_eq!(count(&fixture.pool, resource, None).await?, 0);
+    fixture.cleanup().await
 }
 
 #[tokio::test]
 async fn effective_permissions_serve_only_approved_operator_rows() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=false,effective_powers='[]',revocation_source='{}'")
-        .execute(db.pool()).await?;
-    assert_eq!(operator_count(db.pool(), resource).await?, 0);
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_do_not_cross_registry_generations() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET registry_contract='0x0000000000000000000000000000000000000d44'")
-        .execute(db.pool()).await?;
-    assert_eq!(operator_count(db.pool(), resource).await?, 0);
-    db.cleanup().await
+    let (fixture, resource) = fixture().await?;
+    sqlx::query("UPDATE normalized_events SET after_state = after_state || '{\"approved\":false,\"effective_powers\":[],\"revocation_source\":{}}' WHERE event_kind='AccountPermissionChanged'")
+        .execute(&fixture.pool).await?;
+    rebuild(&fixture).await?;
+    assert_eq!(count(&fixture.pool, resource, None).await?, 0);
+    fixture.cleanup().await
 }
 
 #[tokio::test]
 async fn effective_permissions_require_a_current_registry_owner_binding() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET registry_owner=NULL,registry_contract=NULL,registry_binding_provenance=NULL,registry_binding_chain_positions=NULL")
-        .execute(db.pool()).await?;
-    assert_eq!(operator_count(db.pool(), resource).await?, 0);
-    db.cleanup().await
+    let (fixture, resource) = fixture().await?;
+    fixture
+        .write(
+            2,
+            1,
+            "SurfaceUnbound",
+            "ens_v1_registry_l1",
+            None,
+            Some(&resource.to_string()),
+            json!({}),
+            REGISTRY,
+        )
+        .await?;
+    rebuild(&fixture).await?;
+    assert_eq!(count(&fixture.pool, resource, None).await?, 0);
+    fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn effective_permissions_fail_closed_for_orphaned_account_and_binding_lineage() -> Result<()>
-{
-    for evidence in ["account", "binding"] {
-        let (db, resource) = fixture().await?;
-        let orphan = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,2,now(),'orphaned')")
-            .bind(CHAIN).bind(orphan).execute(db.pool()).await?;
-        let sql = if evidence == "account" {
-            "UPDATE bigname_phase.account_permission_state_current SET chain_positions=jsonb_build_object('target_block_hash',$1::text)"
-        } else {
-            "UPDATE bigname_phase.permissions_current_resource_summary SET registry_binding_chain_positions=jsonb_build_object('block_hash',$1::text)"
-        };
-        sqlx::query(sql).bind(orphan).execute(db.pool()).await?;
-        assert_eq!(operator_count(db.pool(), resource).await?, 0, "{evidence}");
-        db.cleanup().await?;
+async fn effective_permissions_rebuild_excludes_orphaned_authority_and_approval_inputs()
+-> Result<()> {
+    for kind in ["AuthorityTransferred", "AccountPermissionChanged"] {
+        let (fixture, resource) = fixture().await?;
+        sqlx::query(
+            "UPDATE normalized_events SET canonicality_state='orphaned' WHERE event_kind=$1",
+        )
+        .bind(kind)
+        .execute(&fixture.pool)
+        .await?;
+        rebuild(&fixture).await?;
+        assert_eq!(count(&fixture.pool, resource, None).await?, 0, "{kind}");
+        fixture.cleanup().await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn effective_permissions_namespace_filter_rejects_orphaned_identity_lineage() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    assert_eq!(namespaced_count(db.pool(), resource).await?, 1);
-    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,3,now(),'orphaned')")
-        .bind(CHAIN).bind(ORPHAN_HASH).execute(db.pool()).await?;
-    sqlx::query("UPDATE bigname_phase.normalized_events SET block_hash=$1,block_number=3 WHERE event_identity='fixture-namespace'")
-        .bind(ORPHAN_HASH).execute(db.pool()).await?;
-    assert_eq!(namespaced_count(db.pool(), resource).await?, 0);
-    db.cleanup().await
+async fn effective_permissions_namespace_filter_requires_retained_membership() -> Result<()> {
+    let (fixture, resource) = fixture().await?;
+    assert_eq!(count(&fixture.pool, resource, Some("ens")).await?, 1);
+    assert_eq!(count(&fixture.pool, resource, Some("basenames")).await?, 0);
+    sqlx::query("UPDATE normalized_events SET canonicality_state='orphaned' WHERE resource_id=$1")
+        .bind(resource)
+        .execute(&fixture.pool)
+        .await?;
+    rebuild(&fixture).await?;
+    assert_eq!(count(&fixture.pool, resource, Some("ens")).await?, 0);
+    fixture.cleanup().await
 }
 
 #[tokio::test]
 async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    sqlx::query(r#"INSERT INTO bigname_phase.permissions_current (resource_id,subject,scope,scope_kind,effective_powers,grant_source,provenance,chain_positions,canonicality_summary,manifest_version)
-        VALUES ($1,$2,'registry','registry','["set_resolver"]','{}',jsonb_build_object('chain_id',$3::text),jsonb_build_object('target_block_hash',$4::text),'{"state":"canonical"}',1)"#)
-        .bind(resource).bind(SUBJECT).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
-    let first = load_effective_permissions_account_resource_page(
-        db.pool(),
+    let (fixture, resource) = fixture().await?;
+    grant(&fixture, resource, 1).await?;
+    rebuild(&fixture).await?;
+    let first = load_serving_effective_permissions_page(
+        &fixture.pool,
         Some(SUBJECT),
         Some(resource),
         None,
@@ -226,10 +196,10 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
     .await?;
     assert!(
         first.summary.is_none(),
-        "a page read must not run a whole-relation count or aggregate"
+        "a page must not aggregate the entire relation"
     );
-    let second = load_effective_permissions_account_resource_page(
-        db.pool(),
+    let second = load_serving_effective_permissions_page(
+        &fixture.pool,
         Some(SUBJECT),
         Some(resource),
         None,
@@ -237,202 +207,79 @@ async fn effective_permissions_page_direct_and_operator_rows_without_gaps() -> R
         1,
     )
     .await?;
-    ensure!(
-        first.rows.len() == 1
-            && second.rows.len() == 1
-            && first.rows[0].scope != second.rows[0].scope,
-        "direct/operator boundary duplicated or omitted a row"
-    );
-    sqlx::query("UPDATE bigname_phase.permissions_current SET scope='owner'")
-        .execute(db.pool())
-        .await?;
-    let error = load_effective_permissions_by_resource_ids(db.pool(), &[resource], None)
-        .await
-        .expect_err("effective reads must reject a mismatched direct scope key");
-    ensure!(format!("{error:#}").contains("scope mismatch"));
-    db.cleanup().await
+    assert_eq!((first.rows.len(), second.rows.len()), (1, 1));
+    assert_ne!(first.rows[0].scope, second.rows[0].scope);
+    assert!(second.next_cursor.is_none());
+    fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn effective_permissions_summary_uses_the_same_relation() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    let page = load_effective_permissions_account_resource_page_count_summary(
-        db.pool(),
-        Some(SUBJECT),
-        Some(resource),
-        None,
-        None,
-        10,
-    )
-    .await?;
-    assert_eq!(page.summary.expect("count summary").row_count, 1);
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_resource_batch_uses_one_read() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    let rows = load_effective_permissions_by_resource_ids(db.pool(), &[resource], None).await?;
+async fn effective_permissions_bounded_batch_keeps_operator_scope_and_budget() -> Result<()> {
+    let (fixture, resource) = fixture().await?;
+    let rows =
+        load_bounded_effective_permissions_by_resource_ids(&fixture.pool, &[resource], None, 10)
+            .await?;
     assert_eq!(rows.len(), 1);
     assert!(matches!(
         rows[0].scope,
         EffectivePermissionScope::Account { .. }
     ));
-    db.cleanup().await
+    assert_eq!(
+        rows[0].grant_relation,
+        Some(PermissionGrantRelation::Operator)
+    );
+    grant(&fixture, resource, 1).await?;
+    fixture.write(2, 2, "PermissionChanged", "ens_v2_resolver_l1", None,
+        Some(&resource.to_string()), json!({"subject":OWNER,
+            "scope":{"kind":"resolver","chain_id":CHAIN,"resolver_address":REGISTRY},
+            "effective_powers":["set_text"],"grant_source":{"kind":"raw_log","source_event":"EACRolesChanged"},
+            "inheritance_path":[],"transfer_behavior":{}}), REGISTRY).await?;
+    rebuild(&fixture).await?;
+    let bounded =
+        load_bounded_effective_permissions_by_resource_ids(&fixture.pool, &[resource], None, 1)
+            .await?;
+    let both =
+        load_bounded_effective_permissions_by_resource_ids(&fixture.pool, &[resource], None, 2)
+            .await?;
+    assert_eq!(
+        bounded,
+        both[..2],
+        "one extra row is the truncation sentinel"
+    );
+    assert_eq!(both.len(), 3);
+    fixture.cleanup().await
 }
 
 #[tokio::test]
 async fn effective_permissions_require_an_account_or_resource_anchor() -> Result<()> {
-    let (db, _) = fixture().await?;
-    let error =
-        load_effective_permissions_account_resource_page(db.pool(), None, None, None, None, 10)
-            .await
-            .expect_err("an unanchored effective permission scan must be rejected");
+    let (fixture, _) = fixture().await?;
+    let error = load_serving_effective_permissions_page(&fixture.pool, None, None, None, None, 10)
+        .await
+        .expect_err("unanchored reads must be rejected");
     assert!(format!("{error:#}").contains("subject or resource_id"));
-    db.cleanup().await
-}
-
-async fn assert_plan(plan: Value, indexes: &[&str]) -> Result<()> {
-    let text = serde_json::to_string(&plan)?;
-    ensure!(
-        !text.contains("Seq Scan") || !text.contains("account_permission_state_current"),
-        "account-state sequential scan: {text}"
-    );
-    ensure!(
-        !text.contains("Seq Scan") || !text.contains("permissions_current_resource_summary"),
-        "resource-summary sequential scan: {text}"
-    );
-    for index in indexes {
-        ensure!(text.contains(index), "missing index {index}: {text}");
-    }
-    Ok(())
-}
-
-async fn assert_page_plan(plan: Value, indexes: &[&str]) -> Result<()> {
-    let text = serde_json::to_string(&plan)?;
-    ensure!(
-        !text.contains("\"Node Type\":\"Aggregate\""),
-        "page plan performed a whole-relation aggregate: {text}"
-    );
-    assert_plan(plan, indexes).await
+    fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn effective_permissions_address_page_uses_active_subject_and_binding_indexes() -> Result<()>
-{
-    let (db, _) = fixture().await?;
-    assert_page_plan(
-        explain_effective_permissions_account_resource_page(
-            db.pool(),
-            Some(SUBJECT),
-            None,
-            Some("ens"),
-            None,
+async fn effective_permissions_refuse_a_partial_rebuild() -> Result<()> {
+    let (fixture, resource) = fixture().await?;
+    let outcome = fixture
+        .apply_with(
             2,
-            true,
+            FamilyMode::Rebuild,
+            &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(1),
         )
-        .await?,
-        &[
-            "account_permission_state_current_active_subject_idx",
-            "permissions_current_resource_registry_binding_idx",
-            "normalized_events_resource_history_idx",
-        ],
-    )
-    .await?;
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_resource_page_uses_applicability_index() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    assert_page_plan(
-        explain_effective_permissions_account_resource_page(
-            db.pool(),
-            None,
-            Some(resource),
-            None,
-            None,
-            2,
-            true,
-        )
-        .await?,
-        &["account_permission_state_current_applicability_idx"],
-    )
-    .await?;
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_summary_uses_the_anchored_effective_plan() -> Result<()> {
-    let (db, _) = fixture().await?;
-    assert_plan(
-        explain_effective_permissions_account_resource_summary(
-            db.pool(),
-            Some(SUBJECT),
-            None,
-            Some("ens"),
-        )
-        .await?,
-        &[
-            "account_permission_state_current_active_subject_idx",
-            "permissions_current_resource_registry_binding_idx",
-            "normalized_events_resource_history_idx",
-        ],
-    )
-    .await?;
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_resource_batch_uses_applicability_index() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    assert_plan(
-        explain_effective_permissions_by_resource_ids(db.pool(), &[resource], Some("ens")).await?,
-        &[
-            "account_permission_state_current_applicability_idx",
-            "normalized_events_resource_history_idx",
-        ],
-    )
-    .await?;
-    db.cleanup().await
-}
-
-// Clone valid baseline rows, changing keys explicitly; never bypass schema checks.
-async fn page_fixture(grants: i32, per_grant: i32) -> Result<(TestDatabase, Vec<Uuid>)> {
-    let (db, original) = fixture().await?;
-    let pool = db.pool();
-    sqlx::query("CREATE TABLE bigname_phase.page_seed AS SELECT g, n, md5(g::text||':'||n::text)::uuid AS id, '0x'||lpad(to_hex(g),40,'0') AS owner FROM generate_series(1,$1) g CROSS JOIN generate_series(1,$2) n")
-        .bind(grants).bind(per_grant).execute(pool).await?;
-    for (table, patch) in [
-        ("resources", "jsonb_build_object('resource_id',s.id)"),
-        (
-            "name_surfaces",
-            "jsonb_build_object('logical_name_id','ens:'||s.id,'namehash',s.id::text,'raw_name',s.id::text||'.eth')",
-        ),
-        (
-            "surface_bindings",
-            "jsonb_build_object('surface_binding_id',s.id,'logical_name_id','ens:'||s.id,'resource_id',s.id)",
-        ),
-        (
-            "permissions_current_resource_summary",
-            "jsonb_build_object('resource_id',s.id,'registry_owner',s.owner)",
-        ),
-    ] {
-        let query = format!(
-            "INSERT INTO bigname_phase.{table} SELECT (jsonb_populate_record(NULL::bigname_phase.{table},to_jsonb(t)||{patch})).* FROM bigname_phase.{table} t CROSS JOIN bigname_phase.page_seed s"
-        );
-        sqlx::query(&query).execute(pool).await?;
-    }
-    sqlx::query("INSERT INTO bigname_phase.normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,derivation_kind,canonicality_state) SELECT 'page-'||s.id,'ens',s.id,'PermissionChanged','ens_v1_registry_l1',1,$1,$2,2,'ens_v1_unwrapped_authority','canonical' FROM bigname_phase.page_seed s")
-        .bind(CHAIN).bind(NAMESPACE_HASH).execute(pool).await?;
-    sqlx::query("INSERT INTO bigname_phase.account_permission_state_current SELECT (jsonb_populate_record(NULL::bigname_phase.account_permission_state_current,to_jsonb(t)||jsonb_build_object('owner',s.owner))).* FROM bigname_phase.account_permission_state_current t CROSS JOIN (SELECT DISTINCT owner FROM bigname_phase.page_seed) s")
-        .execute(pool).await?;
-    let mut ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM bigname_phase.page_seed ORDER BY id")
-            .fetch_all(pool)
-            .await?;
-    ids.push(original);
-    Ok((db, ids))
+        .await?;
+    assert!(outcome.reset);
+    let error = count(&fixture.pool, resource, None)
+        .await
+        .expect_err("partial rebuild must not serve an empty page");
+    assert!(
+        error
+            .downcast_ref::<bigname_storage::families::name::FamilyPublicationUnavailable>()
+            .is_some()
+    );
+    fixture.cleanup().await
 }
 
 async fn assert_page_equivalence(
@@ -440,7 +287,8 @@ async fn assert_page_equivalence(
     ids: &[Uuid],
     namespace: Option<&str>,
 ) -> Result<()> {
-    let mut expected = load_effective_permissions_by_resource_ids(pool, ids, namespace).await?;
+    let mut expected =
+        load_bounded_effective_permissions_by_resource_ids(pool, ids, namespace, 1000).await?;
     expected.sort_by_key(|row| {
         (
             row.subject.clone(),
@@ -452,7 +300,7 @@ async fn assert_page_equivalence(
         let mut cursor = None;
         let mut seen = Vec::new();
         loop {
-            let page = load_effective_permissions_account_resource_page(
+            let page = load_serving_effective_permissions_page(
                 pool,
                 Some(SUBJECT),
                 None,
@@ -464,9 +312,8 @@ async fn assert_page_equivalence(
             let end = (seen.len() + size as usize).min(expected.len());
             assert_eq!(page.rows, expected[seen.len()..end]);
             assert!(page.summary.is_none());
-            let next = (end < expected.len()).then(|| {
-                bigname_storage::PermissionsCurrentAccountResourceCursor::from(&expected[end - 1])
-            });
+            let next = (end < expected.len())
+                .then(|| PermissionsCurrentAccountResourceCursor::from(&expected[end - 1]));
             assert_eq!(page.next_cursor, next);
             seen.extend(page.rows);
             cursor = page.next_cursor;
@@ -476,15 +323,15 @@ async fn assert_page_equivalence(
         }
         assert_eq!(seen, expected);
         if let Some(last) = expected.last() {
-            let terminal = bigname_storage::PermissionsCurrentAccountResourceCursor::from(last);
+            let terminal = PermissionsCurrentAccountResourceCursor::from(last);
             assert!(
-                load_effective_permissions_account_resource_page(
+                load_serving_effective_permissions_page(
                     pool,
                     Some(SUBJECT),
                     None,
                     namespace,
                     Some(&terminal),
-                    size,
+                    size
                 )
                 .await?
                 .rows
@@ -496,139 +343,50 @@ async fn assert_page_equivalence(
 }
 
 #[tokio::test]
-async fn effective_permissions_grant_pages_match_unlimited_relation() -> Result<()> {
-    let (db, ids) = page_fixture(4, 12).await?;
-    sqlx::query("INSERT INTO bigname_phase.permissions_current(resource_id,subject,scope,scope_kind,effective_powers,grant_source,provenance,chain_positions,canonicality_summary,manifest_version) SELECT id,$1,'registry','registry','[\"set_resolver\"]','{}',jsonb_build_object('chain_id',$2::text),jsonb_build_object('target_block_hash',$3::text),'{\"state\":\"canonical\"}',1 FROM bigname_phase.page_seed WHERE n%3=0")
-        .bind(SUBJECT).bind(CHAIN).bind(HASH).execute(db.pool()).await?;
-    assert_page_equivalence(db.pool(), &ids, None).await?;
-    assert_page_equivalence(db.pool(), &ids, Some("ens")).await?;
-    // Sparse matches must be filtered before the grant-local limit.
-    sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state='orphaned' WHERE resource_id IN (SELECT id FROM bigname_phase.page_seed WHERE n%5<>0)")
-        .execute(db.pool()).await?;
-    assert_page_equivalence(db.pool(), &ids, Some("ens")).await?;
-    sqlx::query("UPDATE bigname_phase.account_permission_state_current SET approved=false,effective_powers='[]' WHERE owner=(SELECT owner FROM bigname_phase.page_seed WHERE g=2 LIMIT 1)")
-        .execute(db.pool()).await?;
-    sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET registry_binding_chain_positions=jsonb_build_object('block_hash',$1::text) WHERE resource_id IN (SELECT id FROM bigname_phase.page_seed WHERE n%2=0)")
-        .bind(ORPHAN_HASH).execute(db.pool()).await?;
-    assert_page_equivalence(db.pool(), &ids, None).await?;
-    assert_page_equivalence(db.pool(), &ids, Some("ens")).await?;
-    db.cleanup().await
-}
-
-fn plan_nodes<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
-    out.push(node);
-    if let Some(children) = node.get("Plans").and_then(Value::as_array) {
-        for child in children {
-            plan_nodes(child, out);
+async fn effective_permissions_grant_pages_match_bounded_relation() -> Result<()> {
+    let fixture = Fixture::new("effective_permission_pages", 2).await?;
+    let mut ids = Vec::new();
+    for group in 1..=4_u128 {
+        let owner = format!("0x{group:040x}");
+        approval(&fixture, &owner, group as i64).await?;
+        for number in 1..=12 {
+            let resource = Uuid::from_u128(group * 100 + number);
+            binding(
+                &fixture,
+                resource,
+                &owner,
+                REGISTRY,
+                (group * 100 + number) as i64,
+            )
+            .await?;
+            if number % 3 == 0 {
+                grant(&fixture, resource, (group * 100 + number) as i64).await?;
+            }
+            ids.push(resource);
         }
     }
-}
-
-#[tokio::test]
-async fn effective_permissions_default_plan_bounds_dense_payload_lookups() -> Result<()> {
-    let (db, _) = page_fixture(4, 6000).await?;
-    sqlx::query("ANALYZE").execute(db.pool()).await?;
-    let plan = explain_effective_permissions_account_resource_page(
-        db.pool(),
-        Some(SUBJECT),
-        None,
-        None,
-        None,
-        25,
-        false,
-    )
-    .await?;
-    eprintln!("861_FULL_ROOT_PLAN dense-grants {plan}");
-    let mut nodes = Vec::new();
-    plan_nodes(&plan[0]["Plan"], &mut nodes);
-    assert!(
-        nodes.iter().any(|node| {
-            let mut descendants = Vec::new();
-            plan_nodes(node, &mut descendants);
-            node["Node Type"] == "Limit"
-                && node["Actual Loops"].as_u64().unwrap_or(0) >= 4
-                && node["Actual Rows"].as_u64().unwrap_or(u64::MAX) <= 26
-                && descendants.iter().any(|child| child["Alias"] == "k")
-                && descendants.iter().any(|child| child["Alias"] == "summary")
-        }),
-        "missing grant-local limit over ordered keys and eligible payloads"
-    );
-    // Limited-beta acceptance bounds payload probes for this dense fixture only.
-    // Four generated grants plus the original grant may each return K = 25 + 1.
-    // The retained pre-acceptance plan made 105 probes, below this derived 130 cap.
-    // Owner-key scans/sorts are explicitly permitted here; #861 remains open,
-    // and sparse eligibility can require more than K payload probes per grant.
-    let grant_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM bigname_phase.account_permission_state_current")
-            .fetch_one(db.pool())
+    rebuild(&fixture).await?;
+    assert_page_equivalence(&fixture.pool, &ids, None).await?;
+    assert_page_equivalence(&fixture.pool, &ids, Some("ens")).await?;
+    sqlx::query("UPDATE normalized_events SET after_state=after_state || '{\"approved\":false,\"effective_powers\":[]}' WHERE event_kind='AccountPermissionChanged' AND after_state #>> '{scope,owner}'=$1")
+        .bind(format!("0x{:040x}", 2)).execute(&fixture.pool).await?;
+    for (index, resource) in ids.iter().enumerate().filter(|(index, _)| index % 2 == 0) {
+        fixture
+            .event(
+                Event::new(
+                    &format!("clear-{resource}"),
+                    2,
+                    1000 + index as i64,
+                    "SurfaceUnbound",
+                    "ens_v1_registry_l1",
+                )
+                .resource(&resource.to_string())
+                .after(json!({})),
+            )
             .await?;
-    let max_payload_probes = grant_count as u64 * 26;
-    let payload_scans: Vec<_> = nodes
-        .iter()
-        .filter(|node| {
-            node["Alias"] == "summary"
-                && node["Relation Name"] == "permissions_current_resource_summary"
-        })
-        .collect();
-    assert!(!payload_scans.is_empty(), "missing payload scan");
-    let mut payload_probes = 0;
-    for node in payload_scans {
-        assert_eq!(node["Node Type"], "Index Scan", "payload lookup: {node}");
-        assert_eq!(
-            node["Index Name"], "permissions_current_resource_summary_pkey",
-            "payload must use resource primary key: {node}"
-        );
-        payload_probes += node["Actual Loops"].as_u64().expect("payload scan loops");
     }
-    assert!(
-        payload_probes > 0 && payload_probes <= max_payload_probes,
-        "dense payload probes {payload_probes} exceed per-grant K bound {max_payload_probes}"
-    );
-    db.cleanup().await
-}
-
-#[tokio::test]
-async fn effective_permissions_resource_plan_ignores_unrelated_grants() -> Result<()> {
-    let (db, resource) = fixture().await?;
-    sqlx::query("INSERT INTO bigname_phase.account_permission_state_current SELECT (jsonb_populate_record(NULL::bigname_phase.account_permission_state_current,to_jsonb(t)||jsonb_build_object('owner','0x'||lpad(to_hex(n),40,'0')))).* FROM bigname_phase.account_permission_state_current t CROSS JOIN generate_series(10000,10999) n")
-        .execute(db.pool()).await?;
-    sqlx::query("ANALYZE").execute(db.pool()).await?;
-    let plan = explain_effective_permissions_account_resource_page(
-        db.pool(),
-        None,
-        Some(resource),
-        None,
-        None,
-        25,
-        false,
-    )
-    .await?;
-    eprintln!("861_FULL_ROOT_PLAN resource-control {plan}");
-    let mut nodes = Vec::new();
-    plan_nodes(&plan[0]["Plan"], &mut nodes);
-    for node in nodes
-        .iter()
-        .filter(|n| n["Relation Name"] == "account_permission_state_current")
-    {
-        let rows = node["Actual Rows"].as_u64().unwrap_or(0)
-            + node["Rows Removed by Filter"].as_u64().unwrap_or(0);
-        assert!(
-            rows * node["Actual Loops"].as_u64().unwrap_or(1) < 10,
-            "resource lookup visited unrelated grants: {node}"
-        );
-    }
-    let page = load_effective_permissions_account_resource_page(
-        db.pool(),
-        None,
-        Some(resource),
-        None,
-        None,
-        25,
-    )
-    .await?;
-    assert_eq!(
-        page.rows,
-        load_effective_permissions_by_resource_ids(db.pool(), &[resource], None).await?
-    );
-    db.cleanup().await
+    rebuild(&fixture).await?;
+    assert_page_equivalence(&fixture.pool, &ids, None).await?;
+    assert_page_equivalence(&fixture.pool, &ids, Some("ens")).await?;
+    fixture.cleanup().await
 }

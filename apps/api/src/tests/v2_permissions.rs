@@ -1742,8 +1742,10 @@ async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
 
 async fn v2_permissions_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_permissions_response_for_database(database, uri).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    read_json(response).await
+    let status = response.status();
+    let body: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Ok(body)
 }
 
 async fn v2_permissions_response_for_database(
@@ -1921,8 +1923,8 @@ async fn seed_handed_off_lease_inputs(database: &TestDatabase, name: &str, lapse
     let mut events = vec![
         permission_fixture_event("permissions-handoff-token", Some(&logical), Some(lease),
             "TokenControlTransferred", "ens_v1_registrar_l1", 119, 0,
-            json!({"source_event":"Transfer", "namehash":node, "from_address":V2_PERMISSIONS_SUBJECT,
-                "to_address":V2_PERMISSIONS_OTHER_SUBJECT})),
+            json!({"source_event":"Transfer", "namehash":node, "from":V2_PERMISSIONS_SUBJECT,
+                "to":V2_PERMISSIONS_OTHER_SUBJECT})),
         permission_fixture_event("permissions-handoff-unbound", Some(&logical), Some(lease),
             "SurfaceUnbound", "ens_v1_registrar_l1", 119, 0, authority.clone()),
         permission_fixture_event("permissions-handoff-bound", Some(&logical), Some(registry),

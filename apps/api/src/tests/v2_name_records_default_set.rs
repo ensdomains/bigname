@@ -85,82 +85,31 @@ fn addr_selector(coin_type: &str, cacheable: bool) -> Value {
     })
 }
 
-fn non_product_selectors() -> Vec<Value> {
-    vec![
-        json!({"record_key": "abi:1", "record_family": "abi", "selector_key": "1", "cacheable": false}),
-        json!({"record_key": "pubkey", "record_family": "pubkey", "selector_key": null, "cacheable": false}),
-    ]
-}
 
-fn sorted_selectors(mut selectors: Vec<Value>) -> Value {
-    selectors.sort_by(|left, right| {
-        left["record_key"]
-            .as_str()
-            .cmp(&right["record_key"].as_str())
-    });
-    Value::Array(selectors)
-}
 
-fn mixed_default_set_inventory(inventory: &mut bigname_storage::RecordInventoryCurrentRow) {
-    // Cacheable selectors repeat in entries and count once; text:url is a selector without a
-    // retained entry; abi:1 and pubkey are outside the product key grammar.
-    let mut selectors = vec![
-        addr_selector("60", true),
-        json!({"record_key": "avatar", "record_family": "avatar", "selector_key": null, "cacheable": true}),
-        json!({"record_key": "contenthash", "record_family": "contenthash", "selector_key": null, "cacheable": true}),
-        text_selector("description", true),
-        text_selector("url", false),
-    ];
-    selectors.extend(non_product_selectors());
-    inventory.selectors = sorted_selectors(selectors);
-    inventory.entries = json!([
-        {
-            "record_key": "addr:60",
-            "record_family": "addr",
-            "selector_key": "60",
-            "status": "success",
-            "value": {"coin_type": "60", "value": "0x00000000000000000000000000000000000ABCDE"}
-        },
-        {
-            "record_key": "text:description",
-            "record_family": "text",
-            "selector_key": "description",
-            "status": "success",
-            "value": {"key": "description", "value": "Alice profile"}
-        },
-        {
-            "record_key": "avatar",
-            "record_family": "avatar",
-            "selector_key": null,
-            "status": "unsupported",
-            "unsupported_reason": "resolver_family_pending"
-        },
-        {
-            "record_key": "contenthash",
-            "record_family": "contenthash",
-            "selector_key": null,
-            "status": "not_found"
-        }
-    ]);
-    inventory.explicit_gaps = json!([]);
-    inventory.unsupported_families = json!([]);
-}
+
+
+
 
 #[tokio::test]
 async fn v2_get_name_records_without_keys_answers_the_inventory_default_set() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        mixed_default_set_inventory(inventory)
-    })
-    .await?;
+    seed_alice_name_inputs_with_writes(&database,&[
+        family_fixture_record_write("addr:60",Some(json!("0x00000000000000000000000000000000000ABCDE"))),
+        family_fixture_record_write("avatar",None),
+        family_fixture_record_write("contenthash",Some(json!("0x"))),
+        family_fixture_record_write("text:description",Some(json!("Alice profile"))),
+        family_fixture_record_write("text:url",Some(json!(""))),
+        json!({"source_event":"PubkeyChanged","record_key":"pubkey","record_family":"pubkey","selector_key":null,"x":"0x00","y":"0x00"})
+    ]).await?;
     let state = database.app_state();
 
     let expected_records = json!({
         "addr:60": {"status": "ok", "value": "0x00000000000000000000000000000000000abcde"},
-        "avatar": {"status": "unsupported", "unsupported_reason": "resolver_family_pending"},
+        "text:avatar": {"status": "unsupported", "unsupported_reason": "value_not_retained"},
         "contenthash": {"status": "not_found"},
         "text:description": {"status": "ok", "value": "Alice profile"},
-        "text:url": {"status": "not_found"}
+        "text:url": {"status": "ok", "value":""}
     });
     for uri in [
         "/v1/names/Alice.eth/records?include=inventory",
@@ -175,9 +124,8 @@ async fn v2_get_name_records_without_keys_answers_the_inventory_default_set() ->
             json!({
                 "known_keys": ["addr:60", "contenthash", "text:description", "text:url"],
                 "unset_keys": [],
-                "unsupported_keys": ["avatar"],
-                "abi_content_types": null,
-                "abi_unsupported_reason": "abi_observations_not_supported"
+                "unsupported_keys": ["text:avatar"],
+                "abi_content_types": []
             }),
             "{uri}"
         );
@@ -232,23 +180,15 @@ fn default_requested_records_unions_all_three_sections_once() {
 #[tokio::test]
 async fn v2_get_name_records_default_set_does_not_enumerate_derivable_addresses() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        inventory.selectors = json!([addr_selector("2147483648", true)]);
-        inventory.entries = json!([{
-            "record_key": "addr:2147483648",
-            "record_family": "addr",
-            "selector_key": "2147483648",
-            "status": "success",
-            "value": "0x0000000000000000000000000000000000000DeF"
-        }]);
-        inventory.provenance["read_rules"] = json!([{
-            "kind": "ensip19_default_address",
-            "source_record_key": "addr:2147483648"
-        }]);
-        inventory.explicit_gaps = json!([]);
-        inventory.unsupported_families = json!([]);
-    })
+    seed_alice_name_inputs_with_writes(
+        &database,
+        &[family_fixture_record_write(
+            "addr:2147483648",
+            Some(json!("0x0000000000000000000000000000000000000DeF")),
+        )],
+    )
     .await?;
+    enable_alice_ensip19_inputs(&database).await?;
     let state = database.app_state();
 
     // The default set enumerates inventory keys only; `addr:60` is derivable but not listed.
@@ -311,26 +251,15 @@ async fn v2_get_name_records_default_set_derives_an_enumerated_address_without_e
         ),
     ] {
         let database = TestDatabase::new_with_schemas(false, true).await?;
-        seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-            inventory.selectors = sorted_selectors(vec![
-                addr_selector("60", false),
-                addr_selector("2147483648", true),
-            ]);
-            inventory.entries = json!([{
-                "record_key": "addr:2147483648",
-                "record_family": "addr",
-                "selector_key": "2147483648",
-                "status": "success",
-                "value": default_value
-            }]);
-            inventory.provenance["read_rules"] = json!([{
-                "kind": "ensip19_default_address",
-                "source_record_key": "addr:2147483648"
-            }]);
-            inventory.explicit_gaps = json!([]);
-            inventory.unsupported_families = json!([]);
-        })
+        seed_alice_name_inputs_with_writes(
+            &database,
+            &[
+                family_fixture_record_write("addr:2147483648", Some(json!(default_value))),
+                family_fixture_record_write("addr:60", Some(json!("0x"))),
+            ],
+        )
         .await?;
+        enable_alice_ensip19_inputs(&database).await?;
         let state = database.app_state();
 
         for uri in [
@@ -365,10 +294,7 @@ async fn v2_get_name_records_default_set_derives_an_enumerated_address_without_e
 #[tokio::test]
 async fn v2_get_name_records_default_set_reports_unsupported_inventory_per_key() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        unsupported_resolver_inventory(inventory)
-    })
-    .await?;
+    seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
     let state = database.app_state();
     let refused = json!({
         "status": "unsupported",
@@ -424,45 +350,38 @@ async fn v2_get_name_records_default_set_reports_unsupported_inventory_per_key()
 
 #[tokio::test]
 async fn v2_get_name_records_default_set_is_empty_without_enumerable_keys() -> Result<()> {
-    type Configure = fn(&mut bigname_storage::RecordInventoryCurrentRow);
-    let authoritative_empty: Configure = |inventory| {
-        inventory.selectors = json!([]);
-        inventory.entries = json!([]);
-        inventory.explicit_gaps = json!([]);
-        inventory.unsupported_families = json!([]);
-    };
-    let non_authoritative_without_product_keys: Configure = |inventory| {
-        unsupported_resolver_inventory(inventory);
-        inventory.selectors = sorted_selectors(non_product_selectors());
-        inventory.entries = json!([]);
-    };
-    for (label, configure, delete_inventory, abi_unsupported_reason) in [
+    for (label, mode, abi) in [
         (
-            "no inventory row",
-            authoritative_empty,
-            true,
-            "inventory_not_available",
+            "no resolver inventory",
+            0,
+            json!({"abi_content_types":null,"abi_unsupported_reason":"inventory_not_available"}),
         ),
         (
             "authoritative empty inventory",
-            authoritative_empty,
-            false,
-            "abi_observations_not_supported",
+            1,
+            json!({"abi_content_types":[]}),
         ),
         (
-            "non-authoritative inventory with no product keys",
-            non_authoritative_without_product_keys,
-            false,
-            "inventory_not_authoritative",
+            "unknown implementation without product keys",
+            2,
+            json!({"abi_content_types":null,"abi_unsupported_reason":"inventory_not_authoritative"}),
         ),
     ] {
-        let database = TestDatabase::new_with_schemas(false, true).await?;
-        seed_v2_alice_name_records_fixture(&database, |_, _, inventory| configure(inventory))
-            .await?;
-        if delete_inventory {
-            sqlx::query("DELETE FROM bigname_phase.record_inventory_current")
-                .execute(&database.pool)
+        let database = TestDatabase::new_migrated().await?;
+        if mode == 2 {
+            seed_unknown_resolver_inputs(&database, &[]).await?;
+        } else {
+            seed_alice_name_inputs_with_writes(&database, &[]).await?;
+            if mode == 0 {
+                append_alice_name_input(&database,"ResolverChanged","ens_v1_registry_l1",json!({"node":bigname_lookup::ens_namehash_hex("alice.eth")?,"resolver":"0x0000000000000000000000000000000000000000"})).await?;
+                rebuild_fixture_families(
+                    &database.pool,
+                    "ethereum-mainnet",
+                    21_000_003,
+                    "0xbinding",
+                )
                 .await?;
+            }
         }
         let state = database.app_state();
         for source in ["indexed", "auto", "verified"] {
@@ -471,17 +390,19 @@ async fn v2_get_name_records_default_set_is_empty_without_enumerable_keys() -> R
             assert_eq!(payload["data"]["records"], json!({}), "{label} {uri}");
             assert_eq!(
                 payload["data"]["inventory"],
-                json!({
-                    "known_keys": [],
-                    "unset_keys": [],
-                    "unsupported_keys": [],
-                    "abi_content_types": null,
-                    "abi_unsupported_reason": abi_unsupported_reason
-                }),
+                {
+                    let mut expected =
+                        json!({"known_keys":[],"unset_keys":[],"unsupported_keys":[]});
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .extend(abi.as_object().unwrap().clone());
+                    expected
+                },
                 "{label} {uri}"
             );
         }
-        if delete_inventory {
+        if mode == 0 {
             // Explicit keys are still answered, never replaced by `{}`.
             let keyed =
                 records_route_json(&state, "/v1/names/Alice.eth/records?keys=addr:60").await?;
@@ -510,16 +431,10 @@ async fn unavailable_rpc_state(database: &TestDatabase) -> Result<AppState> {
 #[tokio::test]
 async fn v2_get_name_records_default_set_limit_applies_on_every_source() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        inventory.selectors = sorted_selectors(
-            (0..=crate::v2::MAX_PAGE_SIZE)
-                .map(|index| text_selector(&format!("key-{index}"), false))
-                .collect(),
-        );
-        inventory.entries = json!([]);
-        inventory.explicit_gaps = json!([]);
-    })
-    .await?;
+    let writes = (0..=crate::v2::MAX_PAGE_SIZE)
+        .map(|index| family_fixture_record_write(&format!("text:key-{index}"), Some(json!(""))))
+        .collect::<Vec<_>>();
+    seed_alice_name_inputs_with_writes(&database, &writes).await?;
     // A provider call would fail the request with a transport error, and reaching verified
     // execution would block on the installed hook until the bounded request timeout.
     let state = unavailable_rpc_state(&database).await?;
@@ -550,7 +465,7 @@ async fn v2_get_name_records_default_set_limit_applies_on_every_source() -> Resu
         .await?;
         assert_eq!(
             narrowed["data"]["records"],
-            json!({"text:key-0": {"status": "not_found"}})
+            json!({"text:key-0": {"status": "ok", "value":""}})
         );
     }
 
@@ -572,38 +487,19 @@ async fn v2_get_name_records_default_set_limit_applies_on_every_source() -> Resu
 #[tokio::test]
 async fn v2_get_name_records_default_set_of_exactly_200_product_keys_is_served() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        // 198 text keys, addr:60 and avatar give 200 product keys. addr:60 and avatar repeat in
-        // entries and must count once; non-product selectors do not count.
-        let mut selectors = (0..198)
-            .map(|index| text_selector(&format!("key-{index}"), false))
-            .collect::<Vec<_>>();
-        selectors.push(addr_selector("60", true));
-        selectors.push(json!({
-            "record_key": "avatar", "record_family": "avatar", "selector_key": null, "cacheable": true
-        }));
-        selectors.extend(non_product_selectors());
-        inventory.selectors = sorted_selectors(selectors);
-        inventory.entries = json!([
-            {
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "status": "success",
-                "value": {"coin_type": "60", "value": "0x0000000000000000000000000000000000000def"}
-            },
-            {
-                "record_key": "avatar",
-                "record_family": "avatar",
-                "selector_key": null,
-                "status": "success",
-                "value": {"value": "https://example.test/avatar.png"}
-            }
-        ]);
-        inventory.explicit_gaps = json!([]);
-        inventory.unsupported_families = json!([]);
-    })
-    .await?;
+    let mut writes = (0..198)
+        .map(|index| family_fixture_record_write(&format!("text:key-{index}"), Some(json!(""))))
+        .collect::<Vec<_>>();
+    writes.push(family_fixture_record_write(
+        "addr:60",
+        Some(json!("0x0000000000000000000000000000000000000def")),
+    ));
+    writes.push(family_fixture_record_write(
+        "avatar",
+        Some(json!("https://example.test/avatar.png")),
+    ));
+    writes.push(json!({"source_event":"PubkeyChanged","record_key":"pubkey","record_family":"pubkey","selector_key":null,"x":"0x00","y":"0x00"}));
+    seed_alice_name_inputs_with_writes(&database, &writes).await?;
     let state = database.app_state();
 
     for source in ["indexed", "auto", "verified"] {
@@ -621,19 +517,19 @@ async fn v2_get_name_records_default_set_of_exactly_200_product_keys_is_served()
 async fn v2_get_name_records_source_auto_without_keys_stays_indexed_over_default_set() -> Result<()>
 {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        let selectors = inventory.selectors.as_array_mut().expect("selectors array");
-        selectors.push(text_selector("email", false));
-        // text:email has no entry, so the family refusal makes it unsatisfiable by the index.
-        // Project never lists a product family here (it records non-product families and
-        // the resolver classification), so this row is synthetic; the test only needs a key
-        // that explicit auto sends to the fallback and unkeyed auto does not.
-        inventory.unsupported_families = json!([{
-            "record_family": "text",
-            "unsupported_reason": "resolver_family_pending"
-        }]);
-    })
+    seed_alice_name_inputs(&database).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "alice.eth",
+        "0x0000000000000000000000000000000000000abc",
+        21_000_003,
+        "0xbinding",
+        &[family_fixture_record_write("text:email", None)],
+    )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let state = database.app_state();
 
     for keys in ["", "&keys=", "&keys=%20%20"] {
@@ -651,7 +547,7 @@ async fn v2_get_name_records_source_auto_without_keys_stays_indexed_over_default
         );
         assert_eq!(
             payload["data"]["records"]["text:email"],
-            json!({"status": "unsupported", "unsupported_reason": "resolver_family_pending"}),
+            json!({"status": "unsupported", "unsupported_reason": "value_not_retained"}),
             "{uri}"
         );
         assert_eq!(record_keys(&payload).len(), 5, "{uri}");
@@ -678,94 +574,28 @@ async fn v2_get_name_records_source_auto_without_keys_stays_indexed_over_default
     database.cleanup().await
 }
 
-fn reserved_row(row: &mut bigname_storage::NameCurrentRow) {
-    row.declared_summary["registration"] = json!({
-        "status": "reserved",
-        "expiry": 4_000_000_000_u64,
-        "latest_event_kind": "RegistrationReserved"
-    });
-    row.declared_summary["control"] = json!({"status": "reserved"});
-}
 
-fn reserved_audit_inventory(inventory: &mut bigname_storage::RecordInventoryCurrentRow) {
-    inventory.selectors = sorted_selectors(
-        (0..=crate::v2::MAX_PAGE_SIZE)
-            .map(|index| text_selector(&format!("audit-{index}"), false))
-            .collect(),
-    );
-    inventory.entries = json!([]);
-}
 
-fn ownerless_serving_row(row: &mut bigname_storage::NameCurrentRow) {
-    let serving_resource_id = row.resource_id.expect("fixture control resource");
-    row.surface_binding_id = None;
-    row.resource_id = None;
-    row.serving_resource_id = Some(serving_resource_id);
-    row.token_lineage_id = None;
-    row.binding_kind = None;
-    row.declared_summary["registration"] = json!({"status":"unregistered"});
-    row.declared_summary["control"] = json!({"status":"unregistered"});
-    let coverage = json!({
-        "status":"projected",
-        "exhaustiveness":"not_asserted",
-        "enumeration_basis":"event_linked_registry_resolver",
-        "unsupported_reason":null
-    });
-    row.declared_summary["coverage"] = coverage.clone();
-    row.provenance["read_reachability"] = json!({
-        "serving_resource_id":serving_resource_id,
-        "basis":"retained_registry_resolver_pointer",
-        "owner_getter_reason":"registry_self",
-        "pointer_event_id":102
-    });
-    row.coverage = coverage;
-}
 
-fn authority_unsupported_row(row: &mut bigname_storage::NameCurrentRow) {
-    row.coverage = json!({
-        "status":"unsupported",
-        "unsupported_reason":"conflicting_current_ens_authority"
-    });
-}
+
+
+
+
 
 #[tokio::test]
 async fn v2_get_name_records_shape_matrix_serves_records_only() -> Result<()> {
-    type ConfigureRow = fn(&mut bigname_storage::NameCurrentRow);
-    type ConfigureInventory = fn(&mut bigname_storage::RecordInventoryCurrentRow);
-    let active: ConfigureRow = |_| {};
-    let keep_inventory: ConfigureInventory = |_| {};
-    let fixture_keys = ["addr:60", "avatar", "contenthash", "text:description"];
-    for (label, configure_row, configure_inventory) in [
-        ("active", active, keep_inventory),
-        (
-            "ownerless serving",
-            ownerless_serving_row as ConfigureRow,
-            keep_inventory,
-        ),
-        (
-            "reservation",
-            reserved_row as ConfigureRow,
-            reserved_audit_inventory as ConfigureInventory,
-        ),
-        (
-            "authority unsupported",
-            authority_unsupported_row as ConfigureRow,
-            keep_inventory,
-        ),
+    let fixture_keys = ["addr:60", "contenthash", "text:avatar", "text:description"];
+    for (label, input) in [
+        ("active", None),
+        ("ownerless serving", Some(AliceInputState::Ownerless)),
+        ("reservation", Some(AliceInputState::Reserved)),
+        ("unbound authority", Some(AliceInputState::Unbound)),
     ] {
-        let database = TestDatabase::new_with_schemas(false, true).await?;
-        seed_v2_alice_name_records_fixture_with_row(&database, configure_row, |_, _, inventory| {
-            configure_inventory(inventory)
-        })
-        .await?;
-        if label == "ownerless serving" {
-            sqlx::query(
-                "UPDATE bigname_phase.resources SET token_lineage_id = NULL
-                 WHERE resource_id = $1",
-            )
-            .bind(Uuid::from_u128(0x2200))
-            .execute(&database.pool)
-            .await?;
+        let database = TestDatabase::new_migrated().await?;
+        if let Some(input) = input {
+            seed_alice_state_inputs(&database, input).await?;
+        } else {
+            seed_alice_name_inputs(&database).await?;
         }
         let state = database.app_state();
 
@@ -783,13 +613,13 @@ async fn v2_get_name_records_shape_matrix_serves_records_only() -> Result<()> {
                 let records = &payload["data"]["records"];
                 let expected_keys = match (label, keys) {
                     (_, Some(key)) => vec![key],
-                    ("reservation", None) => Vec::new(),
+                    ("reservation" | "unbound authority", None) => Vec::new(),
                     (_, None) => fixture_keys.to_vec(),
                 };
                 assert_eq!(record_keys(&payload), expected_keys, "{label} {uri}");
                 assert_eq!(
                     payload["data"].get("inventory").is_some(),
-                    label != "reservation",
+                    !matches!(label, "reservation" | "unbound authority"),
                     "{label} {uri}: {payload}"
                 );
                 let expected_source = if source == "verified" {
@@ -812,11 +642,11 @@ async fn v2_get_name_records_shape_matrix_serves_records_only() -> Result<()> {
                         json!({"status": "unsupported", "unsupported_reason": "verified_records_not_supported"}),
                         "{label} {uri}"
                     ),
-                    ("authority unsupported", _) => {
+                    ("unbound authority", _) => {
                         for key in &expected_keys {
                             assert_eq!(
                                 records[*key],
-                                json!({"status": "unsupported", "unsupported_reason": "conflicting_current_ens_authority"}),
+                                json!({"status": "unsupported", "unsupported_reason": "inventory_not_available"}),
                                 "{label} {uri}"
                             );
                         }
@@ -828,7 +658,7 @@ async fn v2_get_name_records_shape_matrix_serves_records_only() -> Result<()> {
                     ),
                     ("reservation", "verified") if keys.is_some() => assert_eq!(
                         records["addr:60"],
-                        json!({"status": "unsupported", "unsupported_reason": "verified_records_not_supported"}),
+                        json!({"status": "unsupported", "unsupported_reason": "inventory_not_available"}),
                         "{label} {uri}"
                     ),
                     _ => {}
@@ -857,7 +687,7 @@ async fn v2_sepolia_default_sets_match_across_sources_at_one_snapshot() -> Resul
         .to_owned();
     assert_eq!(
         record_keys(&indexed),
-        vec!["addr:60", "avatar", "text:com.twitter"]
+        vec!["addr:60", "text:avatar", "text:com.twitter"]
     );
     assert_eq!(indexed["data"]["records"]["addr:60"]["status"], json!("ok"));
     assert_eq!(
@@ -907,38 +737,26 @@ async fn v2_sepolia_verified_records_readback_checks_the_inventory_snapshot() ->
         json!({"status": "unsupported", "unsupported_reason": "verified_records_not_supported"})
     );
 
-    // Inventory ahead of the selected snapshot fails the verified readback like an indexed read.
+    // A later family publication cannot serve the older selected snapshot.
+    let token = missing["meta"]["as_of_token"]
+        .as_str()
+        .context("verified snapshot token")?;
     insert_v2_sepolia_indexed_inventory(&database).await?;
-    sqlx::query(
-        "INSERT INTO bigname_phase.chain_lineage
-         (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ('ethereum-sepolia', '0xfuture-inventory', $1,
-                 '2026-04-17T00:10:21Z', 'canonical'::bigname_phase.canonicality_state)",
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":"ethereum-sepolia","block_number":V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK+1,
+            "block_hash":"0xsepolia-next","timestamp":"2026-04-17T00:10:21Z"
+        }}))
+        .await?;
+    rebuild_fixture_families(
+        &database.pool,
+        "ethereum-sepolia",
+        V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
+        "0xsepolia-next",
     )
-    .bind(V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1)
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.record_inventory_current
-         SET chain_positions = $2, canonicality_summary = $3
-         WHERE resource_id = $1",
-    )
-    .bind(Uuid::from_u128(0x7e30))
-    .bind(json!({
-        "block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
-        "block_hash": "0xfuture-inventory",
-        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
-        "target_block_hash": "0xfuture-inventory",
-    }))
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK + 1,
-        "target_block_hash": "0xfuture-inventory",
-    }))
-    .execute(&database.pool)
     .await?;
     for uri in [unkeyed, keyed] {
-        let (status, body) = records_route_get(&state, &uri).await?;
+        let (status, body) = records_route_get(&state, &format!("{uri}&at={token}")).await?;
         assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body}");
     }
 
