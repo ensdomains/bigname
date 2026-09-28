@@ -572,3 +572,77 @@ async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
     fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }
+
+// Undo of a block whose only summary change is a clock boundary (no other family writes)
+// restores the summary exactly, and a replay writes the rebuild's rows. Undo of a block that
+// changes nothing at all rewrites no summary.
+#[tokio::test]
+async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_block() -> Result<()>
+{
+    let fixture = Fixture::new("families_name_summary_clock_undo", 12).await?;
+    fixture
+        .binding(&uuid(101), &name(1), &uuid(0x1001), "ens_v1", 2, 0, Some(8))
+        .await?;
+    registered(&fixture, 2, 4, 2_100_000_000).await?;
+    publish(&fixture, 7).await?;
+    let (open, _) = summary(&fixture, &name(1)).await?.expect("first row");
+
+    // Block 8 has no events: only the clock closes name 1's binding.
+    fixture
+        .apply(8, bigname_project::families::FamilyMode::Normal)
+        .await;
+    let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
+    ensure!(closed != open, "block 8 left {closed}");
+    let journalled: Vec<String> = sqlx::query_scalar(
+        "SELECT family FROM project_family_undo WHERE chain_id = $1 AND block_number = 8
+         ORDER BY family",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    ensure!(
+        journalled == ["marker", "project_name_summary"],
+        "block 8 journalled {journalled:?}"
+    );
+    let undone = families::undo_to(&fixture.pool, CHAIN, 7).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    let (restored, _) = summary(&fixture, &name(1)).await?.expect("first row");
+    ensure!(restored == open, "undo left {restored}, not {open}");
+    fixture
+        .apply(8, bigname_project::families::FamilyMode::Normal)
+        .await;
+    let (replayed, _) = summary(&fixture, &name(1)).await?.expect("first row");
+    ensure!(
+        replayed == closed,
+        "the replay wrote {replayed}, not {closed}"
+    );
+    fixture.assert_rebuild_equal(8).await?;
+
+    // Block 9 has no events and reaches no boundary: it and its undo rewrite no summary.
+    let before: Vec<(String, String)> =
+        sqlx::query_as("SELECT logical_name_id, xmin::text FROM project_name_summary ORDER BY 1")
+            .fetch_all(&fixture.pool)
+            .await?;
+    fixture
+        .apply(9, bigname_project::families::FamilyMode::Normal)
+        .await;
+    let summaries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_family_undo
+         WHERE chain_id = $1 AND block_number = 9 AND family = 'project_name_summary'",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(summaries == 0, "block 9 journalled {summaries} summaries");
+    let undone = families::undo_to(&fixture.pool, CHAIN, 8).await?;
+    ensure!(undone == 1, "undid {undone} blocks");
+    let after: Vec<(String, String)> =
+        sqlx::query_as("SELECT logical_name_id, xmin::text FROM project_name_summary ORDER BY 1")
+            .fetch_all(&fixture.pool)
+            .await?;
+    ensure!(
+        after == before,
+        "block 9 or its undo rewrote summaries: {before:?} then {after:?}"
+    );
+    fixture.cleanup().await
+}
