@@ -85,6 +85,7 @@
 
   /* the request line: the URL is the form */
   .req { margin-top: 32px; }
+  .req .cmd { margin-top: 10px; padding: 9px 14px; border-radius: 10px; background: var(--wash); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
   .page .internal { margin-top: 32px; font-size: 14px; color: var(--ink-soft); max-width: 62ch; }
   .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 0; border: 1.5px solid var(--line); background: var(--card); border-radius: 12px; padding: 9px 8px 9px 14px; font-family: var(--mono); font-size: 13.5px; line-height: 1.8; }
   .line .m { font-weight: 600; margin-right: 10px; flex: none; }
@@ -1119,7 +1120,7 @@ const ROUTES = [
       let first = true;
       for (const p of params) { if (p.in === 'path' || !shown.has(p.name)) continue; u += `<i>${first ? '?' : '&amp;'}</i>${esc(p.name)}<i>=</i>${field(p)}`; first = false; }
       const adds = params.filter(p => p.in !== 'path' && !shown.has(p.name)).map(p => `<button type="button" data-add="${esc(p.name)}">${esc(p.name)}</button>`).join('');
-      form.innerHTML = `<div class="line"><span class="m">${esc(r.method)}</span><span class="u">${u}</span><span class="go"><button type="button" class="cp">curl</button><button type="submit" class="run">run</button></span></div>${adds ? `<div class="adds">${adds}</div>` : ''}${r.method === 'POST' ? `<div class="body-in"><textarea name="__body" spellcheck="false" aria-label="request body">${esc(body)}</textarea></div>` : ''}`;
+      form.innerHTML = `<div class="line"><span class="m">${esc(r.method)}</span><span class="u">${u}</span><span class="go"><button type="button" class="cp">curl</button><button type="submit" class="run">run</button></span></div>${adds ? `<div class="adds">${adds}</div>` : ''}${r.method === 'POST' ? `<div class="body-in"><textarea name="__body" spellcheck="false" aria-label="request body">${esc(body)}</textarea></div>` : ''}<pre class="cmd" hidden aria-label="curl command"></pre>`;
     }
     render();
     form.addEventListener('input', e => {
@@ -1143,7 +1144,18 @@ const ROUTES = [
       const add = e.target.closest('[data-add]');
       if (add) { const p = byName(add.dataset.add); shown.add(p.name); vals[p.name] = p.values ? (p.default || p.values[0]) : ''; render(); const f = form.elements[p.name]; if (f) f.focus(); return; }
       const cp = e.target.closest('.cp');
-      if (cp) navigator.clipboard.writeText(curlFor(r, url(), body)).then(() => { cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); });
+      if (!cp) return;
+      // Without a usable clipboard (a plain-http preview, a denied permission)
+      // the command is shown and selected instead, as on the landing page.
+      const cmd = curlFor(r, url(), body), clip = navigator.clipboard;
+      const copied = () => { cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); };
+      const showCmd = () => {
+        const box = $('.cmd', form), sel = getSelection(), range = document.createRange();
+        box.textContent = cmd; box.hidden = false;
+        range.selectNodeContents(box); sel.removeAllRanges(); sel.addRange(range);
+      };
+      if (!clip || typeof clip.writeText !== 'function') { showCmd(); return; }
+      try { clip.writeText(cmd).then(copied, showCmd); } catch (err) { showCmd(); }
     });
     out.addEventListener('click', e => {
       const sw = e.target.closest('.sw'); if (sw) { out.className = 'out ex'; out.innerHTML = exampleHtml(r, sw.dataset.which); }

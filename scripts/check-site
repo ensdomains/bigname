@@ -85,6 +85,15 @@ fi
 if grep -nE 'curl -s' "${pages[@]}" | grep -F "'\${"; then
   fail "a generated curl command interpolates inside hand-written quotes; use shq()"
 fi
+# Copying a curl command must survive a missing or refusing clipboard (plain
+# http previews have none): both pages go through a guarded clip.writeText.
+if grep -nF 'navigator.clipboard.writeText' "${pages[@]}"; then
+  fail "a page calls navigator.clipboard.writeText without the guard and fallback"
+fi
+for page in "${pages[@]}"; do
+  grep -qF "typeof clip.writeText !== 'function'" "$page" || fail "$page copies without checking the clipboard exists"
+done
+
 # The static curl examples on the docs page get the base substituted for
 # __API__; each one must sit right after an opening single quote, so a base
 # that slipped past parseApi still cannot reach the shell.
