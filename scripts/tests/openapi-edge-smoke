@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/tests/openapi-edge-smoke
+
+Runs the committed docker/caddy/Caddyfile, unchanged, in front of a fixture
+upstream (scripts/tests/openapi_fixture_upstream.py) and checks what the edge
+does to GET and HEAD /openapi.json once the API answers them:
+  - a 404 whose body is the fixture's own and which carries no CORS header
+    comes back with that status and body and exactly one wildcard
+    Access-Control-Allow-Origin, added by the edge
+  - a 200 that already carries a wildcard comes back with that status and body
+    and still exactly one wildcard, so the deferred edge header replaced the
+    upstream one rather than adding a second
+  - HEAD checks status and headers only
+  - / is answered by the edge itself: 404, no fixture body, no CORS header
+
+The public-edge smoke cannot show the 200 case, because the API answers 404
+until the OpenAPI document ships (TYR-18).
+
+Needs docker, python3 and curl, and the Caddy image available locally. On
+Linux, Caddy uses host networking; elsewhere (Docker Desktop) it publishes the
+edge port on loopback and reaches the fixture through host.docker.internal.
+
+Environment:
+  BIGNAME_SMOKE_CADDY_IMAGE  Caddy image, default caddy:2-alpine.
+USAGE
+}
+
+case "${1-}" in
+  "") ;;
+  -h | --help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+log() {
+  printf '[openapi-edge-smoke] %s\n' "$*"
+}
+
+caddy_image="${BIGNAME_SMOKE_CADDY_IMAGE:-caddy:2-alpine}"
+caddy_container="bigname-openapi-edge-smoke-$$"
+caddy_started=0
+# Set before docker run is tried, so cleanup removes the named container even
+# when the run fails or is interrupted partway.
+caddy_attempted=0
+fixture_pid=""
+work="$(mktemp -d "${TMPDIR:-/tmp}/openapi-edge-smoke.XXXXXX")"
+
+fail() {
+  printf '[openapi-edge-smoke] ERROR: %s\n' "$*" >&2
+  if [ "$caddy_started" -eq 1 ]; then
+    docker logs "$caddy_container" 2>&1 | sed -n '1,80p' >&2 || true
+  fi
+  exit 1
+}
+
+cleanup() {
+  if [ "$caddy_attempted" -eq 1 ]; then
+    docker rm --force "$caddy_container" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$fixture_pid" ]; then
+    kill "$fixture_pid" 2>/dev/null || true
+    wait "$fixture_pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+for command in docker python3 curl grep sed tr; do
+  command -v "$command" >/dev/null 2>&1 || fail "missing required command: $command"
+done
+docker image inspect "$caddy_image" >/dev/null 2>&1 ||
+  fail "Caddy image is not available locally: ${caddy_image}"
+
+# The fixture picks its own loopback port and writes it down.
+python3 scripts/tests/openapi_fixture_upstream.py --port-file "$work/fixture.port" &
+fixture_pid=$!
+for _attempt in $(seq 1 50); do
+  [ -s "$work/fixture.port" ] && break
+  kill -0 "$fixture_pid" 2>/dev/null || fail "fixture upstream exited"
+  sleep 0.1
+done
+[ -s "$work/fixture.port" ] || fail "fixture upstream did not start"
+fixture_port="$(cat "$work/fixture.port")"
+
+edge_port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+edge_url="http://127.0.0.1:${edge_port}"
+
+caddy_args=(
+  --env "BIGNAME_PUBLIC_SITE_ADDRESS=${edge_url}"
+  --env BIGNAME_CADDY_ADMIN=off
+  --volume "${ROOT}/docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+)
+if [ "$(uname -s)" = Linux ]; then
+  caddy_args+=(
+    --network host
+    --env "BIGNAME_PUBLIC_UPSTREAM=127.0.0.1:${fixture_port}"
+    --env "BIGNAME_PUBLIC_BIND_DIRECTIVE=bind 127.0.0.1"
+  )
+else
+  caddy_args+=(
+    --publish "127.0.0.1:${edge_port}:${edge_port}"
+    --env "BIGNAME_PUBLIC_UPSTREAM=host.docker.internal:${fixture_port}"
+    --env "BIGNAME_PUBLIC_BIND_DIRECTIVE=bind 0.0.0.0"
+  )
+fi
+
+log "starting ${caddy_image} on ${edge_url} in front of the fixture on port ${fixture_port}"
+caddy_attempted=1
+docker run --detach --rm --name "$caddy_container" "${caddy_args[@]}" "$caddy_image" >/dev/null ||
+  fail "could not start ${caddy_image} as ${caddy_container}"
+caddy_started=1
+
+last_status=""
+last_headers=""
+last_body=""
+
+request() {
+  local label="$1" method="$2" path="$3"
+  last_headers="${work}/${label}.headers"
+  last_body="${work}/${label}.body"
+  local method_args=(--request "$method")
+  if [ "$method" = HEAD ]; then
+    method_args=(--head)
+  fi
+  last_status="$(curl --disable --silent --show-error --noproxy '*' --max-time 10 \
+    "${method_args[@]}" --dump-header "$last_headers" --output "$last_body" \
+    --write-out '%{http_code}' "${edge_url}${path}")"
+}
+
+ready=0
+for _attempt in $(seq 1 30); do
+  if request readiness GET / 2>/dev/null && [ "$last_status" = 404 ]; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+[ "$ready" -eq 1 ] || fail "Caddy did not become ready at ${edge_url}"
+
+show() {
+  sed -n '1,40p' "$last_headers" >&2 || true
+  sed -n '1,20p' "$last_body" >&2 || true
+}
+
+header_count() {
+  tr -d '\r' < "$last_headers" | grep -Eic "$1" || true
+}
+
+expect_status() {
+  local label="$1" expected="$2"
+  if [ "$last_status" != "$expected" ]; then
+    show
+    fail "${label}: expected status ${expected}, got ${last_status}"
+  fi
+}
+
+expect_one_wildcard() {
+  local label="$1"
+  local count wildcard
+  count="$(header_count '^access-control-allow-origin:')"
+  wildcard="$(header_count '^access-control-allow-origin:[[:space:]]*\*$')"
+  if [ "$count" != 1 ] || [ "$wildcard" != 1 ]; then
+    show
+    fail "${label}: expected exactly one wildcard access-control-allow-origin, got ${count} header(s), ${wildcard} wildcard(s)"
+  fi
+}
+
+expect_proxied() {
+  local label="$1"
+  if [ "$(header_count '^x-openapi-fixture:[[:space:]]*1$')" != 1 ]; then
+    show
+    fail "${label}: response did not come from the fixture upstream"
+  fi
+}
+
+expect_body() {
+  local label="$1" expected="$2"
+  local actual
+  actual="$(cat "$last_body")"
+  if [ "$actual" != "$expected" ]; then
+    show
+    fail "${label}: body changed at the edge: expected [${expected}], got [${actual}]"
+  fi
+}
+
+missing_body='openapi-fixture-upstream-404'
+ok_body='{"openapi":"3.1.0","fixture":"openapi-edge-smoke"}'
+
+check() {
+  local label="$1" method="$2" path="$3" status="$4" body="$5"
+  request "$label" "$method" "$path"
+  expect_status "$label" "$status"
+  expect_proxied "$label"
+  expect_one_wildcard "$label"
+  if [ "$method" = GET ]; then
+    expect_body "$label" "$body"
+  fi
+  log "${label}: ${method} ${path} -> ${last_status}, one wildcard origin"
+}
+
+check openapi-404-get GET /openapi.json 404 "$missing_body"
+check openapi-404-head HEAD /openapi.json 404 "$missing_body"
+check openapi-200-get GET '/openapi.json?case=ok' 200 "$ok_body"
+check openapi-200-head HEAD '/openapi.json?case=ok' 200 "$ok_body"
+
+# Control: the edge answers / itself, so the fixture body and the CORS header
+# above are not something every response carries.
+request root-get GET /
+expect_status root-get 404
+if [ "$(header_count '^x-openapi-fixture:')" != 0 ] || [ "$(header_count '^access-control-allow-origin:')" != 0 ]; then
+  show
+  fail "root-get: / reached the fixture or carried a CORS header"
+fi
+if grep -q "$missing_body" "$last_body"; then
+  show
+  fail "root-get: / returned the fixture body"
+fi
+log "root-get: GET / -> 404 from the edge, no CORS header"
+
+log "openapi edge regression passed"

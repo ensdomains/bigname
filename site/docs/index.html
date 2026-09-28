@@ -85,6 +85,8 @@
 
   /* the request line: the URL is the form */
   .req { margin-top: 32px; }
+  .req .cmd { margin-top: 10px; padding: 9px 14px; border-radius: 10px; background: var(--wash); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all; }
+  .page .internal { margin-top: 32px; font-size: 14px; color: var(--ink-soft); max-width: 62ch; }
   .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 0; border: 1.5px solid var(--line); background: var(--card); border-radius: 12px; padding: 9px 8px 9px 14px; font-family: var(--mono); font-size: 13.5px; line-height: 1.8; }
   .line .m { font-weight: 600; margin-right: 10px; flex: none; }
   .line .u { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
@@ -141,7 +143,7 @@
 
   @media (max-width: 860px) {
     .wrap { padding: 0 18px 64px; }
-    .mast { height: 64px; } .lockup .word { font-size: 20px; } .status .t { display: none; }
+    .mast { height: 64px; } .lockup .word { font-size: 20px; } .status .t { display: none; } .mast .right { gap: 14px; }
     .split { grid-template-columns: 1fr; padding-top: 4px; }
     .index { position: static; max-height: none; overflow: visible; padding-top: 8px; mask-image: none; }
     .ihero { display: block; margin: 12px 0 30px; } .ihero p { font-family: var(--sans); font-size: 16px; line-height: 1.55; color: var(--ink-soft); margin-top: 16px; text-wrap: pretty; }
@@ -158,8 +160,10 @@
 <header class="mast">
   <a class="lockup" href="#"><svg class="mark" width="40" height="27" viewBox="0 0 92.21 62" aria-hidden="true"><rect x="0" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:0"/><rect x="14.31" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:1"/><rect x="28.62" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:2"/><rect x="42.92" y="0" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:3"/><rect x="65.18" y="0" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:4"/><rect x="79.49" y="0" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:5"/><rect x="0" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:6"/><rect x="14.31" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:7"/><rect x="28.62" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:8"/><rect x="42.92" y="13.04" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:9"/><rect x="65.18" y="13.04" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:10"/><rect x="79.49" y="13.04" width="12.72" height="11.45" rx="3.97" fill="#74b9df" style="--i:11"/><rect x="0" y="37.52" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:12"/><rect x="14.31" y="37.52" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:13"/><rect x="36.57" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:14"/><rect x="50.87" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:15"/><rect x="65.18" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:16"/><rect x="79.49" y="37.52" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:17"/><rect x="0" y="50.55" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:18"/><rect x="14.31" y="50.55" width="12.72" height="11.45" rx="3.97" fill="#f03793" style="--i:19"/><rect x="36.57" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:20"/><rect x="50.87" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:21"/><rect x="65.18" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:22"/><rect x="79.49" y="50.55" width="12.72" height="11.45" rx="3.97" fill="var(--mark-a)" style="--i:23"/></svg><span class="word">bigname</span></a>
   <div class="right">
+    <span id="network"></span>
     <a class="status" id="status" href="#status" title="checking the index"><span class="tile"></span><span class="t">checking</span></a>
     <button class="theme" id="theme-btn" type="button" title="switch theme" aria-label="switch theme"></button>
+    <a href="../" data-carry="../">home</a>
     <a href="https://github.com/ensdomains/bigname">source</a>
   </div>
 </header>
@@ -169,6 +173,9 @@
     <div id="index-groups"></div>
     <div class="ver" id="ver"></div>
   </nav>
+  <!-- The reference below is written by hand. When the API publishes its OpenAPI
+       document at <base>/openapi.json (TYR-18), a renderer attaches here and reads
+       it from the network the switcher selects. -->
   <main class="page" id="page"></main>
 </div>
 </div>
@@ -220,11 +227,11 @@ const GUIDES = [
   keywords: ['quick start', 'base url', 'endpoints', 'routes'],
   sections: [
     { h: 'Examples', id: 'examples', html: `
-<pre class="block"><code>$ curl -s /v1/names/taytems.eth
-$ curl -s '/v1/names/taytems.eth/records?keys=addr:60,text:avatar'
-$ curl -s /v1/addresses/0x8e8Db5CcEF88cca9d624701Db544989C996E3216/primary-name
-$ curl -s -X POST /v1/lookup -H 'content-type: application/json' \\
-       -d '{"profile":"feed","inputs":[{"name":"taytems.eth"}]}'</code></pre>` },
+<pre class="block"><code>$ curl -s '__API__/v1/names/__NAME__'
+$ curl -s '__API__/v1/names/__NAME__/records?keys=addr:60,text:avatar'
+$ curl -s '__API__/v1/addresses/__ADDRESS__/primary-name'
+$ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
+       -d '{"profile":"feed","inputs":[{"name":"__NAME__"}]}'</code></pre>` },
     { h: 'Manual pages', id: 'pages', html: '__ROUTE_TABLE__' },
     { h: 'The six rules', id: 'rules', html: `
 <ol>
@@ -489,6 +496,10 @@ const EVENT_FIELDS = [
   ['kind', 'With <code>include=raw</code>: the raw storage event kind behind the friendly type, such as <code>RecordChanged</code>. Independent of <code>include=data</code>; combine both to receive all three optional fields.'],
   ['page.total_count', 'For name, address, registration, or resolver anchored reads, the count across all matching pages; null above 10,000 unless <code>include=total_count</code> requests an exact count. Unanchored events return null.'],
 ];
+// Prefills that differ per network name a key of the selected network's
+// samples in network.js; fill() swaps them in when a page is drawn, so a
+// network without samples prefills nothing rather than another network's.
+const SAMPLE = { name: { sampleKey: 'name' }, address: { sampleKey: 'address' }, resolver: { sampleKey: 'resolver' }, registry: { sampleKey: 'registry' } };
 const AS_OF = { as_of: { '1': { block_number: 23400118, block_hash: '0x…', timestamp: '2026-09-11T00:00:00Z' } }, as_of_token: '…' };
 const EVENT_SAMPLE = { data: [ { type: 'transfer', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 23399000, timestamp: '2026-09-10T20:11:47Z', transaction_hash: '0x…', log_index: 42 } ], page: { cursor: null, next_cursor: 'opaque-token', page_size: 50, total_count: null, has_more: true }, meta: { as_of: AS_OF.as_of } };
 const REDO = { h: 'Behaviour while a redo is rewriting history', html: `<p>Name history, address history, and events share one check. While an Interpret redo is rewriting history on any chain, all three answer <code>409 stale</code> regardless of the namespace asked for. Name history checks before deriving its anchors and inside its page transaction. Events and address history check at the same two points and check again after resolving current display names. A redo seen by any of these checks means a partially rebuilt page is never served. The answer is safe to retry and does not expire a position cursor: once the redo finishes, the same cursor continues.</p>` };
@@ -510,7 +521,7 @@ const ROUTES = [
       { name: 'relation', in: 'body', type: 'set', desc: 'On address inputs, the relation set to match. It is echoed back normalized in the order owner, manager, registrant.' },
       { name: 'page_size, cursor', in: 'body', type: 'pagination', desc: 'On address inputs. The default page is 50 rows and the maximum is 200. The cursor binds the set of public namespaces it was made under.' },
     ],
-    sample: { profile: 'detail', inputs: [ { id: 'me', name: 'taytems.eth' }, { id: 'holdings', address: '0x8e8Db5CcEF88cca9d624701Db544989C996E3216', coin_type: 60, relation: 'owner,manager', page_size: 10 } ] },
+    sample: s => ({ profile: 'detail', inputs: [ { id: 'me', name: s.name || 'name.eth' }, { id: 'holdings', address: s.address || '0x…', coin_type: 60, relation: 'owner,manager', page_size: 10 } ] }),
   },
   response: {
     html: `<p><code>data</code> is an array with one result per input. There is no top-level <code>page</code>; each address result carries its own.</p>`,
@@ -581,7 +592,7 @@ const ROUTES = [
   id: 'name', method: 'GET', path: '/v1/names/{name}', title: 'Name profile',
   summary: 'Returns one flat record for a name: its identity, its current registration, its NameWrapper state, its resolver, and the most commonly wanted resolver records. A name whose registration has ended still answers, with the fields that no longer apply left out.',
   keywords: ['profile', 'owner', 'registrant', 'manager', 'expires_at', 'wrapper_state', 'wrapper_fuses', 'resolver', 'addresses', 'text_records', 'content_hash', 'primary_name', 'primary_address'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, { name: 'source', in: 'query', type: 'enum', values: ['indexed', 'verified'], default: 'indexed', desc: 'With <code>verified</code>, the fields <code>addresses</code>, <code>text_records</code>, <code>content_hash</code>, and <code>primary_address</code> are rebuilt from live resolver calls. Everything else stays indexed. This route has no <code>auto</code>.' }, P.at, P.finality],
   response: {
     fields: [
@@ -608,7 +619,7 @@ const ROUTES = [
   id: 'records', method: 'GET', path: '/v1/names/{name}/records', title: 'Resolver records',
   summary: 'Returns resolver records for a name, one answer per requested key, or per inventory key when <code>keys</code> is omitted. The answers come from the index by default, from fresh resolver calls with <code>source=verified</code>, or from a mix of the two with <code>source=auto</code>.',
   keywords: ['keys', 'addr', 'text', 'avatar', 'contenthash', 'inventory', 'known_keys', 'unset_keys', 'unsupported_keys', 'abi_content_types', 'abi_unsupported_reason', 'auto', 'verified', 'ENSIP-19', 'default address'],
-  sample: { name: 'taytems.eth', keys: 'addr:60,text:avatar,contenthash' },
+  sample: { name: SAMPLE.name, keys: 'addr:60,text:avatar,contenthash' },
   params: [P.name, P.namespace, { name: 'source', in: 'query', type: 'enum', values: ['indexed', 'verified', 'auto'], default: 'indexed', desc: '<code>auto</code> keeps indexed answers that satisfy a key and verifies the rest. With <code>keys</code> omitted or empty it reads the index only, over the default set.' }, { name: 'keys', in: 'query', desc: 'Comma-separated selectors from <a href="#record-keys">record-keys(7)</a>. When omitted, empty, or only whitespace, the default set is every record key in the grammar found in the name\'s served inventory. Both an explicit and a default set are capped at 200 keys, on every source.' }, { name: 'include', in: 'query', type: 'enum', values: ['inventory'], desc: 'Adds <code>inventory: {known_keys, unset_keys, unsupported_keys, abi_content_types, abi_unsupported_reason?}</code> to the answer.' }, P.at, P.finality],
   response: {
     fields: [
@@ -641,7 +652,7 @@ const ROUTES = [
   id: 'subnames', method: 'GET', path: '/v1/names/{name}/subnames', title: 'Subnames',
   summary: 'Lists the direct children of a name, sorted by display name. Grandchildren are not included; page into a child to see its own children.',
   keywords: ['children', 'labelhash', 'subname_count', 'counts', 'placeholder'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds <code>subname_count</code> to each row.' }, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     fields: [['name, display_name, namespace, namehash, labelhash', 'The child\'s identity. The label itself may be unknown.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at', 'Present when the index can back them.'], ['subname_count', 'Present with <code>include=counts</code>.']],
@@ -658,7 +669,7 @@ const ROUTES = [
   id: 'address-names', method: 'GET', path: '/v1/addresses/{address}/names', title: 'Names by address',
   summary: 'Lists names an address currently holds as owner, manager, or registrant, or names whose address record resolves to it. Rows carry the name\'s registration fields and which relations matched, but no resolver records.',
   keywords: ['q', 'prefix', 'sort', 'order', 'dedupe', 'role_summary', 'record_count', 'is_primary', 'relations', 'grants', 'resolves_to', 'coin_type', 'evm', 'resolutions'],
-  sample: { address: '0x8e8Db5CcEF88cca9d624701Db544989C996E3216' },
+  sample: { address: SAMPLE.address },
   params: [P.address, P.namespace, { ...P.relation, desc: P.relation.desc + ' Alternatively, <code>resolves_to</code> stands alone and reads resolver address records; it cannot be combined with the ownership relations.' }, { name: 'authority', in: 'query', type: 'enum', values: ['ens_v0', 'ens_v1', 'ens_v2'], desc: 'Keeps only names whose <code>authority</code> field has this value, so <code>ens_v1</code> does not match an <code>ens_v0</code> name. Names without <code>authority</code> match no value. Also applies to <code>resolves_to</code> and is bound into its cursor.' }, { name: 'coin_type', in: 'query', default: '60', desc: 'Accepted only with <code>relation=resolves_to</code>. A decimal coin type reads the address record for that one coin type. The literal <code>evm</code> reads every EVM coin type at once (60, and 2147483648 through 4294967295) (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f), so names set only for another chain are found too; its rows carry <code>resolutions</code> instead of <code>resolution</code>, at most 100 per row. An empty value means 60; <code>EVM</code> and comma lists are rejected.' }, { name: 'q', in: 'query', desc: 'A normalized name prefix. The last label may be partial. One trailing dot marks a label boundary, so <code>alice.</code> matches <code>alice.eth</code> but not <code>alicex.eth</code>.' }, { name: 'sort', in: 'query', type: 'enum', values: ['name', 'expires_at', 'registered_at'], default: 'name', desc: 'The sort key.' }, { name: 'order', in: 'query', type: 'enum', values: ['asc', 'desc'], default: 'asc', desc: 'The sort direction.' }, { name: 'dedupe', in: 'query', type: 'enum', values: ['name', 'registration'], default: 'name', desc: 'Whether to collapse rows by name surface or by registration.' }, { name: 'include', in: 'query', type: 'enum', values: ['role_summary'], desc: 'Adds <code>role_summary</code>, applicable <code>restrictions</code>, and <code>record_count</code> to each row, including <code>resolves_to</code> rows.' }, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     fields: [['name, display_name, namespace, namehash', 'Identity.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at', 'Present when the index can back them. For records use <a href="#records">names-records(2)</a>.'], ['is_primary', 'Whether this name is primary in the row\'s namespace for coin type 60, or for the requested coin type on <code>resolves_to</code> reads. With <code>coin_type=evm</code>, whether it is primary for any coin type the row\'s own name matched; a claim for a coin type the row did not match does not count. With <code>dedupe=registration</code> those are the matches of the representative name (the group member listed on the row) alone, which can be fewer than the group\'s <code>resolutions</code>: a claim for a coin type only another member of the group matched does not make the row primary.'], ['resolution', 'On <code>resolves_to</code> rows read for one coin type: <code>{coin_type, record_key}</code>, the coin type asked about and the record that answered, which is <code>addr:2147483648</code> when the ENSIP-19 default address answered (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f).'], ['resolutions', 'On <code>resolves_to</code> rows read with <code>coin_type=evm</code>: <code>[{coin_type, record_key}]</code>, one entry per EVM coin type whose stored record holds this address, in ascending coin-type order. These are matches, not every coin type the resolver has records for. The default record appears once as 2147483648 (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f). A row carries at most 100 entries; see the 422 outcome. One row is returned per name, and with <code>dedupe=registration</code> the list covers the whole registration group.'], ['relations', 'The subset of <code>owner</code>, <code>manager</code>, and <code>registrant</code> that matched, or <code>["resolves_to"]</code>.'], ['authority', 'Where the chain reads the name\'s registration and control from. <code>ens_v2</code> is ENSv2. <code>ens_v1</code> is the ENSv1 registry. <code>ens_v0</code> is an ENSv1 name the current registry has no ownership record for yet, so its owner, resolver, and TTL are still read from the 2017 ENS registry (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f); it becomes <code>ens_v1</code> at the first ownership write in the current registry, a <code>NewOwner</code> or <code>Transfer</code> (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f). Omitted for Basenames names and for supported, unregistered ownerless registry rows. A zero registry owner does not remove authority supplied by a retained registrar binding.'], ['migrated_at', 'Only with <code>authority=ens_v2</code>: the block time of the ENSv1→ENSv2 migration that moved the name. A name registered directly in ENSv2 omits it, and it has nothing to do with <code>ens_v0</code>.'], ['permission_resource_id', 'The handle that selects the row\'s permission rows when passed as <code>registration_id</code> to <a href="#permissions">permissions(2)</a>: the name\'s <code>registration_id</code> while it retains a current registration identity, including unsupported name coverage (for a wrapped <code>.eth</code> name the BaseRegistrar lease, not the NameWrapper resource), otherwise the permission authority UUID itself. Present without the include; omitted only on a <code>resolves_to</code> row that has no permission authority.'], ['role_summary', '<code>[{address, grants: [{grant_relation?, grant_scope, powers}]}]</code>, using the same shapes as <a href="#permissions">permissions(2)</a>, including effective registry operators. At most 1,000 grant rows are inlined across the page; an overflow returns <code>422 unsupported</code>.'], ['restrictions', 'With <code>include=role_summary</code>: the same resource-level object <a href="#permissions">permissions(2)</a> returns for the row\'s registration, when one applies.'], ['record_count', 'The number of known record selectors on the current registration.']],
@@ -674,7 +685,7 @@ const ROUTES = [
   id: 'primary-name', method: 'GET', path: '/v1/addresses/{address}/primary-name', title: 'Primary name',
   summary: 'Returns the primary name for an address and coin type. By default it gives both the indexed answer and a freshly verified one, so you can see whether the reverse claim still resolves forward to the same address.',
   keywords: ['reverse', 'answers', 'verification', 'raw_claim_name', 'claim_not_normalized', 'coin_type', 'mismatch'],
-  sample: { address: '0x8e8Db5CcEF88cca9d624701Db544989C996E3216' },
+  sample: { address: SAMPLE.address },
   params: [P.address, { name: 'coin_type', in: 'query', type: 'integer', default: '60', desc: 'The coin type of the reverse record.' }, P.namespaceEns, { name: 'source', in: 'query', type: 'enum', values: ['indexed', 'verified'], desc: 'Omit it to get every supported answer. <code>indexed</code> skips verified execution and its admission limits.' }],
   response: {
     html: `<p>This is a current-state read and accepts neither <code>at</code> nor <code>finality</code>. <code>data</code> is <code>{address, coin_type, namespace, answers, verification?}</code>.</p>`,
@@ -693,7 +704,7 @@ const ROUTES = [
   id: 'address-history', method: 'GET', path: '/v1/addresses/{address}/history', title: 'Address history',
   summary: 'Lists events across every name and registration an address is related to, newest first.',
   keywords: ['events', 'activity', 'scope', 'relation'],
-  sample: { address: '0x8e8Db5CcEF88cca9d624701Db544989C996E3216' },
+  sample: { address: SAMPLE.address },
   params: [P.address, P.namespaceEns, P.relation, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: EVENT_SAMPLE },
   outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The address is malformed, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The namespace is not served.'], ['409 stale', 'The namespace has no publication yet, an Interpret redo is active on some chain (retry with the same cursor), or a cursor from before history walks names a row that is gone (restart once without it).']],
@@ -704,7 +715,7 @@ const ROUTES = [
   id: 'history', method: 'GET', path: '/v1/names/{name}/history', title: 'Name history',
   summary: 'Lists the events for a name and every registration it has had, newest first. History survives release, so a name that is no longer registered still has one.',
   keywords: ['events', 'scope', 'lifecycle', 'timeline', 'child_registrations', 'subject', 'children'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.nameHistoryInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: { data: [ { type: 'renewal', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 21100310, timestamp: '2025-01-03T14:20:59Z', transaction_hash: '0x…', log_index: 118 }, { type: 'registration', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 13556001, timestamp: '2021-11-04T09:31:19Z', transaction_hash: '0x…', log_index: 260 } ], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: {} } },
   outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The name is invalid, the cursor is bad or was issued with a different <code>child_registrations</code> choice, a parameter is unknown, a snapshot selector was given, or <code>include=child_registrations</code> was requested for <code>eth</code> or <code>base.eth</code>.'], ['404 not_found', 'The name is unknown and no redo is interfering.'], ['409 stale', 'The namespace has no publication yet, an Interpret redo is active on some chain (retry with the same cursor), or a cursor from before history walks names a row that is gone (restart once without it).']],
@@ -723,7 +734,7 @@ const ROUTES = [
   id: 'events', method: 'GET', path: '/v1/events', title: 'Events',
   summary: 'Searches product events by name, address, registration, resolver, emitting contract, event type, and block or timestamp range. Filters combine.',
   keywords: ['filter', 'registration_id', 'resolver', 'contract_address', 'type', 'from_block', 'to_block', 'from_timestamp', 'to_timestamp', 'order', 'include', 'data', 'raw', 'total_count'],
-  sample: { name: 'taytems.eth', type: 'transfer' },
+  sample: { name: SAMPLE.name, type: 'transfer' },
   params: [{ name: 'name', in: 'query', desc: 'Events for this name. The namespace is inferred from it when <code>namespace</code> is omitted.' }, { name: 'address', in: 'query', desc: 'Events for names related to this address.' }, { name: 'resolver', in: 'query', desc: '<code>&lt;numeric_chain_id&gt;:&lt;address&gt;</code>, for example <code>1:0x…</code>. Matches events emitted by that resolver and pointer changes to or from it. A bare address is invalid.' }, { name: 'contract_address', in: 'query', desc: 'EVM address of the emitting contract, compared case-insensitively. Combines with <code>resolver</code> as AND.' }, { name: 'registration_id', in: 'query', desc: 'Events for one registration. Ownerless ENSv1 rows attached only to the registry resource are excluded, as is a record write that Bigname attributed only to another registration of the same name.' }, { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], desc: 'Inferred from <code>name</code> when present; otherwise defaults to <code>ens</code>, except a bare <code>resolver</code> filter spans all served namespaces.' }, P.eventType, P.fromBlock, P.toBlock, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: EVENT_SAMPLE },
   outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'A filter is bad, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The namespace is unrecognized.'], ['409 stale', 'A recognized namespace has no publication yet, an Interpret redo is active on some chain (retry with the same cursor), or a cursor from before history walks names a row that is gone (restart once without it).']],
@@ -737,7 +748,7 @@ const ROUTES = [
   id: 'permissions', method: 'GET', path: '/v1/permissions', title: 'Permissions',
   summary: 'Lists who holds which powers over a name, a specific registration, or from the point of view of an address. Read <code>meta.completeness</code> before trusting an empty page, because some permission paths are not projected yet and the route says so rather than pretending the set is empty.',
   keywords: ['grant_scope', 'powers', 'authority_context', 'current_for_name', 'resource_audit', 'lineage', 'registration_control', 'record_manager'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [{ name: 'name', in: 'query', desc: 'Selects the name\'s current registration. At least one of <code>name</code>, <code>registration_id</code>, and <code>address</code> is required; they combine.' }, { name: 'registration_id', in: 'query', desc: 'Selects one registration explicitly, including a superseded one, for auditing.' }, { name: 'address', in: 'query', desc: 'Restricts rows to this permission subject.' }, P.namespace, { name: 'include', in: 'query', type: 'enum', values: ['lineage'], desc: 'Adds <code>lineage: {grant, revocation?, inheritance_path?, transfer_behavior?}</code> to each row.' }, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     fields: [['address', 'The subject of the permission.'], ['grant_scope', '<code>{kind, detail}</code>. The kinds <code>root</code>, <code>registry</code>, and <code>registration</code> have an empty detail; <code>resolver</code> carries <code>{resolver: {chain_id, address}}</code>; <code>record_manager</code> carries <code>{chain_id, manager}</code>; <code>account</code> carries <code>{chain_id, authority_kind, authority_contract, owner}</code>.'], ['grant_relation', 'Present only on an effective row: <code>operator</code> for an ENSv1 or Basenames registry <code>ApprovalForAll</code> operator of the registration\'s current registry owner, with <code>grant_scope.kind</code> <code>account</code> and <code>powers</code> <code>["registry_control"]</code>. Direct rows omit it.'], ['powers', 'The effective powers. <code>registration_control</code> exposes the storage-level <code>resource_control</code>. <code>was_reserved</code> is a marker rather than a power.'], ['registration_id, name', 'The target registration and, when known, its display name.'], ['authority_context', '<code>current_for_name</code> when the row was selected through <code>name</code>, otherwise <code>resource_audit</code>.'], ['wrapper_state, wrapper_fuses', 'Present on current ENSv1 wrapper rows.'], ['lineage', 'Present with <code>include=lineage</code>. Its kinds are <code>event</code>, <code>permission</code>, <code>registration_authority</code>, <code>registration_rebound</code>, <code>ens_v1_authority</code>, <code>resolver_root_fallback</code>, and <code>registry_root_fallback</code>; a NameWrapper grant also names its <code>relation</code>: <code>holder</code>, <code>operator</code>, or <code>token_approval</code>.'], ['restrictions', 'Top level, beside <code>data</code>, on a read bound to a registration by <code>name</code> or <code>registration_id</code>: constraints on the registration itself. <code>kind</code> is <code>ens_v1_wrapper</code> with <code>wrapper_state</code>, <code>wrapper_fuses</code>, and <code>wrapper_expires_at</code>, or <code>ens_v2_registry</code> with <code>locked_roles</code>. Omitted for address-only reads, for registrations without a resource-level constraint model, for an expired emancipated or locked NameWrapper position, and once the wrapped token is burnt or unwrapped.']],
@@ -786,7 +797,7 @@ const ROUTES = [
   id: 'resolver', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}', title: 'Resolver overview',
   summary: 'Describes a resolver contract and pages the names currently bound to it. Its aliases, record links, and roles are separate paged collections.',
   keywords: ['bound_names', 'mirror', 'aliases', 'links', 'roles'],
-  sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+  sample: SAMPLE.resolver,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The chain the resolver is deployed on.' }, { name: 'address', in: 'path', required: true, desc: 'The resolver contract address.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>bound_names</code> list.' }, { ...P.pageSize, desc: 'Sizes the nested <code>bound_names</code> list.' }],
   response: {
     fields: [['chain_id, address', 'The resolver\'s identity.'], ['mirror', 'Present only for a declared ENSv1 mirror resolver: <code>{kind, registry}</code>, the ENSv1 registry whose resolvers answer for its names.'], ['bound_names', '<code>{data, page}</code>, with record-shaped rows that carry the wrapper pair where it applies. There is no top-level <code>page</code>.']],
@@ -802,7 +813,7 @@ const ROUTES = [
   id: 'resolver-links', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/links', title: 'Resolver record links',
   summary: 'Pages the record links of an ENSv2 record-ID resolver: every node currently bound to a non-zero record, the default record\'s empty-name node included.',
   keywords: ['links', 'record_id', 'namehash', 'default', 'link_event', 'total_count'],
-  sample: { chain_id: '11155111', address: '' },
+  sample: SAMPLE.resolver,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
   response: {
     fields: [['data', 'Rows <code>{record_id, namehash, default, namespace?, name?, display_name?, link_event}</code>, in numeric <code>record_id</code> then <code>namehash</code> order. Rows sharing a <code>record_id</code> share one record\'s values. <code>name</code> is present only when an active name surface is known for the node. <code>link_event</code> is <code>{block_number, timestamp, transaction_hash, log_index}</code> of the current <code>Linked</code> observation.'], ['page.total_count', 'The exact number of linked nodes, including zero. A node-keyed resolver returns an empty page with a null total, <code>meta.completeness</code> unsupported, and <code>record_links_not_applicable</code>.']],
@@ -816,7 +827,7 @@ const ROUTES = [
   id: 'resolver-aliases', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/aliases', title: 'Resolver aliases',
   summary: 'Pages the supported indexed alias mappings for a resolver, including current binding aliases and active alias-event mappings.',
   keywords: ['aliases', 'bindings', 'from_name', 'to_name', 'total_count'],
-  sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+  sample: SAMPLE.resolver,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
   response: {
     fields: [['data', 'Binding aliases are <code>{namespace, name, display_name, namehash}</code>. Active alias-event mappings are <code>{namespace, from_name, to_name, state, resolver, to_registration_id?}</code>.'], ['page.total_count', 'The exact number of supported mappings across both groups, including zero. Unsupported enumeration instead returns an empty page with a null total and explicit <code>meta.completeness</code> and <code>meta.unsupported_reason</code>.']],
@@ -830,7 +841,7 @@ const ROUTES = [
   id: 'resolver-roles', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/roles', title: 'Resolver roles',
   summary: 'Pages current resolver-scoped permission rows. Each holder and registration pair is a separate row, so one holder can appear more than once.',
   keywords: ['roles', 'permissions', 'powers', 'registration_id', 'grant_event', 'total_count'],
-  sample: { chain_id: '1', address: '0x231b0Ee14048e9dCcD1d247744d114a4EB5E8E63' },
+  sample: SAMPLE.resolver,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
   response: {
     fields: [['address, registration_id, powers', 'The holder, registration, and its nonempty set of current resolver-scoped powers. Revoked grants and unrelated scopes are excluded.'], ['name', 'Present when the registration has a current readable name.'], ['grant_event', 'Optional provenance from this registration\'s permission row: <code>{block_number, timestamp?, transaction_hash?, log_index?}</code>.'], ['page.total_count', 'Exact permission-row count, including zero. Unsupported enumeration returns an empty page with a null total and explicit <code>meta.completeness</code> and <code>meta.unsupported_reason</code>.']],
@@ -844,7 +855,7 @@ const ROUTES = [
   id: 'registry', method: 'GET', path: '/v1/registries/{chain_id}/{address}', title: 'Registry overview',
   summary: 'Describes one indexed ENSv2 registry: its served name, parent registry, first observation, current label count, and names that point at it. ENSv1 and Basenames registries are outside this route.',
   keywords: ['registry', 'parent_registry', 'created_basis', 'counts', 'referenced_by'],
-  sample: { chain_id: '11155111', address: '' },
+  sample: SAMPLE.registry,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds exact declared role-assignment and product-visible event counts.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>referenced_by</code> collection.' }, { ...P.pageSize, desc: 'Sizes the nested <code>referenced_by</code> collection.' }],
   response: {
     fields: [['chain_id, address', 'The registry identity, with a lowercase address.'], ['name, parent_registry', '<code>name</code> is <code>{name, display_name, namespace, namehash}</code> for the earliest name currently pointing at the registry; <code>parent_registry</code> is <code>{chain_id, address}</code>. Both are null when no name points at it.'], ['created_block_number, created_at, created_transaction_hash, created_basis', 'First-observation evidence. <code>created_basis</code> is <code>registry_created</code>, <code>subregistry_pointer</code>, or <code>declared</code>. A declared registry with no creation event uses its configured start block and a null transaction hash.'], ['counts.labels', 'Exact current label count; zero when no name points at the registry, and null for a historical selection different from the current publication.'], ['counts.roles, counts.events', 'With <code>include=counts</code>: nonzero declared account/resource assignments and product-visible emitted events through the selected block. Several role bits count once per account/resource; this is not an effective-permission count.'], ['referenced_by', 'Nested <code>{data, page}</code> of name identity rows, sorted by display name. Its <code>page.total_count</code> is null. There is no top-level page.']],
@@ -858,7 +869,7 @@ const ROUTES = [
   id: 'registry-labels', method: 'GET', path: '/v1/registries/{chain_id}/{address}/labels', title: 'Registry labels',
   summary: 'Lists the current labels of one ENSv2 registry, sorted by display name. Only direct children whose selected ENSv2 registration was emitted by this registry are included.',
   keywords: ['labels', 'subregistry', 'subname_count', 'role_holder_count', 'counts'],
-  sample: { chain_id: '11155111', address: '' },
+  sample: SAMPLE.registry,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, { name: 'include', in: 'query', type: 'enum', values: ['counts'], desc: 'Adds each label\'s <code>subname_count</code> and <code>role_holder_count</code>.' }, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     fields: [['name, display_name, namespace, namehash, labelhash', 'The label\'s name identity, using the <a href="#subnames">subnames</a> row shape.'], ['owner, registrant, registration_status, registered_at, created_at, expires_at, subregistry', 'Current registration fields and optional <code>subregistry: {chain_id, address}</code>, when known.'], ['subname_count, role_holder_count', 'With <code>include=counts</code>: direct child count and distinct accounts with nonzero declared assignments on the label\'s current registration resource. Root roles, resolver roles, revoked grants, and older resource versions are excluded; inherited effective permissions are not counted.'], ['page.total_count', 'Exact current label count, matching <code>counts.labels</code> on the registry overview.']],
@@ -885,7 +896,7 @@ const ROUTES = [
   id: 'diag-coverage', method: 'GET', path: '/v1/diagnostics/names/{name}/coverage', title: 'Coverage',
   summary: 'Explains, in the pipeline\'s own vocabulary, how completely the index covers a name and why any part of it is unsupported. Use it when a product route reports something partial and you want to know the cause.',
   keywords: ['exhaustiveness', 'enumeration_basis', 'source_classes_considered', 'coverage', 'explain'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, P.at, P.finality],
   response: { html: `<p>The answer carries <code>exhaustiveness</code>, <code>enumeration_basis</code>, <code>source_classes_considered</code>, and detailed <code>unsupported_reason</code> classes. Diagnostics routes may expose <code>logical_name_id</code>, <code>resource_id</code>, and manifest and projection terms that product routes never do.</p>` },
   outcomes: [['200', 'The coverage taxonomy.'], ['404 not_found', 'The name is unknown.']],
@@ -895,7 +906,7 @@ const ROUTES = [
   id: 'diag-binding', method: 'GET', path: '/v1/diagnostics/names/{name}/binding', title: 'Binding',
   summary: 'Shows how a name is bound to its surface: the binding IDs, the binding kind, and the anchors the binding rests on.',
   keywords: ['surface', 'binding_kind', 'surface_binding_id', 'anchors', 'logical_name_id'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, P.at, P.finality],
   outcomes: [['200', 'The binding.'], ['404 not_found', 'The name is unknown.']],
   related: ['diag-coverage', 'diag-authority'],
@@ -904,7 +915,7 @@ const ROUTES = [
   id: 'diag-authority', method: 'GET', path: '/v1/diagnostics/names/{name}/authority', title: 'Authority',
   summary: 'Traces where a name\'s current authority comes from: the token lineage, the control vectors, and the permission lineage behind the rows that permissions(2) serves.',
   keywords: ['token_lineage', 'control', 'permission lineage', 'authority'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, P.at, P.finality],
   outcomes: [['200', 'The lineage.'], ['404 not_found', 'The name is unknown.']],
   related: ['permissions', 'diag-binding'],
@@ -913,7 +924,7 @@ const ROUTES = [
   id: 'diag-records', method: 'GET', path: '/v1/diagnostics/names/{name}/records', title: 'Record inventory',
   summary: 'Shows the full record inventory and cached values the index holds for a name, and compares a bounded set of them against a fresh read from the resolver.',
   keywords: ['record_inventory', 'record_cache', 'value_sources', 'comparison', 'comparison_explicit_gaps', 'selectors', 'explicit_gaps', 'unsupported_families', 'record_version_boundary'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [P.name, P.namespace, P.at, P.finality, { name: 'keys', in: 'query', desc: 'The same grammar as <a href="#record-keys">record-keys(7)</a>. When omitted, the first 16 supported inventory keys are compared.' }],
   response: {
     fields: [['record_inventory', '<code>{record_version_boundary, enumeration_basis, selectors, explicit_gaps, unsupported_families, last_change}</code>. A selector row holds <code>record_key</code>, <code>record_family</code>, <code>selector_key</code>, and <code>cacheable</code>.'], ['record_cache', '<code>{record_version_boundary, entries}</code>, the projected indexed values. A retained contenthash is <code>status="success"</code> with <code>value={"encoding":"hex","bytes":"0x…"}</code>.'], ['value_sources', 'Whether each key\'s value came from the index or from verification.'], ['comparison', 'A map from <code>record_key</code> to <code>{indexed, verified}</code>, from fresh execution with at most 4 calls in flight. This comparison can update or clear the divergence ledger.'], ['comparison_explicit_gaps', 'Default selectors beyond the 16-key limit, with <code>gap_reason</code> set to <code>diagnostics_comparison_default_limit_exceeded</code>.']],
@@ -934,7 +945,7 @@ const ROUTES = [
   id: 'diag-events', method: 'GET', path: '/v1/diagnostics/events', title: 'Raw events',
   summary: 'Lists normalized event rows with their identity, canonicality, before and after state, and provenance. This is the unfiltered view behind the product history routes.',
   keywords: ['normalized_event_id', 'event_identity', 'event_kind', 'source_family', 'canonicality_state', 'before_state', 'after_state', 'provenance', 'raw_fact_ref', 'consumer_visibility', 'migration_correlation_ids'],
-  sample: { name: 'taytems.eth' },
+  sample: { name: SAMPLE.name },
   params: [{ name: 'name', in: 'query', desc: 'Events for this name. The namespace is inferred from it when omitted.' }, { name: 'address', in: 'query', desc: 'Events anchored from this address\'s activated and candidate relations.' }, { name: 'registration_id', in: 'query', desc: 'Events for one registration.' }, { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], desc: 'Defaults to <code>ens</code> only when <code>name</code> is absent.' }, { name: 'type', in: 'query', desc: 'Restricts rows to one event kind.' }, P.fromBlock, P.toBlock, P.cursor, P.pageSize, P.finalityLatest],
   response: {
     html: `<pre class="block"><code>{ normalized_event_id, event_identity, namespace, name?, registration_id?, event_kind, source_family,
@@ -946,7 +957,7 @@ const ROUTES = [
   related: ['events', 'history', 'diag-coverage'],
 },
 {
-  id: 'healthz', method: 'GET', path: '/healthz', title: 'Health',
+  id: 'healthz', method: 'GET', path: '/healthz', title: 'Health', internal: true,
   summary: 'Probes the process and its database. This route lives outside <code>/v1</code>, does not use the envelope, and bypasses global admission with a reserved single-connection pool and a two-second check so that it answers even under load.',
   keywords: ['health', 'liveness', 'readiness', 'probe', 'database', 'identity', 'phase_runner', 'interpreter_content_hash', 'version', 'build_sha'],
   sample: {}, params: [],
@@ -959,12 +970,20 @@ const ROUTES = [
 },
 ];
 </script>
+<script src="../network.js"></script>
 <script>
 (function () {
   'use strict';
-  const VERSION = '__BIGNAME_VERSION__', BUILD_SHA = '__BIGNAME_BUILD_SHA__';
-  const dev = VERSION.startsWith('__');
-  let PREFIX = '/v1';
+  // Every request goes to the API the network switcher selects (network.js).
+  const NET = window.BignameNetwork;
+  function fill(v) {
+    const s = NET.samples();
+    if (typeof v === 'function') return v(s);
+    if (!v) return v;
+    if (v.sampleKey) return s[v.sampleKey] || {};
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, x && x.sampleKey ? s[x.sampleKey] : x]));
+  }
+  const PREFIX = '/v1';
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const MARK = $('.mast .mark').outerHTML;
@@ -976,7 +995,10 @@ const ROUTES = [
   // the reference was written with man-page cross references; show the path or the page name instead
   const friendly = html => String(html)
     .replace(/<a href="#([a-z-]+)(\/[a-z-]+)?">[^<]*\(\d\)<\/a>/g, (_, id, anchor) => BY_ID[id] ? `<a href="#${id}${anchor || ''}">${BY_ID[id].kind === 'route' ? `<code>${esc(nameOf(BY_ID[id]))}</code>` : esc(nameOf(BY_ID[id]))}</a>` : id)
-    .replace(/\/v1\//g, PREFIX + '/');
+    .replace(/\/v1\//g, PREFIX + '/')
+    .replace(/__API__/g, esc(NET.apiBase()))
+    .replace(/__NAME__/g, esc(NET.samples().name || 'name.eth'))
+    .replace(/__ADDRESS__/g, esc(NET.samples().address || '0x…'));
   const hlJson = str => esc(str).replace(/"((?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*)"(\s*:)/g, '<span class="k">"$1"</span>$2');
   const enc = v => encodeURIComponent(v).replace(/%3A/gi, ':').replace(/%2C/gi, ',');
   const LEDE = 'A read API for ENS';
@@ -1044,6 +1066,9 @@ const ROUTES = [
     return [p.in === 'path' ? 'in the path' : p.in === 'body' ? null : 'query', p.required ? 'required' : null, p.values ? `one of ${p.values.join(', ')}` : (p.type && p.type !== 'enum' ? p.type : null), p.default !== undefined ? `default ${p.default}` : null].filter(Boolean).join(' · ');
   }
   const refDl = rows => `<dl class="ref">${rows.map(([k, meta, v]) => `<dt>${esc(k)}${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</dt><dd>${v || ''}</dd>`).join('')}</dl>`;
+  // A route the process serves on its internal address only: the public edge
+  // does not admit it, so its page has no request line to run from here.
+  const INTERNAL_NOTE = '<p class="internal">The API process serves this route on its internal address for probes and operators; the public edge does not forward it, so it cannot be run from this page.</p>';
   function routeHtml(r) {
     const ex = exampleHtml(r, 'main');
     let ref = '';
@@ -1053,7 +1078,7 @@ const ROUTES = [
     if (r.outcomes) ref += `<h2>Status codes</h2>${refDl(r.outcomes.map(([c, w]) => [c, '', w]))}`;
     if (r.notes && r.notes.length) ref += '<h2>Notes</h2>' + r.notes.map(n => `<details class="note"><summary>${n.h}</summary><div class="body">${n.html}</div></details>`).join('');
     const also = (r.related || []).filter(id => BY_ID[id]).map(id => `<a href="#${id}">${esc(nameOf(BY_ID[id]))}</a>`).join('');
-    return friendly(`<div class="word-title">${word(r.method.toLowerCase(), 6)}</div><h1 class="path">${pathHtml(r.path)}</h1><p class="lede">${r.summary}</p><form class="req" id="req"></form><div class="out${ex ? ' ex' : ''}" id="out"${ex ? '' : ' hidden'}>${ex}</div><div class="ref">${ref}</div>${also ? `<div class="also"><span class="l">see also</span>${also}</div>` : ''}`);
+    return friendly(`<div class="word-title">${word(r.method.toLowerCase(), 6)}</div><h1 class="path">${pathHtml(r.path)}</h1><p class="lede">${r.summary}</p>${r.internal ? INTERNAL_NOTE : '<form class="req" id="req"></form>'}<div class="out${ex ? ' ex' : ''}" id="out"${ex ? '' : ' hidden'}>${ex}</div><div class="ref">${ref}</div>${also ? `<div class="also"><span class="l">see also</span>${also}</div>` : ''}`);
   }
   function exampleHtml(r, which) {
     const alt = r.response && r.response.alt, main = r.response && r.response.sample;
@@ -1066,9 +1091,11 @@ const ROUTES = [
     const hit = (r.outcomes || []).find(([c]) => c.startsWith(String(status)));
     return hit ? hit[1] : status === 404 ? 'Nothing there.' : '';
   }
+  // POSIX single-quote a whole shell word, so a quote in the URL or body cannot end it
+  const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
   function curlFor(r, url, body) {
-    const full = location.origin + url;
-    return r.method === 'POST' ? `curl -s -X POST '${full}' -H 'content-type: application/json' -d '${body.replace(/'/g, "'\\''")}'` : `curl -s '${full}'`;
+    const full = NET.apiBase() + url;
+    return r.method === 'POST' ? `curl -s -X POST ${shq(full)} -H 'content-type: application/json' -d ${shq(body)}` : `curl -s ${shq(full)}`;
   }
 
   // ---- the request line: the URL is the form --------------------------
@@ -1077,13 +1104,13 @@ const ROUTES = [
   const remember = (k, v) => { try { localStorage.setItem(MEM_KEY, JSON.stringify({ ...mem(), [k]: v })); } catch (e) {} };
   function wireRequest(r) {
     const form = $('#req'), out = $('#out'), params = r.params || [], m = mem();
-    const vals = {}, shown = new Set();
+    const vals = {}, shown = new Set(), sample = fill(r.sample);
     for (const p of params) {
-      const s = r.sample && r.sample[p.name];
+      const s = sample && sample[p.name];
       if (p.in === 'path') { vals[p.name] = String(m[p.name] || s || ''); shown.add(p.name); }
       else if (s !== undefined && s !== '') { vals[p.name] = String(s); shown.add(p.name); }
     }
-    let body = r.method === 'POST' && r.body ? JSON.stringify(r.body.sample, null, 2) : '';
+    let body = r.method === 'POST' && r.body ? JSON.stringify(fill(r.body.sample), null, 2) : '';
     const byName = n => params.find(p => p.name === n);
     const url = () => {
       let path = withPrefix(r.path); const qs = [];
@@ -1106,7 +1133,7 @@ const ROUTES = [
       let first = true;
       for (const p of params) { if (p.in === 'path' || !shown.has(p.name)) continue; u += `<i>${first ? '?' : '&amp;'}</i>${esc(p.name)}<i>=</i>${field(p)}`; first = false; }
       const adds = params.filter(p => p.in !== 'path' && !shown.has(p.name)).map(p => `<button type="button" data-add="${esc(p.name)}">${esc(p.name)}</button>`).join('');
-      form.innerHTML = `<div class="line"><span class="m">${esc(r.method)}</span><span class="u">${u}</span><span class="go"><button type="button" class="cp">curl</button><button type="submit" class="run">run</button></span></div>${adds ? `<div class="adds">${adds}</div>` : ''}${r.method === 'POST' ? `<div class="body-in"><textarea name="__body" spellcheck="false" aria-label="request body">${esc(body)}</textarea></div>` : ''}`;
+      form.innerHTML = `<div class="line"><span class="m">${esc(r.method)}</span><span class="u">${u}</span><span class="go"><button type="button" class="cp">curl</button><button type="submit" class="run">run</button></span></div>${adds ? `<div class="adds">${adds}</div>` : ''}${r.method === 'POST' ? `<div class="body-in"><textarea name="__body" spellcheck="false" aria-label="request body">${esc(body)}</textarea></div>` : ''}<pre class="cmd" hidden aria-label="curl command"></pre>`;
     }
     render();
     form.addEventListener('input', e => {
@@ -1130,7 +1157,18 @@ const ROUTES = [
       const add = e.target.closest('[data-add]');
       if (add) { const p = byName(add.dataset.add); shown.add(p.name); vals[p.name] = p.values ? (p.default || p.values[0]) : ''; render(); const f = form.elements[p.name]; if (f) f.focus(); return; }
       const cp = e.target.closest('.cp');
-      if (cp) navigator.clipboard.writeText(curlFor(r, url(), body)).then(() => { cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); });
+      if (!cp) return;
+      // Without a usable clipboard (a plain-http preview, a denied permission)
+      // the command is shown and selected instead, as on the landing page.
+      const cmd = curlFor(r, url(), body), clip = navigator.clipboard;
+      const copied = () => { cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); };
+      const showCmd = () => {
+        const box = $('.cmd', form), sel = getSelection(), range = document.createRange();
+        box.textContent = cmd; box.hidden = false;
+        range.selectNodeContents(box); sel.removeAllRanges(); sel.addRange(range);
+      };
+      if (!clip || typeof clip.writeText !== 'function') { showCmd(); return; }
+      try { clip.writeText(cmd).then(copied, showCmd); } catch (err) { showCmd(); }
     });
     out.addEventListener('click', e => {
       const sw = e.target.closest('.sw'); if (sw) { out.className = 'out ex'; out.innerHTML = exampleHtml(r, sw.dataset.which); }
@@ -1138,33 +1176,50 @@ const ROUTES = [
     });
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      const u = url(), btn = $('.run', form);
+      // Only the newest request on the page it was sent from may write the output;
+      // a page change or a network change (which redraws the page) drops it. A
+      // new submission (possible after a parameter redraw re-enables run)
+      // replaces the one in flight, which is aborted here.
+      const gen = ++reqGen, base = NET.apiBase(), lbl = NET.label(), u = url(), btn = $('.run', form);
+      if (reqAbort) reqAbort.abort();
+      const ctl = new AbortController();
+      reqAbort = ctl;
       btn.disabled = true; out.hidden = false; out.className = 'out';
-      out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(location.host)}</span></div><pre> </pre>`;
+      out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
       const t0 = performance.now();
       try {
         const init = { method: r.method, headers: { accept: 'application/json' } };
         if (r.method === 'POST') { init.headers['content-type'] = 'application/json'; init.body = body; }
-        const res = await fetch(u, init);
-        const ms = Math.round(performance.now() - t0), text = await res.text();
+        // Aborted and rejected after NET.TRY_TIMEOUT_MS, so run always comes back.
+        const res = await NET.fetchText(base + u, init, ctl);
+        const ms = Math.round(performance.now() - t0), text = res.text;
+        if (gen !== reqGen) return;
         let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
         const why = outcomeText(r, res.status);
         const back = r.response && r.response.sample ? '<span class="sp"><button type="button" class="ex-back">example</button></span>' : '';
         out.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${back}</div>${why ? `<p class="why">${why}</p>` : ''}<pre>${hlJson(pretty)}</pre>`;
       } catch (err) {
-        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(location.origin)}. This page is served by the API itself, so open it from a running bigname to run requests.</p>`;
-      } finally { btn.disabled = false; }
+        if (gen !== reqGen) return;
+        const late = err && err.timeout ? ` within ${NET.TRY_TIMEOUT_MS / 1000} seconds` : '';
+        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(base)}${late}. Check the ${esc(lbl)} status in the header, or pick another network.</p>`;
+      } finally {
+        if (gen === reqGen) { const run = $('.run', form); if (run) run.disabled = false; }
+        if (reqAbort === ctl) reqAbort = null;
+      }
     });
   }
 
   // ---- routing --------------------------------------------------------
+  let reqGen = 0, reqAbort = null;
   function show(id) {
+    reqGen++;
+    if (reqAbort) { reqAbort.abort(); reqAbort = null; }
     const e = BY_ID[id] || BY_ID.overview;
     document.body.classList.toggle('at', !!BY_ID[id]);
     setCurrent(e.id);
     $('#page').innerHTML = `<a class="back" href="#">&larr; ${esc(PREFIX)}</a>` + (e.kind === 'route' ? routeHtml(e) : guideHtml(e));
     document.title = e.id === 'overview' ? 'bigname API docs' : `${nameOf(e)} · bigname API docs`;
-    if (e.kind === 'route') wireRequest(e);
+    if (e.kind === 'route' && !e.internal) wireRequest(e);
   }
   function route() {
     const [id, anchor] = decodeURIComponent(location.hash.replace(/^#\/?/, '')).split('/');
@@ -1187,26 +1242,13 @@ const ROUTES = [
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
   applyTheme();
 
-  async function probe(prefix) {
-    try { const r = await fetch(prefix + '/status', { headers: { accept: 'application/json' } }); if (!r.ok) return null; const j = await r.json(); return j && j.data && j.data.status ? j.data : null; } catch (e) { return null; }
-  }
-  const fmtLag = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
-  async function loadStatus(first) {
-    const el = $('#status'), t = $('.t', el);
-    let d = await probe(PREFIX);
-    if (!d && first) for (const alt of ['/v2', '/v1']) { if (alt === PREFIX) continue; d = await probe(alt); if (d) { PREFIX = alt; renderIndex(); route(); break; } }
-    if (!d) { el.className = 'status bad'; t.textContent = 'index unreachable'; el.title = `GET ${PREFIX}/status did not answer from this origin`; return; }
-    const chains = Object.entries(d.chains || {});
-    const lag = chains.map(([, c]) => c.lag_seconds).filter(x => typeof x === 'number');
-    el.className = 'status ' + (d.status === 'ready' ? 'ok' : d.status === 'stale' ? 'bad' : '');
-    t.textContent = `index ${d.status}${lag.length ? `, ${fmtLag(Math.max(...lag))} behind` : ''}`;
-    el.title = chains.map(([id, c]) => `chain ${id}: ${c.status}, indexed ${c.indexed_block ?? '?'} of ${c.latest_block ?? '?'}`).join('\n');
-  }
-
   renderIndex();
-  $('#ver').textContent = dev ? 'bigname dev' : `bigname ${VERSION} · ${BUILD_SHA.slice(0, 10)}`;
+  NET.mount($('#network'));
+  NET.statusPill($('#status'));
+  NET.statusDetail($('#ver'));
+  // The examples and the request lines name the selected API; redraw the page.
+  NET.onChange(route);
   route();
-  loadStatus(true); setInterval(() => loadStatus(false), 30000);
 })();
 </script>
 </body>

@@ -403,6 +403,8 @@ mod v2_authority_ens_v0;
 #[path = "tests/v2_authority_ens_v0_produced.rs"]
 mod v2_authority_ens_v0_produced;
 include!("tests/v2_permissions.rs");
+#[path = "tests/site_pages.rs"]
+mod site_pages;
 #[path = "tests/v2_history_bounded_rebinding.rs"]
 mod v2_history_bounded_rebinding;
 #[path = "tests/v2_history_bounded_regeneration.rs"]

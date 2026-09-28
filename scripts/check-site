@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Static checks for the documentation site in site/. The site has no build
+# step, so these guard the properties a build would otherwise enforce: every
+# request goes to the API the network switcher selects, no server-side
+# placeholder or retired hostname is left, and the reference still carries
+# the route entries the API crate's site_pages tests read.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+failures=0
+fail() {
+  printf '[check-site] ERROR: %s\n' "$*" >&2
+  failures=$((failures + 1))
+}
+
+pages=(site/index.html site/docs/index.html)
+
+# 404.html is what the host serves for any missing path; without it the host
+# answers every unknown path with the landing page and 200.
+not_found=site/404.html
+
+for file in "${pages[@]}" site/network.js site/README.md "$not_found"; do
+  [ -f "$file" ] || fail "missing $file"
+done
+[ "$failures" -eq 0 ] || exit 1
+
+# The legacy host is gone. This matches the retired host only; ENS names in
+# the example responses are fine.
+if grep -rn 'taytems\.xyz' site; then
+  fail "site/ names the retired taytems.xyz host"
+fi
+
+# The API used to substitute these when it served the pages; nothing does now.
+if grep -rn '__BIGNAME_' site; then
+  fail "site/ still carries a __BIGNAME_ server-side placeholder"
+fi
+
+# The site is hosted apart from the API, so nothing may talk to its own origin.
+if grep -rn 'location\.origin' site; then
+  fail "site/ uses location.origin; go through BignameNetwork.apiBase()"
+fi
+if grep -rnE "fetch\(\s*['\"\`]/" site; then
+  fail "site/ fetches a same-origin path; go through BignameNetwork.apiBase()"
+fi
+# Other ways to reach or name the page's own origin. Links between the pages
+# are relative (docs/, ../, #anchor) so the site works under any host.
+# 404.html is exempt from the root-relative href ban only: it is served for
+# missing paths at any depth, so its links to / and /docs/ must be absolute.
+code_files=("${pages[@]}" site/network.js "$not_found")
+if grep -nF 'href="/' "${pages[@]}" site/network.js; then
+  fail "site code uses a root-relative href; link relatively (docs/, ../, #anchor)"
+fi
+for banned in \
+  'src="/' \
+  'location.host' \
+  'location.hostname' \
+  'document.location' \
+  'XMLHttpRequest' \
+  'new Request(' \
+  'EventSource' \
+  'sendBeacon'; do
+  if grep -nF -- "$banned" "${code_files[@]}"; then
+    fail "site code uses ${banned}; link relatively and send API requests through BignameNetwork.apiBase()"
+  fi
+done
+
+# Every fetch in the pages (plain, or the try-it NET.fetchText) goes to a base
+# read from NET.apiBase() when the request was made; network.js's status
+# request uses the base it just read, and its fetchText passes on the URL the
+# page gave it.
+if grep -nE 'fetch(Text)?\(' "${pages[@]}" | grep -vE 'fetch(Text)?\(base \+ '; then
+  fail "a page fetch does not start from the captured API base"
+fi
+for page in "${pages[@]}"; do
+  if grep -qE 'fetch(Text)?\(' "$page" && ! grep -qF 'base = NET.apiBase()' "$page"; then
+    fail "$page fetches without capturing base = NET.apiBase()"
+  fi
+done
+if grep -nE 'fetch[A-Za-z]*\(' site/network.js | grep -vF "(base + '/v1/status'" |
+  grep -vE 'function fetchText\(\{ fetchImpl, url,|=> fetchText\(\{ fetchImpl: root\.fetch\.bind\(root\), url,|fetchImpl\(url, \{ \.\.\.init, signal'; then
+  fail "a network.js fetch does not start from the selected base"
+fi
+
+# Generated curl commands are copied into a shell. Every value interpolated
+# into one goes through shq(), which single-quotes the whole word; a
+# hand-written '${...}' lets a quote in the URL or body end the word early.
+if grep -nE 'curl -s' "${pages[@]}" | grep -F "'\${"; then
+  fail "a generated curl command interpolates inside hand-written quotes; use shq()"
+fi
+# Copying a curl command must survive a missing or refusing clipboard (plain
+# http previews have none): both pages go through a guarded clip.writeText.
+if grep -nF 'navigator.clipboard.writeText' "${pages[@]}"; then
+  fail "a page calls navigator.clipboard.writeText without the guard and fallback"
+fi
+for page in "${pages[@]}"; do
+  grep -qF "typeof clip.writeText !== 'function'" "$page" || fail "$page copies without checking the clipboard exists"
+done
+
+# The static curl examples on the docs page get the base substituted for
+# __API__; each one must sit right after an opening single quote, so a base
+# that slipped past parseApi still cannot reach the shell.
+if grep -nF '__API__' "${pages[@]}" | grep -vF 'replace(/__API__/g' | grep -E "(^|[^'])__API__"; then
+  fail "a static example uses __API__ outside single quotes"
+fi
+
+unquoted_curl="$(awk '/curl -s/ {
+  all = gsub(/\$\{/, "&"); quoted = gsub(/\$\{shq\(/, "&")
+  if (all != quoted) print FILENAME ":" FNR ": " $0
+}' "${pages[@]}")"
+if [ -n "$unquoted_curl" ]; then
+  printf '%s\n' "$unquoted_curl" >&2
+  fail "a generated curl command interpolates a value without shq()"
+fi
+
+# The not-found page stands alone: no scripts loaded, no requests, and a way
+# back to the landing page and the docs.
+if grep -nE '<script src=|fetch\(' "$not_found"; then
+  fail "$not_found loads a script or makes a request"
+fi
+grep -qF 'href="/"' "$not_found" || fail "$not_found does not link to /"
+grep -qF 'href="/docs/"' "$not_found" || fail "$not_found does not link to /docs/"
+
+for page in "${pages[@]}"; do
+  grep -qE '<script src="(\.\./)?network\.js"></script>' "$page" \
+    || fail "$page does not load network.js"
+  grep -q 'NET.mount(' "$page" || fail "$page does not render the network switcher"
+done
+
+# The public edge forwards only /v1 (and /openapi.json), so a manual page for
+# any other path must be marked internal and get no request line to run.
+if grep -nE "path: '/" site/docs/index.html | grep -vE "path: '/v1/" | grep -vF 'internal: true'; then
+  fail "a route outside /v1 in site/docs/index.html is not marked internal: true"
+fi
+
+# apps/api/src/tests/site_pages.rs reads these entries to hold the router and
+# the reference together; an empty set would make that test vacuous.
+route_entries="$(grep -c "path: '/v1/" site/docs/index.html || true)"
+if [ "$route_entries" -lt 1 ]; then
+  fail "site/docs/index.html has no path: '/v1/...' route entries"
+fi
+
+if [ "$failures" -ne 0 ]; then
+  exit 1
+fi
+printf '[check-site] ok: static guards passed, %s route entries\n' "$route_entries"

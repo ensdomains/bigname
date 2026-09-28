@@ -26,10 +26,13 @@ is a separate deployment step rather than part of the repeatable smoke check. CI
 performs that setup immediately before invoking this script.
 
 The edge check reflects the #315 state with GraphQL removed. The API binary
-serves `/v1`, `/`, `/docs`, and `/healthz`; the checked-in public edge admits
-`/v1` reads, `POST /v1/lookup`, and its browser preflight. `/v2`, `/graphql`,
-documentation-helper paths, `/healthz`, and encoded-traversal paths return
-`404` publicly, and `/graphql` also returns `404` directly from the API.
+serves `/v1` and `/healthz`. The landing page and API reference (`/`, `/docs`)
+live on the separate static site in [`site/`](../../site/README.md), so the API
+answers them `404`. The checked-in public edge admits `/v1` reads,
+`POST /v1/lookup` and its browser preflight, and `GET`/`HEAD /openapi.json`,
+which the API answers `404` until the OpenAPI document ships (TYR-18). `/v2`,
+`/graphql`, `/`, `/docs`, `/healthz`, and encoded-traversal paths return `404`
+publicly, and `/graphql` also returns `404` directly from the API.
 
 `--no-network` makes Cargo offline and requires all HTTP endpoints to be
 loopback. It does not skip the PostgreSQL, API, or Caddy checks. CI must fetch

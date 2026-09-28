@@ -24,6 +24,8 @@ outcomes or durable [execution traces](docs/glossary.md).
 - `migrations/` — Postgres schema
 - `schema-v2/` — the fresh phase-runner schema baseline
 - `docs/` — how it works
+- `site/` — the landing page and API reference, a static site hosted apart
+  from the API, with a mainnet/Sepolia network switcher
 
 ## Local development
 

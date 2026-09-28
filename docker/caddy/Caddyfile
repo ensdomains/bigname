@@ -24,6 +24,13 @@
 		path /v1/lookup
 	}
 
+	# The OpenAPI document is public and read-only, fetched cross-origin by the
+	# documentation site. The API answers 404 until the document ships (TYR-18).
+	@openapi {
+		method GET HEAD
+		path /openapi.json
+	}
+
 	@preflight {
 		method OPTIONS
 		path /v1/lookup
@@ -33,6 +40,9 @@
 		reverse_proxy @v1_reads {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @v1_lookup {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @preflight {$BIGNAME_PUBLIC_UPSTREAM}
+		# Deferred, so it replaces rather than duplicates a CORS header the API sets.
+		header @openapi >Access-Control-Allow-Origin *
+		reverse_proxy @openapi {$BIGNAME_PUBLIC_UPSTREAM}
 		respond 404
 	}
 }

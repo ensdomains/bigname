@@ -2,7 +2,8 @@
 
 This page documents the public single-host deployment shape used for bigname.
 
-The current production hostname is `bigname.taytems.xyz`.
+The current public API hostname is `sepolia.api.bigname.sh`, serving Sepolia.
+Mainnet follows at its own hostname once it is deployed.
 
 ## Public Edge
 
@@ -17,13 +18,19 @@ are:
   product, and diagnostic route families in
   [`api-v1-routes.md`](api-v1-routes.md).
 - REST lookup: `POST /v1/lookup` and its `OPTIONS` browser preflight.
+- OpenAPI document: `GET` and `HEAD` on `/openapi.json`. The document is
+  public and read-only, and the edge adds `Access-Control-Allow-Origin: *` so
+  the documentation site can read it from another origin. The API answers
+  `404` until the document ships (TYR-18).
 
-The former documentation-helper matchers (`/`, `/docs`, `/docs/`,
-`/openapi.json`) and the removed `POST /v1/identity:lookup` matcher were
-dropped with the flip; those paths now fall through to the edge's `404`. The
-GraphQL matcher (`POST /graphql` and its preflight) was dropped when the GraphQL
-compatibility surface was removed (TYR-19); the API itself now answers
-`/graphql` like any unknown route, and the edge returns `404`.
+The removed `POST /v1/identity:lookup` matcher was dropped with the flip and
+now falls through to the edge's `404`. The landing page and API reference no
+longer live in the API binary: they are the static site in
+[`site/`](../site/README.md), hosted separately, so `/`, `/docs`, and `/docs/`
+answer `404` from the API and at the edge. The GraphQL matcher (`POST /graphql`
+and its preflight) was dropped when the GraphQL compatibility surface was
+removed (TYR-19); the API itself now answers `/graphql` like any unknown route,
+and the edge returns `404`.
 
 Requests outside these method and path matcher groups return `404` at the edge.
 In particular, Caddy does not expose `/healthz`; the compose probe reaches it
@@ -39,8 +46,8 @@ surfaces are not routed through Caddy.
 Not every URL the API process answers is a public one. Keep the two sets
 apart when writing runbooks, dashboards, or smoke checks:
 
-- Public (through Caddy): `GET`/`HEAD /v1/*` and `POST /v1/lookup`, plus
-  its `OPTIONS` preflight. Diagnostics under
+- Public (through Caddy): `GET`/`HEAD /v1/*`, `POST /v1/lookup` and its
+  `OPTIONS` preflight, and `GET`/`HEAD /openapi.json`. Diagnostics under
   `/v1/diagnostics/*` are part of the public read surface by design (ADR 0006).
 - Internal only (reachable on the API listener, never through Caddy):
   `GET /healthz`, process metrics, and any
