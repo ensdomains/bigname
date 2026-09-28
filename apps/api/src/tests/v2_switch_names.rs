@@ -1,4 +1,3 @@
-
 const SWITCH_ALICE: &str = "0x00000000000000000000000000000000000a11ce";
 const SWITCH_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
 
@@ -13,12 +12,12 @@ async fn seed_switch_names_fixture(database: &TestDatabase) -> Result<()> {
 /// resource.
 async fn seed_switch_names_events(database: &TestDatabase) -> Result<(String, String, Uuid)> {
     seed_bounded_membership_blocks(database, 240).await?;
-    let (alpha, alpha_resource) = seed_switch_name(database, "alpha.eth", 0x5a1_0000, "ens_v1").await?;
-    let (beta, beta_resource) = seed_switch_name(database, "beta.eth", 0x5b1_0000, "ens_v1").await?;
+    let (alpha, alpha_resource) =
+        seed_switch_name(database, "alpha.eth", 0x5a1_0000, "ens_v1").await?;
+    let (beta, beta_resource) =
+        seed_switch_name(database, "beta.eth", 0x5b1_0000, "ens_v1").await?;
     let alpha_node = alpha.strip_prefix("ens:").expect("ens id").to_owned();
-    let grant = |expiry: i64| {
-        json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": expiry})
-    };
+    let grant = |expiry: i64| json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": expiry});
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -84,7 +83,11 @@ async fn v2_name_detail_from_families() -> Result<()> {
     seed_switch_names_fixture(&database).await?;
     let (status, alpha) = read_family_response(&database, "/v1/names/alpha.eth").await?;
     assert_eq!(status, StatusCode::OK, "{alpha:#}");
-    assert_eq!(alpha["data"]["registrant"], json!(SWITCH_ALICE), "{alpha:#}");
+    assert_eq!(
+        alpha["data"]["registrant"],
+        json!(SWITCH_ALICE),
+        "{alpha:#}"
+    );
     assert_eq!(
         alpha["data"]["resolver"]["address"],
         json!(SWITCH_RESOLVER),
@@ -100,7 +103,11 @@ async fn v2_name_detail_from_families() -> Result<()> {
         "/v1/diagnostics/names/alpha.eth/authority",
     ] {
         let (status, body) = read_family_response(&database, uri).await?;
-        let expected = if uri == "/v1/names/missing.eth" { StatusCode::NOT_FOUND } else { StatusCode::OK };
+        let expected = if uri == "/v1/names/missing.eth" {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::OK
+        };
         assert_eq!(status, expected, "{uri}: {body:#}");
     }
 
@@ -196,14 +203,11 @@ async fn v2_search_from_families() -> Result<()> {
     ] {
         read_family_pages(&database, &format!("/v1/search?{query}")).await?;
     }
-    let pages =
-        read_family_pages(&database, "/v1/search?q=eth&match=contains&page_size=1")
-            .await?;
+    let pages = read_family_pages(&database, "/v1/search?q=eth&match=contains&page_size=1").await?;
     assert_eq!(pages.len(), 2, "{pages:#?}");
 
     database.cleanup().await
 }
-
 
 #[tokio::test]
 async fn v2_resolver_bound_names_from_families() -> Result<()> {
@@ -217,7 +221,11 @@ async fn v2_resolver_bound_names_from_families() -> Result<()> {
         .flat_map(|page| page["data"].as_array().into_iter().flatten())
         .map(|name| &name["name"])
         .collect();
-    assert_eq!(names, [&json!("alpha.eth"), &json!("beta.eth")], "{pages:#?}");
+    assert_eq!(
+        names,
+        [&json!("alpha.eth"), &json!("beta.eth")],
+        "{pages:#?}"
+    );
     for uri in [
         format!("/v1/resolvers/1/{SWITCH_RESOLVER}"),
         format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=5"),
@@ -263,7 +271,9 @@ async fn v2_name_listings_are_the_same_across_candidate_batches() -> Result<()> 
             )
             .await?;
             assert!(
-                pages.iter().any(|page| page["data"].as_array().is_some_and(|rows| !rows.is_empty())),
+                pages
+                    .iter()
+                    .any(|page| page["data"].as_array().is_some_and(|rows| !rows.is_empty())),
                 "{uri}: {pages:#?}"
             );
         }
@@ -292,7 +302,10 @@ async fn seed_switch_routes_fixture(database: &TestDatabase) -> Result<()> {
 }
 
 /// The events of `seed_switch_routes_fixture`, unpublished.
-async fn seed_switch_routes_fixture_with(database: &TestDatabase, extra: Vec<NormalizedEvent>) -> Result<()> {
+async fn seed_switch_routes_fixture_with(
+    database: &TestDatabase,
+    extra: Vec<NormalizedEvent>,
+) -> Result<()> {
     seed_switch_routes_events_with(database, extra).await?;
     publish_test_families(database, 240).await
 }
@@ -301,7 +314,10 @@ async fn seed_switch_routes_events(database: &TestDatabase) -> Result<()> {
     seed_switch_routes_events_with(database, Vec::new()).await
 }
 
-async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<NormalizedEvent>) -> Result<()> {
+async fn seed_switch_routes_events_with(
+    database: &TestDatabase,
+    extra: Vec<NormalizedEvent>,
+) -> Result<()> {
     let (_, alpha_node, alpha_resource) = seed_switch_names_events(database).await?;
     let (sub, _) = seed_switch_name(database, "sub.alpha.eth", 0x5c1_0000, "ens_v1").await?;
     let sub_node = sub.strip_prefix("ens:").expect("ens id").to_owned();
@@ -383,16 +399,19 @@ async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<Norm
     .bind(SWITCH_REGISTRY)
     .execute(&database.pool)
     .await?;
-    let (two, _) = seed_switch_name(database, "two.alpha.eth", 0x5e1_0000, "ens_v2").await?;
+    let (two, two_resource) =
+        seed_switch_name(database, "two.alpha.eth", 0x5e1_0000, "ens_v2").await?;
     let labels: Vec<String> = ["two", "alpha", "eth"]
         .iter()
         .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
         .collect();
-    sqlx::query("UPDATE bigname_phase.name_surfaces SET labelhashes = $2 WHERE logical_name_id = $1")
-        .bind(&two)
-        .bind(&labels)
-        .execute(&database.pool)
-        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces SET labelhashes = $2 WHERE logical_name_id = $1",
+    )
+    .bind(&two)
+    .bind(&labels)
+    .execute(&database.pool)
+    .await?;
     let alpha_id = format!("ens:{alpha_node}");
     let mut subregistry = switch_event(
         "switch-alpha-subregistry",
@@ -405,11 +424,12 @@ async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<Norm
         json!({"subregistry": SWITCH_REGISTRY}),
     );
     subregistry.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
-    subregistry.raw_fact_ref["emitting_address"] = json!("0x00000000000000000000000000000000000000e3");
+    subregistry.raw_fact_ref["emitting_address"] =
+        json!("0x00000000000000000000000000000000000000e3");
     let mut child = switch_event(
         "switch-two-granted",
         Some(&two),
-        None,
+        Some(two_resource),
         "RegistrationGranted",
         "ens_v2_registry_l1",
         209,
@@ -422,8 +442,7 @@ async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<Norm
     child.raw_fact_ref["emitting_address"] = json!(SWITCH_REGISTRY);
     let mut events = vec![edge, role, record, subregistry, child];
     events.extend(extra);
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events)
-    .await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     Ok(())
 }
 #[tokio::test]
@@ -436,12 +455,20 @@ async fn v2_routes_with_composed_name_rows_from_families() -> Result<()> {
         ("/v1/names/alpha.eth/subnames".to_owned(), "/data"),
         ("/v1/names/alpha.eth/history".to_owned(), "/data"),
         ("/v1/permissions?name=alpha.eth".to_owned(), "/data"),
-        (format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens"), "/data"),
         (
-            format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&relation=resolves_to&coin_type=60"),
+            format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens"),
             "/data",
         ),
-        (format!("/v1/registries/1/{SWITCH_REGISTRY}/labels"), "/data"),
+        (
+            format!(
+                "/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&relation=resolves_to&coin_type=60"
+            ),
+            "/data",
+        ),
+        (
+            format!("/v1/registries/1/{SWITCH_REGISTRY}/labels"),
+            "/data",
+        ),
         ("/v1/events?name=alpha.eth".to_owned(), "/data"),
         (format!("/v1/events?address={SWITCH_ALICE}"), "/data"),
         ("/v1/diagnostics/events?name=alpha.eth".to_owned(), "/data"),
@@ -484,12 +511,15 @@ async fn v2_composed_name_reads_answer_409_while_the_families_rebuild() -> Resul
         SWITCH_SEARCH,
         bound_names.as_str(),
     ] {
-        let response = v2_get_response(&database, uri)
-        .await?;
+        let response = v2_get_response(&database, uri).await?;
         let status = response.status();
         let body: Value = read_json(response).await?;
         // Search's own fence answers a deployment with no servable namespace as a conflict.
-        let code = if uri == SWITCH_SEARCH { "conflict" } else { "stale" };
+        let code = if uri == SWITCH_SEARCH {
+            "conflict"
+        } else {
+            "stale"
+        };
         assert_eq!(
             (status, &body["error"]["code"]),
             (StatusCode::CONFLICT, &json!(code)),
@@ -554,8 +584,7 @@ async fn v2_get_with_marker_flip_after_fence(
 // starting, or a marker written by another interpreter build. They answer it as every other
 // composed read does, not with a server error.
 #[tokio::test]
-async fn v2_composed_listings_answer_409_when_the_marker_changes_after_their_fence() -> Result<()>
-{
+async fn v2_composed_listings_answer_409_when_the_marker_changes_after_their_fence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_routes_fixture(&database).await?;
     let bound_names = format!("/v1/resolvers/1/{SWITCH_RESOLVER}");
@@ -651,7 +680,10 @@ async fn v2_primary_name_gate_from_families() -> Result<()> {
         .unwrap_or(Value::Null);
     assert_eq!(
         (&verified["status"], &verified["unsupported_reason"]),
-        (&json!("unsupported"), &json!("exact_name_authority_not_verifiable")),
+        (
+            &json!("unsupported"),
+            &json!("exact_name_authority_not_verifiable")
+        ),
         "the gate refused in band: {body:#}"
     );
     // A rebuild starting after the route's fence reaches the gate's composed read (the pause
@@ -689,12 +721,14 @@ async fn v2_primary_name_gate_from_families() -> Result<()> {
 // starts after the collection fence, subnames and the first history page of an unknown name
 // answer the stale 409, not 404.
 #[tokio::test]
-async fn v2_unknown_parent_reads_answer_409_when_a_rebuild_starts_after_the_fence() -> Result<()>
-{
+async fn v2_unknown_parent_reads_answer_409_when_a_rebuild_starts_after_the_fence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
     let mut answers = Vec::new();
-    for uri in ["/v1/names/nobody.eth/subnames", "/v1/names/nobody.eth/history"] {
+    for uri in [
+        "/v1/names/nobody.eth/subnames",
+        "/v1/names/nobody.eth/history",
+    ] {
         let (status, _) = read_family_response(&database, uri).await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} with a live marker");
         let (status, body) = v2_get_with_marker_flip_after_fence(
@@ -708,8 +742,16 @@ async fn v2_unknown_parent_reads_answer_409_when_a_rebuild_starts_after_the_fenc
     assert_eq!(
         answers,
         [
-            ("/v1/names/nobody.eth/subnames", StatusCode::CONFLICT, json!("stale")),
-            ("/v1/names/nobody.eth/history", StatusCode::CONFLICT, json!("stale")),
+            (
+                "/v1/names/nobody.eth/subnames",
+                StatusCode::CONFLICT,
+                json!("stale")
+            ),
+            (
+                "/v1/names/nobody.eth/history",
+                StatusCode::CONFLICT,
+                json!("stale")
+            ),
         ]
     );
     database.cleanup().await
@@ -743,8 +785,10 @@ async fn seed_switch_resolver_declaration(database: &TestDatabase) -> Result<i64
     )
     .bind(manifest_id)
     .bind(SWITCH_CHAIN)
-    .bind(json!({"rollout_status": "active", "normalizer_version": "fixture",
-                 "manifest_payload": payload}))
+    .bind(
+        json!({"rollout_status": "active", "normalizer_version": "fixture",
+                 "manifest_payload": payload}),
+    )
     .execute(&database.pool)
     .await?;
     Ok(manifest_id)

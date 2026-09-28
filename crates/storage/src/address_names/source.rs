@@ -10,14 +10,14 @@ use sqlx::{Postgres, QueryBuilder};
 
 /// The columns of a composed `address_names_current` row set.
 const ADDRESS_NAMES_COLUMNS: &str = "anc(address text, logical_name_id text, relation text,
-    namespace text, raw_name text, namehash text, surface_binding_id uuid, resource_id uuid,
+    namespace text, raw_name text, normalized_name text, namehash text, surface_binding_id uuid, resource_id uuid,
     token_lineage_id uuid, binding_kind text, support_status text, unsupported_reason text,
     provenance jsonb, chain_positions jsonb, canonicality_summary jsonb, manifest_version bigint,
     last_recomputed_at timestamptz)";
 
 /// The columns of a composed `address_records_current` row set.
 const ADDRESS_RECORDS_COLUMNS: &str = "arc(address text, coin_type text, logical_name_id text,
-    namespace text, raw_name text, namehash text, surface_binding_id uuid, resource_id uuid,
+    namespace text, raw_name text, normalized_name text, namehash text, surface_binding_id uuid, resource_id uuid,
     record_resource_id uuid, binding_kind text, record_key text, support_status text,
     unsupported_reason text, provenance jsonb, chain_positions jsonb,
     canonicality_summary jsonb, manifest_version bigint, last_recomputed_at timestamptz)";

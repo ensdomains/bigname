@@ -227,9 +227,23 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
         })
         .collect::<Vec<_>>();
     // Relinked: only the latest link per node counts.
-    events.push(link("relink-0", 150, 500, &node(0), "3", V2_RESOLVER_ADDRESS));
+    events.push(link(
+        "relink-0",
+        150,
+        500,
+        &node(0),
+        "3",
+        V2_RESOLVER_ADDRESS,
+    ));
     // Unlinked: record 0 removes the node.
-    events.push(link("unlink-1", 150, 501, &node(1), "0", V2_RESOLVER_ADDRESS));
+    events.push(link(
+        "unlink-1",
+        150,
+        501,
+        &node(1),
+        "0",
+        V2_RESOLVER_ADDRESS,
+    ));
     // The default record: the empty-name node.
     events.push(link(
         "default",
@@ -242,7 +256,14 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
     let mut orphan = link("orphan-2", 150, 503, &node(2), "9", V2_RESOLVER_ADDRESS);
     orphan.canonicality_state = CanonicalityState::Orphaned;
     events.push(orphan);
-    events.push(link("candidate-2", 150, 504, &node(2), "9", V2_RESOLVER_ADDRESS));
+    events.push(link(
+        "candidate-2",
+        150,
+        504,
+        &node(2),
+        "9",
+        V2_RESOLVER_ADDRESS,
+    ));
     events.push(link(
         "other-resolver",
         150,
@@ -320,7 +341,10 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
             "log_index": 4
         })
     );
-    assert!(by_node[&node(5)].get("name").is_none(), "shadow surface must not name a link");
+    assert!(
+        by_node[&node(5)].get("name").is_none(),
+        "shadow surface must not name a link"
+    );
     assert!(all.iter().all(|row| row.get("logical_name_id").is_none()
         && row.get("normalized_event_id").is_none()
         && row.get("chain_position").is_none()));
@@ -372,7 +396,11 @@ async fn v2_resolver_collection_rejects_pipeline_unsupported_reason() -> Result<
             &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{section}");
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{section}"
+        );
         let payload: ErrorResponse = read_json(response).await?;
         assert_eq!(payload.error.code, "internal_error", "{section}");
         assert_eq!(
@@ -518,8 +546,7 @@ async fn resolver_publication_replaced_before_finish(
     )
     .await
     .context("request never reached the collection publication finish")?;
-    sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
-        .execute(&database.pool).await?;
+    commit_family_block(&database.pool).await?;
     control.resume().await;
     let response = request
         .await

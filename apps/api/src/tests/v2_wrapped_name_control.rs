@@ -10,9 +10,8 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     const NAME: &str = "wrapped-after-grant.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_switch_name(
-        &database, NAME, 0xb0a_6900, "ens_v1",
-    ).await?;
+    let (logical_name_id, resource) =
+        seed_switch_name(&database, NAME, 0xb0a_6900, "ens_v1").await?;
     let mut registered = v2_history_event(
         &format!("{NAME}-registered"),
         Some(&logical_name_id),
@@ -45,6 +44,7 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     registry_owner.source_family = "ens_v1_registry_l1".to_owned();
     registry_owner.log_index = Some(1);
     registry_owner.after_state = json!({
+        "node": logical_name_id.trim_start_matches("ens:"),
         "owner": WRAPPER_CONTRACT,
         "owner_getter": WRAPPER_CONTRACT,
     });
@@ -57,17 +57,29 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     // The shape the removed API rule matched: the grant says registrar, the served authority kind
     // says wrapper.
     let grant_kind: Option<String> = sqlx::query_scalar(
-        "SELECT after_state ->> 'authority_kind' FROM normalized_events WHERE event_identity = $1")
-        .bind(format!("{NAME}-registered")).fetch_one(&database.pool).await?;
-    let composed = bigname_storage::families::name::load_family_name(&database.pool, &logical_name_id)
-        .await?.context("wrapped family name")?;
-    let served_kind = composed.declared_summary.pointer("/registration/authority_kind").and_then(Value::as_str);
+        "SELECT after_state ->> 'authority_kind' FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(format!("{NAME}-registered"))
+    .fetch_one(&database.pool)
+    .await?;
+    let composed =
+        bigname_storage::families::name::load_family_name(&database.pool, &logical_name_id)
+            .await?
+            .context("wrapped family name")?;
+    let served_kind = composed
+        .declared_summary
+        .pointer("/registration/authority_kind")
+        .and_then(Value::as_str);
     assert_eq!(
         (grant_kind.as_deref(), served_kind),
         (Some("registrar"), Some("wrapper"))
     );
 
-    let payload = v2_get_json(&database, &format!("/v1/diagnostics/names/{NAME}/authority")).await?;
+    let payload = v2_get_json(
+        &database,
+        &format!("/v1/diagnostics/names/{NAME}/authority"),
+    )
+    .await?;
     let control = &payload["data"]["control"];
     assert_ne!(control["status"], "unsupported", "{control:#}");
     assert!(control.get("unsupported_reason").is_none(), "{control:#}");
