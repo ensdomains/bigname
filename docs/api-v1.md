@@ -898,13 +898,14 @@ on subnames, are evaluated at the published block's timestamp on the first page
 and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
-its post-call guard still compares the project row's generation. The lookup
-engine keeps reading the served tables, and its database guard moves to the
-marker in the flip slice; no lookup input moves to the families before that.
+its post-call guard compares the marker's `sequence` (see the served-generation
+paragraph above). The lookup engine's inputs still come from the served tables,
+whose per-row versions the guard also compares; they move to the families
+before the served batch stops.
 
 With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
-instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
-diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
+instead of `name_current` rows. Name detail (`GET /v1/names/{name}`),
+`GET /v1/search`, the expiring listing of `GET /v1/names` and a
 resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
 whole. The following routes keep their own pages on the served tables until a
 later step 7b slice moves them, and take only the name rows they join from
@@ -913,9 +914,8 @@ registration), `GET /v1/registries/{chain_id}/{address}/labels` (each child's
 registration), `GET /v1/names/{name}/history` (whether the name exists),
 `GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
 name of each registration), `GET /v1/addresses/{address}/names` (each name's
-registration, `relation=resolves_to` included), `GET /v1/events`,
-`GET /v1/diagnostics/events` and `GET /v1/addresses/{address}/history` (each
-event's name), and the primary-name claim gate of
+registration, `relation=resolves_to` included), `GET /v1/events` and
+`GET /v1/addresses/{address}/history` (each event's name), and the primary-name claim gate of
 `GET /v1/addresses/{address}/primary-name`. Their bodies are meant to be
 identical to the served ones. Each composed read sees one committed family
 block, so a row never mixes two blocks. A composed row describes the publication
