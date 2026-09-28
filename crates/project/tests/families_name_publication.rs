@@ -17,7 +17,6 @@ use bigname_storage::{
         load_family_name,
     },
     load_name_current_for_snapshot,
-    publication_source::with_serve_from_families,
 };
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
@@ -109,12 +108,7 @@ async fn an_unknown_name_during_a_rebuild_is_stale() -> Result<()> {
     }))
     .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?;
     let unknown = name(99);
-    let read = || {
-        with_serve_from_families(
-            true,
-            load_name_current_for_snapshot(&fixture.pool, &unknown, &positions),
-        )
-    };
+    let read = || load_name_current_for_snapshot(&fixture.pool, &unknown, &positions);
     assert!(
         matches!(read().await, Ok(SnapshotProjectionRead::NotFound)),
         "a live marker answers not found"
@@ -269,11 +263,7 @@ async fn an_unknown_name_below_the_publication_is_stale() -> Result<()> {
         position(12, "2027-01-15T08:02:24Z")?,
         position(11, "2027-01-15T08:02:12Z")?,
     ] {
-        let read = with_serve_from_families(
-            true,
-            load_name_current_for_snapshot(&fixture.pool, &unknown, &positions),
-        )
-        .await;
+        let read = load_name_current_for_snapshot(&fixture.pool, &unknown, &positions).await;
         answers.push(match read {
             Ok(SnapshotProjectionRead::NotFound) => "not found".to_owned(),
             Ok(_) => "found".to_owned(),

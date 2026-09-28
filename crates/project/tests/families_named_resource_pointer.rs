@@ -50,8 +50,7 @@ async fn named_keys_keep_clears_and_canonical_order_through_undo_reset_and_rebui
     let fixture = Fixture::new("families_named_pointer_replay", 14).await?;
     seed(&fixture).await?;
     for block in [10, 11] {
-        let outcome = fixture.apply(block, FamilyMode::Normal).await;
-        assert!(outcome.skipped.is_none(), "{outcome:?}");
+        fixture.apply(block, FamilyMode::Normal).await?;
     }
     let named = fixture.rows(TABLE).await?;
     assert_eq!(named.len(), 1);
@@ -79,13 +78,14 @@ async fn named_keys_keep_clears_and_canonical_order_through_undo_reset_and_rebui
     let published = fixture.snapshot().await?;
     let mut options = FamilyOptions::new(CONTENT_HASH);
     options.max_blocks_per_run = 0;
-    fixture.apply_with(14, FamilyMode::Rebuild, &options).await;
+    fixture
+        .apply_with(14, FamilyMode::Rebuild, &options)
+        .await?;
     assert!(fixture.marker().await?.0.is_none());
     for table in FAMILY_TABLES {
         assert!(fixture.rows(table).await?.is_empty(), "reset kept {table}");
     }
-    let replayed = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(replayed.skipped.is_none(), "{replayed:?}");
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(fixture.snapshot().await?, published);
     fixture.cleanup().await
 }
@@ -115,9 +115,14 @@ async fn shape(fixture: &Fixture) -> Result<Vec<Value>> {
 #[tokio::test]
 async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -> Result<()> {
     let fixture = Fixture::new("families_named_pointer_migration", 14).await?;
+    // This historical upgrade starts from the real installed pre-removal schema.
+    raw_sql(include_str!(
+        "../../../schema-v2/fixtures/pre-7c/06_projections.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     seed(&fixture).await?;
-    let outcome = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(outcome.skipped.is_none(), "{outcome:?}");
+    fixture.apply(14, FamilyMode::Normal).await?;
     let baseline = shape(&fixture).await?;
     let published = fixture.snapshot().await?;
     assert_eq!(fixture.rows(TABLE).await?.len(), 2);
@@ -136,8 +141,7 @@ async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -
             "migration kept {table}"
         );
     }
-    let rebuilt = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(rebuilt.skipped.is_none(), "{rebuilt:?}");
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(
         fixture.snapshot().await?,
         published,
