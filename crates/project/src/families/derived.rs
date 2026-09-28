@@ -119,12 +119,13 @@ impl Touched {
 }
 
 /// Delete and derive again the index rows of the touched keys, then, after a block's write,
-/// compose again the name summaries of the names it touched.
+/// compose again the name summaries of the names it touched. Returns what the summary refresh
+/// wrote (nothing on an undo, which restores the summaries from the journal).
 pub(crate) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     touched: &Touched,
-) -> Result<()> {
+) -> Result<summary::Refreshed> {
     if !touched.names.is_empty() {
         run(transaction, NAME_DELETE, chain_id, &touched.names, None).await?;
         run(transaction, NAME_INSERT, chain_id, &touched.names, None).await?;
@@ -139,10 +140,10 @@ pub(crate) async fn refresh(
         run(transaction, RECORD_ID_DELETE, chain_id, pairs.0, pairs.1).await?;
         run(transaction, RECORD_ID_INSERT, chain_id, pairs.0, pairs.1).await?;
     }
-    if !touched.restoring {
-        summary::refresh(transaction, chain_id, touched.number).await?;
+    if touched.restoring {
+        return Ok(summary::Refreshed::default());
     }
-    Ok(())
+    summary::refresh(transaction, chain_id, touched.number).await
 }
 
 async fn run(

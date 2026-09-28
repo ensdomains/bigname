@@ -152,7 +152,11 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
             REGISTRAR,
         )
         .await?;
-    publish(&fixture, 8).await?;
+    shadow_support::publish_served(&fixture, 8).await?;
+    let outcome = fixture
+        .apply(8, bigname_project::families::FamilyMode::Normal)
+        .await;
+    ensure!(outcome.skipped.is_none(), "block 8: {:?}", outcome.skipped);
     let renewed = assert_matches_served(&fixture, &name(1)).await?;
     assert_matches_served(&fixture, &name(2)).await?;
     ensure!(renewed != first, "the renewal left {renewed}");
@@ -176,6 +180,23 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
     ensure!(
         journalled == vec![json!([CHAIN, name(1)]).to_string()],
         "block 8 journalled the summaries {journalled:?}"
+    );
+    // The outcome reports the summary row the block wrote and every undo row it journalled.
+    ensure!(
+        outcome.rows.get("project_name_summary") == Some(&1),
+        "block 8 reported the summary rows {:?}",
+        outcome.rows
+    );
+    let undo_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_family_undo WHERE chain_id = $1 AND block_number = 8",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        outcome.undo_rows == u64::try_from(undo_rows)?,
+        "block 8 reported {} undo rows, journalled {undo_rows}",
+        outcome.undo_rows
     );
 
     // Undo block 8: the renewed name's summary is the block-7 row again.

@@ -38,13 +38,20 @@ use crate::{
 /// Names composed per call, to bound the working set of a rebuild range.
 const CHUNK: usize = 1000;
 
-/// Compose again, journal and write the summaries of the names block `number` touched. Returns
-/// the rows written or removed.
+/// What a summary refresh wrote: the `project_name_summary` rows written or removed, and the
+/// undo rows journalled for them.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Refreshed {
+    pub(crate) rows: u64,
+    pub(crate) undo_rows: u64,
+}
+
+/// Compose again, journal and write the summaries of the names block `number` touched.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
-) -> Result<u64> {
+) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
         .await?
         .ok_or_else(|| {
@@ -62,7 +69,7 @@ pub(super) async fn refresh(
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
     if names.is_empty() {
-        return Ok(0);
+        return Ok(Refreshed::default());
     }
     let publication = bigname_storage::families::name::FamilyPublication {
         chain_id: chain_id.to_owned(),
@@ -122,10 +129,11 @@ pub(super) async fn refresh(
         }
     }
     if keys.is_empty() {
-        return Ok(0);
+        return Ok(Refreshed::default());
     }
-    block::insert_journal(transaction, chain_id, &block, journal).await?;
-    store::replace(transaction, &NAME_SUMMARY, keys, rows).await
+    let undo_rows = block::insert_journal(transaction, chain_id, &block, journal).await?;
+    let rows = store::replace(transaction, &NAME_SUMMARY, keys, rows).await?;
+    Ok(Refreshed { rows, undo_rows })
 }
 
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's
