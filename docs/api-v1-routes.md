@@ -42,21 +42,30 @@ All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
 The product collections `GET /v1/names`, subnames, address names, and
-permissions read current state. The subnames, address names, and permissions
-cursors bind anchors, filters, sorting, the served project publication (including
-same-height replacement) and manifest revisions. A `GET /v1/names` cursor binds
-its namespace, window, and order and holds a position only; a continuation reads
-the current publication (see
-[current-state list cursors](api-v1.md#current-state-list-cursors)). Counts and rows use the same
-filters; time-dependent expiry filtering retains the first page's evaluation
-time (with the [publication switch](glossary.md#publication-switch) on, it is
-the published block's timestamp on every page). These reads revalidate the publication before returning and disclose
-`meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
-returns `409 stale` and requires restarting without a cursor. A first page,
-which has no cursor to drop, whose publication changed while it was read
-returns the same `409 stale` with a message saying so; retrying the same
-request reads the new publication. No historical
-projection is retained by a pagination token. The binding conservatively covers
+permissions read current state. Every one of them revalidates the publication
+before returning and discloses `meta.as_of`; a page whose publication changed
+while it was read returns `409 stale`. Counts and rows use the same filters. No
+historical projection is retained by a pagination token. Their cursors differ:
+
+- `GET /v1/names` uses a
+  [current-state list cursor](glossary.md#current-state-list-cursor): it binds
+  the namespace, window, and order and holds only the last row's position. A
+  continuation reads the publication current when it runs, so a newer
+  publication does not refuse it, and the `409 stale` of a page whose
+  publication changed during its read asks for a retry with the same cursor.
+  A cursor carrying the publication fields that cursors issued before that
+  contract carried returns `400 invalid_input` once. See
+  [current-state list cursors](api-v1.md#current-state-list-cursors).
+- Subnames, address names, and permissions cursors bind anchors, filters,
+  sorting, the served project publication (including same-height replacement)
+  and manifest revisions. A changed or unavailable publication, or an older
+  cursor without that binding, returns `409 stale` and requires restarting
+  without the cursor. A first page, which has no cursor to drop, whose
+  publication changed while it was read returns the same `409 stale` with a
+  message saying so; retrying the same request reads the new publication.
+  Subnames' time-dependent expiry filtering retains the first page's
+  evaluation time (with the [publication switch](glossary.md#publication-switch)
+  on, it is the published block's timestamp on every page). The binding conservatively covers
 the requested namespace, or all active public namespaces when none is selected.
 A count spanning namespaces requires readable publications for all of them;
 otherwise it returns `409 stale` rather than a misleading partial total. Registry and resolver collections use the same publication fence

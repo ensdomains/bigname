@@ -8,9 +8,11 @@ use super::support::{
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
 /// The publication a collection read is admitted against. Current projections are not retained
-/// after publication, so a current-state continuation must restart when it changes. History
-/// collections (`capture_history`, `finish_history`) are walks: they are bounded by the captured
-/// publication but never refused because a newer one exists.
+/// after publication, so a continuation whose cursor binds the publication (`validate_cursor`,
+/// `bind_cursor`) must restart when it changes. A current-state list cursor (`list_cursor`) binds
+/// none: its route captures without the cursor and only `finish`'s same-request recheck can
+/// refuse it, with a retry. History collections (`capture_history`, `finish_history`) are walks:
+/// they are bounded by the captured publication but never refused because a newer one exists.
 pub(crate) struct CollectionSnapshot {
     namespaces: PublicNamespaceSet,
     token: String,

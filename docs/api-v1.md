@@ -597,8 +597,9 @@ Rules:
   ownership, and permission collections bind cursors to the current
   publication: a changed publication returns `409 stale` requiring a restart
   without the cursor; a first page, sent without one, is simply retried.
-  `GET /v1/names` binds none: its cursor holds a position that a continuation
-  reads from the current publication (see
+  `GET /v1/names` binds none: its
+  [current-state list cursor](glossary.md#current-state-list-cursor) holds a
+  position that a continuation reads from the current publication (see
   [current-state list cursors](#current-state-list-cursors)). History collections (`/v1/events`, name history, and address
   history) disclose in `meta.as_of` the publication captured when the request
   was admitted and do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
@@ -864,14 +865,16 @@ interpreter content hash, sit on readable lineage, and trail the stored head by
 at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
-for equality, so nothing changes on the wire, except that turning the switch on
-or off makes publication-bound current-state continuation cursors (history
-cursors and [current-state list cursors](#current-state-list-cursors) carry no
-publication token and continue) issued before the change return
-`409 stale`, asking the client to restart pagination without the cursor. Such a
-cursor stays rejected until the client restarts pagination. The API tags these
-cursors with the publication source, so this holds even when the project row's
-version and the marker's `sequence` happen to be the same number.
+for equality, so nothing changes on the wire, with one exception for cursors
+that bind the publication (subnames, address names, `resolves_to`, permissions,
+registries and their labels, and the resolver `/aliases`, `/links`, and `/roles`
+collections). Such a cursor issued before the switch is turned on or off returns
+`409 stale`, asking the client to restart pagination without the cursor, and
+stays rejected until the client does. The API tags these cursors with the
+publication source, so this holds even when the project row's version and the
+marker's `sequence` happen to be the same number. History cursors and
+[current-state list cursors](#current-state-list-cursors) carry no publication
+token and continue across the change.
 Until the later step 7b slices move a route's rows onto the families, that
 route still reads the served tables while the switch is on. The served rows are
 committed before the family marker moves, so a served batch that lands between
@@ -1466,8 +1469,9 @@ readable surface answers `404 not_found`.
 
 ### Current-state list cursors
 
-A cursor of `GET /v1/search`, `GET /v1/names`, or the resolver overview's
-`bound_names` holds the list's sort and filters, the sort position of the last
+A [current-state list cursor](glossary.md#current-state-list-cursor), the
+cursor of `GET /v1/search`, `GET /v1/names`, or the resolver overview's
+`bound_names`, holds the list's sort and filters, the sort position of the last
 row it returned, and, when the request pinned `at`, that `at` token (of these
 three, only the resolver overview accepts `at`). It holds no publication,
 generation, or evaluation time. A continuation reads whatever is published when
@@ -1490,7 +1494,8 @@ query pages with a `where` filter on the last id it saw:
   `400 invalid_input` with `cursor must be a valid pagination cursor`; restart
   without the cursor. That includes the publication token, evaluation time, or
   resolver generation that `GET /v1/names` and `bound_names` cursors carried
-  before this contract, so such a cursor is refused once.
+  before this contract, and the snapshot field of `GET /v1/search` cursors
+  issued before July 2026, so such a cursor is refused once.
 - With `at`, the continuation must send the same `at`, or it returns
   `400 invalid_input`. Once a newer publication lands, that `at` is below the
   current publication and the continuation returns `409 stale`, as any read at

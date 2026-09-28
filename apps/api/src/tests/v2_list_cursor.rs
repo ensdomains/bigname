@@ -356,6 +356,9 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
     let namehash_ff = format!("0x{}", "ff".repeat(32));
     let end_expiry = switch_timestamp(1_959_999_999)?;
     let gap_expiry = switch_timestamp(1_850_000_000)?;
+    // Descending, "after the last row" is below the earliest expiry in the window.
+    let desc_end_expiry = switch_timestamp(1_700_000_001)?;
+    let namehash_00 = format!("0x{}", "00".repeat(32));
     let routes = list_cursor_routes()?;
     for on in [false, true] {
         for (uri, holder) in &routes {
@@ -387,7 +390,13 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
                         "alpha.eth",
                     )
                 } else {
-                    continue;
+                    (
+                        vec![("expires_at", &desc_end_expiry), ("name", "aaaa.eth"),
+                             ("namespace", "ens"), ("namehash", &namehash_00)],
+                        vec![("expires_at", &gap_expiry), ("name", "gap.eth"),
+                             ("namespace", "ens"), ("namehash", &namehash_00)],
+                        "beta.eth",
+                    )
                 };
             let (rows, last) = list_cursor_page(
                 &database,
