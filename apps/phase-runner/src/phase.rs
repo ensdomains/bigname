@@ -248,15 +248,19 @@ pub trait Phase: Send + Sync {
 
     /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
     /// applies the owned key families here, one family run per call. The runner calls again while
-    /// it returns `More`, recording the phase heartbeat between calls. An error fails the phase
-    /// run, keeping the batch.
+    /// it returns `More`, probing the lock, recording the phase heartbeat and passing the capacity
+    /// guard before every call. An error fails the phase run, keeping the batch. A wrapper around
+    /// a phase that overrides this, such as `ProjectPhase`, must forward both this and
+    /// `has_after_progress_work`, or the follow-up work silently never runs.
     fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
         Box::pin(async { Ok(AfterProgress::Done) })
     }
 
     /// Whether `after_progress_recorded` has work waiting for the chain, answered without taking
-    /// it. A phase with none finishes its batch even when a stop has been raised; one with work
-    /// waiting is abandoned by the stop before the hook is called.
+    /// it. A settled batch with no follow-up work completes despite a pending stop. With work
+    /// waiting, a stop already observable at the runner's check before the hook prevents the
+    /// hook from being called at all; work admitted before the stop becomes observable is
+    /// cancelled cooperatively, at its next await.
     fn has_after_progress_work(&self, _chain_id: &str) -> bool {
         false
     }

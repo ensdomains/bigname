@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bigname_project::{
@@ -40,6 +41,9 @@ pub struct FamilySettings {
     /// Which work blocks a family rebuild applies several to a transaction; production keeps the
     /// switch below the chain's safe block.
     pub rebuild_ranges: RebuildRanges,
+    /// How long the input token read after a served batch may take. A read that outlasts it is a
+    /// transient family failure raised after the batch's progress is recorded, never a skip.
+    pub token_budget: Duration,
 }
 
 impl Default for FamilySettings {
@@ -49,6 +53,7 @@ impl Default for FamilySettings {
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
             retry_family_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
+            token_budget: Duration::from_secs(30),
         }
     }
 }
@@ -265,6 +270,12 @@ impl Phase for ProjectPhase {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
+            // A family run an earlier batch planned and a stop left waiting belongs to that
+            // batch: this one plans its own or none, so no older run reaches the loop after it.
+            self.pending_families
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&context.chain_id);
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .require_rpc_configuration(&context.chain_id)
@@ -360,10 +371,20 @@ impl Phase for ProjectPhase {
                     },
                 };
                 // Read now, while a finished redo's session is still open on the Project row: the
-                // runner closes it when it records this batch. A failed read fails the family run
-                // that follows the progress write, which the restart loop retries.
-                let token =
-                    bigname_project::families::input_token(&self.pool, &context.chain_id).await;
+                // runner closes it when it records this batch. The batch's writes are committed,
+                // so the read is bounded: a read that fails or outlasts the bound fails the family
+                // run that follows the progress write, as a transient failure.
+                let budget = self.families.token_budget;
+                let token = tokio::time::timeout(
+                    budget,
+                    bigname_project::families::input_token(&self.pool, &context.chain_id),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ProjectError::transient(format!(
+                        "the family input token did not read within {budget:?}"
+                    )))
+                });
                 self.pending_families
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())

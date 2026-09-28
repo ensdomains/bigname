@@ -195,12 +195,13 @@ impl PhaseRunner {
     }
 
     /// The phase's shadow work after a recorded batch, call after call until it is done; its
-    /// error fails the run with the batch kept. Between calls the loop progress and the phase
-    /// heartbeat are recorded as a batch settlement records them, so a family catch-up that spans
-    /// hours stays visibly alive, and the capacity guard is re-entered as before a batch, with no
-    /// write reservation since a family run carries no estimate. A stop abandons waiting work:
-    /// returns false when one did. With no work waiting it returns true without calling the hook,
-    /// stop or not, so a phase with nothing to follow finishes its batch as before.
+    /// error fails the run with the batch kept. With no work waiting it returns true without
+    /// calling the hook, stop or not, so a phase with nothing to follow finishes its batch as
+    /// before. Otherwise every call, the first included, is preceded by the maintenance a batch
+    /// gets: the lock probe, the phase heartbeat and the capacity guard, which pauses the phase
+    /// while storage is short (with no write reservation, since a family run carries no
+    /// estimate). A family catch-up that spans hours so stays visibly alive and stops writing
+    /// while the disk or database is full. Returns false when a stop abandoned waiting work.
     pub(super) async fn follow_batch(
         &self,
         chain: &ChainConfig,
@@ -209,21 +210,10 @@ impl PhaseRunner {
         heartbeat: &mut HeartbeatThrottle,
         phase_lock: &mut PhaseLock,
     ) -> RunnerResult<bool> {
+        if !phase.has_after_progress_work(&chain.chain_id) {
+            return Ok(true);
+        }
         loop {
-            if !phase.has_after_progress_work(&chain.chain_id) {
-                return Ok(true);
-            }
-            // The stop is checked first, and the hook is called only inside the polled branch:
-            // calling it plans a family run, so a stop already raised must not reach it.
-            let step = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Ok(false),
-                result = async { phase.after_progress_recorded(&chain.chain_id).await } => result?,
-            };
-            if step == AfterProgress::Done {
-                return Ok(true);
-            }
-            self.record_loop_progress(&chain.chain_id);
             let admitted = until_cancelled(cancellation, async {
                 phase_lock.check_alive().await?;
                 heartbeat
@@ -243,6 +233,22 @@ impl PhaseRunner {
             if admitted != Some(true) {
                 return Ok(false);
             }
+            // Asked again after the maintenance, which may have waited long for capacity.
+            if !phase.has_after_progress_work(&chain.chain_id) {
+                return Ok(true);
+            }
+            // The stop is checked first, and the hook is called only inside the polled branch:
+            // calling it plans a family run, so a stop observable here never reaches it. A stop
+            // raised once the run is under way abandons it at its next await.
+            let step = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Ok(false),
+                result = async { phase.after_progress_recorded(&chain.chain_id).await } => result?,
+            };
+            if step == AfterProgress::Done {
+                return Ok(true);
+            }
+            self.record_loop_progress(&chain.chain_id);
         }
     }
 }

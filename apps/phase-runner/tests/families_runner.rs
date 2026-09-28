@@ -20,7 +20,7 @@ use phase_runner::{
     error::{ErrorKind, RunnerError},
     phase::{
         AfterProgress, AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
-        PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseSet, RunMode,
+        PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseResume, PhaseSet, RunMode,
     },
     project_phase::FamilySettings,
     project_phase::ProjectPhase,
@@ -358,10 +358,9 @@ async fn marker_row(scratch: &ScratchDatabase) -> Result<(Option<i64>, Option<St
     .await?)
 }
 
-// A stop that arrives while the final served batch is being recorded abandons the family run
-// before it commits anything, and the run ends as cancelled: the redo stays in progress with the
-// served batch's progress recorded, the command fails, and an uncancelled rerun repairs the
-// families.
+// A stop that arrives while the final served batch is being recorded means no family run starts,
+// and the run ends as cancelled: the redo stays in progress with the served batch's progress
+// recorded, the command fails, and an uncancelled rerun repairs the families.
 #[tokio::test]
 async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_rerun_repairs_it()
 -> Result<()> {
@@ -379,17 +378,13 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
     );
     let error = redo_with_phase_and_stop(&scratch, project, 30, stop)
         .await
-        .expect_err("the stop abandoned the family run");
+        .expect_err("the stop left the redo incomplete");
     assert_eq!(
         redo_progress(&scratch).await?,
         (true, Some(30)),
         "the served batch is recorded and the redo stays open"
     );
-    assert_eq!(
-        marker(&scratch).await?,
-        None,
-        "the family run committed nothing"
-    );
+    assert_eq!(marker(&scratch).await?, None, "no family run started");
     let message = error.to_string();
     assert!(message.contains("is incomplete"), "{message}");
 
@@ -572,15 +567,45 @@ async fn a_family_catch_up_of_several_runs_keeps_the_phase_heartbeat_fresh() -> 
     scratch.cleanup().await
 }
 
-// A family catch-up of several runs re-enters the capacity guard before each run after the first,
-// as the runner does before each batch. The probe reports the database over its ceiling once the
-// first run has moved the family marker, so the phase pauses with the marker where that run left
-// it; once the probe clears, the phase resumes and the remaining runs finish the rebuild.
+// A family catch-up of several runs re-enters the capacity guard before each run, as the runner
+// does before each batch. The probe reports the database over its ceiling once the first run has
+// moved the family marker, so the phase pauses with the marker where that run left it; once the
+// probe clears, the phase resumes and the remaining runs finish the rebuild.
 #[tokio::test]
 async fn a_family_catch_up_pauses_between_runs_while_capacity_is_breached() -> Result<()> {
-    let scratch = ready_through("families_runner_capacity", 30).await?;
+    capacity_pause_case(
+        "families_runner_capacity",
+        |_, marker| marker.is_some_and(|block| block < 30),
+        "the guard paused the catch-up after a run, short of block 30",
+    )
+    .await
+}
+
+// The first family run after a served batch is guarded too: the probe admits the batch, then
+// reports the database over its ceiling before any family block exists, so the phase pauses with
+// no marker and the first run starts only once the probe clears.
+#[tokio::test]
+async fn the_first_family_run_after_a_batch_waits_while_capacity_is_breached() -> Result<()> {
+    capacity_pause_case(
+        "families_runner_capacity_first",
+        |call, marker| call > 1 && marker.is_none(),
+        "the guard paused before the first family run",
+    )
+    .await
+}
+
+/// Runs a Project redo through block 30 in family runs of ten blocks, under a probe that reports
+/// the database over its ceiling while `over(call, marker)` holds, until released. The watcher
+/// waits for the breach, requires the phase paused with the family marker standing still, then
+/// releases the probe; the redo must then finish the rebuild.
+async fn capacity_pause_case(
+    prefix: &str,
+    over: fn(usize, Option<i64>) -> bool,
+    paused_where: &str,
+) -> Result<()> {
+    let scratch = ready_through(prefix, 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
-    let probe = Arc::new(CeilingOnceTheMarkerMoves::default());
+    let probe = Arc::new(TrippingProbe::new(over));
     let capacity = CapacityGuard::new(
         CapacityConfig {
             database_max_bytes: Some(1 << 40),
@@ -595,45 +620,34 @@ async fn a_family_catch_up_pauses_between_runs_while_capacity_is_breached() -> R
             ..FamilySettings::default()
         }),
     );
-    let mut task = tokio::spawn({
-        let scratch_runner = scratch.runner();
-        async move {
-            redo_with_capacity(
-                scratch_runner,
-                project,
-                30,
-                CancellationToken::new(),
-                capacity,
-            )
-            .await
+    let observe = async {
+        probe.breached.notified().await;
+        let paused_at = marker(&scratch).await?;
+        anyhow::ensure!(over(2, paused_at), "{paused_where}: marker {paused_at:?}");
+        while project_state(&scratch).await?.0 != "paused" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    });
-    let paused_at = tokio::select! {
-        () = probe.breached.notified() => marker(&scratch).await?,
-        finished = tokio::time::timeout(Duration::from_secs(60), &mut task) => {
-            finished???;
-            anyhow::bail!(
-                "the rebuild finished without the capacity guard running between its runs; \
-                 the family marker reached {:?}",
-                marker(&scratch).await?
-            );
-        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        anyhow::ensure!(
+            marker(&scratch).await? == paused_at,
+            "a family run started while the database was over its ceiling"
+        );
+        anyhow::ensure!(project_state(&scratch).await?.0 == "paused");
+        probe.released.store(true, Ordering::SeqCst);
+        Ok(())
     };
-    assert!(
-        paused_at.is_some_and(|block| block < 30),
-        "the guard ran after the first run only: {paused_at:?}"
-    );
-    wait_for_project_status(&scratch, "paused").await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        marker(&scratch).await?,
-        paused_at,
-        "no family run started while the database was over its ceiling"
-    );
-    assert_eq!(project_state(&scratch).await?.0, "paused");
-
-    probe.released.store(true, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(60), task).await???;
+    let (command, ()) = with_watcher(
+        redo_with_capacity(
+            scratch.runner(),
+            project,
+            30,
+            CancellationToken::new(),
+            capacity,
+        ),
+        observe,
+    )
+    .await?;
+    command?;
     assert_eq!(
         project_state(&scratch).await?,
         ("completed".into(), Some(30), false)
@@ -646,21 +660,34 @@ async fn a_family_catch_up_pauses_between_runs_while_capacity_is_breached() -> R
     scratch.cleanup().await
 }
 
-/// Reports the database over any ceiling while the family marker stands short of block 30, until
-/// released; before the first family run there is no marker, so the served batch is admitted.
-#[derive(Default)]
-struct CeilingOnceTheMarkerMoves {
+/// Reports the database over any ceiling while `over(call, marker)` holds for the probe's
+/// one-based call number and the family marker, until released.
+struct TrippingProbe {
+    over: fn(usize, Option<i64>) -> bool,
+    calls: AtomicUsize,
     breached: Notify,
     released: AtomicBool,
 }
 
-impl CapacityProbe for CeilingOnceTheMarkerMoves {
+impl TrippingProbe {
+    fn new(over: fn(usize, Option<i64>) -> bool) -> Self {
+        Self {
+            over,
+            calls: AtomicUsize::new(0),
+            breached: Notify::new(),
+            released: AtomicBool::new(false),
+        }
+    }
+}
+
+impl CapacityProbe for TrippingProbe {
     fn measure<'a>(
         &'a self,
         pool: &'a sqlx::PgPool,
         _writable_path: &'a std::path::Path,
     ) -> CapacityFuture<'a> {
         Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             let marker: Option<i64> = sqlx::query_scalar(
                 "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
             )
@@ -669,7 +696,7 @@ impl CapacityProbe for CeilingOnceTheMarkerMoves {
             .await
             .map_err(|error| RunnerError::transient(format!("probe marker read: {error}")))?
             .flatten();
-            let over = !self.released.load(Ordering::SeqCst) && marker.is_some_and(|b| b < 30);
+            let over = !self.released.load(Ordering::SeqCst) && (self.over)(call, marker);
             if over {
                 self.breached.notify_one();
             }
@@ -681,81 +708,104 @@ impl CapacityProbe for CeilingOnceTheMarkerMoves {
     }
 }
 
-async fn wait_for_project_status(scratch: &ScratchDatabase, status: &str) -> Result<()> {
-    for _ in 0..2_000 {
-        if project_state(scratch).await?.0 == status {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    anyhow::bail!("project never reached status {status}")
-}
-
-// A stop raised while the served batch settles reaches the after-progress loop already cancelled:
-// the loop returns without calling the hook, so no family run is even planned after the stop.
+// A stop raised while the served batch settles is seen by the loop's maintenance step before the
+// first hook call, so no family run is even planned after the stop.
 #[tokio::test]
 async fn a_stop_before_the_after_progress_loop_calls_no_hook() -> Result<()> {
     let scratch = ready("families_runner_hook_precancelled").await?;
     let stop = CancellationToken::new();
-    let (phase, calls) = CountingHook::stopping(HookStop::InBatch, stop.clone());
+    let (phase, probe) = CountingHook::stopping(HookStop::InBatch, stop.clone());
     let error = redo_with_phase_and_stop(&scratch, phase, 3, stop)
         .await
         .expect_err("the stop left the redo incomplete");
     assert!(error.to_string().contains("is incomplete"), "{error}");
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        probe.calls.load(Ordering::SeqCst),
         0,
         "no hook call after the stop"
     );
     scratch.cleanup().await
 }
 
-// A stop raised during one family run, which asks for another, ends the loop before the next
-// hook call.
+// A stop raised during one family run, which asks for another, is seen by the maintenance step
+// (lock check, heartbeat, capacity) that precedes the next hook call, so that call never happens.
 #[tokio::test]
 async fn a_stop_between_family_runs_prevents_the_next_hook_call() -> Result<()> {
     let scratch = ready("families_runner_hook_between").await?;
     let stop = CancellationToken::new();
-    let (phase, calls) = CountingHook::stopping(HookStop::InHook, stop.clone());
+    let (phase, probe) = CountingHook::stopping(HookStop::InHook, stop.clone());
     let error = redo_with_phase_and_stop(&scratch, phase, 3, stop)
         .await
         .expect_err("the stop left the redo incomplete");
     assert!(error.to_string().contains("is incomplete"), "{error}");
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        probe.calls.load(Ordering::SeqCst),
         1,
         "the hook ran once, before the stop"
     );
     scratch.cleanup().await
 }
 
-#[derive(Clone, Copy)]
-enum HookStop {
-    InBatch,
-    InHook,
+// A stop raised after the maintenance step, at the work check right before the next hook call,
+// is observed by the loop's cancel-first select: the second hook is never built.
+#[tokio::test]
+async fn a_stop_at_the_work_check_prevents_building_the_next_hook() -> Result<()> {
+    let scratch = ready("families_runner_hook_work_check").await?;
+    let stop = CancellationToken::new();
+    let (phase, probe) = CountingHook::stopping(HookStop::AtWorkCheck, stop.clone());
+    let error = redo_with_phase_and_stop(&scratch, phase, 3, stop)
+        .await
+        .expect_err("the stop left the redo incomplete");
+    assert!(error.to_string().contains("is incomplete"), "{error}");
+    assert!(
+        probe.checkpoint.load(Ordering::SeqCst),
+        "the work check after the first run was reached"
+    );
+    assert_eq!(
+        probe.calls.load(Ordering::SeqCst),
+        1,
+        "only the first hook was built"
+    );
+    scratch.cleanup().await
 }
 
-/// A loopback Project whose after-progress hook counts its calls, counted when the hook is called
-/// rather than when its future is polled, and asks for one more run after the first; it reports
-/// work waiting until the second call. The stop is
-/// raised either as the served batch returns or inside the first hook call.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HookStop {
+    /// As the served batch returns.
+    InBatch,
+    /// Inside the first hook call.
+    InHook,
+    /// At the work check that follows the first hook, which returns `More`.
+    AtWorkCheck,
+}
+
+/// What a [`CountingHook`] observed: its hook calls, counted when the hook is called rather than
+/// when its future is polled, and whether the work check after the first call was reached.
+#[derive(Default)]
+struct HookProbe {
+    calls: AtomicUsize,
+    checkpoint: AtomicBool,
+}
+
+/// A loopback Project whose after-progress hook asks for one more run after the first and reports
+/// work waiting until its second call. The stop is raised where `stop_at` says.
 struct CountingHook {
     inner: LoopbackPhase,
-    calls: Arc<AtomicUsize>,
+    probe: Arc<HookProbe>,
     stop_at: HookStop,
     stop: CancellationToken,
 }
 
 impl CountingHook {
-    fn stopping(stop_at: HookStop, stop: CancellationToken) -> (Arc<dyn Phase>, Arc<AtomicUsize>) {
-        let calls = Arc::new(AtomicUsize::new(0));
+    fn stopping(stop_at: HookStop, stop: CancellationToken) -> (Arc<dyn Phase>, Arc<HookProbe>) {
+        let probe = Arc::new(HookProbe::default());
         let phase = Arc::new(Self {
             inner: LoopbackPhase::new(PhaseName::Project),
-            calls: Arc::clone(&calls),
+            probe: Arc::clone(&probe),
             stop_at,
             stop,
         });
-        (phase, calls)
+        (phase, probe)
     }
 }
 
@@ -767,7 +817,7 @@ impl Phase for CountingHook {
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
         Box::pin(async move {
             let outcome = self.inner.run_batch(context).await;
-            if matches!(self.stop_at, HookStop::InBatch) {
+            if self.stop_at == HookStop::InBatch {
                 self.stop.cancel();
             }
             outcome
@@ -775,12 +825,17 @@ impl Phase for CountingHook {
     }
 
     fn has_after_progress_work(&self, _chain_id: &str) -> bool {
-        self.calls.load(Ordering::SeqCst) < 2
+        let calls = self.probe.calls.load(Ordering::SeqCst);
+        if self.stop_at == HookStop::AtWorkCheck && calls == 1 {
+            self.probe.checkpoint.store(true, Ordering::SeqCst);
+            self.stop.cancel();
+        }
+        calls < 2
     }
 
     fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if matches!(self.stop_at, HookStop::InHook) {
+        let call = self.probe.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.stop_at == HookStop::InHook {
             self.stop.cancel();
         }
         let step = if call == 1 {
@@ -792,6 +847,130 @@ impl Phase for CountingHook {
     }
 }
 
+// A stop raised while a family block's transaction is open abandons the run under way: the
+// transaction rolls back, so the marker stays on the block before, and the Project run ends as
+// cancelled. Block 15, in the second run, waits on an advisory lock the test holds; the stop is
+// raised once it waits.
+#[tokio::test]
+async fn a_stop_during_a_family_block_rolls_that_block_back() -> Result<()> {
+    const LOCK: i64 = 964_015;
+    let scratch = ready_through("families_runner_stop_mid_block", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION wait_at_block() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock({LOCK});
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER wait_at_block BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW WHEN (NEW.current_block_number = 15)
+         EXECUTE FUNCTION wait_at_block();"
+    ))
+    .execute(scratch.pool())
+    .await?;
+    let mut holder = scratch.pool().acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(LOCK)
+        .execute(&mut *holder)
+        .await?;
+    let families = FamilySettings {
+        max_blocks_per_run: 10,
+        ..FamilySettings::default()
+    };
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    let stop = CancellationToken::new();
+    let watch = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks
+                 WHERE locktype = 'advisory' AND objid = $1 AND NOT granted)",
+            )
+            .bind(LOCK)
+            .fetch_one(scratch.pool())
+            .await?;
+            if waiting {
+                stop.cancel();
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let (command, ()) = with_watcher(
+        redo_with_phase_and_stop(&scratch, project, 30, stop.clone()),
+        watch,
+    )
+    .await?;
+    let error = command.expect_err("the stop left the redo incomplete");
+    assert!(error.to_string().contains("is incomplete"), "{error}");
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(14),
+        "block 15's transaction did not commit"
+    );
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(LOCK)
+        .execute(&mut *holder)
+        .await?;
+    drop(holder);
+    sqlx::query("DROP TRIGGER wait_at_block ON project_family_marker")
+        .execute(scratch.pool())
+        .await?;
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(14),
+        "block 15 rolled back once its lock was free"
+    );
+    assert_eq!(redo_progress(&scratch).await?, (true, Some(30)));
+
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        redo_with_phase(&scratch, project, 30),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("the rerun did not finish"))??;
+    assert_eq!(marker(&scratch).await?, Some(30), "the rerun repaired them");
+    scratch.cleanup().await
+}
+
+// A family run planned by one batch never outlives a later batch that plans none: here a stop
+// leaves a planned run waiting, and a batch that finds no readable head, and so plans nothing,
+// clears it rather than leaving it for the loop that follows.
+#[tokio::test]
+async fn a_batch_that_plans_no_family_run_leaves_none_waiting() -> Result<()> {
+    let scratch = ready("families_runner_stale_pending").await?;
+    let stop = CancellationToken::new();
+    let (project, _) =
+        ServedBatches::cancelling_at(ProjectPhase::new(scratch.pool().clone()), 1, stop.clone());
+    redo_with_phase_and_stop(&scratch, Arc::clone(&project), 3, stop)
+        .await
+        .expect_err("the stop left the redo incomplete");
+    assert!(
+        project.has_after_progress_work(CHAIN),
+        "the stop left the planned run waiting"
+    );
+    let outcome = project
+        .run_batch(PhaseContext {
+            chain_id: CHAIN.to_owned(),
+            phase: PhaseName::Project,
+            mode: RunMode::Normal,
+            redo_attempt: None,
+            sources: chain_config()?.sources.clone(),
+            available_heads: None,
+            live_handoff: None,
+            resume: PhaseResume::default(),
+        })
+        .await?;
+    assert!(matches!(outcome, PhaseBatchOutcome::Complete(_)));
+    assert!(
+        !project.has_after_progress_work(CHAIN),
+        "the batch that planned nothing cleared the earlier run"
+    );
+    scratch.cleanup().await
+}
+
 // An input token that fails to read is the family run's failure, raised after the batch's
 // progress is recorded, and the restart loop retries it. Here only the token read fails: the
 // Project phase reads `chain_phase_state` through a view whose `last_error` column, which only the
@@ -799,17 +978,69 @@ impl Phase for CountingHook {
 #[tokio::test]
 async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retried() -> Result<()> {
     let scratch = ready("families_runner_token").await?;
+    let project_pool =
+        shadow_token_read(&scratch, "RAISE EXCEPTION 'injected token read failure';").await?;
+    let (failure, progress, family) =
+        token_failure_is_retried(&scratch, &project_pool, FamilySettings::default()).await?;
+    assert!(
+        failure.contains("failed to read the family input token")
+            && failure.contains("injected token read failure"),
+        "{failure}"
+    );
+    assert_eq!(
+        progress,
+        (true, Some(3)),
+        "the served redo recorded its progress before the token failure surfaced"
+    );
+    assert_eq!(family, None, "no family run started without a token");
+    project_pool.close().await;
+    scratch.cleanup().await
+}
+
+// A token read that outlasts its bound is a family failure too, never a skip: the batch's
+// progress stands, the family marker does not move, the Project run fails and the restart loop
+// retries, and once the read is fast again the retry runs the families. Here the read sleeps
+// while armed, well past a 200 ms bound.
+#[tokio::test]
+async fn a_token_read_past_its_bound_fails_project_after_its_progress_and_is_retried() -> Result<()>
+{
+    let scratch = ready("families_runner_token_slow").await?;
+    let project_pool = shadow_token_read(&scratch, "PERFORM pg_sleep(2);").await?;
+    let families = FamilySettings {
+        token_budget: Duration::from_millis(200),
+        ..FamilySettings::default()
+    };
+    let (failure, progress, family) =
+        token_failure_is_retried(&scratch, &project_pool, families).await?;
+    assert!(
+        failure.contains("the family input token did not read within 200ms"),
+        "{failure}"
+    );
+    assert_eq!(
+        progress,
+        (true, Some(3)),
+        "the served redo recorded its progress before the late read surfaced"
+    );
+    assert_eq!(family, None, "no family run started without a token");
+    project_pool.close().await;
+    scratch.cleanup().await
+}
+
+/// A pool for the Project phase whose `chain_phase_state` is a view in schema `token_fault`: its
+/// `last_error` column, which only the family input token read selects, runs `armed_body` while
+/// `token_fault.armed` holds.
+async fn shadow_token_read(scratch: &ScratchDatabase, armed_body: &str) -> Result<sqlx::PgPool> {
     let search_path: String = sqlx::query_scalar("SELECT current_setting('search_path')")
         .fetch_one(scratch.pool())
         .await?;
-    sqlx::raw_sql(
+    sqlx::raw_sql(&format!(
         "CREATE SCHEMA token_fault;
          CREATE TABLE token_fault.armed (armed boolean NOT NULL);
          INSERT INTO token_fault.armed VALUES (true);
          CREATE FUNCTION token_fault.guard(value text) RETURNS text LANGUAGE plpgsql STABLE AS $$
          BEGIN
              IF (SELECT armed FROM token_fault.armed) THEN
-                 RAISE EXCEPTION 'injected token read failure';
+                 {armed_body}
              END IF;
              RETURN value;
          END $$;
@@ -825,30 +1056,41 @@ async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retri
              WHERE attrelid = 'chain_phase_state'::regclass AND attnum > 0 AND NOT attisdropped;
              EXECUTE format('CREATE VIEW token_fault.chain_phase_state AS SELECT %s FROM %s',
                             columns, 'chain_phase_state'::regclass);
-         END $$;",
-    )
+         END $$;"
+    ))
     .execute(scratch.pool())
     .await?;
     let search_path = format!("token_fault,{}", search_path.replace(' ', ""));
-    let project_pool = sqlx::postgres::PgPoolOptions::new()
+    Ok(sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect_with(
             scratch
                 .writer_connect_options()
                 .options([("search_path", search_path.as_str())]),
         )
-        .await?;
-    let project: Arc<dyn Phase> = Arc::new(ProjectPhase::new(project_pool.clone()));
+        .await?)
+}
 
+/// Runs a supervised-settings Project redo through block 3 on `project_pool` until a family
+/// failure is recorded, observes the redo progress and family marker at that point, disarms the
+/// token fault and lets the restart loop finish. Returns the recorded failure, that progress and
+/// that marker; requires the retry to have completed the redo and run the families.
+async fn token_failure_is_retried(
+    scratch: &ScratchDatabase,
+    project_pool: &sqlx::PgPool,
+    families: FamilySettings,
+) -> Result<(String, (bool, Option<i64>), Option<i64>)> {
+    let project: Arc<dyn Phase> =
+        Arc::new(ProjectPhase::new(project_pool.clone()).with_family_settings(families));
     let observed = async {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
-            if let Some(failure) = last_error(&scratch)
+            if let Some(failure) = last_error(scratch)
                 .await?
                 .filter(|failure| failure.contains("owned key families"))
             {
-                let progress = redo_progress(&scratch).await?;
-                let family = marker(&scratch).await?;
+                let progress = redo_progress(scratch).await?;
+                let family = marker(scratch).await?;
                 sqlx::query("UPDATE token_fault.armed SET armed = false")
                     .execute(scratch.pool())
                     .await?;
@@ -861,35 +1103,23 @@ async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retri
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     };
-    let (command, (failure, progress, family)) = with_watcher(
-        redo_with_phase_and_stop(&scratch, project, 3, CancellationToken::new()),
+    let (command, observed) = with_watcher(
+        redo_with_phase_and_stop(scratch, project, 3, CancellationToken::new()),
         observed,
     )
     .await?;
     command?;
-    assert!(
-        failure.contains("failed to read the family input token")
-            && failure.contains("injected token read failure"),
-        "{failure}"
-    );
     assert_eq!(
-        progress,
-        (true, Some(3)),
-        "the served redo recorded its progress before the token failure surfaced"
-    );
-    assert_eq!(family, None, "no family run started without a token");
-    assert_eq!(
-        project_state(&scratch).await?,
+        project_state(scratch).await?,
         ("completed".into(), Some(3), false),
         "the retry finished the redo"
     );
     assert_eq!(
-        marker(&scratch).await?,
+        marker(scratch).await?,
         Some(3),
         "the retry ran the families"
     );
-    project_pool.close().await;
-    scratch.cleanup().await
+    Ok(observed)
 }
 
 /// The `RAISE` clause that makes an injected failure a data-integrity one.
@@ -951,8 +1181,8 @@ async fn last_error(scratch: &ScratchDatabase) -> Result<Option<String>> {
 }
 
 /// Project, counting the served batches that complete and raising a stop as soon as the
-/// `cancel_at`th returns, so the stop is pending while the runner records that batch and wins
-/// the select against the family run.
+/// `cancel_at`th returns, so the stop is pending while the runner records that batch and no
+/// family run starts after it.
 struct ServedBatches {
     inner: ProjectPhase,
     served: Arc<AtomicUsize>,

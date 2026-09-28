@@ -1695,12 +1695,14 @@ run applies or undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`); while a run spends that
 budget and applies or undoes at least one block, the runner starts another, in
 normal mode, so a rebuild or a long catch-up holds up the next batch until it
-ends. Between runs the runner records the phase heartbeat and its loop progress
-as it does after a batch, so a catch-up that spans hours does not read as a
-stalled phase, and checks storage capacity as it does before a batch: while the
-database is over its ceiling or free disk under its floor, the Project phase is
-paused and no further run starts. The one-shot `redo` command runs the same loop and returns with
-the families on the served marker. The family work is driven by served batches
+ends. Before each family run, the first after the batch included, the runner
+probes the phase lock, records the phase heartbeat as it does after a batch,
+so a catch-up that spans hours does not read as a stalled phase, and checks
+storage capacity as it does before a batch, with no write reservation, since a
+family run carries no estimate: while the database is over its ceiling or free
+disk under its floor, the Project phase is paused and no family run starts.
+After each run it records its loop progress. The one-shot `redo` command runs
+the same loop and returns with the families on the served marker. The family work is driven by served batches
 and held in memory, but every Project run starts with a batch, an empty
 incremental one when the head has not moved, so after a restart the families
 run on the first Project run. The families trail the served marker until the
@@ -1713,7 +1715,7 @@ height) counts at least one block.
 A family failure stops the loop at the last complete block and fails the
 Project run. Failures include a failing block, a fence its transaction refuses,
 a changed [family input revision](glossary.md#family-input-revision), Interpret
-in redo, and an input token that did not read. The error names the family
+in redo, and an input token that did not read in time. The error names the family
 marker and the served marker, block and hash, and reaches the runner after the
 batch's progress is recorded: the batch and its progress stand, the failure is
 recorded on the Project row, and the restart loop retries with backoff. In
@@ -1731,11 +1733,22 @@ error recorded, the redo stays in progress and a rerun is admitted. Retrying
 would run the served redo again each time, forever when the failure persists,
 as it does while Interpret is in redo. A stop abandons a family run under way:
 its open transaction rolls back and the Project run ends as cancelled, so a
-redo stays in progress and rerunning it repairs the families. A stop raised
-before a run starts, including one raised while the batch's progress is
-recorded, ends the loop before the next run is planned. The Project phase reads the Interpret and Project rows of
-`chain_phase_state` for the family run before the batch's progress is
-recorded, while a finished redo's session is still open.
+redo stays in progress and rerunning it repairs the families. A stop already
+observable at the runner's check before a run, including one raised while the
+batch's progress is recorded, ends the loop before that run is planned; a run
+admitted before the stop becomes observable is cancelled cooperatively, at its
+next await. A settled batch with no family run waiting completes despite a
+pending stop. A family run is planned by the batch that precedes it and by
+none other: a batch that plans none, such as one that finds no readable head,
+drops any run an earlier batch left waiting.
+
+The Project phase reads the family input token, the Interpret and Project rows
+of `chain_phase_state`, after the batch commits and before its progress is
+recorded, while a finished redo's session is still open. The read is bounded,
+by 30 seconds by default: a read that fails or outlasts the bound is a
+transient family failure raised after the batch's progress is recorded, never
+a skip, so the supervised runner retries it and the one-shot `redo` command
+ends with it.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
 
