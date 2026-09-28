@@ -68,8 +68,9 @@ pub(crate) fn bound_names_next_cursor(
 pub(crate) fn check_bound_names_cursor_shape(
     cursor: Option<&str>,
     binding: &BoundNamesCursorBinding<'_>,
+    pinned: bool,
 ) -> V2Result<()> {
-    bound_names_list_cursor(binding).check_shape(cursor, &POSITION_KEYS)
+    bound_names_list_cursor(binding).check_shape(cursor, &POSITION_KEYS, pinned)
 }
 
 /// The storage position a request's `cursor` continues from; `400 invalid_input` for a cursor

@@ -529,13 +529,26 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
     seed_switch_names_fixture(&database).await?;
     seed_switch_resolver_current(&database).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    let search = "/v1/search?q=eth&match=contains&page_size=1";
     for on in [false, true] {
+        let (_, search_next) = list_cursor_page(&database, on, search, "").await?;
+        let search_next = search_next.context("a search continuation")?;
+        let search_structural = [
+            list_cursor_raw(&search_next, |raw| raw["route"] = json!("search")),
+            list_cursor_raw(&search_next, |raw| {
+                raw["last_item"].as_object_mut().expect("object").remove("namehash");
+            }),
+            list_cursor_raw(&search_next, |raw| raw["snapshot"] = json!("legacy-snapshot")),
+            list_cursor_raw(&search_next, |raw| raw["filters"]["q"] = json!("other")),
+        ];
         // Cursors that decode but that this list could not have written: an unknown top-level
         // field, a missing position key, another resolver's filters.
         let (_, next) = list_cursor_page(&database, on, &base, "/data/bound_names").await?;
         let next = next.context("a continuation")?;
         let structural = [
             list_cursor_raw(&next, |raw| raw["route"] = json!("resolver")),
+            // A pin on a request that sends no `at`.
+            list_cursor_raw(&next, |raw| raw["snapshot"] = json!("7b7d")),
             list_cursor_raw(&next, |raw| {
                 raw["last_item"].as_object_mut().expect("object").remove("namehash");
             }),
@@ -553,6 +566,17 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
             for cursor in &structural {
                 assert_list_cursor_refused(db, on, &list_cursor_continue(&base, cursor), "structural")
                     .await?;
+            }
+            // Bare search reads the namespace set before it can compare the namespace anchor;
+            // everything else is refused first, even where that set cannot be read.
+            for cursor in &search_structural {
+                assert_list_cursor_refused(
+                    db,
+                    on,
+                    &list_cursor_continue(search, cursor),
+                    "search structural",
+                )
+                .await?;
             }
         }
     }

@@ -18,7 +18,7 @@ use super::list_cursor::{ListCursor, ListPosition};
 use super::name_filter::{normalize_name_contains, normalize_name_prefix};
 use super::{
     AtSelector, Envelope, Finality, Page, QueryParams, RawQueryParams, RegistrationStatus, V2Error,
-    V2Result, api_error_to_v2, decode,
+    V2Result, api_error_to_v2,
     name_record::name_registration_fields,
     support::{derive_public_namespace_set, revalidate_public_namespace_set},
     support::{
@@ -162,9 +162,20 @@ pub(crate) async fn get_search(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
-    // A cursor that does not decode is refused before any read; its binding is checked once the
-    // namespaces it anchors are known.
-    params.cursor.as_deref().map(decode).transpose()?;
+    // A cursor this list could not have written is refused before any read; a bare search's
+    // namespace anchor needs the namespace set, so only that value waits for the full read.
+    let preflight = search_list_cursor(&SearchCursorBinding {
+        q: &params.q,
+        match_mode: params.match_mode,
+        namespace: params.namespace.as_deref(),
+        public_namespaces: &[],
+    });
+    let preflight = if params.namespace.is_none() {
+        preflight.deferring(NAMESPACE_FILTER_KEY)
+    } else {
+        preflight
+    };
+    preflight.check_shape(params.cursor.as_deref(), &POSITION_KEYS, false)?;
     let public_namespace_set = if params.namespace.is_none() {
         let namespaces = derive_public_namespace_set(&state)
             .await

@@ -49,6 +49,9 @@ pub(crate) struct ListCursor {
     sort: String,
     filters: BTreeMap<String, String>,
     at: Option<String>,
+    /// Filter keys whose value `check_shape` leaves to the full `read`, because the route knows
+    /// it only after reading state (search's namespace anchor).
+    deferred: Vec<String>,
 }
 
 /// The position of the last row a page returned: the list's keyset fields by name.
@@ -61,7 +64,14 @@ impl ListCursor {
             sort: sort.into(),
             filters,
             at: None,
+            deferred: Vec::new(),
         }
+    }
+
+    /// Leaves the value of filter `key` to the full `read`; `check_shape` still requires the key.
+    pub(crate) fn deferring(mut self, key: &str) -> Self {
+        self.deferred.push(key.to_owned());
+        self
     }
 
     /// Binds the request's `at` token (`None` for a latest read, which binds nothing).
@@ -80,7 +90,7 @@ impl ListCursor {
         cursor: Option<&str>,
         keys: &[&str],
     ) -> V2Result<Option<ListPosition>> {
-        let Some(payload) = self.read_shape(cursor, keys)? else {
+        let Some(payload) = self.read_shape(cursor, keys, true)? else {
             return Ok(None);
         };
         if payload.snapshot != self.at {
@@ -89,21 +99,43 @@ impl ListCursor {
         Ok(Some(ListPosition(payload.last_item)))
     }
 
-    /// Every check of [`Self::read`] except the `at` pin, for a route that must refuse a
-    /// malformed cursor before it knows the request's `at` token (the resolver overview checks
-    /// the pin once its snapshot is selected).
-    pub(crate) fn check_shape(&self, cursor: Option<&str>, keys: &[&str]) -> V2Result<()> {
-        self.read_shape(cursor, keys).map(|_| ())
+    /// The checks of [`Self::read`] a route can run before it reads anything: everything but
+    /// the `at` token's value and the deferred filter values. `pinned` says whether the request
+    /// sent `at`, so a cursor with a pin on a request without one (or the reverse) is refused
+    /// here too.
+    pub(crate) fn check_shape(
+        &self,
+        cursor: Option<&str>,
+        keys: &[&str],
+        pinned: bool,
+    ) -> V2Result<()> {
+        match self.read_shape(cursor, keys, false)? {
+            Some(payload) if payload.snapshot.is_some() != pinned => Err(invalid_cursor_error()),
+            _ => Ok(()),
+        }
     }
 
-    fn read_shape(&self, cursor: Option<&str>, keys: &[&str]) -> V2Result<Option<Payload>> {
+    /// The one decode-and-validate path: every check but the `at` pin, comparing deferred
+    /// filter values only when `all_filters`.
+    fn read_shape(
+        &self,
+        cursor: Option<&str>,
+        keys: &[&str],
+        all_filters: bool,
+    ) -> V2Result<Option<Payload>> {
         let Some(cursor) = cursor else {
             return Ok(None);
         };
         let payload = decode(cursor)?;
+        let filters_match = payload.filters.len() == self.filters.len()
+            && self.filters.iter().all(|(key, value)| {
+                payload.filters.get(key).is_some_and(|sent| {
+                    sent == value || (!all_filters && self.deferred.contains(key))
+                })
+            });
         let matches = only_known_fields(cursor)
             && payload.sort == self.sort
-            && payload.filters == self.filters
+            && filters_match
             && payload.evaluated_at.is_none()
             && payload.last_item.len() == keys.len()
             && keys.iter().all(|key| {

@@ -101,6 +101,7 @@ pub(crate) async fn get_resolver(
             sort: BOUND_NAMES_SORT_TOKEN,
             at: None,
         },
+        params.at.is_some(),
     )?;
     // Admitted without the cursor: a bound-names cursor binds no publication (`list_cursor`), so
     // only a publication during this read refuses it, with a retry.
