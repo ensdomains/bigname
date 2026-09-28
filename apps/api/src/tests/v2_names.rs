@@ -758,7 +758,7 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
 #[tokio::test]
 async fn v2_indexed_name_read_carries_weak_etag_and_honours_if_none_match() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
+    seed_alice_name_inputs(&database).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
