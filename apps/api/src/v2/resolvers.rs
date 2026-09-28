@@ -98,7 +98,10 @@ pub(crate) async fn get_resolver(
     .continuing_from_request_cursor(params.cursor.is_some());
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
-    let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;
+    // Family bound names describe only their publication, including an empty page. A served
+    // resolver row can retain an older target, so checking returned rows alone is insufficient.
+    let require_selected_head = bigname_storage::publication_source::serve_from_families()
+        || (params.at.is_none() && params.finality == Finality::Latest);
     let selected_snapshot = resolve_v2_snapshot_for(
         &state.pool,
         &scope,
