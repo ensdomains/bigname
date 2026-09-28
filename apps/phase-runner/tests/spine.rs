@@ -1882,9 +1882,11 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
 }
 
 // A batch prelude measures storage afresh rather than reuse a reading taken before the last batch:
-// that reading does not count the batch's own writes. Here the first batch grows the database past
-// its ceiling well inside the poll interval, so the next prelude must measure, see the breach and
-// pause before the second batch; once storage clears the second batch runs.
+// that reading does not count the batch's own writes. The runner's capacity clock is held fixed,
+// so the first prelude's reading stays within the poll interval at the second prelude however
+// long the machine takes; only the pause's own polling sleeps in real time. The first batch grows
+// the database past its ceiling, so the second prelude must measure, see the breach and pause
+// before the second batch; once storage clears the second batch runs.
 #[tokio::test]
 async fn a_batch_prelude_measures_afresh_after_a_batch_consumed_the_headroom() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1942,7 +1944,11 @@ async fn a_batch_prelude_measures_afresh_after_a_batch_consumed_the_headroom() -
             phase_set_replacing(PhaseName::Verify, verify)?,
             capacity,
             "capacity-prelude-runner",
-        )?;
+        )?
+        .with_capacity_clock({
+            let fixed = std::time::Instant::now();
+            move || fixed
+        });
         let chain = chain(chain_id)?;
         let mut task = tokio::spawn(async move {
             runner

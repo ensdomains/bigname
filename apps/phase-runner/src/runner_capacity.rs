@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -21,13 +21,27 @@ use super::PhaseRunner;
 /// batch within the capacity poll interval reuses the batch prelude's measurement when it showed
 /// room, instead of a second `pg_database_size` and probe-file write moments later. Writes made
 /// since that measurement are not in it, which is why batch preludes never reuse one.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct CapacityMemo {
     taken: Mutex<BTreeMap<String, (Instant, CapacityMeasurement)>>,
     disabled: AtomicBool,
+    clock: Mutex<Option<Clock>>,
 }
 
+/// A monotonic `now` a test can hold still; the runner uses `Instant::now` otherwise.
+type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 impl CapacityMemo {
+    /// The instant freshness is measured by: the injected clock's, or `Instant::now()`.
+    fn now(&self) -> Instant {
+        let clock = self
+            .clock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        clock.map_or_else(Instant::now, |clock| clock())
+    }
+
     /// The chain's last measurement when, at `now`, less than `window` has passed since its probe
     /// started. A lookup never extends that.
     fn fresh(&self, chain_id: &str, window: Duration, now: Instant) -> Option<CapacityMeasurement> {
@@ -72,6 +86,20 @@ impl PhaseRunner {
         self
     }
 
+    /// Public test-support hook: the monotonic clock capacity freshness is measured by, both when
+    /// a probe starts and when a reading is looked up, in place of `Instant::now`, so a test can
+    /// hold a reading fresh. Pause polling still sleeps in real time. `doc(hidden)` hides it from
+    /// the docs; the method is still public.
+    #[doc(hidden)]
+    pub fn with_capacity_clock(self, clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        *self
+            .capacity_memo
+            .clock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(clock));
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn wait_for_capacity(
         &self,
@@ -93,7 +121,7 @@ impl PhaseRunner {
                     self.capacity_memo.fresh(
                         &chain.chain_id,
                         self.capacity.poll_interval(),
-                        Instant::now(),
+                        self.capacity_memo.now(),
                     )
                 })
                 .flatten()
@@ -102,7 +130,7 @@ impl PhaseRunner {
             let status = match reused {
                 Some(status) => status,
                 None => {
-                    let started = Instant::now();
+                    let started = self.capacity_memo.now();
                     let status = self
                         .capacity
                         .check(self.store.pool(), reserved_write_bytes)

@@ -700,12 +700,11 @@ async fn an_aged_reading_is_measured_again_and_a_breach_pauses_until_a_fresh_rea
             while project_state(&scratch).await?.0 != "paused" {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            // The paused phase probes afresh at its polls; the case deadline bounds the wait.
             let probed = probe.calls.load(Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            anyhow::ensure!(
-                probe.calls.load(Ordering::SeqCst) > probed,
-                "the paused phase probed afresh at its polls"
-            );
+            while probe.calls.load(Ordering::SeqCst) <= probed {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             anyhow::ensure!(marker(&scratch).await? == paused_at, "no run while paused");
             anyhow::ensure!(project_state(&scratch).await?.0 == "paused");
             probe.released.store(true, Ordering::SeqCst);
