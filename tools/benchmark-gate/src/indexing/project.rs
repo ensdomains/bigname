@@ -3,7 +3,7 @@ use super::IndexingInput;
 use anyhow::{Context, Result};
 use phase_runner::{
     capacity::CapacityGuard,
-    config::{CapacityConfig, ChainConfig, TimingConfig},
+    config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, SourceRole, TimingConfig},
     database::RunnerDatabase,
     phase::{BlockRange, LoopbackPhase, Phase, PhaseName, PhaseSet},
     project_phase::{FamilySettings, ProjectPhase},
@@ -45,10 +45,33 @@ pub(crate) async fn replay(pool: &PgPool, input: &IndexingInput, from: i64) -> R
         "benchmark-project",
         TimingConfig::default(),
     )?;
-    // Only Project is dispatched; no intake or other phase is run by this measurement.
+    let descriptors: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT source_key, source_kind, seed_basis, start_block_number FROM bigname_phase.ingest_cursors WHERE chain_id=$1 ORDER BY source_key")
+        .bind(&input.chain_id).fetch_all(pool).await?;
+    let endpoint = input
+        .hydration_rpc_urls
+        .as_ref()
+        .and_then(|urls| urls.url_for(&input.chain_id))
+        .unwrap_or("http://127.0.0.1:1");
+    let sources = descriptors
+        .into_iter()
+        .map(|(key, kind, basis, start)| {
+            SourceConfig::new_with_role(
+                &input.chain_id,
+                key,
+                kind,
+                SeedBasis::parse(&basis)?,
+                start,
+                SourceRole::Intake,
+                endpoint,
+            )
+        })
+        .collect::<phase_runner::error::RunnerResult<Vec<_>>>()?;
+    // The runner validates the copied intake descriptors. Endpoints are not contacted:
+    // only Project is dispatched; no intake or other phase is run by this measurement.
     runner
         .redo(
-            &ChainConfig::new(&input.chain_id, vec![], false)?,
+            &ChainConfig::new(&input.chain_id, sources, false)?,
             RedoPhase::Phase(PhaseName::Project),
             BlockRange::new(from, input.head_block)?,
             CancellationToken::new(),
