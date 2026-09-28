@@ -108,7 +108,7 @@ impl FamilyBlockSeconds {
         let blocks = self.count - before.count;
         let seconds = self.sum - before.sum;
         format!(
-            "SEPOLIA_END_TO_END_D3 target={target} metric=phase_runner_project_family_block_seconds \
+            "SEPOLIA_END_TO_END_FAMILY_BLOCKS target={target} metric=phase_runner_project_family_block_seconds \
              blocks={blocks} sum_ms={:.1} mean_ms={:.1}",
             seconds * 1_000.0,
             if blocks > 0.0 {
