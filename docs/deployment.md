@@ -890,9 +890,10 @@ The `project_*` tables are the [owned key families](glossary.md#owned-key-family
 the API composes names, records, permissions, resolver collections and primary
 claims from, together with their [family marker](glossary.md#family-marker),
 undo journal and repair record. Snapshot selection, the verified lookup and its
-guard, and `/v1/status` read the marker. Startup
-(`crates/storage/src/api_preflight.rs`) refuses a role that cannot read any of
-them.
+guard, and `/v1/status` read the marker. `discovery_edges`, `label_preimages`
+and `migration_discovery_associations` are on the list because the family
+children reader joins them. Startup (`crates/storage/src/api_preflight.rs`)
+refuses a role that cannot read any of them.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows

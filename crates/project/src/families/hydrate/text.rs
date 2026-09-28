@@ -1,5 +1,10 @@
 //! F6 text enrichment keeps the event-derived columns intact. The existing JSON overlay records
 //! the outcome and the selectors it was read for; null restores the missing-value baseline.
+//!
+//! A block reads at most [`ROLLING_LIMIT`] selectors, as the reverse refresh does: those the block
+//! changed first, then the backlog a rebuild leaves (every overlay null) in a stable rolling order,
+//! never-read selectors before the oldest attempts. A failed read keeps the null overlay but
+//! stamps `hydrated_at_block` with the attempt, so it waits behind the rest of the backlog.
 use std::collections::BTreeMap;
 
 use bigname_lookup::{
@@ -19,10 +24,18 @@ use super::ETHEREUM;
 use super::admission::TEXT_RESOLVERS;
 use crate::{ProjectError, Result};
 
+/// The most selectors one block reads, one Multicall3 batch: the reverse refresh's bound.
+pub(super) const ROLLING_LIMIT: usize = 250;
+
 pub(super) struct Candidate {
     key: Row,
     selector: Value,
     request: Option<EnsTextRecordMulticallRequest>,
+    /// Whether this block changed the selector's value, partition or admission.
+    delta: bool,
+    /// The block of the last read, successful or not; null for a selector never read since the
+    /// overlay was last cleared.
+    attempted: Option<i64>,
 }
 
 pub(super) struct Prepared {
@@ -64,7 +77,22 @@ pub(super) async fn select(
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to select family text hydration", error))?;
-    Ok(values.into_iter().filter_map(candidate).collect())
+    Ok(rolling(values.into_iter().filter_map(candidate).collect()))
+}
+
+/// The block's share of the work: the block's own changes first, then never-read selectors, then
+/// the oldest attempts, each in key order, cut at [`ROLLING_LIMIT`]. Preparation and publication
+/// select from the same rows, so both cut the same list.
+fn rolling(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates.sort_by_key(|candidate| {
+        (
+            !candidate.delta,
+            candidate.attempted.is_some(),
+            candidate.attempted,
+        )
+    });
+    candidates.truncate(ROLLING_LIMIT);
+    candidates
 }
 
 fn candidate(value: Value) -> Option<Candidate> {
@@ -114,6 +142,8 @@ fn candidate(value: Value) -> Option<Candidate> {
             namehash: namehash.expect("active namehash").to_owned(),
             text_key: selector_key.to_owned(),
         }),
+        delta: value["_delta"] == true,
+        attempted: value["hydrated_at_block"].as_i64(),
     })
 }
 
@@ -136,7 +166,7 @@ pub(super) async fn execute(
         block_hash: head.hash.clone(),
     };
     let mut results = Vec::with_capacity(requests.len());
-    for chunk in requests.chunks(250) {
+    for chunk in requests.chunks(ROLLING_LIMIT) {
         match execute_ens_text_record_multicall(
             rpc_urls,
             ETHEREUM,
@@ -211,7 +241,8 @@ impl Prepared {
                 continue;
             };
             let mut overlay = candidate.selector.clone();
-            match matched.and_then(|(_, result)| result.as_ref()) {
+            let result = matched.and_then(|(_, result)| result.as_ref());
+            match result {
                 Some(EnsTextRecordMulticallResult::Success { value }) => {
                     overlay["status"] = json!("success");
                     overlay["value"] = json!(value);
@@ -221,11 +252,14 @@ impl Prepared {
                 }
                 Some(EnsTextRecordMulticallResult::Failed { .. }) | None => overlay = Value::Null,
             }
-            let height = if overlay.is_null() {
-                Value::Null
-            } else {
+            if !overlay.is_null() {
                 overlay["block_hash"] = json!(context.block.hash);
+            }
+            // A failed read stamps its attempt with a null overlay, which nothing serves.
+            let height = if result.is_some() {
                 json!(context.block.number)
+            } else {
+                Value::Null
             };
             set(&mut row, "hydrated_value", overlay);
             set(&mut row, "hydrated_at_block", height);
