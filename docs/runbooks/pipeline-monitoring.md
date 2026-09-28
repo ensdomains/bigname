@@ -170,32 +170,16 @@ Two gauges measure how far the newest data the API could serve trails the
 chain. They have no dashboard panel or paging rule yet; those arrive with the
 ops dashboards tracked in Linear TYR-34.
 
-- With the [publication switch](../glossary.md#publication-switch) on, both
-  served-lag gauges keep their names but measure the
-  [family marker](../glossary.md#family-marker) instead of the Project row:
-  the publication is the marker's block while it is `live` with this binary's
-  interpreter content hash, and `-1` while a family rebuild is
-  `bootstrap_pending` or no marker exists. The switch is read once when the
-  runner starts. The paragraphs below describe the switch-off source.
 - `phase_runner_served_publication_block{chain}` is an absolute block height:
-  the block of the Project publication (the latest committed
-  [projection generation](../glossary.md#projection-generation)) that the API
-  would accept apart from its one-block lag fence. The Project row is
-  `completed` or `running`, was built with this binary's
-  [interpreter content hash](../glossary.md#interpreter-content-hash), its exact
-  block number and hash are still canonical, safe or finalized, the chain has a
-  stored head, and the publication is not above that head. `-1` means no
-  publication passes, for example after a reorg orphaned the published block,
-  before Project has rebuilt for a new interpreter content hash, or before the
-  chain has a stored head. The API's [served head](../glossary.md#served-head)
-  also refuses a publication more than one block behind the stored head, so a
-  publication this gauge reports can still be one the API will not serve. Two
-  conditional API checks are deliberately left out: the check that a request's
-  position is the publication itself, which means nothing for a per-chain
-  gauge, and the refusal some routes add while an Interpret repair run is in
-  progress, which `phase_runner_redo_in_progress` already shows. This gauge
-  measures Project publication eligibility only. It is not expected to return
-  to zero.
+  the [family marker](../glossary.md#family-marker)'s block while the marker is
+  `live`, uses this binary's interpreter content hash, lies on readable
+  canonical lineage and is at or below the stored head. The chain must also
+  have its Project phase row for the metrics query. Missing or rebuilding
+  (`bootstrap_pending`) publication reads `-1`. This gauge does not apply the
+  API's one-block lag tolerance, request-specific selected positions or redo
+  admission, so a reported publication can still be stale for a request.
+  `phase_runner_redo_in_progress` reports active repairs separately. The
+  publication gauge is not expected to return to zero.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
   execution-client head minus that publication block. It is the only one of
   the two expected to return to zero. A non-zero value means the newest
@@ -268,105 +252,56 @@ The build identity is already exported as
 `build_info{build_sha, interpreter_content_hash}`, with the value `1` for the
 running binary.
 
-## Project batch writes
+## Project family work
 
-Six families describe what each committed Project batch cost. They come from
-the [write summary](../glossary.md#write-summary) the Project engine returns
-with every batch, so they cover
-normal blocks, redo ranges and full rebuilds alike. Like the served-lag gauges
-they have no dashboard panel or alert yet (Linear TYR-34), and they are the
-numbers the Project latency work (Linear TYR-36) is measured with.
+Four metrics describe the family runner's work. The runner reports its outcome
+to the metrics task, including the committed prefix when a run fails.
 
-- `phase_runner_project_batch_blocks{chain}` is the number of blocks in the
-  newest committed batch's affected range. A batch that follows the chain
-  covers one block; catch-up and redo batches cover more.
-- `phase_runner_project_changed_events{chain}` is the number of readable events
-  in those blocks. It seeds the batch's scope. A full rebuild reads `0` because
-  it derives the whole chain without a changed-event list.
-- `phase_runner_project_staged_events{chain}` is the number of events the batch
-  staged for its builders: the history the rebuilt names and resources read.
-  Compared with the changed events, it shows how much older history one block
-  pulls in.
-- `phase_runner_project_scope_keys{chain, scope}` is the number of keys in each
-  scope when publication starts: `names`, `children`, `resources`,
-  `account_permissions`, `resolvers` and `primary`. On a normal or redo batch,
-  publication deletes and republishes the served rows of these keys. A full
-  rebuild skips scope seeding and republishes every table whole, so its scope
-  counts do not describe what it rewrote; read its row counters instead. Child
-  registrations are not published by key at all. A normal or redo batch
-  replaces the rows of its own block window, whatever names they belong to, and
-  deletes rows above the window whose block is no longer readable; a full
-  rebuild deletes and rewrites the whole chain's rows.
-- `phase_runner_project_rows_written_total{chain, table, kind}` is a counter of
-  the rows Project batches deleted (`kind="deleted"`) from and inserted
-  (`kind="inserted"`) into each served table, including
-  `child_registration_events`, whose inserted count also includes rows the
-  batch updated in place. Its rate is the write volume. Rows written for each
-  key that had an event in the batch is the ratio TYR-36 drives towards one.
-- `phase_runner_project_stage_duration_seconds{chain, stage}` is the elapsed
-  time of each derivation stage of the newest committed batch: `prepare`,
-  `scope`, `inputs`, `builders`, `integrity` and `publish`. Together the six
-  cover the derivation's work approximately: they leave out the timing
-  bookkeeping between stages and are each rounded down to whole milliseconds, so
-  their sum can fall slightly short of the derivation's elapsed time. `publish`
-  includes counting the scope keys and staged events just before publication.
-  They cover the derivation inside the Project transaction only: not
-  `SET TRANSACTION` or the target revalidation, which run inside the
-  transaction before the first stage, and not the commit, hydration or the
-  runner's progress write.
+- `phase_runner_project_families_seconds{chain}` is the wall time of the newest
+  family run.
+- `phase_runner_project_family_lag_blocks{chain}` is the distance between the
+  committed marker and that run's Project target. Zero requires the target's
+  exact hash and a readable marker; an orphaned or same-height mismatched
+  marker counts at least one block. This is progress toward the run's fixed
+  target, not end-to-end lag to the latest observed execution head.
+- `phase_runner_project_family_block_seconds{chain}` records each single-block
+  transaction from its first read through commit. Rebuild ranges are excluded
+  because one range applies several work blocks in a transaction.
+- `phase_runner_project_family_duplicate_anomalies_total{chain}` counts
+  conflicting deliveries of one normalized event identity whose position or
+  payload disagrees with the delivery retained in canonical order.
 
-The gauges hold the newest committed batch of each chain until the next one
-replaces them; they are not reset between batches. The runner hands each
-summary to the metrics task as soon as the engine commits, before hydration,
-and the task applies it with its next refresh: the periodic one, or the one
-that follows the batch's progress write, whichever comes first. The values are
-therefore current shortly after each Project commit, and can appear before the
-batch's publication is served. When several batches commit between
-two refreshes, the gauges show the newest and the counter adds all of them. A
-batch whose Project transaction fails reports nothing; one that commits and then
-fails in hydration is still counted. A chain's series appear with its first committed
-batch after the runner starts.
+The run gauges retain the newest outcome until the next; anomaly counters add
+all reported outcomes. Pending single-block observations are bounded to 65,536
+per chain until the metrics task drains them. Cancellation can leave an
+in-flight outcome unreported even though a commit completed, so these process
+metrics do not replace the durable marker as proof of progress. There is no
+second metrics publication transaction. The removed batch-builder row, scope,
+stage and step metrics are no longer exported.
 
-Every Project statement also begins with a `/* project:<name> */` comment, so
-PostgreSQL's slow log, `pg_stat_activity` and `pg_stat_statements` name the
-statement behind a slow stage. The name is the source file under
-`crates/project/src` with `.` for `/`, followed by the statement, for example
-`publish.insert.name_current` or `builders.name_authority.build`.
+Project statements begin with a `/* project:<name> */` comment, so PostgreSQL's
+slow log, `pg_stat_activity` and `pg_stat_statements` can identify a slow query.
+For example, reverse hydration selection is
+`project:families.hydrate.reverse.select`. See the statement's source under
+`crates/project/src/families` for the exact identifier.
 
 ## Long Project runs
 
-A full rebuild (a Project run with no earlier publication to build on) or a
-redo (a repair run over a block range) runs Project as one database transaction
-that can take tens of minutes, and its block gauges do not move until it
-commits. The Project refresh of a recompute-flags run is also a redo, so it
-counts too. Three gauges show which step it is in instead. They have no
-dashboard panel or alert yet; those arrive with the ops dashboards tracked in
-Linear TYR-34.
+Rebuild and redo use bounded family runs, not one transaction for the complete
+history. The default run budget is 256 applied or undone blocks. Older rebuild
+work can commit in bounded ranges; follow and replay commit one block at a
+time. Each continuation records progress and passes the ordinary phase lock,
+heartbeat and capacity checks. `recompute-flags` runs in Interpret and stamps
+ordinary downstream Project redo; there is no special Project refresh stage.
 
-- `phase_runner_project_step{chain, step}` is `1` for the active step and `0`
-  for every other step.
-- `phase_runner_project_step_index{chain}` is the active step's position,
-  starting at 1.
-- `phase_runner_project_step_total{chain}` is the number of steps, currently 20.
-
-The steps run in this order: `prepare`, `scope`, `inputs`, one step per
-projection builder named after it (`name_authority` through
-`child_registrations`), `integrity`, `publish` and `commit`. All three gauges
-read `0` once the metrics worker has applied the latest recorded idle state,
-so they are `0` whenever no full rebuild or redo is running. Normal
-incremental batches never set them. The values live only in the running
-process, so a restart starts them at zero.
-
-The runner records each step the moment it starts, but a separate metrics
-worker copies the latest recorded step into the gauges a moment later. A step
-that finishes quickly may never show up in the gauges or in a scrape.
-
-The gauges cover the engine's derivation and its commit, not the hydration or
-the progress write that follow. When a reporting engine run completes, fails
-or is dropped, the observer records idle; the previous step can stay visible
-until the metrics worker applies that idle state. After a failed redo, the
-gauges may read `0` while PostgreSQL is still rolling the transaction back and
-the Project row still says `running`.
+Inspect the family marker and repair record alongside phase progress. A
+`bootstrap_pending` marker means the rebuild has committed intermediate work
+but cannot yet serve. Repair states `undoing`, `replaying` and `rebuilding`
+identify the durable operation; `complete` records the accepted target.
+Failures leave the committed prefix available for resumption. A malformed
+journal is a data-integrity error to investigate, not an instruction to edit
+markers or silently discard it. Follow the recovery runbook for operator redo
+or rebuild.
 
 ## Alerts
 
@@ -532,8 +467,9 @@ For `BignamePhaseRunnerCapacityPaused`:
    The guard adds the preceding batch's reserved-write estimate to the floor;
    that estimate starts at zero for a new batch loop and is not a reservation.
    Capacity is checked before batches, not before all startup work or every write.
-   Before each Project family run the check may reuse the batch's reading when
-   it is younger than the capacity poll interval and showed room.
+   Project estimates write bytes from the preceding family run's reported row
+   count. Checks occur between bounded runs; they do not reserve the space that
+   every block or rebuild range might need.
    Heartbeats and unrelated writes can continue during a pause, so this is not
    an absolute ENOSPC guarantee. A probe permission error is a retryable phase
    failure, not an ordinary capacity breach.

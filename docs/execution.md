@@ -20,8 +20,8 @@ The API keeps these meanings separate:
 - `auto` uses a satisfying indexed answer and attempts verified lookup only for
   requested selectors that indexed state cannot satisfy.
 
-Verified lookup never backfills `record_inventory_current` or
-`primary_names_current`. Project owns those rows. A provider answer affects only
+Verified lookup never backfills the record or primary-claim families.
+Project owns those rows and their hydration overlays. A provider answer affects only
 the current response and, for guarded direct comparisons, divergence-ledger
 state.
 
@@ -35,17 +35,22 @@ head, mismatched hash, future publication, missing canonical lineage, or
 interpreter-content-hash mismatch returns `409 stale`; it does not fall back to
 an answer at another position.
 
-Lookup captures the Project publication's block number, block hash, interpreter
-content hash, and row generation (`xmin`) before calling providers. A publication
-may be `completed` or `running` and trail the stored execution head by one block,
-matching `PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`. Revalidation locks that
-captured publication and its canonical lineage, rather than requiring Project to
-have completed the execution head. Provider calls remain pinned to the captured
-execution head; the indexed comparison retains its own projected position.
-A changed publication row still refuses the response, including a same-height
-republish or a phase-status transition during the provider call. This tolerance
-does not eliminate concurrent-state `409` responses or relax route-level checks
-that indexed and verified answers share one reported position.
+Lookup captures the participating family publications: block number, block hash,
+interpreter content hash and marker sequence, together with the selected input
+revision, bindings, inventory boundary and real manifest provenance. A live
+publication may trail the stored execution head by one block, matching
+`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`. Provider calls remain pinned to the
+captured execution head; the indexed comparison retains its own published
+position. The snapshot contains the full declared topology, including aliases,
+wildcards and any admitted cross-chain transport context.
+
+Revalidation checks the captured marker generation and canonical lineage. A new
+family block, reset, same-height republication or overlapping Interpret/Project
+redo refuses the response or ledger mutation. An ordinary Project progress or
+status update does not change family publication identity. This tolerance does
+not relax route-level checks that indexed and verified answers share the
+reported position. No obsolete serving row or its PostgreSQL `xmin` supplies
+the comparison proof.
 
 Provider calls use the selected block identity rather than `latest`. Missing
 provider configuration, unsupported topology, and unsupported selectors are
@@ -71,8 +76,8 @@ arm-scoped. The supported topology classes are:
 
 - exact-surface direct resolution: a name bound through its selected
   `declared_registry_path` binding, on either arm, whose projected exact
-  resolver is non-null. Project writes this topology for bound ENS names whose
-  binding resource has a record inventory row, copying that row's record
+  resolver is non-null. The snapshot reader composes this topology for bound
+  ENS names whose binding resource has inventory, copying that inventory's record
   boundary (`projections.md` § Exact-name projection); a bound row without an
   inventory row has no topology and is `unsupported` with
   `verified_records_not_supported`. On Mainnet the
@@ -231,8 +236,8 @@ is admitted at the public edge, and see
 ## Primary-name lookup
 
 The verified primary-name product path supports ENS on coin type `60`. It
-performs a fresh reverse lookup at the selected Ethereum position; a projected
-`primary_names_current` claim is not required. When a projected claim exists,
+performs a fresh reverse lookup at the selected Ethereum position; a composed
+declared primary claim is not required. When a projected claim exists,
 the route consults it before live execution so unsupported exact-name coverage
 or an unverifiable selected [authority arm](glossary.md#authority-epoch) can
 refuse the forward call. An arm is verifiable when the selected `ens_execution`
@@ -259,6 +264,13 @@ The lookup engine may call fixed-`search_path`, security-definer functions that
 revalidate the selected lookup state and then create, refresh, or clear an
 active resolution-divergence observation. The API role has `EXECUTE` on those
 functions but no direct write privilege on the ledger table.
+
+The guard holds shared locks on the captured publications, canonical lineage,
+manifest selection and relevant Interpret/Project phase rows through the ledger
+transaction. It checks overlapping redo even when the head, marker and manifest
+values have not changed. Both creating an observation and clearing one use the
+same guard and exact refusal results. Provider calls happen before this
+transaction; no call runs while the guard's locks are held.
 
 An observation records the logical name, resolver identity, request kind,
 selected positions, and indexed/live comparison. The indexed side is the same
