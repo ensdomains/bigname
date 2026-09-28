@@ -430,11 +430,10 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
     )
     .await?;
     let record = &forward["data"][0]["record"];
-    assert_eq!(record["status"], json!("unsupported"));
-    assert_eq!(
-        record["unsupported_reason"],
-        json!("current_authority_not_projected")
-    );
+    // Name detail's partial serve: the row is `current_authority_not_projected`, served `ok`.
+    assert_eq!(record["status"], json!("ok"), "{record}");
+    assert!(record.get("unsupported_reason").is_none(), "{record}");
+    assert_eq!(record["registration_status"], json!("unregistered"));
     // The record keeps the detail shape for this reason. With no selected binding there is no
     // served resolver, so neither the pointer nor the records written on it are served.
     assert_eq!(record["addresses"]["60"], Value::Null, "{record}");
@@ -484,11 +483,9 @@ async fn v2_lookup_serves_a_root_registry_pointer_without_projected_authority() 
     )
     .await?;
     let record = &forward["data"][0]["record"];
-    assert_eq!(record["status"], json!("unsupported"), "{record}");
-    assert_eq!(
-        record["unsupported_reason"],
-        json!("current_authority_not_projected")
-    );
+    // As on name detail, the unprojected-authority TLD is served `ok` with its root pointer.
+    assert_eq!(record["status"], json!("ok"), "{record}");
+    assert!(record.get("unsupported_reason").is_none(), "{record}");
     assert_eq!(
         record["resolver"],
         json!({"chain_id": 1, "address": "0x0000000000000000000000000000000000000abc"}),
