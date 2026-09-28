@@ -171,13 +171,14 @@ const MAINNET_GLUE_FAMILIES: &[&str] = &["basenames_l1_compat", "basenames_execu
 /// `basenames_execution`) that no single-protocol scenario mirrors. The
 /// checked-in shadow `ens_execution` family is intentionally omitted here and
 /// exercised by the separate verified-resolution scenario. Glue roles a
-/// scenario does not deploy get placeholder addresses like any other
-/// undeployed role.
+/// scenario does not name in `glue_targets` get placeholder addresses like any
+/// other undeployed role.
 pub fn generate_local_mainnet_composed_profile(
     scratch_dir: &Path,
     repo_root: &Path,
     ens_targets: &HashMap<&str, (Address, u64)>,
     basenames_targets: &HashMap<&str, (Address, u64)>,
+    glue_targets: &HashMap<&str, (Address, u64)>,
 ) -> Result<LocalProfile> {
     let profile = generate_profile_from_families(
         scratch_dir,
@@ -205,12 +206,11 @@ pub fn generate_local_mainnet_composed_profile(
             family,
         }),
     )?;
-    let glue_targets = HashMap::new();
     generate_profile_from_families(
         scratch_dir,
         "manifests-e2e",
         repo_root,
-        &glue_targets,
+        glue_targets,
         None,
         MAINNET_GLUE_FAMILIES.iter().map(|family| FamilySpec {
             profile_root: "mainnet",

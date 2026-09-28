@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use alloy_primitives::Address;
@@ -701,6 +702,7 @@ pub async fn ingest_mainnet_composed_and_serve(
     ens_deployment: &EnsV1Deployment,
     base_anvil: &Anvil,
     basenames_deployment: &BasenamesDeployment,
+    glue_targets: &HashMap<&str, (Address, u64)>,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
     let chains = [
@@ -719,6 +721,7 @@ pub async fn ingest_mainnet_composed_and_serve(
             repo_root,
             &ens_deployment.manifest_targets(),
             &basenames_deployment.manifest_targets(),
+            glue_targets,
         )
     })
     .await

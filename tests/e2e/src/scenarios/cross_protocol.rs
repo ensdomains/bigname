@@ -432,6 +432,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
         &ens_deployment,
         &base,
         &basenames_deployment,
+        &std::collections::HashMap::new(),
         Some(ready_sql),
     )
     .await?;
@@ -682,6 +683,7 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         &root,
         &ens_deployment.manifest_targets(),
         &basenames_deployment.manifest_targets(),
+        &std::collections::HashMap::new(),
     )?;
     profile.retarget_chain("ethereum-mainnet", ETH_REORG_CHAIN)?;
     profile.retarget_chain("base-mainnet", BASE_REORG_CHAIN)?;
