@@ -50,8 +50,8 @@ pub(crate) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, 
 }
 
 /// The family marker of `chain_id`, the publication a composed row describes, when it is
-/// servable: `live` and written by this build's interpreter, the fence's rule
-/// (snapshot_selection/project.rs). None otherwise.
+/// servable: `live`, written by this build's interpreter, on the readable lineage, and not
+/// overlapped by pending Interpret/Project redo (snapshot_selection/project.rs). None otherwise.
 pub async fn load_family_publication(
     pool: &PgPool,
     chain_id: &str,
@@ -120,7 +120,8 @@ pub(crate) async fn publication(
         "/* storage:families.name.publication */
          SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,
                 marker.block_timestamp, to_jsonb(marker.block_timestamp) AS block_timestamp_json",
-        crate::snapshot_selection::servable_family_marker!()
+        crate::snapshot_selection::servable_family_marker!(),
+        crate::snapshot_selection::family_inputs_not_in_redo!()
     ))
     .bind(chain_id)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
@@ -262,6 +263,8 @@ pub(crate) async fn load(
 /// that second can bring back.
 pub(super) struct Composed {
     pub(super) row: Option<NameCurrentRow>,
+    // Child relation selection needs the arm even when token readability withholds the row.
+    pub(super) authority_arm: Option<String>,
     pub(super) recompose_at: Option<i64>,
 }
 
@@ -428,6 +431,7 @@ pub(super) async fn load_chain(
                 name.to_owned(),
                 Composed {
                     row: None,
+                    authority_arm: decided.selection.authority_arm.clone(),
                     recompose_at: recompose_at(facts, clock.timestamp_seconds),
                 },
             );
@@ -454,6 +458,7 @@ pub(super) async fn load_chain(
             name.to_owned(),
             Composed {
                 row: Some(row),
+                authority_arm: decided.selection.authority_arm,
                 recompose_at: recompose_at(facts, clock.timestamp_seconds),
             },
         );

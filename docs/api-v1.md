@@ -967,8 +967,22 @@ dropped block's grants leave the families when that block is undone. The bodies
 are meant to be identical to the served ones, and these routes answer
 `409 stale` while the families are not servable, as above.
 
+Composed names also refuse a publication while Interpret or Project has a redo
+whose range overlaps it. Interpret's normalization-flag recompute can change a
+surface's visibility before the required Project replay publishes the new name
+state; finishing Interpret alone does not make the old publication readable.
+The composed reader and the collection's final generation check both enforce
+this rule. Diagnostic reads that do not compose published names keep their
+existing snapshot selection. Event diagnostics still return their audit rows
+when the name publication is unavailable, omitting the optional name attachment.
+Resolver bound-name pages require the selected family publication even when the
+page is empty, so an older `at` answers
+`409 stale` rather than reporting current absence as historical absence.
+
 One difference remains with the switch on. After an ENSv1 registry `Transfer` to
-the zero address leaves a name's registry node ownerless, the served name row
+the zero address leaves a name's registry node ownerless (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f), the served name row
 keeps its earlier state (unsupported, so unlisted) until Project next rebuilds
 the served tables, while the composed row reads the node at once (unregistered
 but projected), so `GET /v1/search` can list with the switch on a name it omits
