@@ -849,3 +849,33 @@ async fn v2_primary_name_gate_is_the_same_with_the_switch_off_and_on() -> Result
     );
     database.cleanup().await
 }
+
+// An exact name with no composed row may be one a rebuild has yet to reach: when a rebuild
+// starts after the collection fence, subnames and the first history page of an unknown name
+// answer the stale 409, not 404.
+#[tokio::test]
+async fn v2_unknown_parent_reads_answer_409_when_a_rebuild_starts_after_the_fence() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    let mut answers = Vec::new();
+    for uri in ["/v1/names/nobody.eth/subnames", "/v1/names/nobody.eth/history"] {
+        let (status, _) = with_serve_on(&database, uri).await?;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} with a live marker");
+        let (status, body) = v2_get_with_marker_flip_after_fence(
+            &database,
+            uri,
+            "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+        )
+        .await?;
+        answers.push((uri, status, body["error"]["code"].clone()));
+    }
+    assert_eq!(
+        answers,
+        [
+            ("/v1/names/nobody.eth/subnames", StatusCode::CONFLICT, json!("stale")),
+            ("/v1/names/nobody.eth/history", StatusCode::CONFLICT, json!("stale")),
+        ]
+    );
+    database.cleanup().await
+}
