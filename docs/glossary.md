@@ -2528,7 +2528,7 @@ the reducer under `crates/project/src/families/` that writes them:
 
 | Label | Tables | Reducer |
 | --- | --- | --- |
-| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F1, name identity | `project_name_state`, `project_binding_candidate`, `project_name_history` | `identity.rs` |
 | F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
 | F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
 | F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |

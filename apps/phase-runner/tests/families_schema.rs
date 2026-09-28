@@ -42,6 +42,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
+    "project_name_history",
 ];
 
 const BASELINE: &[&str] = &[

@@ -58,6 +58,7 @@ tables! {
     ADDRESS_NAME_FOLD = "project_address_name_fold" ["chain_id", "logical_name_id"];
     ADDRESS_CONTROLLER_CANDIDATE = "project_address_controller_candidate"
         ["chain_id", "logical_name_id", "event_identity"];
+    NAME_HISTORY = "project_name_history" ["chain_id", "logical_name_id"];
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.

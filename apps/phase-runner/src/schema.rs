@@ -71,6 +71,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
+    "project_name_history",
     "project_generation_failures",
     "project_redo_child_registration_history",
     "project_redo_expiry_roots",
