@@ -2575,6 +2575,18 @@ It exists only while the served reads move to the
 [per-block publication](#per-block-publication), and goes with the served
 batch.
 
+## Composed name row
+
+a `name_current`-shaped row that `bigname_storage::families::name` builds for
+one name at read, from the [owned key families](#owned-key-family) and the
+identity input tables, with no stored per-name row: the selection among the
+name's binding candidates, its registration and control, NameWrapper state,
+serving pointer and resolver, history heads and coverage. It describes the
+[family marker](#family-marker)'s publication. With the
+[publication switch](#publication-switch) on, the names group serves these rows
+([API](api-v1.md#tier-2-product-reads)). The name comparison of the
+fixture-corpus harness checks every composed row against the served row.
+
 ## Family undo journal
 
 the rows of `project_family_undo`: for every owned key family row a block

@@ -22,8 +22,11 @@
 //!
 //! The whole-history evidence the served row also carries (`provenance.selected_event_ids`,
 //! `raw_fact_refs`, `manifest_versions`) is not read by any route and is not composed.
-//! `declared_summary.topology` is not composed here either: the alias and wildcard arms come from
-//! `topology::load_name_topology_shadow`.
+//! `declared_summary.topology` is not composed yet. The alias and wildcard arms have a family
+//! reader (`topology::load_name_topology_shadow`); the direct arm takes its version boundary from
+//! the record inventory (crates/project/src/builders/name_topology/direct.rs), so the topology
+//! joins the row with the record inventory reads. Until then a composed row carries none, which
+//! the records route's verified admission and avatar readback read (docs/api-v1.md).
 //!
 //! Every row describes the family marker's publication (the "publication" below): its
 //! `chain_positions` and `canonicality_summary` name the marker's block, so a row carries no

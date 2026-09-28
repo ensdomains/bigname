@@ -575,7 +575,14 @@ collection route carry neither header.
   guarded by `jsonb_typeof(registration.expiry) = 'number'`
   (`schema-v2/baseline/06_projections.sql`; migration
   `20260911120200_name_current_registration_expiry_idx.sql` for a phase schema
-  installed before the baseline carried it). A row whose only expiry is stored
+  installed before the baseline carried it). With the
+  [publication switch](glossary.md#publication-switch) on, the listing serves
+  the same rows from [composed name rows](glossary.md#composed-name-row),
+  found by walking the retained lifecycle events and NameWrapper states by
+  expiry through `project_lifecycle_event_expiry_idx`,
+  `project_lifecycle_event_inexact_expiry_idx` and
+  `project_wrapper_state_expiry_idx` (migration
+  `20260928140000_project_families_expiry_indexes.sql`). A row whose only expiry is stored
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
   `expires_at`. A negative numeric expiry, or one after 9999-12-31T23:59:59Z,

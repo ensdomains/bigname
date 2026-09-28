@@ -898,6 +898,19 @@ several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
 its post-call guard still compares the project row's generation.
 
+With the switch on, name detail (`GET /v1/names/{name}` and the name
+diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
+resolver's bound names read [composed name rows](glossary.md#composed-name-row)
+instead of `name_current`, as does every other route that loads name rows
+through the same storage reads. Their bodies are meant to be identical to the
+served ones. A composed row describes the publication and has no older position
+of its own, so an `at` below the publication answers `409 stale` with "requested
+snapshot is not available for name", the answer served rows give once Project
+has republished them. A composed row does not yet carry the declared resolution
+topology (`declared_summary.topology`), which the records route's verified
+lookup admission and avatar readback read; that moves with the record
+inventories.
+
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
 Projection publication is incremental, so an unchanged row retains the target of
