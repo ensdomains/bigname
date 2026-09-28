@@ -165,7 +165,10 @@ pub(crate) async fn get_registry(
             &normalized_address,
         )
         .await
-        .map_err(|_| internal_error(chain_id_slug, &normalized_address))?,
+        .map_err(super::name_rows_error(
+            super::SnapshotReadResource::Registry,
+            |_| internal_error(chain_id_slug, &normalized_address),
+        ))?,
         None => 0,
     };
     let roles = if include_event_count {

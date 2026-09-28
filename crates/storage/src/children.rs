@@ -1,3 +1,4 @@
+mod families;
 mod page;
 mod reads;
 mod types;

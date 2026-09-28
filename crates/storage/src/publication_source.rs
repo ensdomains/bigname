@@ -47,7 +47,7 @@ pub fn init_from_env() -> Result<bool, String> {
 /// The value [`init_from_env`] would hold, without holding it: for a harness that scopes the
 /// switch per task (`with_serve_from_families`) the way the binaries set it per process.
 pub fn configured() -> Result<bool, String> {
-    parse(std::env::var(SERVE_FROM_FAMILIES_ENV).ok().as_deref())
+    parse_environment(std::env::var(SERVE_FROM_FAMILIES_ENV))
 }
 
 /// Whether the serving fences read the family marker.
@@ -83,6 +83,16 @@ pub async fn with_serve_from_families<F: std::future::Future>(on: bool, future: 
     SCOPED_SERVE_FROM_FAMILIES.scope(on, future).await
 }
 
+fn parse_environment(value: Result<String, std::env::VarError>) -> Result<bool, String> {
+    match value {
+        Ok(value) => parse(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{SERVE_FROM_FAMILIES_ENV} must contain valid Unicode"))
+        }
+    }
+}
+
 fn parse(value: Option<&str>) -> Result<bool, String> {
     match value {
         None | Some("") => Ok(SERVE_FROM_FAMILIES_DEFAULT),
@@ -113,6 +123,20 @@ mod tests {
             let error = parse(Some(invalid)).expect_err(invalid);
             assert!(error.contains(SERVE_FROM_FAMILIES_ENV), "{error}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_invalidly_encoded_override_is_not_treated_as_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        let error = parse_environment(Err(std::env::VarError::NotUnicode(invalid)))
+            .expect_err("a present invalid value must refuse startup");
+        assert!(error.contains(SERVE_FROM_FAMILIES_ENV));
+        assert_eq!(
+            parse_environment(Err(std::env::VarError::NotPresent)),
+            Ok(SERVE_FROM_FAMILIES_DEFAULT)
+        );
     }
 
     #[tokio::test]

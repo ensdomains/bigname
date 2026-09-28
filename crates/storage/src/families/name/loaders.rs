@@ -236,12 +236,10 @@ pub(super) async fn resource_pointers(
     Ok((by_resource, roots))
 }
 
-/// The latest `ResolverChanged` of each `(resource, name)` pair at or below `target`, read from
-/// `normalized_events`. F5 keeps only a resource's latest pointer, whichever name it came from,
-/// while the served row picks a name's latest pointer among that name's own events
-/// (name_current/build.sql, the `resolver` lateral), so a name sharing its resource with a name
-/// that pointed later reads its own pointer here. Only pairs whose F5 row names another name are
-/// asked for; the order is the served one.
+/// The latest named `ResolverChanged` for each requested (resource, name) pair. F5 keeps the
+/// resource's latest pointer independently; these owned rows keep each name's own pointer,
+/// including clears, in the family's canonical event order. Only pairs whose F5 row names a
+/// different name are requested. The primary key bounds reads to those pairs.
 pub(super) async fn named_resource_pointers(
     conn: &mut PgConnection,
     chain_id: &str,
@@ -254,31 +252,18 @@ pub(super) async fn named_resource_pointers(
     let (resources, names): (Vec<String>, Vec<String>) = pairs.iter().cloned().unzip();
     let rows = sqlx::query(
         "/* storage:families.name.named_resource_pointers */
-         SELECT DISTINCT ON (event.resource_id, event.logical_name_id)
-                event.resource_id::text AS resource_id,
-                lower(event.after_state ->> 'resolver') AS resolver_address,
-                jsonb_build_object('block_number', event.block_number,
-                    'transaction_index', event.transaction_index,
-                    'log_index', event.log_index,
-                    'event_identity', event.event_identity) AS pointer_position,
-                event.source_family, event.logical_name_id AS event_name,
-                event.normalized_event_id AS event_id
-         FROM bigname_phase.normalized_events event
-         JOIN bigname_phase.chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number
-          AND lineage.block_hash = event.block_hash
-         WHERE event.chain_id = $1
-           AND event.event_kind = 'ResolverChanged'
-           AND event.consumer_visibility = 'activated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND event.block_number <= $2
-           AND (event.resource_id::text, event.logical_name_id) IN (
-               SELECT * FROM unnest($3::text[], $4::text[]))
-         ORDER BY event.resource_id, event.logical_name_id,
-                  event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
-                  event.log_index DESC NULLS LAST, event.normalized_event_id DESC",
+         SELECT pointer.resource_id::text AS resource_id, pointer.resolver_address,
+                jsonb_build_object('block_number', pointer.block_number,
+                    'transaction_index', pointer.transaction_index,
+                    'log_index', pointer.log_index,
+                    'event_identity', pointer.event_identity) AS pointer_position,
+                pointer.source_family, pointer.logical_name_id AS event_name,
+                pointer.normalized_event_id AS event_id
+         FROM bigname_phase.project_named_resource_pointer pointer
+         JOIN unnest($3::text[], $4::text[]) wanted(resource_id, logical_name_id)
+           ON pointer.resource_id = wanted.resource_id::uuid
+          AND pointer.logical_name_id = wanted.logical_name_id
+         WHERE pointer.chain_id = $1 AND pointer.block_number <= $2",
     )
     .bind(chain_id)
     .bind(target)

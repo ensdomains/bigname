@@ -75,7 +75,9 @@ pub(crate) async fn undo_block(
         }
     }
     // The index rows follow the base rows: take the keys while the block's rows still stand.
-    let touched = derived::touched(&mut transaction, chain_id, current.number).await?;
+    let touched = derived::touched(&mut transaction, chain_id, current.number)
+        .await?
+        .restoring();
     for (name, (keys, images)) in by_table {
         store::replace(&mut transaction, tables::spec(name), keys, images).await?;
     }

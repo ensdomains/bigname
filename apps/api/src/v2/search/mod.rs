@@ -14,11 +14,11 @@ use tracing::error;
 
 use crate::{AppState, state::is_recognized_public_namespace};
 
-use super::cursor::{cursor_value, invalid_cursor_error};
+use super::list_cursor::{ListCursor, ListPosition};
 use super::name_filter::{normalize_name_contains, normalize_name_prefix};
 use super::{
-    AtSelector, CursorPayload, Envelope, Finality, Page, QueryParams, RawQueryParams,
-    RegistrationStatus, V2Error, V2Result, api_error_to_v2, decode, encode,
+    AtSelector, Envelope, Finality, Page, QueryParams, RawQueryParams, RegistrationStatus, V2Error,
+    V2Result, api_error_to_v2,
     name_record::name_registration_fields,
     support::{derive_public_namespace_set, revalidate_public_namespace_set},
     support::{
@@ -36,6 +36,12 @@ const NONE_FILTER_VALUE: &str = "";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const NORMALIZED_NAME_CURSOR_KEY: &str = "normalized_name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
+const POSITION_KEYS: [&str; 4] = [
+    DISPLAY_NAME_CURSOR_KEY,
+    NAMESPACE_FILTER_KEY,
+    NORMALIZED_NAME_CURSOR_KEY,
+    NAMEHASH_CURSOR_KEY,
+];
 const SEARCH_QUERY_PARAMS: &[&str] = &[
     "q",
     "match",
@@ -156,7 +162,20 @@ pub(crate) async fn get_search(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
-    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
+    // A cursor this list could not have written is refused before any read; a bare search's
+    // namespace anchor needs the namespace set, so only that value waits for the full read.
+    let preflight = search_list_cursor(&SearchCursorBinding {
+        q: &params.q,
+        match_mode: params.match_mode,
+        namespace: params.namespace.as_deref(),
+        public_namespaces: &[],
+    });
+    let preflight = if params.namespace.is_none() {
+        preflight.deferring(NAMESPACE_FILTER_KEY)
+    } else {
+        preflight
+    };
+    preflight.check_shape(params.cursor.as_deref(), &POSITION_KEYS, false)?;
     let public_namespace_set = if params.namespace.is_none() {
         let namespaces = derive_public_namespace_set(&state)
             .await
@@ -193,9 +212,10 @@ pub(crate) async fn get_search(
         namespace: params.namespace.as_deref(),
         public_namespaces,
     };
-    let storage_cursor = cursor_payload
-        .as_ref()
-        .map(|payload| search_storage_cursor(payload, &cursor_binding))
+    let list = search_list_cursor(&cursor_binding);
+    let storage_cursor = list
+        .read(params.cursor.as_deref(), &POSITION_KEYS)?
+        .map(|position| search_storage_cursor(&position))
         .transpose()?;
 
     let filter = search_filter(&params, public_namespaces);
@@ -234,9 +254,7 @@ pub(crate) async fn get_search(
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
-        .map(|cursor| {
-            search_cursor_payload(cursor, &cursor_binding).map(|payload| encode(&payload))
-        })
+        .map(|cursor| search_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().map(build_search_name).collect();
@@ -270,55 +288,35 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
     }
 }
 
-pub(crate) fn search_cursor_payload(
-    cursor: &NameCurrentListCursor,
-    binding: &SearchCursorBinding<'_>,
-) -> V2Result<CursorPayload> {
+/// The search cursor binds `q`, `match` and the namespace anchor; it holds the last row's
+/// position and no publication (`list_cursor`).
+fn search_list_cursor(binding: &SearchCursorBinding<'_>) -> ListCursor {
+    ListCursor::new(SEARCH_SORT, cursor_filters(binding))
+}
+
+fn search_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
     let NameCurrentListCursorValue::Name(display_name) = &cursor.sort_value else {
         return Err(V2Error::internal_error(
             "search pagination cursor must use name sort",
         ));
     };
 
-    Ok(CursorPayload::new(
-        SEARCH_SORT,
-        cursor_filters(binding),
-        BTreeMap::from([
-            (DISPLAY_NAME_CURSOR_KEY.to_owned(), display_name.clone()),
-            (NAMESPACE_FILTER_KEY.to_owned(), cursor.namespace.clone()),
-            (
-                NORMALIZED_NAME_CURSOR_KEY.to_owned(),
-                cursor.normalized_name.clone(),
-            ),
-            (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
-        ]),
-        None,
-    ))
+    Ok(ListPosition::new([
+        (DISPLAY_NAME_CURSOR_KEY, display_name.clone()),
+        (NAMESPACE_FILTER_KEY, cursor.namespace.clone()),
+        (NORMALIZED_NAME_CURSOR_KEY, cursor.normalized_name.clone()),
+        (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
+    ]))
 }
 
-pub(crate) fn search_storage_cursor(
-    payload: &CursorPayload,
-    binding: &SearchCursorBinding<'_>,
-) -> V2Result<NameCurrentListCursor> {
-    if payload.sort != SEARCH_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.filters != cursor_filters(binding) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 4 {
-        return Err(invalid_cursor_error());
-    }
-
+fn search_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
     Ok(NameCurrentListCursor {
-        sort_value: NameCurrentListCursorValue::Name(cursor_value(
-            payload,
-            DISPLAY_NAME_CURSOR_KEY,
-            invalid_cursor_error,
-        )?),
-        namespace: cursor_value(payload, NAMESPACE_FILTER_KEY, invalid_cursor_error)?,
-        normalized_name: cursor_value(payload, NORMALIZED_NAME_CURSOR_KEY, invalid_cursor_error)?,
-        namehash: cursor_value(payload, NAMEHASH_CURSOR_KEY, invalid_cursor_error)?,
+        sort_value: NameCurrentListCursorValue::Name(
+            position.get(DISPLAY_NAME_CURSOR_KEY)?.to_owned(),
+        ),
+        namespace: position.get(NAMESPACE_FILTER_KEY)?.to_owned(),
+        normalized_name: position.get(NORMALIZED_NAME_CURSOR_KEY)?.to_owned(),
+        namehash: position.get(NAMEHASH_CURSOR_KEY)?.to_owned(),
     })
 }
 

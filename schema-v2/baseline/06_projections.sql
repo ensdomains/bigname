@@ -1407,6 +1407,13 @@ CREATE INDEX IF NOT EXISTS project_binding_candidate_resource_idx
     ON project_binding_candidate (chain_id, resource_id);
 CREATE INDEX IF NOT EXISTS project_binding_candidate_name_idx
     ON project_binding_candidate (chain_id, logical_name_id);
+-- The name summary writer's work list (crates/project families/derived/summary.rs).
+CREATE INDEX IF NOT EXISTS project_binding_candidate_predecessor_idx
+    ON project_binding_candidate (chain_id, predecessor_resource_id)
+    WHERE predecessor_resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_binding_candidate_lease_idx
+    ON project_binding_candidate (chain_id, lease_resource_id)
+    WHERE lease_resource_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS project_lifecycle_key_state (
     chain_id text NOT NULL,
@@ -1683,6 +1690,11 @@ CREATE INDEX IF NOT EXISTS project_lifecycle_event_unnamed_lease_idx
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_decoded_name_idx
     ON project_lifecycle_event (chain_id, decoded_logical_name_id);
 
+-- The name summary writer's work list (crates/project families/derived/summary.rs).
+CREATE INDEX IF NOT EXISTS project_lifecycle_association_target_idx
+    ON project_lifecycle_association (chain_id, target_resource_id)
+    WHERE target_resource_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS project_child_registration_state (
     chain_id text NOT NULL,
     logical_name_id text NOT NULL,
@@ -1915,6 +1927,15 @@ COMMENT ON COLUMN project_registry_owner_event.registry_owner IS
 COMMENT ON COLUMN project_registry_owner_event.owner_word_unmasked IS
     'This value is the owner_word_unmasked flag of the event, as the node row keeps it for its latest event.';
 
+-- The name summary writer's work list (crates/project families/derived/summary.rs) and its
+-- zero-owner attribution (crates/storage families/name/summary.rs).
+CREATE INDEX IF NOT EXISTS project_registry_owner_event_name_idx
+    ON project_registry_owner_event (chain_id, logical_name_id)
+    WHERE logical_name_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_registry_owner_event_resource_idx
+    ON project_registry_owner_event (chain_id, resource_id)
+    WHERE resource_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
     observation_identity text NOT NULL,
@@ -2137,6 +2158,45 @@ COMMENT ON COLUMN project_resource_pointer.boundary_position IS
     'This value is that boundary event''s position.';
 COMMENT ON COLUMN project_resource_pointer.boundary_block_timestamp IS
     'This value is that boundary event''s block timestamp.';
+
+CREATE TABLE IF NOT EXISTS project_named_resource_pointer (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    resolver_address text,
+    source_family text NOT NULL,
+    PRIMARY KEY (chain_id, resource_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_named_resource_pointer_resolver_idx
+    ON project_named_resource_pointer (chain_id, resolver_address, logical_name_id, resource_id);
+COMMENT ON TABLE project_named_resource_pointer IS
+    'Project-owned named resource resolver pointer of family F5: the latest named ResolverChanged per resource and logical name in canonical event order, including clears. An unnamed pointer or an event naming another name leaves this row unchanged. The composed name reader loads exact resource/name pairs; bound-name discovery walks retained pointer keys by resolver instead of normalized event history. Released names keep their pointer facts and are filtered by the composed binding admission.';
+COMMENT ON COLUMN project_named_resource_pointer.chain_id IS
+    'This value is the chain whose events wrote the row.';
+COMMENT ON COLUMN project_named_resource_pointer.resource_id IS
+    'This value is the resource named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.logical_name_id IS
+    'This value is the logical name named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.block_number IS
+    'This value is the block number of the latest named ResolverChanged for the key.';
+COMMENT ON COLUMN project_named_resource_pointer.transaction_index IS
+    'This value is the transaction index of that event; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_named_resource_pointer.log_index IS
+    'This value is the log index of that event; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_named_resource_pointer.event_identity IS
+    'This value is that event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_named_resource_pointer.normalized_event_id IS
+    'This value names that event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_named_resource_pointer.resolver_address IS
+    'This value is the lower-cased resolver from that event, including null, empty and zero-address clears.';
+COMMENT ON COLUMN project_named_resource_pointer.source_family IS
+    'This value is that event''s source family.';
 
 CREATE TABLE IF NOT EXISTS project_node_record_partition (
     chain_id text NOT NULL,
@@ -3122,6 +3182,45 @@ COMMENT ON COLUMN project_name_history.has_ens_v2_events IS
     'This value is whether any event naming the name came from the ENSv2 root, registry or registrar families (name_current/build.sql, the corpus lateral).';
 COMMENT ON COLUMN project_name_history.event_arms IS
     'This value is the sorted array of authority arms (ens_v1, ens_v2, basenames) voted by the name''s registration, renewal, release, expiry change, authority transfer, token transfer and authority epoch events (name_authority/build.sql, event_arms), without the ENSv2 root and registry expiry changes, which never vote, and releases, which the reader decides against the binding candidates.';
+
+CREATE TABLE IF NOT EXISTS project_name_summary (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    namespace text NOT NULL,
+    authority_arm text,
+    serving boolean NOT NULL,
+    registration_status text,
+    expires_at timestamptz,
+    registered_at timestamptz,
+    zero_owner boolean NOT NULL,
+    recompose_at bigint,
+    PRIMARY KEY (chain_id, logical_name_id)
+);
+COMMENT ON TABLE project_name_summary IS
+    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no arm, serving resource, registration or clock boundary. Each column but zero_owner is the value the served lists read from the name''s name_current row.';
+COMMENT ON COLUMN project_name_summary.chain_id IS
+    'This value is the chain of the name''s surface.';
+COMMENT ON COLUMN project_name_summary.logical_name_id IS
+    'This value is the name.';
+COMMENT ON COLUMN project_name_summary.namespace IS
+    'This value is the namespace of the name.';
+COMMENT ON COLUMN project_name_summary.authority_arm IS
+    'This value is the selected authority arm (ens_v1, ens_v2 or basenames) of provenance.authority_selection, null when no single arm is selected; the child lists take a child''s arm from it.';
+COMMENT ON COLUMN project_name_summary.serving IS
+    'This value is whether the name has a serving resource (provenance.read_reachability.serving_resource_id), which admits an ownerless registry child.';
+COMMENT ON COLUMN project_name_summary.registration_status IS
+    'This value is declared_summary.registration.status; the subnames expiry fence drops a released child.';
+COMMENT ON COLUMN project_name_summary.expires_at IS
+    'This value is the expiry the subnames expiry sort and fence read: the first timestamp of the registration and control expiry fields, as address_names/query.rs reads it.';
+COMMENT ON COLUMN project_name_summary.registered_at IS
+    'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.';
+COMMENT ON COLUMN project_name_summary.zero_owner IS
+    'This value is whether the latest ENSv1 or Basenames registry Transfer attributed to the name names the zero owner, which zeroes a registry child''s owner. A Transfer is attributed as the served child build does: by the name it carries, else the latest named registry event of any kind of its resource and family, else an active, readable surface at its node.';
+COMMENT ON COLUMN project_name_summary.recompose_at IS
+    'This value is the first second, in Unix seconds, after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary, kept whether or not the name composes a row. The family step composes the name again at the first block whose time reaches it; null when no such second exists. It is a count of seconds, not a timestamp, because a NameWrapper expiry can be any 64-bit word, past the last instant a timestamp holds.';
+CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
+    ON project_name_summary (chain_id, recompose_at)
+    WHERE recompose_at IS NOT NULL;
 
 -- The composed expiring listing's candidate indexes (TYR-36 step 7b).
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx

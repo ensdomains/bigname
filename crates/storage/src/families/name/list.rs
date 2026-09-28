@@ -419,7 +419,7 @@ async fn expiry_pairs(
          )
          SELECT at::text AS at, logical_name_id FROM pairs
          WHERE $3::numeric IS NULL OR (at, logical_name_id) {compare} ($3::numeric, $4)
-         ORDER BY at {direction}, logical_name_id {direction}
+         ORDER BY pairs.at {direction}, pairs.logical_name_id {direction}
          LIMIT $5",
         names = EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$6")
     );
