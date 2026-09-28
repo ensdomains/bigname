@@ -487,14 +487,7 @@ async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> R
 async fn v2_resolver_overview_cursor_continues_across_a_same_height_republish() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     let cursor = first["data"]["bound_names"]["page"]["next_cursor"]
@@ -513,8 +506,7 @@ async fn v2_resolver_overview_cursor_continues_across_a_same_height_republish() 
     )
     .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
-        .execute(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 203, "0xresolvercb").await?;
     let again =
         v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
     assert_eq!(again["data"]["bound_names"], second["data"]["bound_names"]);
@@ -571,14 +563,7 @@ async fn v2_resolver_overview_continuation_retries_when_publication_changes_befo
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     let cursor = first["data"]["bound_names"]["page"]["next_cursor"]

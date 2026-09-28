@@ -5237,3 +5237,59 @@ async fn read_family_pages_in(database: &TestDatabase, uri: &str, holder: &str) 
     }
     Ok(pages)
 }
+
+/// Retain the label bytes which Interpret actually observed. An edge can be seeded without
+/// this helper when its label preimage has not been observed.
+async fn insert_family_label_preimage(pool: &PgPool, raw_label: &[u8]) -> Result<String> {
+    let hash = format!("{:#x}", alloy_primitives::keccak256(raw_label));
+    let decoded = std::str::from_utf8(raw_label).ok().filter(|label| !label.contains('\0'));
+    let normalization_error = match decoded {
+        Some(label) => match bigname_domain::normalization::normalize_label_under_suffix(label, &[]) {
+            Ok(name) if name.normalized_name == label => None,
+            Ok(_) => Some("raw label is not byte-identical to its normalized form".to_owned()),
+            Err(error) => Some(error.to_string()),
+        },
+        None => Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
+    };
+    sqlx::query("INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
+        normalized_under_version, normalization_error, source_kind, source_priority)
+        VALUES ($1, $2, $3, $4, $5, $6, 'fixture', 0) ON CONFLICT DO NOTHING")
+        .bind(&hash).bind(raw_label).bind(decoded)
+        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION).bind(normalization_error.is_none())
+        .bind(normalization_error)
+        .execute(pool).await?;
+    Ok(hash)
+}
+
+/// A normalized registry NewOwner observation. It creates the retained edge only;
+/// name bindings, lifecycle and family publication are separate fixture inputs.
+#[allow(clippy::too_many_arguments)]
+async fn insert_family_registry_child_edge(
+    pool: &PgPool,
+    namespace: &str,
+    chain: &str,
+    parent_name: &str,
+    labelhash: &str,
+    owner: &str,
+    block: i64,
+    hash: &str,
+) -> Result<String> {
+    let family = match namespace {
+        "ens" => "ens_v1_registry_l1",
+        "basenames" => "basenames_base_registry",
+        _ => anyhow::bail!("registry child fixture supports ENSv1 and Basenames"),
+    };
+    let node = bigname_lookup::ens_namehash_hex(parent_name)?;
+    let child = format!("{:#x}", alloy_primitives::keccak256([
+        alloy_primitives::hex::decode(&node)?, alloy_primitives::hex::decode(labelhash)?
+    ].concat()));
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let mut event = history_event(&format!("fixture-child-{ordinal}"), None, None, Some(chain), Some(block), Some(hash),
+        Some("0xregistry-child"), Some(ordinal), CanonicalityState::Canonical);
+    event.namespace = namespace.into(); event.event_kind = "SubregistryChanged".into();
+    event.source_family = family.into(); event.before_state = json!({});
+    event.after_state = json!({"source_event":"NewOwner", "node":node, "child_node":child,
+        "labelhash":labelhash, "owner":owner});
+    bigname_storage::insert_normalized_event_fixtures(pool, &[event]).await?;
+    Ok(child)
+}
