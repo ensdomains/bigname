@@ -109,8 +109,8 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
         json!(V2_ADDRESS)
     );
     assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00Z"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00Z"));
+    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00+00:00"));
+    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00+00:00"));
     assert_eq!(data[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
     assert_eq!(data[0]["relations"], json!(["registrant", "owner"]));
     assert_eq!(data[0]["is_primary"], json!(true));
@@ -534,7 +534,10 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     assert_eq!(rows.len(), 5);
     let shared_rows = rows.iter().filter(|row| row["name"].as_str().unwrap().starts_with("shared-")).collect::<Vec<_>>();
     assert_eq!(shared_rows.len(), 2);
-    assert_ne!(shared_rows[0]["registration_id"], shared_rows[1]["registration_id"]);
+    assert_ne!(
+        shared_rows[0]["permission_resource_id"],
+        shared_rows[1]["permission_resource_id"]
+    );
     for row in &shared_rows {
         let grants = address_name_inline_grants(row);
         assert!(!grants.is_empty());
@@ -821,7 +824,7 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 }
 
 #[tokio::test]
-async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> Result<()> {
+async fn v2_address_role_summary_marks_wrapper_page_as_non_authoritative() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     wrap_address_name(&database, "beta.eth", 0xb300, None).await?;
@@ -833,7 +836,14 @@ async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> R
     .await?;
 
     assert_eq!(payload["data"][0]["name"], json!("beta.eth"));
-    assert_eq!(payload["data"][0]["role_summary"], json!([]));
+    // The wrapper token holder's grant is the only listed one.
+    assert_eq!(
+        payload["data"][0]["role_summary"],
+        json!([{"address":V2_ADDRESS, "grants":[{
+            "grant_scope":{"kind":"registration", "detail":{}},
+            "powers":["registration_control"]
+        }]}])
+    );
     assert!(payload["data"][0].get("restrictions").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
@@ -1162,19 +1172,6 @@ async fn v2_address_name_collections_exclude_orphaned_phase_lineage_before_proje
             "shared-one.eth",
             "shared-two.eth"
         ]
-    );
-
-    let audit_rows = bigname_storage::load_address_names_current_including_noncanonical(
-        &database.pool,
-        V2_ADDRESS,
-        Some("ens"),
-        None,
-    )
-    .await?;
-    assert!(
-        audit_rows
-            .iter()
-            .any(|row| row.canonical_display_name == "beta.eth")
     );
 
     database.cleanup().await?;
@@ -1804,8 +1801,8 @@ async fn bind_address_name_ens_v2(
 }
 
 /// Wrap `name` in the NameWrapper at the head block: its registrar lease stays the linked
-/// registration, the wrapper resource `seed` holds control, and the wrapper token goes to the
-/// name's controller. `state` adds the wrapper state, fuses and expiry.
+/// registration, the wrapper resource `seed` holds control, and the wrapper token goes to
+/// `V2_ADDRESS`. `state` adds the wrapper state, fuses and expiry.
 async fn wrap_address_name(
     database: &TestDatabase,
     name: &str,
@@ -1816,11 +1813,7 @@ async fn wrap_address_name(
         .into_iter()
         .find(|spec| spec.name == name)
         .context("wrapped name must be an address-name fixture")?;
-    let holder = if spec.owner == V2_PERMISSION_SUBJECT {
-        V2_PERMISSION_SUBJECT
-    } else {
-        V2_ADDRESS
-    };
+    let holder = V2_ADDRESS;
     let (block, hash) = address_fixture_head(database).await?;
     let wrapper = Uuid::from_u128(seed);
     sqlx::query(

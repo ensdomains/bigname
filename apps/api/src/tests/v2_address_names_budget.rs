@@ -491,8 +491,10 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
         );
     }
     // A single direct grant over the same page makes the mixed total 1,001.
-    let alpha = &specs[0];
-    let grant = address_owner_grant(alpha, json!({"kind":"resource"}), "resource_control", block, &hash)?;
+    let alpha = specs[0].resource_id;
+    let manifest = address_budget_resolver_manifest(&database).await?;
+    let direct = address_budget_subject(5_000);
+    let grant = address_budget_role_event(alpha, &direct, true, manifest, block, &hash);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
     rebuild_address_fixture(&database).await?;
     let over =
@@ -501,9 +503,7 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
     assert_eq!(over.status(), StatusCode::UNPROCESSABLE_ENTITY);
     // Pure operator overflow is independently rejected: the direct grant is revoked and a sixth
     // operator approved.
-    let mut revoke = address_owner_grant(alpha, json!({"kind":"resource"}), "resource_control", block, &hash)?;
-    revoke.after_state["revocation_source"] = revoke.after_state["grant_source"].take();
-    revoke.after_state["effective_powers"] = json!([]);
+    let revoke = address_budget_role_event(alpha, &direct, false, manifest, block, &hash);
     let sixth = address_operator_approval(&address_budget_subject(6), OPERATOR_OWNER, true, block, &hash);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[revoke, sixth]).await?;
     rebuild_address_fixture(&database).await?;

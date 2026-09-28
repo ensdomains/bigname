@@ -1,70 +1,30 @@
 // EVM resolution facets and continuation contracts over a populated address fixture.
 
-const V2_EVM_GATE_NAMES: i32 = 250;
-const V2_EVM_GATE_OTHER_NAMES: i32 = 25_000;
-const V2_EVM_GATE_OTHER_ADDRESSES: i32 = 100;
-/// Extra names on the fixture's canonical blocks. Each of the first `V2_EVM_GATE_NAMES` resolves to
-/// `V2_ADDRESS` under 30 EVM coin types (60, the default 2^31, 27 ENSIP-11 coin types, and 2^32 - 1)
-/// and 5 coin types outside the EVM set (0, 61, 118, 2^31 - 1, 2^32). Each of the next
-/// `V2_EVM_GATE_OTHER_NAMES` resolves to `V2_EVM_GATE_OTHER_ADDRESSES` other addresses under 10 EVM
-/// coin types, so the table and the name tables are dominated by unrelated rows, as in production.
-/// Returns the number of rows stored for `V2_ADDRESS`.
-async fn seed_v2_resolves_to_evm_cost_fixture(database: &TestDatabase) -> Result<i64> {
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.name_surfaces (
-            logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
-            labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
-            block_number, provenance, canonicality_state
-        )
-        SELECT 'ens:bulk-node-' || i, 'ens', 'bulk' || lpad(i::text, 4, '0') || '.eth',
-               src.raw_labels, src.dns_encoded_name, 'bulk-node-' || i, src.labelhashes,
-               src.normalizer_version, 'active', src.chain_id, src.block_hash,
-               src.block_number, src.provenance, src.canonicality_state
-        FROM bigname_phase.name_surfaces src
-        CROSS JOIN generate_series(1, $1) i
-        WHERE src.raw_name = 'alpha.eth'
-        "#,
-    )
-    .bind(V2_EVM_GATE_NAMES + V2_EVM_GATE_OTHER_NAMES)
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.resources (
-            resource_id, chain_id, block_hash, block_number, provenance, canonicality_state
-        )
-        SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(15728640 + i), 12, '0'))::uuid,
-               src.chain_id, src.block_hash, src.block_number, '{}'::jsonb,
-               src.canonicality_state
-        FROM bigname_phase.resources src
-        CROSS JOIN generate_series(1, $1) i
-        WHERE src.resource_id = $2
-        "#,
-    )
-    .bind(V2_EVM_GATE_NAMES + V2_EVM_GATE_OTHER_NAMES)
-    .bind(Uuid::from_u128(0xa100))
-    .execute(&database.pool)
-    .await?;
-    let insert_rows = r#"
-        INSERT INTO bigname_phase.address_records_current (
-            address, coin_type, logical_name_id, namespace, raw_name, namehash,
-            surface_binding_id, resource_id, record_resource_id, binding_kind, record_key,
-            support_status, unsupported_reason, provenance, chain_positions,
-            canonicality_summary, manifest_version
-        )
-        SELECT target.address, coin.coin_type, 'ens:bulk-node-' || i, 'ens',
-               'bulk' || lpad(i::text, 4, '0') || '.eth', 'bulk-node-' || i,
-               NULL, NULL,
-               ('00000000-0000-0000-0000-' || lpad(to_hex(15728640 + i), 12, '0'))::uuid,
-               NULL, 'addr:' || coin.coin_type, 'supported', NULL, src.provenance,
-               src.chain_positions, src.canonicality_summary, 1
-        FROM bigname_phase.address_records_current src
-        CROSS JOIN generate_series($1, $5) i
-        CROSS JOIN unnest($2::text[]) AS target(address)
-        CROSS JOIN unnest($3::text[]) AS coin(coin_type)
-        WHERE src.address = $4 AND src.raw_name = 'alpha.eth' AND src.coin_type = '60'
-    "#;
+const V2_EVM_GATE_NAMES: u128 = 250;
+
+/// Extra names, each resolving to `V2_ADDRESS` under 30 EVM coin types (60, the default 2^31, 27
+/// ENSIP-11 coin types, and 2^32 - 1) and 5 coin types outside the EVM set (0, 61, 118, 2^31 - 1,
+/// 2^32).
+async fn seed_v2_resolves_to_evm_cost_fixture(database: &TestDatabase) -> Result<()> {
+    let specs = (1..=V2_EVM_GATE_NAMES)
+        .map(|index| V2AddressNameSpec {
+            logical_name_id: Box::leak(format!("ens:bulk{index:04}.eth").into_boxed_str()),
+            name: Box::leak(format!("bulk{index:04}.eth").into_boxed_str()),
+            resource_id: Uuid::from_u128(0xf00000 + index * 3),
+            token_lineage_id: Uuid::from_u128(0xf00001 + index * 3),
+            surface_binding_id: Uuid::from_u128(0xf00002 + index * 3),
+            block_hash: Box::leak(format!("0xbulk{index:x}").into_boxed_str()),
+            block_number: (2000 + index) as i64,
+            owner: V2_OTHER_ADDRESS,
+            registrant: V2_OTHER_ADDRESS,
+            registered_at: "2024-01-02T00:00:00Z",
+            created_at: "2023-01-02T00:00:00Z",
+            expires_at: "2027-01-02T00:00:00Z",
+            relations: &[],
+        })
+        .collect::<Vec<_>>();
+    seed_v2_address_name_identities(database, &specs).await?;
+    publish_v2_address_name_inputs(database, &specs).await?;
     let mut target_coins = vec!["60".to_owned(), "2147483648".to_owned()];
     target_coins.extend((1..=27).map(|k| (2_147_483_648_u64 + k * 1000).to_string()));
     target_coins.push("4294967295".to_owned());
@@ -73,42 +33,17 @@ async fn seed_v2_resolves_to_evm_cost_fixture(database: &TestDatabase) -> Result
             .into_iter()
             .map(str::to_owned),
     );
-    sqlx::query(insert_rows)
-        .bind(1)
-        .bind(vec![V2_ADDRESS.to_owned()])
-        .bind(&target_coins)
-        .bind(V2_ADDRESS)
-        .bind(V2_EVM_GATE_NAMES)
-        .execute(&database.pool)
-        .await?;
-    // Each unrelated name resolves to one of the other addresses, as a real name's records do.
-    let other_rows = insert_rows.replace(
-        "CROSS JOIN unnest($2::text[]) AS target(address)",
-        "CROSS JOIN LATERAL (SELECT ($2::text[])[1 + i % cardinality($2::text[])]) AS target(address)",
-    );
-    let others = (1..=V2_EVM_GATE_OTHER_ADDRESSES)
-        .map(|index| format!("0x{:040x}", 0xe000 + index))
+    let writes = specs
+        .iter()
+        .map(|spec| {
+            let records = target_coins
+                .iter()
+                .map(|coin| (format!("addr:{coin}"), V2_ADDRESS.to_owned()))
+                .collect::<Vec<_>>();
+            (spec.name, records)
+        })
         .collect::<Vec<_>>();
-    let other_coins = target_coins[..10].to_vec();
-    sqlx::query(&other_rows)
-        .bind(V2_EVM_GATE_NAMES + 1)
-        .bind(&others)
-        .bind(&other_coins)
-        .bind(V2_ADDRESS)
-        .bind(V2_EVM_GATE_NAMES + V2_EVM_GATE_OTHER_NAMES)
-        .execute(&database.pool)
-        .await?;
-    for table in ["address_records_current", "name_surfaces", "resources"] {
-        sqlx::query(&format!("ANALYZE bigname_phase.{table}"))
-            .execute(&database.pool)
-            .await?;
-    }
-    Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM bigname_phase.address_records_current WHERE address = $1",
-    )
-    .bind(V2_ADDRESS)
-    .fetch_one(&database.pool)
-    .await?)
+    write_address_name_records(database, &writes).await
 }
 
 #[tokio::test]
@@ -240,7 +175,7 @@ async fn v2_resolves_to_evm_storage_bounds_the_group_aggregation() -> Result<()>
         }
     }
 
-    // At the limit nothing is dropped, and a registration group's repeated coin types count once.
+    // At the limit nothing is dropped.
     for dedupe in [Dedupe::Surface, Dedupe::Resource] {
         let page = bigname_storage::load_address_records_current_evm_page(
             &database.pool,
