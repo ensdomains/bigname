@@ -322,7 +322,7 @@ page_label() {
     /docs) echo docs ;;
     /docs/) echo docs-slash ;;
     /openapi.json) echo openapi ;;
-    # Any other path still gets a distinct, file-name-safe label. The callers
+    # Any other path still gets a file-name-safe label. The callers
     # check the substitution's status, since a fail inside $(...) would only
     # end the subshell.
     *) printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' ;;

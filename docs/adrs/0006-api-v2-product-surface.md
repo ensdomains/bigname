@@ -14,11 +14,11 @@ site)
 
 The landing page and the API reference are a separate static site
 ([`site/`](../../site/README.md)) outside the API binary; both describe this
-contract and neither is part of it. The API's `GET /` and `GET /docs` routes
-are removed, and the API answers them like any unknown route.
-`GET /openapi.json` is admitted at the public edge but not served yet; the API
-answers it like any unknown route until the OpenAPI document ships (TYR-18).
-Route details live in [`api-v1-routes.md`](../api-v1-routes.md).
+contract and neither is part of it. The API's `GET /`, `GET /docs` and
+`GET /docs/` routes are removed, and the API answers them like any unknown
+route. `GET /openapi.json` is admitted at the public edge but not served
+yet; the API answers it like any unknown route until the OpenAPI document
+ships (TYR-18). Route details live in [`api-v1-routes.md`](../api-v1-routes.md).
 
 ## 2026-09-23 Amendment: One Value Shape On The Records Route
 

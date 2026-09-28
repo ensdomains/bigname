@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Regression for scripts/tests/openapi-edge-smoke's failure path: when
+# `docker run` fails, the smoke must still try to remove its named container,
+# stop the fixture upstream, delete its temporary directory, and exit nonzero.
+# A stub docker on PATH stands in for Docker, so this needs no daemon; the
+# fixture upstream is real (python3).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+test_tmp="$(mktemp -d "${TMPDIR:-/tmp}/openapi-edge-smoke-cleanup.XXXXXX")"
+trap 'rm -rf "$test_tmp"' EXIT
+
+fail() {
+  printf '[openapi-edge-smoke-cleanup] ERROR: %s\n' "$*" >&2
+  sed -n '1,40p' "$test_tmp/out.log" >&2 2>/dev/null || true
+  exit 1
+}
+
+mkdir -p "$test_tmp/bin" "$test_tmp/smoke-tmp"
+cat > "$test_tmp/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_STUB_LOG"
+case "$1" in
+  image) exit 0 ;;          # the image is "available"
+  run) exit 125 ;;          # the start fails
+  rm) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$test_tmp/bin/docker"
+
+status=0
+DOCKER_STUB_LOG="$test_tmp/docker.log" TMPDIR="$test_tmp/smoke-tmp" PATH="$test_tmp/bin:$PATH" \
+  "$ROOT/scripts/tests/openapi-edge-smoke" > "$test_tmp/out.log" 2>&1 || status=$?
+
+[ "$status" -ne 0 ] || fail "the smoke exited 0 although docker run failed"
+grep -q 'could not start' "$test_tmp/out.log" || fail "the failed docker run did not go through fail"
+grep -Eq '^run --detach --rm --name bigname-openapi-edge-smoke-[0-9]+ ' "$test_tmp/docker.log" ||
+  fail "docker run was not attempted"
+container="$(sed -nE 's/^run --detach --rm --name (bigname-openapi-edge-smoke-[0-9]+) .*/\1/p' "$test_tmp/docker.log")"
+grep -qx "rm --force ${container}" "$test_tmp/docker.log" || fail "cleanup did not try to remove ${container}"
+if pgrep -f "$test_tmp/smoke-tmp/openapi-edge-smoke" >/dev/null 2>&1; then
+  fail "the fixture upstream is still running"
+fi
+leftover="$(find "$test_tmp/smoke-tmp" -mindepth 1 -print -quit)"
+[ -z "$leftover" ] || fail "the smoke left ${leftover} behind"
+
+printf '[openapi-edge-smoke-cleanup] ok: exit %s, removal of %s attempted, fixture stopped, temp dir removed\n' "$status" "$container"

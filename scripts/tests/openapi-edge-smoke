@@ -45,6 +45,9 @@ log() {
 caddy_image="${BIGNAME_SMOKE_CADDY_IMAGE:-caddy:2-alpine}"
 caddy_container="bigname-openapi-edge-smoke-$$"
 caddy_started=0
+# Set before docker run is tried, so cleanup removes the named container even
+# when the run fails or is interrupted partway.
+caddy_attempted=0
 fixture_pid=""
 work="$(mktemp -d "${TMPDIR:-/tmp}/openapi-edge-smoke.XXXXXX")"
 
@@ -57,7 +60,7 @@ fail() {
 }
 
 cleanup() {
-  if [ "$caddy_started" -eq 1 ]; then
+  if [ "$caddy_attempted" -eq 1 ]; then
     docker rm --force "$caddy_container" >/dev/null 2>&1 || true
   fi
   if [ -n "$fixture_pid" ]; then
@@ -67,6 +70,7 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 for command in docker python3 curl grep sed tr; do
   command -v "$command" >/dev/null 2>&1 || fail "missing required command: $command"
@@ -108,7 +112,9 @@ else
 fi
 
 log "starting ${caddy_image} on ${edge_url} in front of the fixture on port ${fixture_port}"
-docker run --detach --rm --name "$caddy_container" "${caddy_args[@]}" "$caddy_image" >/dev/null
+caddy_attempted=1
+docker run --detach --rm --name "$caddy_container" "${caddy_args[@]}" "$caddy_image" >/dev/null ||
+  fail "could not start ${caddy_image} as ${caddy_container}"
 caddy_started=1
 
 last_status=""

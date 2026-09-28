@@ -179,6 +179,10 @@ jobs:
       - name: Site behaviour tests
         run: node --test scripts/tests/site.test.mjs
 
+      # The OpenAPI edge regression's failure path, with a stub docker.
+      - name: OpenAPI edge regression cleanup
+        run: scripts/tests/openapi-edge-smoke-cleanup
+
       - name: Upload the site
         uses: actions/upload-artifact@v7
         with:

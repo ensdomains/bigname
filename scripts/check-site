@@ -26,7 +26,8 @@ for file in "${pages[@]}" site/network.js site/README.md "$not_found"; do
 done
 [ "$failures" -eq 0 ] || exit 1
 
-# The legacy host is gone; the example ENS name taytems.eth is fine.
+# The legacy host is gone. This matches the retired host only; ENS names in
+# the example responses are fine.
 if grep -rn 'taytems\.xyz' site; then
   fail "site/ names the retired taytems.xyz host"
 fi
