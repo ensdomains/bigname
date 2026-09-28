@@ -171,6 +171,7 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
         .map(|(block, _)| BTreeMap::from([(chain_id.to_owned(), *block)]));
     let mut attribution = load_bounded_record_attribution(pool, &resources, bound.as_ref()).await?;
     for resource_id in resources {
+        let started = std::time::Instant::now();
         let family = load_family_record_inventory_detail(
             pool,
             chain_id,
@@ -178,6 +179,8 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
             FamilyAttribution::Given(attribution.remove(&resource_id).unwrap_or_default()),
         )
         .await?;
+        let family_us = started.elapsed().as_micros();
+        let started = std::time::Instant::now();
         // Today's readable row at the family row's boundary, else its first readable row.
         let boundaries: Vec<(String, Value)> = sqlx::query_as(
             "SELECT record_version_boundary_key, record_version_boundary
@@ -200,6 +203,10 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
                 break;
             }
         }
+        let timing = report.read_timings.entry("record_inventory").or_default();
+        timing.0 += started.elapsed().as_micros();
+        timing.1 += family_us;
+        timing.2 += 1;
         report.inventory_rows += usize::from(today.is_some() || family.is_some());
         let mut differences =
             compare_record_inventory(today.as_ref(), family.as_ref().map(|family| &family.row));

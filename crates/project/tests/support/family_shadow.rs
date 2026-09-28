@@ -241,6 +241,13 @@ async fn compare_family_reads_on(
         report.address_index_misses.len(),
         report.classification_fallbacks.len(),
     );
+    for (route, (served_us, family_us, reads)) in &report.read_timings {
+        eprintln!(
+            "FAMILY_SHADOW_TIMING target={} route={route} reads={reads} served_us={served_us} \
+             family_us={family_us}",
+            target.number
+        );
+    }
     Ok(report)
 }
 
