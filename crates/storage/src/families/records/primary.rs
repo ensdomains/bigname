@@ -127,7 +127,7 @@ async fn hydrate(
 ) -> Result<()> {
     let row = sqlx::query(
         "/* storage:families.records.primary_hydration */
-         SELECT tuple.hydrated_name, tuple.attempt_block, tuple.attempt_hash
+         SELECT tuple.hydrated_name, tuple.attempt_block, tuple.attempt_hash, tuple.baseline
          FROM bigname_phase.project_reverse_tuple tuple
          WHERE tuple.address = $1 AND tuple.namespace = $2 AND tuple.coin_type = $3
            AND tuple.chain_id = $4 AND tuple.hydrated_name IS NOT NULL
@@ -169,10 +169,12 @@ async fn hydrate(
     let name: String = row.try_get("hydrated_name")?;
     let block: i64 = row.try_get("attempt_block")?;
     let hash: String = row.try_get("attempt_hash")?;
+    let prepared_baseline: Value = row.try_get("baseline")?;
     let baseline = json!({
         "claim_status": claim.row.claim_status.as_str(),
         "raw_claim_name": claim.row.raw_claim_name,
         "claim_name_is_normalized": claim.claim_name_is_normalized,
+        "unsupported_reason": prepared_baseline.get("unsupported_reason").cloned().unwrap_or(Value::Null),
     });
     // The served classification of a hydrated name (crates/project/src/hydration/reverse.rs,
     // `classify_result`).
@@ -196,9 +198,12 @@ async fn hydrate(
         provenance.insert(
             HYDRATION.into(),
             json!({
+                "source": "multicall_at_canonical_head",
                 "chain_id": chain_id,
                 "block_number": block,
                 "block_hash": hash,
+                "resolver_address": prepared_baseline.get("resolver_address"),
+                "reverse_node": prepared_baseline.get("reverse_node"),
                 "baseline": baseline,
             }),
         );
