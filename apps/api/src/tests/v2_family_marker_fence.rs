@@ -2,6 +2,9 @@
 // Expiry filters use its block timestamp on both first pages and continuations.
 
 /// Advance the generation during a paused read, modeling the marker change of a family commit.
+/// An intentional direct write: the fixtures publish through the family publisher, but a
+/// commit landing inside a paused read can only be placed deterministically by bumping the
+/// marker here.
 async fn commit_family_block(pool: &PgPool) -> Result<()> {
     sqlx::query("UPDATE bigname_phase.project_family_marker SET sequence = sequence + 1")
         .execute(pool)

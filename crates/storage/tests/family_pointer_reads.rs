@@ -40,6 +40,10 @@ async fn install(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Writes a `project_resolver_link` row directly. This is an intentional exception to
+/// publishing through the family publisher: these tests pin the storage reader's selection
+/// rule over chosen link rows (exact, default, clears), independent of how Project writes them.
+/// The publisher's own link output is covered by the project crate's family tests.
 async fn link(pool: &PgPool, node: &str, record_id: &str, block: i64) -> Result<()> {
     sqlx::query(
         "INSERT INTO bigname_phase.project_resolver_link (chain_id, resolver_address, node,

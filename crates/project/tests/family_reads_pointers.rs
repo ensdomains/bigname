@@ -104,6 +104,9 @@ async fn resolver_classification_admission_is_bounded_by_the_family_marker() -> 
             None,
         ),
     ] {
+        // Intentional exception to publishing through the family publisher: the rows are
+        // written directly so each classification sits at a chosen position against manifest
+        // versions before and after the marker, which is the reader bound under test.
         sqlx::query(
             "INSERT INTO project_resolver_classification (chain_id, resolver_address,
                  block_number, transaction_index, log_index, event_identity, classification,
