@@ -349,3 +349,116 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
     );
     fixture.cleanup().await
 }
+
+/// The production selection query, run as the Follow path runs it with no block changes.
+async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
+    let rows: Vec<Value> = sqlx::query_scalar(include_str!("../src/families/hydrate/text.sql"))
+        .bind(CHAIN)
+        .bind(block)
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(vec![RESOLVER])
+        .bind(250_i64)
+        .fetch_all(&fixture.pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| row["selector_key"].as_str().unwrap().to_owned())
+        .collect())
+}
+
+/// Copies the hydrated `url` row under `count` new keys `{prefix}{index:05}`, overriding columns.
+async fn copies(fixture: &Fixture, prefix: &str, count: i32, columns: Value) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_node_record_value
+        SELECT (jsonb_populate_record(v, to_jsonb(v) || $3 || jsonb_build_object(
+            'record_key', 'text:' || $1 || lpad(i::text, 5, '0'),
+            'selector_key', $1 || lpad(i::text, 5, '0')))).*
+        FROM project_node_record_value v, generate_series(1, $2) i
+        WHERE v.record_key = 'text:url'",
+    )
+    .bind(prefix)
+    .bind(count)
+    .bind(columns)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors() -> Result<()> {
+    let key = |prefix: &str, index: usize| format!("{prefix}{index:05}");
+    let keys = |prefix: &str, from: usize, to: usize| {
+        (from..=to)
+            .map(|index| key(prefix, index))
+            .collect::<Vec<_>>()
+    };
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    rpc.answer(1, Some("current"));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let hydrated = value_row(&fixture).await?;
+    assert_eq!(hydrated["hydrated_value"]["status"], "success");
+    // Thousands of selectors already current at block 1, which no later block may transfer.
+    copies(&fixture, "c", 3000, json!({})).await?;
+    // Never-read selectors, as a rebuild leaves them.
+    copies(
+        &fixture,
+        "n",
+        300,
+        json!({"hydrated_value": null, "hydrated_at_block": null}),
+    )
+    .await?;
+    // Failed reads at block 1. They sort first by key, yet wait behind every never-read selector.
+    copies(
+        &fixture,
+        "a",
+        5,
+        json!({"hydrated_value": null, "hydrated_at_block": 1}),
+    )
+    .await?;
+    // Reads made on a block 1 that a reorg orphaned: no longer readable, so stale again.
+    let fork = format!("0x{}", "f".repeat(64));
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, 1, to_timestamp(1800000012), 'orphaned')",
+    )
+    .bind(CHAIN)
+    .bind(&fork)
+    .bind(hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    let mut orphaned = hydrated["hydrated_value"].clone();
+    orphaned["block_hash"] = json!(fork);
+    copies(&fixture, "r", 5, json!({"hydrated_value": orphaned})).await?;
+
+    // The query itself returns only the block's share: never-read selectors, in key order.
+    assert_eq!(selected(&fixture, 2).await?, keys("n", 1, 250));
+    rpc.answer(2, Some("fresh"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(keys_at(&attempts(&fixture).await?, 2), keys("n", 1, 250));
+    // Then the rest of the never-read selectors, then the older attempts, failed or orphaned.
+    let mut expected = keys("a", 1, 5);
+    expected.extend(keys("n", 251, 300));
+    expected.extend(keys("r", 1, 5));
+    let mut share = selected(&fixture, 3).await?;
+    share.sort();
+    assert_eq!(share, expected);
+    rpc.answer(3, Some("fresh"));
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
+    // Nothing is left, and the current selectors were never read again.
+    assert!(selected(&fixture, 4).await?.is_empty());
+    run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(per_call, vec![1, 250, 60]);
+    let rows = attempts(&fixture).await?;
+    assert_eq!(rows.len(), 1 + 3000 + 300 + 5 + 5);
+    assert!(
+        rows.iter()
+            .all(|(_, _, status)| status.as_deref() == Some("success"))
+    );
+    fixture.cleanup().await
+}

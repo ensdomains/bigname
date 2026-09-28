@@ -5,6 +5,11 @@
 //! changed first, then the backlog a rebuild leaves (every overlay null) in a stable rolling order,
 //! never-read selectors before the oldest attempts. A failed read keeps the null overlay but
 //! stamps `hydrated_at_block` with the attempt, so it waits behind the rest of the backlog.
+//!
+//! `text.sql` decides which selectors need work and cuts the block's share, so a block never
+//! transfers the selectors that are already current. Every row it returns is work: a read stamps
+//! it current or with a newer attempt, and a cleared overlay leaves the work set, so the backlog
+//! behind the cut always moves forward.
 use std::collections::BTreeMap;
 
 use bigname_lookup::{
@@ -15,7 +20,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::super::{
-    input::{BlockHeader, Position},
+    input::BlockHeader,
     reduce::{Context, key_of, set},
     store::{Row, RowSet, key_text},
     tables,
@@ -31,11 +36,6 @@ pub(super) struct Candidate {
     key: Row,
     selector: Value,
     request: Option<EnsTextRecordMulticallRequest>,
-    /// Whether this block changed the selector's value, partition or admission.
-    delta: bool,
-    /// The block of the last read, successful or not; null for a selector never read since the
-    /// overlay was last cleared.
-    attempted: Option<i64>,
 }
 
 pub(super) struct Prepared {
@@ -74,61 +74,38 @@ pub(super) async fn select(
         .bind(changes(rows, &tables::NODE_RECORD_PARTITION))
         .bind(changes(rows, &tables::RESOLVER_CLASSIFICATION))
         .bind(TEXT_RESOLVERS)
+        .bind(ROLLING_LIMIT as i64)
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to select family text hydration", error))?;
-    Ok(rolling(values.into_iter().filter_map(candidate).collect()))
+    values.into_iter().map(candidate).collect()
 }
 
-/// The block's share of the work: the block's own changes first, then never-read selectors, then
-/// the oldest attempts, each in key order, cut at [`ROLLING_LIMIT`]. Preparation and publication
-/// select from the same rows, so both cut the same list.
-fn rolling(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-    candidates.sort_by_key(|candidate| {
-        (
-            !candidate.delta,
-            candidate.attempted.is_some(),
-            candidate.attempted,
-        )
-    });
-    candidates.truncate(ROLLING_LIMIT);
-    candidates
-}
-
-fn candidate(value: Value) -> Option<Candidate> {
-    let row = value.as_object()?;
-    let position = Position::of_row(row)?;
-    let version = value.get("_version").cloned().unwrap_or(Value::Null);
-    let admission = &value["_admission"];
-    let resolver = value["resolver_address"].as_str()?;
-    let selector_key = value["selector_key"].as_str().unwrap_or("");
-    let namehash = value["_namehash"].as_str();
-    let version_position = version.as_object().and_then(Position::of_row);
-    let active = value["status"] == "unsupported"
-        && value["record_key"] == format!("text:{selector_key}")
-        && !selector_key.trim().is_empty()
-        && TEXT_RESOLVERS.contains(&resolver)
-        && admission["support_status"] == "supported"
-        && namehash.is_some()
-        && version_position.is_none_or(|boundary| position > boundary);
-    let selector = json!({
-        "source_position": position.to_json(), "version_position": version,
-        "admission": admission, "namehash": namehash,
-    });
-    let overlay = &value["hydrated_value"];
-    let current = value["_readable"] == true
-        && [
-            "source_position",
-            "version_position",
-            "admission",
-            "namehash",
-        ]
-        .iter()
-        .all(|field| overlay[*field] == selector[*field]);
-    if (active && current) || (!active && overlay.is_null()) {
-        return None;
-    }
-    Some(Candidate {
+/// One selected row. The query already dropped current and cleared selectors and cut the block's
+/// share: the block's own changes first, then never-read selectors, then the oldest attempts, each
+/// in key order. Preparation and publication run the same query on the same rows, so both cut the
+/// same list.
+fn candidate(value: Value) -> Result<Candidate> {
+    let selector = value["_selector"].clone();
+    let request = if value["_active"] == true {
+        let (Some(resolver), Some(namehash), Some(text_key)) = (
+            value["resolver_address"].as_str(),
+            selector["namehash"].as_str(),
+            value["selector_key"].as_str(),
+        ) else {
+            return Err(ProjectError::data_integrity(
+                "family text hydration selected an eligible selector without its read inputs",
+            ));
+        };
+        Some(EnsTextRecordMulticallRequest {
+            resolver_address: resolver.to_owned(),
+            namehash: namehash.to_owned(),
+            text_key: text_key.to_owned(),
+        })
+    } else {
+        None
+    };
+    Ok(Candidate {
         key: key_of(
             &tables::NODE_RECORD_VALUE,
             tables::NODE_RECORD_VALUE
@@ -137,13 +114,7 @@ fn candidate(value: Value) -> Option<Candidate> {
                 .map(|column| value[*column].clone()),
         ),
         selector,
-        request: active.then(|| EnsTextRecordMulticallRequest {
-            resolver_address: resolver.to_owned(),
-            namehash: namehash.expect("active namehash").to_owned(),
-            text_key: selector_key.to_owned(),
-        }),
-        delta: value["_delta"] == true,
-        attempted: value["hydrated_at_block"].as_i64(),
+        request,
     })
 }
 
@@ -266,5 +237,19 @@ impl Prepared {
             rows.put(&tables::NODE_RECORD_VALUE, row)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The query's blank-key test trims exactly the characters `str::trim` trims.
+    #[test]
+    fn the_query_trims_rust_white_space() {
+        let listed: String = (0..=u32::from(char::MAX))
+            .filter_map(char::from_u32)
+            .filter(|character| character.is_whitespace())
+            .map(|character| format!("\\{:04X}", u32::from(character)))
+            .collect();
+        assert!(include_str!("text.sql").contains(&format!("U&'{listed}'")));
     }
 }
