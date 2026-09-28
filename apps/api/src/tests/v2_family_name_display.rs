@@ -163,3 +163,34 @@ async fn v2_address_name_display_uses_shared_emoji_normalization() -> Result<()>
     }
     database.cleanup().await
 }
+
+/// The composed name listings, /v1/search and the expiring /v1/names, show each name's ENSIP-15
+/// display form beside its normalized name, and page in normalized-name order.
+#[tokio::test]
+async fn v2_name_listing_display_uses_shared_emoji_normalization() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_emoji_names(&database).await?;
+    for uri in [
+        "/v1/search?q=eth&match=contains&namespace=ens&page_size=1",
+        "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&page_size=1",
+        "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&order=desc&page_size=1",
+    ] {
+        let pages = read_family_pages(&database, uri).await?;
+        assert_eq!(pages.len(), 2, "{uri}: {pages:#?}");
+        let mut names = Vec::new();
+        for page in &pages {
+            let row = &page["data"][0];
+            let normalized = bigname_domain::normalization::normalize_name(
+                row["name"].as_str().context("listed name")?,
+            )?;
+            assert_eq!(row["name"], normalized.normalized_name, "{uri}");
+            assert_eq!(row["display_name"], normalized.canonical_display_name, "{uri}");
+            assert_ne!(row["name"], row["display_name"], "{uri}");
+            names.push(normalized.normalized_name);
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "{uri}: the pages follow the normalized names");
+    }
+    database.cleanup().await
+}
