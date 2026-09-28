@@ -8,11 +8,11 @@ use serde_json::{Value, json};
 use super::{
     NameFacts,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    membership::{members, merged_for, without_expired},
+    membership::merged_for,
     served::{Selected, Tagged, latest},
 };
 use crate::families::control::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::{BindingCandidate, LifecycleEvent, Mark},
 };
 
@@ -48,9 +48,8 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 /// The expiry lateral: the latest admitted grant, or renewal, release or
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
-pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> Option<i64> {
+pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<i64> {
     latest(
-        order,
         in_scope.iter().filter(|tagged| {
             let event = tagged.event;
             let wrapper_expiry = event.event_kind == "ExpiryChanged"
@@ -77,7 +76,6 @@ pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> 
 /// custody transfer into the wrapper and without a registrar release of a lease a wrapper of the
 /// name stands for; a release names its before-state registrant.
 pub(super) fn registrant(
-    order: &EventOrder,
     authority: &Authority<'_>,
     tagged: &[Tagged<'_>],
     in_scope: &[&Tagged<'_>],
@@ -167,7 +165,7 @@ pub(super) fn registrant(
                 && !released_under_wrapper(tagged.event)
                 && value(tagged.event).is_some()
         });
-    latest(order, candidates, |tagged| &tagged.event.position)
+    latest(candidates, |tagged| &tagged.event.position)
         .and_then(|tagged| value(tagged.event).map(|value| (value, tagged.event.position.clone())))
 }
 
@@ -257,7 +255,7 @@ pub(super) fn authority_context(
             json!(candidate.authority_key),
         ));
     }
-    match latest(&facts.order, found, |(position, _, _)| position) {
+    match latest(found, |(position, _, _)| position) {
         Some((position, kind, key)) => AuthorityContext {
             kind,
             key,
@@ -346,7 +344,6 @@ pub(super) fn latest_event_kind(
     }
     let found = if !is_v2 {
         latest(
-            &facts.order,
             in_scope
                 .iter()
                 .filter(|tagged| FIVE_KINDS.contains(&tagged.event.event_kind.as_str())),
@@ -355,35 +352,21 @@ pub(super) fn latest_event_kind(
         .map(|tagged| tagged.event.event_kind.clone())
     } else if let Some(key) = selected_key {
         let name = &facts.input.logical_name_id;
-        if facts.order != EventOrder::Canonical {
-            // A generated order reads the key's members themselves in block and generated-id
-            // order, not the maxima folded in its membership order.
-            let live = without_expired(
-                facts,
-                members(facts, key, name)
-                    .into_iter()
-                    .filter(|event| FIVE_KINDS.contains(&event.event_kind.as_str())),
-            )?;
-            latest(&facts.order, live, |event| &event.position)
-                .map(|event| event.event_kind.clone())
-        } else {
-            let view = merged_for(facts, key, name)?;
-            let marks: [(&Option<Mark>, &str); 5] = [
-                (&view.last_grant, "RegistrationGranted"),
-                (&view.last_renewal, "RegistrationRenewed"),
-                (&view.last_release_any, "RegistrationReleased"),
-                (&view.last_reservation, "RegistrationReserved"),
-                (&view.last_expiry_changed, "ExpiryChanged"),
-            ];
-            latest(
-                &facts.order,
-                marks
-                    .into_iter()
-                    .filter_map(|(mark, kind)| mark.as_ref().map(|mark| (mark, kind))),
-                |(mark, _)| &mark.position,
-            )
-            .map(|(_, kind)| kind.to_owned())
-        }
+        let view = merged_for(facts, key, name)?;
+        let marks: [(&Option<Mark>, &str); 5] = [
+            (&view.last_grant, "RegistrationGranted"),
+            (&view.last_renewal, "RegistrationRenewed"),
+            (&view.last_release_any, "RegistrationReleased"),
+            (&view.last_reservation, "RegistrationReserved"),
+            (&view.last_expiry_changed, "ExpiryChanged"),
+        ];
+        latest(
+            marks
+                .into_iter()
+                .filter_map(|(mark, kind)| mark.as_ref().map(|mark| (mark, kind))),
+            |(mark, _)| &mark.position,
+        )
+        .map(|(_, kind)| kind.to_owned())
     } else {
         None
     };
@@ -392,10 +375,9 @@ pub(super) fn latest_event_kind(
 
 /// The registration's registrar lease: the lease the latest NameWrapper SurfaceBound on the
 /// selected event's resource recorded, else that resource. The candidates compare by their
-/// SurfaceBound positions in the read's order: the canonical order in a read, else block and
-/// generated id. A candidate without a SurfaceBound position stands at its own place with the
-/// identity `binding:<id>`, as the family writer places it (families/identity.rs
-/// `binding_position`).
+/// SurfaceBound positions in the canonical order. A candidate without a SurfaceBound position
+/// stands at its own place with the identity `binding:<id>`, as the family writer places it
+/// (families/identity.rs `binding_position`).
 pub(super) fn registrar_resource<'a>(
     facts: &'a NameFacts,
     resource: Option<&'a str>,
@@ -421,7 +403,7 @@ pub(super) fn registrar_resource<'a>(
                 });
             (position, candidate)
         })
-        .max_by(|(left, _), (right, _)| facts.order.membership(left, right))
+        .max_by(|(left, _), (right, _)| left.cmp(right))
         .and_then(|(_, candidate)| candidate.wrapped_registrar_resource_id.as_deref());
     Some(wrapped.unwrap_or(resource))
 }

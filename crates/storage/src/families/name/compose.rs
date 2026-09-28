@@ -120,7 +120,7 @@ fn lapsed_authority(parts: &Parts<'_>) -> (Value, Value) {
     }
     candidates
         .into_iter()
-        .max_by(|left, right| parts.facts.order.lateral(&left.0, &right.0))
+        .max_by(|left, right| left.0.cmp(&right.0))
         .map_or((Value::Null, Value::Null), |(_, kind, key)| {
             (json!(kind), json!(key))
         })

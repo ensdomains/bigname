@@ -9,7 +9,6 @@ use sqlx::PgConnection;
 use super::{ResourceInput, resource_restrictions, rows_for, wrapper_unwrapped};
 use crate::families::control::{
     lifecycle::{Clock, view::registration_lapsed},
-    position::EventOrder,
     rows::{Maxima, text},
     wrapper::load_wrapper_rows,
 };
@@ -40,11 +39,7 @@ pub(super) async fn load(
     .iter()
     .filter_map(|row| Some((text(row, "resource_id")?, Maxima::from_row(row))))
     .collect();
-    let active = |resource: &str| {
-        !states
-            .get(resource)
-            .is_some_and(|state| registration_lapsed(state, &EventOrder::Canonical))
-    };
+    let active = |resource: &str| !states.get(resource).is_some_and(registration_lapsed);
     // Collapse the stored holder map in SQL: only the distinct powers are needed by a summary.
     let admins: BTreeMap<String, Vec<String>> = sqlx::query_as(
         "/* storage:families.control.permissions.summary_admin_powers */

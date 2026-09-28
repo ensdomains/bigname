@@ -30,7 +30,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde_json::{Map, Value};
 
 use super::{
-    position::{EventOrder, Position, bound_of},
+    position::{Position, bound_of},
     registry::RegistryNode,
     rows::{self, BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
@@ -159,9 +159,6 @@ pub struct NameFacts {
     pub authority_starts: Value,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
-    /// The order the read takes its "latest" in: canonical in every read; the generated-id order
-    /// is built only by the order tests.
-    pub order: EventOrder,
 }
 
 /// The shadow of one name's registration and control blocks.

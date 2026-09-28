@@ -19,7 +19,7 @@ use super::{
     tombstone::deciding_fact,
 };
 use crate::families::control::{
-    position::{EventOrder, Position},
+    position::Position,
     rows::LifecycleEvent,
     wrapper::{effective_wrapper, servable_expiry},
 };
@@ -59,16 +59,14 @@ impl Selected<'_> {
     }
 }
 
-/// The latest item under the laterals' order: the canonical order in a read, else block and
-/// generated id under `EventOrder::Generated`.
+/// The latest item in the canonical order.
 pub(super) fn latest<T>(
-    order: &EventOrder,
     items: impl IntoIterator<Item = T>,
     position: impl for<'b> Fn(&'b T) -> &'b Position,
 ) -> Option<T> {
     items
         .into_iter()
-        .max_by(|left, right| order.lateral(position(left), position(right)))
+        .max_by(|left, right| position(left).cmp(position(right)))
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -151,7 +149,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         select_v2(facts, &tagged, binding_resource, &mut trace)?
     } else {
         let event = latest(
-            &facts.order,
             tagged.iter().filter(|tagged| {
                 tagged.staged == StagedName::Ours
                     && tagged.admitted
@@ -254,7 +251,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         .collect();
 
     let grant = latest(
-        &facts.order,
         in_scope
             .iter()
             .filter(|tagged| tagged.event.event_kind == "RegistrationGranted"),
@@ -274,7 +270,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         .and_then(servable_expiry);
 
     let selected_kind = selected.kind();
-    let expiry_seconds = expiry_candidate(&facts.order, &in_scope);
+    let expiry_seconds = expiry_candidate(&in_scope);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     let selected_expiry = || {
         selected
@@ -310,7 +306,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     };
 
     let registrant = registrant(
-        &facts.order,
         &authority,
         &tagged,
         &in_scope,
@@ -413,7 +408,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             selected.event.and_then(|event| event.status.clone())
         } else {
             latest(
-                &facts.order,
                 in_scope
                     .iter()
                     .filter(|tagged| tagged.event.status.is_some()),
