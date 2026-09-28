@@ -919,7 +919,14 @@ type and `coin_type=evm`) from the record-id index alone, the record counts of
 `include=counts`, and the indexed primary-name claim of
 `GET /v1/addresses/{address}/primary-name`. Batch lookup identity records,
 address relations, inventory readback, and verified lookup inputs use those same
-family publications. The following routes keep their own
+family publications. Reverse address pages and their exact counts in `POST /v1/lookup`
+also read the address index and primary claims from the families. Candidate keys
+are sought in bounded batches before composing names and applying relation masks.
+Primary claims, page membership, counts, and returned inventories share one
+repeatable-read snapshot over the route's selected authority chains. Exact counts
+visit all matching candidates; page-only relation scans stop at the page limit
+and overflow row. Primary-first ordering, role ranking, filters, and cursors are
+unchanged. The following routes keep their own
 pages on the served tables until a later step 7b slice moves them, and take
 only the name rows they join from composed rows:
 `GET /v1/names/{name}/subnames` (the parent and each child's registration),

@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use std::collections::BTreeMap;
 
 pub(super) async fn load(
@@ -16,8 +16,18 @@ pub(super) async fn load(
     include_inventory: bool,
 ) -> Result<Vec<IdentityNameRecordRow>> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
-    let names = load_composed(&mut snapshot, ids, CoverageShape::Plain).await?;
-    let mut relations = name_relations_on(&mut snapshot, &names).await?;
+    let out = load_on(&mut snapshot, ids, include_inventory).await?;
+    snapshot.commit().await?;
+    Ok(out)
+}
+
+pub(crate) async fn load_on(
+    conn: &mut PgConnection,
+    ids: &[String],
+    include_inventory: bool,
+) -> Result<Vec<IdentityNameRecordRow>> {
+    let names = load_composed(&mut *conn, ids, CoverageShape::Plain).await?;
+    let mut relations = name_relations_on(&mut *conn, &names).await?;
     let mut inventories = BTreeMap::new();
     let mut out = Vec::new();
     for (id, row) in names {
@@ -34,7 +44,7 @@ pub(super) async fn load(
         {
             if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(resource) {
                 let inventory = load_family_record_inventory_detail_on(
-                    &mut snapshot,
+                    &mut *conn,
                     chain,
                     resource,
                     FamilyAttribution::Load,
@@ -92,6 +102,5 @@ pub(super) async fn load(
             relations: relations.remove(&id).unwrap_or_default(),
         });
     }
-    snapshot.commit().await?;
     Ok(out)
 }

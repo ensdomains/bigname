@@ -6,11 +6,9 @@
 //! (primary_name/reads.rs): a hydration whose attempt block is no longer on canonical lineage is
 //! not read, and the pre-hydration claim is served.
 //!
-//! The hydration columns hold the hydrated name only. A hydration that found no name and one that
-//! failed both leave it null, and the served read tells them apart (a found-nothing hydration
-//! serves `not_found`, a failed one the baseline), so a null hydrated name serves the baseline.
-//! Nothing writes the columns yet (TYR-36 step 7a-2), so today every claim is the pre-hydration
-//! claim.
+//! Hydration is applied only while its prepared reverse node and resolver still match the
+//! current claim and its attempt block remains canonical. Replay can preserve hydration
+//! columns while changing a pointer, so attempt lineage alone does not establish that match.
 //!
 //! The served tuple has no chain; the family tuple has one. A namespace's tuples live on one
 //! chain, which the read takes from the family rows.
@@ -47,11 +45,23 @@ pub async fn load_family_primary_name_snapshots(
     address: &str,
     keys: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), PrimaryNameCurrentSnapshot>> {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let out = load_family_primary_name_snapshots_on(&mut snapshot, address, keys, None).await?;
+    snapshot.commit().await?;
+    Ok(out)
+}
+
+/// The same tuple read on a caller's family snapshot, shared by reverse pagination.
+pub(crate) async fn load_family_primary_name_snapshots_on(
+    conn: &mut PgConnection,
+    address: &str,
+    keys: &[(String, String)],
+    selected_chains: Option<&[String]>,
+) -> Result<BTreeMap<(String, String), PrimaryNameCurrentSnapshot>> {
     let mut out = BTreeMap::new();
     if keys.is_empty() {
         return Ok(out);
     }
-    let mut snapshot = crate::families::read_snapshot(pool).await?;
     let address = address.to_ascii_lowercase();
     let mut publications: BTreeMap<String, FamilyPublication> = BTreeMap::new();
     let mut checked_all = false;
@@ -61,39 +71,40 @@ pub async fn load_family_primary_name_snapshots(
              SELECT chain_id FROM bigname_phase.project_reverse_tuple
              WHERE address = $1 AND namespace = $2 AND coin_type = $3
                AND reverse_position IS NOT NULL
+               AND ($4::text[] IS NULL OR chain_id = ANY($4))
              ORDER BY chain_id",
         )
         .bind(&address)
         .bind(namespace)
         .bind(coin_type)
-        .fetch_all(&mut *snapshot)
+        .bind(selected_chains)
+        .fetch_all(&mut *conn)
         .await
         .context("failed to find the chain of a reverse tuple")?;
         let Some(chain_id) = chains.first() else {
             // No tuple: an answer only when every chain's families are published.
-            if !checked_all {
-                all_servable_publications(&mut snapshot).await?;
+            if selected_chains.is_none() && !checked_all {
+                all_servable_publications(&mut *conn).await?;
                 checked_all = true;
             }
             continue;
         };
         if !publications.contains_key(chain_id) {
-            let publication = servable_publication(&mut snapshot, chain_id).await?;
+            let publication = servable_publication(&mut *conn, chain_id).await?;
             publications.insert(chain_id.clone(), publication);
         }
         let publication = &publications[chain_id];
         let Some(claim) =
-            load_family_reverse_claim_on(&mut snapshot, chain_id, &address, namespace, coin_type)
+            load_family_reverse_claim_on(&mut *conn, chain_id, &address, namespace, coin_type)
                 .await?
         else {
             continue;
         };
         let mut claim = claim.snapshot;
         stamp(&mut claim, publication);
-        hydrate(&mut snapshot, chain_id, &mut claim).await?;
+        hydrate(&mut *conn, chain_id, &mut claim).await?;
         out.insert((namespace.clone(), coin_type.clone()), claim);
     }
-    snapshot.commit().await?;
     Ok(out)
 }
 
@@ -120,6 +131,9 @@ async fn hydrate(
          FROM bigname_phase.project_reverse_tuple tuple
          WHERE tuple.address = $1 AND tuple.namespace = $2 AND tuple.coin_type = $3
            AND tuple.chain_id = $4 AND tuple.hydrated_name IS NOT NULL
+           AND tuple.baseline IS NOT NULL
+           AND (tuple.baseline ->> 'reverse_node') IS NOT DISTINCT FROM $5::text
+           AND (tuple.baseline ->> 'resolver_address') IS NOT DISTINCT FROM $6::text
            AND EXISTS (
                SELECT 1 FROM bigname_phase.chain_lineage lineage
                WHERE lineage.chain_id = tuple.chain_id
@@ -132,6 +146,20 @@ async fn hydrate(
     .bind(&claim.row.namespace)
     .bind(&claim.row.coin_type)
     .bind(chain_id)
+    .bind(
+        claim
+            .row
+            .claim_provenance
+            .get("reverse_node")
+            .and_then(Value::as_str),
+    )
+    .bind(
+        claim
+            .row
+            .claim_provenance
+            .get("resolver_address")
+            .and_then(Value::as_str),
+    )
     .fetch_optional(&mut *conn)
     .await
     .context("failed to load the reverse tuple hydration")?;

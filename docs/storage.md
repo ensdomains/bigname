@@ -189,6 +189,16 @@ schema-migration; raw facts, manifest identities,
 normalized-event identities, and unrelated phase rows remain in place for the
 mandatory full Interpret and Project redos.
 
+Reverse address lookup under the [publication switch](glossary.md#publication-switch)
+uses `project_address_name_index` to admit candidate name surfaces, seeks those
+keys in primary-first, role, and lexical order, and recomputes their current
+relations in batches of at most 64 names. The primary claims, relation masks,
+exact count, and page inventories share one read-only repeatable-read snapshot.
+The count visits every candidate but retains only a page and its overflow row.
+The candidate SQL can inspect or sort more index entries than it returns, and
+masked candidates can require additional seeks; production query plans and
+latency still require qualification before enabling the switch.
+
 ## Table ownership
 
 | Family | Writer | Meaning |
