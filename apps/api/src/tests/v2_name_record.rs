@@ -294,104 +294,40 @@ async fn v2_get_name_response_omits_banned_v1_spellings() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_lookup(
-) -> Result<()> {
+async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_lookup() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    let logical_name_id = "basenames:alice.base.eth";
-    let resource_id = Uuid::from_u128(0x9240);
-    let token_lineage_id = Uuid::from_u128(0x9241);
-    let surface_binding_id = Uuid::from_u128(0x9242);
-    let chain_positions = json!({
-        "base": {
-            "chain_id": "base-mainnet",
-            "block_number": 21_000_003,
-            "block_hash": "0xbase-binding",
-            "timestamp": "2026-04-17T00:00:03Z"
-        },
-        "ethereum": {
-            "chain_id": "ethereum-mainnet",
-            "block_number": 21_000_100,
-            "block_hash": "0xbasenamesl1",
-            "timestamp": "2026-04-17T00:00:03Z"
-        }
-    });
-
-    database
-        .seed_snapshot_selector_chain_positions(&chain_positions)
-        .await?;
-    database
-        .seed_name_current_binding(
-            logical_name_id,
-            "basenames",
-            "alice.base.eth",
-            "Alice.base.eth",
-            "namehash:alice.base.eth",
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-    let mut row = exact_name_row(
-        logical_name_id,
-        surface_binding_id,
-        resource_id,
-        token_lineage_id,
-    );
-    row.namespace = "basenames".to_owned();
-    row.canonical_display_name = "Alice.base.eth".to_owned();
-    row.normalized_name = "alice.base.eth".to_owned();
-    row.namehash = "namehash:alice.base.eth".to_owned();
-    row.declared_summary = json!({
-        "registration": {
-            "status": "active",
-            "authority_kind": "registrar"
-        },
-        "resolver": {
-            "chain_id": "base-mainnet",
-            "address": "0x0000000000000000000000000000000000000abc",
-            "latest_event_kind": "ResolverChanged"
-        }
-    });
-    row.provenance = json!({
-        "manifest_versions": [basenames_execution_manifest_version()]
-    });
-    row.chain_positions = chain_positions;
-    row.canonicality_summary = json!({
-        "status": "finalized",
-        "chains": {
-            "base-mainnet": "finalized",
-            "ethereum-mainnet": "finalized"
-        }
-    });
-    database.insert_name_current_row(row).await?;
-
-    let mut inventory =
-        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
-    inventory.record_version_boundary =
-        basenames_dynamic_resolver_record_inventory_boundary(logical_name_id, resource_id, None, None);
-    inventory.chain_positions = json!({
-        "base": {
-            "chain_id": "base-mainnet",
-            "block_number": 21_000_004,
-            "block_hash": "0xbase-stale",
-            "timestamp": "2026-04-17T00:00:04Z"
-        }
-    });
-    inventory.canonicality_summary = json!({
-        "status": "finalized",
-        "chains": {
-            "base-mainnet": "finalized"
-        }
-    });
-    database
-        .insert_record_inventory_current_row(inventory)
-        .await?;
+    database.initialize_lookup_schema().await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_basenames_record_lookup(
+        &lookup_pool,
+        21_000_003,
+        "0xbase-binding",
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "base":{"chain_id":"base-mainnet","block_number":21000003,"block_hash":"0xbase-binding","timestamp":"2026-04-17T00:00:03Z"},
+        "ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}
+    })).await?;
+    let before =
+        v2_name_record_payload_for_database(&database, "/v1/names/alice.base.eth?source=verified")
+            .await?;
+    let token = before["meta"]["as_of_token"]
+        .as_str()
+        .context("Base and Ethereum snapshot")?;
+    database.seed_snapshot_selector_chain_positions(&json!({"base":{
+        "chain_id":"base-mainnet","block_number":21000004,"block_hash":"0xbase-next","timestamp":"2026-04-17T00:00:04Z"
+    }})).await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 21000004, "0xbase-next").await?;
 
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/alice.base.eth?source=verified")
+                .uri(format!(
+                    "/v1/names/alice.base.eth?source=verified&at={token}"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -407,6 +343,7 @@ async fn v2_get_name_verified_source_basenames_keeps_stale_inventory_before_look
         json!("requested snapshot is not available for name")
     );
 
+    lookup_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
@@ -2542,78 +2479,37 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
     Ok(())
 }
 
+async fn seed_base_indexed_name_inputs(
+    database: &TestDatabase,
+    resource: Uuid,
+    address: &str,
+) -> Result<()> {
+    database.seed_snapshot_selector_chain_positions(&json!({"base":{
+        "chain_id":"base-mainnet","block_number":21000003,"block_hash":"0xbase-binding","timestamp":"2026-04-17T00:00:03Z"
+    }})).await?;
+    seed_record_lookup_inputs(
+        &database.pool,
+        "base-mainnet",
+        "basenames",
+        "alice.base.eth",
+        resource,
+        Uuid::from_u128(resource.as_u128() + 1),
+        21000003,
+        "0xbase-binding",
+        "2026-04-17T00:00:03Z",
+        address,
+    )
+    .await?;
+    Ok(())
+}
+
+
+
 #[tokio::test]
 async fn v2_get_basenames_records_source_auto_stays_base_scoped_without_fallback() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    let logical_name_id = "basenames:alice.base.eth";
-    let resource_id = Uuid::from_u128(0x9250);
-    let token_lineage_id = Uuid::from_u128(0x9251);
-    let surface_binding_id = Uuid::from_u128(0x9252);
-    let chain_positions = json!({
-        "base": {
-            "chain_id": "base-mainnet",
-            "block_number": 21_000_003,
-            "block_hash": "0xbase-binding",
-            "timestamp": "2026-04-17T00:00:03Z"
-        }
-    });
-    database
-        .seed_snapshot_selector_chain_positions(&chain_positions)
-        .await?;
-    database
-        .seed_name_current_binding(
-            logical_name_id,
-            "basenames",
-            "alice.base.eth",
-            "Alice.base.eth",
-            "namehash:alice.base.eth",
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-    let mut row = exact_name_row(
-        logical_name_id,
-        surface_binding_id,
-        resource_id,
-        token_lineage_id,
-    );
-    row.namespace = "basenames".to_owned();
-    row.canonical_display_name = "Alice.base.eth".to_owned();
-    row.normalized_name = "alice.base.eth".to_owned();
-    row.namehash = "namehash:alice.base.eth".to_owned();
-    row.declared_summary["resolver"] = json!({
-        "chain_id": "base-mainnet",
-        "address": "0x0000000000000000000000000000000000000abc",
-        "latest_event_kind": "ResolverChanged"
-    });
-    row.chain_positions = chain_positions;
-    row.canonicality_summary = json!({
-        "status": "finalized",
-        "chains": { "base-mainnet": "finalized" }
-    });
-    database.insert_name_current_row(row).await?;
-
     let indexed_address = "0x0000000000000000000000000000000000000def";
-    let mut inventory =
-        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
-    inventory.selectors = json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "cacheable": true
-    }]);
-    inventory.entries = json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "status": "success",
-        "value": { "coin_type": "60", "value": indexed_address }
-    }]);
-    database
-        .insert_record_inventory_current_row(inventory)
-        .await?;
+    seed_base_indexed_name_inputs(&database, Uuid::from_u128(0x9250), indexed_address).await?;
 
     for uri in [
         "/v1/names/alice.base.eth/records?source=auto",
@@ -2630,10 +2526,17 @@ async fn v2_get_basenames_records_source_auto_stays_base_scoped_without_fallback
             .context("v2 Base-only auto records request failed")?;
         let status = response.status();
         let payload: Value = read_json(response).await?;
-        assert_eq!(status, StatusCode::OK, "unexpected response for {uri}: {payload}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected response for {uri}: {payload}"
+        );
         assert_eq!(payload["meta"]["source"], json!("indexed"));
         assert!(payload["meta"]["as_of"].get("1").is_none());
-        assert_eq!(payload["meta"]["as_of"]["8453"]["block_hash"], json!("0xbase-binding"));
+        assert_eq!(
+            payload["meta"]["as_of"]["8453"]["block_hash"],
+            json!("0xbase-binding")
+        );
         assert_eq!(
             payload["data"]["records"]["addr:60"],
             json!({"status": "ok", "value": indexed_address})
@@ -2657,9 +2560,7 @@ async fn v2_get_basenames_records_source_auto_retries_when_fallback_disappears_d
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri(
-                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
-                    )
+                    .uri("/v1/names/alice.base.eth/records?source=auto&keys=addr:60")
                     .body(Body::empty())
                     .expect("request must build"),
             )
@@ -2667,21 +2568,12 @@ async fn v2_get_basenames_records_source_auto_retries_when_fallback_disappears_d
     });
 
     control.wait_until_reached().await;
-    let indexed_address = "0x0000000000000000000000000000000000000def";
-    sqlx::query(
-        "UPDATE record_inventory_current
-         SET entries = $2
-         WHERE resource_id = $1",
+    append_name_resolver_input(
+        &database,
+        "basenames",
+        "alice.base.eth",
+        "0x1000000000000000000000000000000000000001",
     )
-    .bind(resource_id)
-    .bind(json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "status": "success",
-        "value": { "coin_type": "60", "value": indexed_address }
-    }]))
-    .execute(&database.pool)
     .await?;
     control.resume().await;
 
@@ -2691,7 +2583,11 @@ async fn v2_get_basenames_records_source_auto_retries_when_fallback_disappears_d
         .context("v2 auto fallback transition request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unexpected response: {payload}"
+    );
     assert_eq!(payload["error"]["code"], json!("stale"));
 
     database.cleanup().await?;
@@ -2702,86 +2598,18 @@ async fn seed_v2_basenames_auto_transition_fixture(
     database: &TestDatabase,
     resource_id: Uuid,
 ) -> Result<()> {
-    let logical_name_id = "basenames:alice.base.eth";
-    let token_lineage_id = Uuid::from_u128(0x9261);
-    let surface_binding_id = Uuid::from_u128(0x9262);
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "base": {
-                "chain_id": "base-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbase-binding",
-                "timestamp": "2026-04-17T00:00:03Z"
-            },
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 21_000_003,
-                "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
-            }
-        }))
-        .await?;
-    database
-        .seed_name_current_binding(
-            logical_name_id,
-            "basenames",
-            "alice.base.eth",
-            "Alice.base.eth",
-            "namehash:alice.base.eth",
-            resource_id,
-            token_lineage_id,
-            surface_binding_id,
-        )
-        .await?;
-
-    let mut row = exact_name_row(
-        logical_name_id,
-        surface_binding_id,
+    seed_base_indexed_name_inputs(
+        database,
         resource_id,
-        token_lineage_id,
-    );
-    row.namespace = "basenames".to_owned();
-    row.canonical_display_name = "Alice.base.eth".to_owned();
-    row.normalized_name = "alice.base.eth".to_owned();
-    row.namehash = "namehash:alice.base.eth".to_owned();
-    row.declared_summary["resolver"] = json!({
-        "chain_id": "base-mainnet",
-        "address": "0x0000000000000000000000000000000000000abc",
-        "latest_event_kind": "ResolverChanged"
-    });
-    row.chain_positions = json!({
-        "base": {
-            "chain_id": "base-mainnet",
-            "block_number": 21_000_003,
-            "block_hash": "0xbase-binding",
-            "timestamp": "2026-04-17T00:00:03Z"
-        }
-    });
-    row.canonicality_summary = json!({
-        "status": "finalized",
-        "chains": { "base-mainnet": "finalized" }
-    });
-    database.insert_name_current_row(row).await?;
-
-    let mut inventory =
-        basenames_l2resolver_record_inventory_current_row(logical_name_id, resource_id);
-    inventory.selectors = json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "cacheable": true
-    }]);
-    inventory.entries = json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "status": "unsupported",
-        "unsupported_reason": "value_not_retained"
-    }]);
-    database
-        .insert_record_inventory_current_row(inventory)
-        .await?;
-    Ok(())
+        "0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    database.seed_snapshot_selector_chain_positions(&json!({
+        "base":{"chain_id":"base-mainnet","block_number":21000003,"block_hash":"0xbase-binding","timestamp":"2026-04-17T00:00:03Z"},
+        "ethereum":{"chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03Z"}
+    })).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21000003, "0xbinding").await?;
+    seed_basenames_auto_fallback_requiring_inventory(database).await
 }
 
 #[tokio::test]
@@ -2819,10 +2647,11 @@ async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifie
 
     let (_guard, control) =
         crate::v2::name_records_auto_fallback_test_hooks::install(&database.pool).await?;
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        resolution_basenames_l1_addr60_response("0x0000000000000000000000000000000000000e0e"),
-    ])
-    .await?;
+    let (rpc_url, rpc_handle) =
+        spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
+            "0x0000000000000000000000000000000000000e0e",
+        )])
+        .await?;
     let chain_rpc_urls =
         bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
     let state = database
@@ -2832,24 +2661,57 @@ async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifie
         app_router(state)
             .oneshot(
                 Request::builder()
-                    .uri(
-                        "/v1/names/alice.base.eth/records?source=auto&keys=addr:60",
-                    )
+                    .uri("/v1/names/alice.base.eth/records?source=auto&keys=addr:60")
                     .body(Body::empty())
                     .expect("request must build"),
             )
             .await
     });
 
-    control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET support_status = 'unsupported',
-             unsupported_reason = 'current_authority_not_projected'
-         WHERE namespace = 'basenames' AND raw_name = 'alice.base.eth'",
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        control.wait_until_reached(),
     )
+    .await
+    .context("auto fallback preparation must be reached")?;
+    database.seed_snapshot_selector_chain_positions(&json!({"base":{
+        "chain_id":"base-mainnet","block_number":21000004,"block_hash":"0xbase-release","timestamp":"2026-04-17T00:00:04Z"
+    }})).await?;
+    let logical = bigname_storage::logical_name_id_for_name("basenames", "alice.base.eth");
+    let resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings WHERE logical_name_id=$1 AND active_to IS NULL",
+    )
+    .bind(&logical)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to=to_timestamp(1776384004) WHERE resource_id=$1",
+    )
+    .bind(resource)
     .execute(&database.pool)
     .await?;
+    let mut release = history_event(
+        "base-release",
+        Some(&logical),
+        Some(resource),
+        Some("base-mainnet"),
+        Some(21000004),
+        Some("0xbase-release"),
+        Some("0xrelease"),
+        Some(10000),
+        CanonicalityState::Canonical,
+    );
+    release.namespace = "basenames".into();
+    release.event_kind = "RegistrationReleased".into();
+    release.source_family = "basenames_base_registrar".into();
+    release.before_state = json!({});
+    release.after_state = json!({"expiry":1700000000,"released_at":1776384004});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release]).await?;
+    rebuild_fixture_families(&database.pool, "base-mainnet", 21000004, "0xbase-release").await?;
+    let released = bigname_storage::load_name_current(&database.pool, &logical)
+        .await?
+        .context("released Base name")?;
+    assert!(released.surface_binding_id.is_none(), "{released:?}");
     control.resume().await;
 
     let response = request_task
@@ -2858,7 +2720,11 @@ async fn v2_get_basenames_records_source_auto_retries_when_authority_reclassifie
         .context("v2 auto fallback authority transition request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unexpected response: {payload}"
+    );
     assert_eq!(payload["error"]["code"], json!("stale"));
     assert_eq!(
         payload["error"]["message"],
@@ -2913,13 +2779,27 @@ async fn v2_get_basenames_records_source_auto_executes_verified_fallback_after_r
             }
         }))
         .await?;
+    for source in ["indexed", "auto"] {
+        let indexed = v2_name_record_payload_for_database(
+            &database,
+            &format!("/v1/names/alice.base.eth/records?source={source}&keys=addr:60"),
+        )
+        .await?;
+        assert_eq!(indexed["meta"]["source"], json!("indexed"));
+        assert!(indexed["meta"]["as_of"].get("1").is_none(), "{indexed}");
+        assert_eq!(
+            indexed["data"]["records"]["addr:60"]["value"],
+            json!("0x0000000000000000000000000000000000000def")
+        );
+    }
     seed_basenames_auto_fallback_requiring_inventory(&database).await?;
 
     let executed_address = "0x0000000000000000000000000000000000000e0e";
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        resolution_basenames_l1_addr60_response(executed_address),
-    ])
-    .await?;
+    let (rpc_url, rpc_handle) =
+        spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
+            executed_address,
+        )])
+        .await?;
     let chain_rpc_urls =
         bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
     let state = database
@@ -2955,35 +2835,29 @@ async fn v2_get_basenames_records_source_auto_executes_verified_fallback_after_r
     Ok(())
 }
 
-/// Rewrite the seeded Basenames inventory entry so `addr:60` stops being
-/// indexed-satisfying and `source=auto` must take the verified fallback path.
+/// A registry pointer to an undeclared resolver makes explicit auto use the admitted L1 lookup.
 async fn seed_basenames_auto_fallback_requiring_inventory(database: &TestDatabase) -> Result<()> {
-    sqlx::query(
-        "UPDATE bigname_phase.record_inventory_current
-         SET entries = $1
-         WHERE resource_id = (
-             SELECT resource_id FROM bigname_phase.name_current
-             WHERE namespace = 'basenames' AND raw_name = 'alice.base.eth'
-         )",
+    append_name_resolver_input(
+        database,
+        "basenames",
+        "alice.base.eth",
+        "0x000000000000000000000000000000000000fafa",
     )
-    .bind(json!([{
-        "record_key": "addr:60",
-        "record_family": "addr",
-        "selector_key": "60",
-        "status": "unsupported",
-        "unsupported_reason": "value_not_retained"
-    }]))
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    .await
 }
 
 #[tokio::test]
-async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_position(
-) -> Result<()> {
+async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_position()
+-> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
     database.initialize_lookup_schema().await?;
     let lookup_pool = database.lookup_pool().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":"ethereum-mainnet","block_number":21000002,
+            "block_hash":"0xearlier-binding","timestamp":"2026-04-17T00:00:02Z"
+        }}))
+        .await?;
     let _namehash = seed_schema_v2_basenames_record_lookup(
         &lookup_pool,
         21_000_003,
@@ -3011,10 +2885,11 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
         .await?;
 
     let executed_address = "0x0000000000000000000000000000000000000e0e";
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        resolution_basenames_l1_addr60_response(executed_address),
-    ])
-    .await?;
+    let (rpc_url, rpc_handle) =
+        spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
+            executed_address,
+        )])
+        .await?;
     let chain_rpc_urls =
         bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
     let state = database
@@ -3038,7 +2913,10 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
         json!("0xbinding"),
         "Basenames verified response metadata must expose the row's actual execution position"
     );
-    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(21_000_003));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"]["block_number"],
+        json!(21_000_003)
+    );
     assert_eq!(
         payload["meta"]["as_of"]["8453"]["block_hash"],
         json!("0xbase-binding")
@@ -3060,12 +2938,34 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
             "requireCanonical": true
         })
     );
-    let ledger_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
+            .fetch_one(&lookup_pool)
+            .await?;
     assert_eq!(ledger_count, 1);
+
+    // An explicitly selected older auxiliary block cannot use today's composed execution route.
+    let old_auxiliary = bigname_storage::SelectedSnapshot {
+        chain_positions: bigname_storage::ChainPositions::from_value(&json!({
+            "base":{"chain_id":"base-mainnet","block_number":21000003,"block_hash":"0xbase-binding","timestamp":"2026-04-17T00:00:03Z"},
+            "ethereum":{"chain_id":"ethereum-mainnet","block_number":21000002,"block_hash":"0xearlier-binding","timestamp":"2026-04-17T00:00:02Z"}
+        }))?,
+        consistency: bigname_storage::SnapshotConsistency::Head,
+    };
+    let token = crate::v2::encode_at_token(&old_auxiliary);
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/names/alice.base.eth/records?source=verified&keys=addr:60&at={token}"
+                ))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -3073,17 +2973,11 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
 }
 
 #[tokio::test]
-async fn v2_get_name_records_source_verified_reports_unsupported_without_verified_boundary(
-) -> Result<()> {
-    let payload = v2_name_records_payload_with_row_and_setup(
+async fn v2_get_name_records_source_verified_reports_unsupported_without_verified_boundary()
+-> Result<()> {
+    let payload = v2_alice_state_payload(
         "/v1/names/Alice.eth/records?source=verified&keys=avatar",
-        |row| {
-            row.binding_kind = None;
-            row.surface_binding_id = None;
-            row.resource_id = None;
-            row.token_lineage_id = None;
-        },
-        |_, _, _| {},
+        AliceInputState::Ownerless,
     )
     .await?;
 
@@ -3101,16 +2995,15 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_verifie
 
 #[tokio::test]
 async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
+    let payload = v2_name_records_payload_with_writes(
         "/v1/names/Alice.eth/records?source=auto&keys=addr:60,text:email",
-        |_, _, inventory| {
-            inventory.unsupported_families = json!([
-                {
-                    "record_family": "text",
-                    "unsupported_reason": "resolver_family_pending"
-                }
-            ]);
-        },
+        &[
+            family_fixture_record_write(
+                "addr:60",
+                Some(json!("0x0000000000000000000000000000000000000def")),
+            ),
+            family_fixture_record_write("text:email", None),
+        ],
     )
     .await?;
 
