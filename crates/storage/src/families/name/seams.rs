@@ -8,15 +8,40 @@
 //!   snapshot (crates/project/tests/families_name_snapshot.rs).
 //! - The candidate batch size of the listings (`list.rs`, `bound.rs`), so a test over a handful
 //!   of names can make a page straddle candidate batches.
+//! - A counter of the composed rows the search and expiring walks submit to their page
+//!   statement, summed over every batch, so the harness can measure the walk's cost in rows
+//!   rather than time (flip prerequisite 1).
 #[cfg(any(test, feature = "test-support"))]
 mod scoped {
-    use std::{future::Future, sync::Arc};
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
 
     use tokio::sync::Notify;
 
     tokio::task_local! {
         static PAUSE: (Arc<Notify>, Arc<Notify>);
         static BATCH_SIZE: usize;
+        static SUBMITTED_ROWS: Arc<AtomicU64>;
+    }
+
+    /// Runs `future` adding to `counter` every composed row a listing walk in it submits to its
+    /// page statement.
+    pub async fn with_submitted_rows_counter<F: Future>(
+        counter: Arc<AtomicU64>,
+        future: F,
+    ) -> F::Output {
+        SUBMITTED_ROWS.scope(counter, future).await
+    }
+
+    pub(in crate::families::name) fn note_submitted_rows(rows: usize) {
+        let _ = SUBMITTED_ROWS.try_with(|counter| {
+            counter.fetch_add(u64::try_from(rows).unwrap_or(u64::MAX), Ordering::Relaxed)
+        });
     }
 
     /// Runs `future` so that every composed load in it, once it has read its publication,
@@ -47,9 +72,9 @@ mod scoped {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{after_publication, batch_size};
+pub(super) use scoped::{after_publication, batch_size, note_submitted_rows};
 #[cfg(any(test, feature = "test-support"))]
-pub use scoped::{with_batch_size, with_pause_after_publication};
+pub use scoped::{with_batch_size, with_pause_after_publication, with_submitted_rows_counter};
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) async fn after_publication() {}
@@ -58,3 +83,6 @@ pub(super) async fn after_publication() {}
 pub(super) fn batch_size(production: usize) -> usize {
     production
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) fn note_submitted_rows(_rows: usize) {}
