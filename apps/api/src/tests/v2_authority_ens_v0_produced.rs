@@ -246,6 +246,7 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
             "timestamp": "2024-01-01T00:00:00Z",
         }}))
         .await?;
+    republish_fixture_chain(&database, "base-mainnet").await?;
     let mut session = None;
     for block in OLD_RECORD..=CLEARED {
         // The served head advances with each projected block.

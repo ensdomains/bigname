@@ -269,21 +269,20 @@ async fn wrapper_first_materialization_keeps_dormant_registry_resolver_out_of_le
     );
 
     let database = TestDatabase::new_migrated().await?;
-    seed_identity_name(
-        &database,
-        "ens:dormant.eth",
+    seed_v2_history_blocks(&database, 120..=123).await?;
+    seed_family_identity_inputs(
+        &database.pool,
+        "ens",
         NAME,
-        NAME,
-        &format!("{node:#x}"),
+        CHAIN,
+        123,
+        "0xhistory123",
         wrapper,
         wrapper_lineage,
         binding.surface_binding_id,
-        HOLDER,
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
+        "ens_v1",
     )
     .await?;
-    seed_v2_history_blocks(&database, 120..=123).await?;
     upsert_test_token_lineages(
         &database.pool,
         &output
@@ -337,6 +336,7 @@ async fn wrapper_first_materialization_keeps_dormant_registry_resolver_out_of_le
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     let global = v2_history_payload_for_database(&database, "/v1/events?page_size=100").await?;
     let active_id = hex::encode(sha2::Sha256::digest(controlling.event_identity.as_bytes()));
     let dormant_id = hex::encode(sha2::Sha256::digest(dormant.event_identity.as_bytes()));

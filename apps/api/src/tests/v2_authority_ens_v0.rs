@@ -41,6 +41,7 @@ async fn v2_address_names_split_the_ens_v1_arm_by_registry_generation() -> Resul
             "timestamp": "2024-01-01T00:00:00Z"
         }}))
         .await?;
+    republish_fixture_chain(&database, "base-mainnet").await?;
     seed_authority_shape_names(&database, V2_ADDRESS).await?;
 
     for base in [
