@@ -414,8 +414,8 @@ const GLYPHS = {
   const mem = () => { try { return JSON.parse(localStorage.getItem(MEM_KEY) || '{}'); } catch (e) { return {}; } };
   const remember = (k, v) => { try { localStorage.setItem(MEM_KEY, JSON.stringify({ ...mem(), [k]: v })); } catch (e) {} };
   const tryForm = $('#try'), tryOut = $('#try-out');
-  let view = VIEWS[0], tryName = String(mem().name || 'taytems.eth');
-  const tryUrl = () => `${PREFIX}/names/${encodeURIComponent(tryName.trim() || 'taytems.eth')}${view.suffix}${view.query ? '?' + view.query : ''}`;
+  let view = VIEWS[0], tryName = String(mem().name || 'cognify.eth');
+  const tryUrl = () => `${PREFIX}/names/${encodeURIComponent(tryName.trim() || 'cognify.eth')}${view.suffix}${view.query ? '?' + view.query : ''}`;
   const width = v => (Math.max(v.length, 4) + 2) + 'ch';
   // POSIX single-quote the whole URL, so an apostrophe in the name survives the shell
   const shq = s => `'${s.replace(/'/g, `'\\''`)}'`;
