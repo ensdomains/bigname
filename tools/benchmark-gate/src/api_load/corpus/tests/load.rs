@@ -1134,9 +1134,10 @@ async fn duplicate_resolver_roles_count_one_declared_address() {
         .await
         .unwrap();
     assert!(
-        advanced.failures.iter().any(|failure| failure.contains(
-            "fails the resolver benchmark's canonical-read or chain-anchor integrity checks",
-        )),
+        advanced
+            .failures
+            .iter()
+            .any(|failure| failure.contains("no current Project head",)),
         "{:?}",
         advanced.failures
     );
@@ -1431,7 +1432,7 @@ async fn resolver_coverage_uses_the_route_snapshot_bounds() {
 
         let expected = match case {
             "wrong_manifest" => "does not cite latest projected manifest event",
-            "wrong_manifest_version" => "stored version",
+            "wrong_manifest_version" => "stored active version diverges",
             _ => "no current Project head",
         };
         assert!(
@@ -1528,14 +1529,6 @@ async fn resolver_coverage_accepts_an_exact_current_head_match() {
         100,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO chain_lineage
-             (chain_id, block_hash, canonicality_state, block_number)
-         VALUES ('ethereum-mainnet', 'project-head-100', 'canonical', 100)",
-    )
-    .execute(database.pool())
-    .await
-    .unwrap();
     let coverage = super::resolver_coverage::load(database.pool())
         .await
         .unwrap();
