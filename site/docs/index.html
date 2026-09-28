@@ -1164,15 +1164,20 @@ const ROUTES = [
     form.addEventListener('submit', async e => {
       e.preventDefault();
       // Only the newest request on the page it was sent from may write the output;
-      // a page change or a network change (which redraws the page) drops it.
+      // a page change or a network change (which redraws the page) drops it. A
+      // new submission (possible after a parameter redraw re-enables run)
+      // replaces the one in flight, which is aborted here.
       const gen = ++reqGen, base = NET.apiBase(), lbl = NET.label(), u = url(), btn = $('.run', form);
+      if (reqAbort) reqAbort.abort();
+      const ctl = new AbortController();
+      reqAbort = ctl;
       btn.disabled = true; out.hidden = false; out.className = 'out';
       out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
       const t0 = performance.now();
       try {
         const init = { method: r.method, headers: { accept: 'application/json' } };
         if (r.method === 'POST') { init.headers['content-type'] = 'application/json'; init.body = body; }
-        init.signal = (reqAbort = new AbortController()).signal;
+        init.signal = ctl.signal;
         const res = await fetch(base + u, init);
         const ms = Math.round(performance.now() - t0), text = await res.text();
         if (gen !== reqGen) return;
@@ -1183,7 +1188,10 @@ const ROUTES = [
       } catch (err) {
         if (gen !== reqGen) return;
         out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(base)}. Check the ${esc(lbl)} status in the header, or pick another network.</p>`;
-      } finally { if (gen === reqGen) btn.disabled = false; }
+      } finally {
+        if (gen === reqGen) { const run = $('.run', form); if (run) run.disabled = false; }
+        if (reqAbort === ctl) reqAbort = null;
+      }
     });
   }
 
