@@ -2159,6 +2159,45 @@ COMMENT ON COLUMN project_resource_pointer.boundary_position IS
 COMMENT ON COLUMN project_resource_pointer.boundary_block_timestamp IS
     'This value is that boundary event''s block timestamp.';
 
+CREATE TABLE IF NOT EXISTS project_named_resource_pointer (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    resolver_address text,
+    source_family text NOT NULL,
+    PRIMARY KEY (chain_id, resource_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_named_resource_pointer_resolver_idx
+    ON project_named_resource_pointer (chain_id, resolver_address, logical_name_id, resource_id);
+COMMENT ON TABLE project_named_resource_pointer IS
+    'Project-owned named resource resolver pointer of family F5: the latest named ResolverChanged per resource and logical name in canonical event order, including clears. An unnamed pointer or an event naming another name leaves this row unchanged. The composed name reader loads exact resource/name pairs; bound-name discovery walks retained pointer keys by resolver instead of normalized event history. Released names keep their pointer facts and are filtered by the composed binding admission.';
+COMMENT ON COLUMN project_named_resource_pointer.chain_id IS
+    'This value is the chain whose events wrote the row.';
+COMMENT ON COLUMN project_named_resource_pointer.resource_id IS
+    'This value is the resource named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.logical_name_id IS
+    'This value is the logical name named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.block_number IS
+    'This value is the block number of the latest named ResolverChanged for the key.';
+COMMENT ON COLUMN project_named_resource_pointer.transaction_index IS
+    'This value is the transaction index of that event; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_named_resource_pointer.log_index IS
+    'This value is the log index of that event; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_named_resource_pointer.event_identity IS
+    'This value is that event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_named_resource_pointer.normalized_event_id IS
+    'This value names that event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_named_resource_pointer.resolver_address IS
+    'This value is the lower-cased resolver from that event, including null, empty and zero-address clears.';
+COMMENT ON COLUMN project_named_resource_pointer.source_family IS
+    'This value is that event''s source family.';
+
 CREATE TABLE IF NOT EXISTS project_node_record_partition (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,

@@ -35,6 +35,8 @@ tables! {
     RESOLVER_CLASSIFICATION = "project_resolver_classification" ["chain_id", "resolver_address"];
     REGISTRY_POINTER = "project_registry_pointer" ["chain_id", "namespace", "node"];
     RESOURCE_POINTER = "project_resource_pointer" ["chain_id", "resource_id"];
+    NAMED_RESOURCE_POINTER = "project_named_resource_pointer"
+        ["chain_id", "resource_id", "logical_name_id"];
     NODE_RECORD_PARTITION = "project_node_record_partition"
         ["chain_id", "resolver_address", "arm", "arm_identity"];
     NODE_RECORD_VALUE = "project_node_record_value"

@@ -1667,6 +1667,35 @@ included, so the publishing steps can tell which registration of the resource a
 grant was written under. The served permissions read keeps no such value and
 masks by the resource's current registration.
 
+F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
+one resource's latest pointer, including unnamed changes, for root, alias and
+wildcard composition. `project_named_resource_pointer` keeps the latest named
+`ResolverChanged` per `(chain_id, resource_id, logical_name_id)`, clears included.
+Only events carrying both keys write it; unnamed changes and changes naming
+another name leave it alone. A release does not delete a pointer fact: the
+composed reader still applies its binding and reachability rules. Both reducers
+use the same canonical event order and before-image journal as every family.
+
+The composed name reader fetches named pointers by exact resource/name pairs.
+Bound-name discovery uses `project_named_resource_pointer_resolver_idx` to find
+retained named pointer keys at the requested resolver, alongside the existing
+resource and registry-node pointer paths. It does not scan the resolver's
+`ResolverChanged` history. This bounds that input to retained pointer keys, not
+to page size: the candidate walk and sort can still visit the resolver's retained
+keys on each batch. Current-key listing cost remains a pre-switch performance
+check.
+
+Schema-migration `20260929140000_named_resource_pointer.sql` adds the named key
+table to an existing phase schema and atomically clears all family rows, the
+marker, journal and repair record when the table was absent, including
+`project_name_summary` when the following TYR-36 slice has already installed it.
+The next family
+run rebuilds from canonical interpreted input; fenced reads remain stale until
+the new publication is live. Reapplying the migration preserves an existing
+publication. Fresh initialization installs the same table from the baseline.
+The reducer source participates in the shared content fingerprint, so an older
+family build cannot be served under the new binary's hash.
+
 Registration and lease state also keeps every registration, renewal, release,
 reservation, expiry change and token transfer of a lease or ENSv2 triple as a
 row of its own, never pruned. Each row keeps the name the adapter emitted,

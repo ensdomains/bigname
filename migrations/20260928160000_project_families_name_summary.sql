@@ -58,6 +58,11 @@ IF to_regclass('bigname_phase.project_name_summary') IS NULL THEN
     EXECUTE $ddl$DELETE FROM bigname_phase.project_address_record_node_index$ddl$;
     EXECUTE $ddl$DELETE FROM bigname_phase.project_address_record_id_index$ddl$;
     EXECUTE $ddl$DELETE FROM bigname_phase.project_name_history$ddl$;
+    -- An earlier deployment of the preceding slice may already have named pointer facts.
+    -- Reset them with the rest of the family state when installing this summary family.
+    IF to_regclass('bigname_phase.project_named_resource_pointer') IS NOT NULL THEN
+        EXECUTE $ddl$DELETE FROM bigname_phase.project_named_resource_pointer$ddl$;
+    END IF;
 END IF;
 
 EXECUTE $ddl$
