@@ -157,25 +157,19 @@ mod tests {
     use bigname_storage::ResourcePermissionCoverage;
 
     const PROJECTION: &str =
-        include_str!("../../../../crates/project/src/builders/permissions/resource_summary.rs");
+        include_str!("../../../../crates/storage/src/families/control/permissions/summary.rs");
     const V2_ROLE_TABLES: &str =
         include_str!("../../../../crates/adapters/src/schema_v2/protocol/permissions.rs");
 
-    /// `(role, admin)` pairs from the projection's `VALUES (ordinal, 'role', 'admin')` list.
+    /// Role/admin pairs from the permanent family reader's role table.
     fn projected_lock_pairs() -> Vec<(String, String)> {
-        let start = PROJECTION
-            .find("AS locked_roles")
-            .expect("projection must build locked_roles");
-        let end = start
-            + PROJECTION[start..]
-                .find(") role(ordinality, name, admin)")
-                .expect("projection must close its role list");
+        let start = PROJECTION.find("const ROLES:").expect("family role table");
+        let end = start + PROJECTION[start..].find("];").expect("role table end");
         PROJECTION[start..end]
             .lines()
             .filter_map(|line| {
-                let quoted = line.trim().strip_prefix('(')?.split_once(", '")?.1;
-                let (role, rest) = quoted.split_once("', '")?;
-                Some((role.to_owned(), rest.split('\'').next()?.to_owned()))
+                let quoted: Vec<_> = line.split('"').skip(1).step_by(2).collect();
+                (quoted.len() == 2).then(|| (quoted[0].to_owned(), quoted[1].to_owned()))
             })
             .collect()
     }
