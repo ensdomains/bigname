@@ -9,7 +9,10 @@
 //! `text.sql` decides which selectors need work and cuts the block's share, so a block never
 //! transfers the selectors that are already current. Every row it returns is work: a read stamps
 //! it current or with a newer attempt, and a cleared overlay leaves the work set, so the backlog
-//! behind the cut always moves forward.
+//! behind the cut moves forward whenever the block's share has room for it. Changed selectors
+//! still rank first: while 250 or more change every block, the unchanged backlog waits, as it
+//! did before the cut moved into the query, and a steady stream of never-read selectors likewise
+//! delays failed retries.
 use std::collections::BTreeMap;
 
 use bigname_lookup::{

@@ -13,8 +13,9 @@ mod scoped {
     }
 
     /// Runs `future` appending to `reads` the resource count of every record inventory read in
-    /// it. Each read runs a fixed number of statements whatever its resource count, so the list
-    /// shows how many round trips a request made for its inventories.
+    /// it. Apart from the mirror walk, which reads per mirror pointer, each read runs a fixed
+    /// number of statements whatever its resource count, so the list shows how many inventory
+    /// round trips a request made. It does not count the request's other statements.
     pub async fn with_inventory_read_counter<F: Future>(
         reads: Arc<Mutex<Vec<usize>>>,
         future: F,

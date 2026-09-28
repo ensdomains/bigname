@@ -535,6 +535,9 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     // One batched read for the whole request, never one per name.
     assert_eq!(calls.lock().expect("calls").as_slice(), &[NAMES]);
     // So are the record inventories: one read for the composed rows, one for the inventories.
+    // This counts inventory-reader calls, not statements, for directly bound names. A mirror
+    // pointer still walks its registry per resource, and alias or wildcard bindings still read
+    // their topology per name.
     assert_eq!(reads, [NAMES, NAMES]);
 
     let plan = bigname_storage::explain_record_inventory_abi_evidence_for_test(
