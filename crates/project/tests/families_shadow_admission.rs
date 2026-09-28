@@ -215,19 +215,7 @@ async fn a_row_several_names_match_is_named_for_none_of_them() -> Result<()> {
     let other = format!("basenames:{}", node(1));
     // A logical name is its namespace and namehash (name_surfaces_logical_identity_check), so
     // two names share a namehash only across namespaces.
-    sqlx::query(
-        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
-             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, 'basenames', $1, ARRAY[$1], '\\x00', $2, ARRAY[$2], 'ensip15', 'active',
-                 $3, $4, 0, 'canonical')",
-    )
-    .bind(&other)
-    .bind(node(1))
-    .bind(support::CHAIN)
-    .bind(support::hash(0))
-    .execute(&fixture.pool)
-    .await?;
+    fixture.surface_on(support::CHAIN, &other, &node(1)).await?;
     fixture
         .binding(&uuid(100), &name(1), &lease, "ens_v1", 9, 0, None)
         .await?;

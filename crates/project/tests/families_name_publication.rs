@@ -171,19 +171,7 @@ async fn ens_expiring(fixture: &Fixture) -> Result<(Vec<String>, String)> {
 /// A Basenames name on `BASE`, granted with `expiry` (a JSON number) on its own lease.
 async fn basenames_grant(fixture: &Fixture, n: u64, expiry: serde_json::Value) -> Result<()> {
     let other = format!("basenames:{}", node(n));
-    sqlx::query(
-        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
-             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, 'basenames', $1, ARRAY[$1], '\\x00', $2, ARRAY[$2], 'ensip15', 'active',
-                 $3, $4, 0, 'canonical')",
-    )
-    .bind(&other)
-    .bind(node(n))
-    .bind(BASE)
-    .bind(hash(0))
-    .execute(&fixture.pool)
-    .await?;
+    fixture.surface_on(BASE, &other, &node(n)).await?;
     let lease = uuid(u32::try_from(n)?);
     sqlx::query(
         "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
