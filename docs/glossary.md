@@ -2584,7 +2584,9 @@ name's binding candidates, its registration and control, NameWrapper state,
 serving pointer and resolver, history heads and coverage. It describes the
 [family marker](#family-marker)'s publication. With the
 [publication switch](#publication-switch) on, the names group serves these rows
-([API](api-v1.md#tier-2-product-reads)). The name comparison of the
+and every route that joins name rows takes them from here
+([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
+block, and none is served while the marker is not `live` for this build. The name comparison of the
 fixture-corpus harness checks every composed row against the served row.
 
 ## Family undo journal

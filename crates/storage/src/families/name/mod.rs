@@ -1,7 +1,8 @@
 //! The composed name reader (TYR-36 step 7b, ruling J3): a `name_current`-shaped row assembled at
 //! read from the owned key families (docs/projections.md, "Owned key families") and the identity
-//! input tables, with no stored per-name row. It serves the fields the API and the verified
-//! lookup read from `name_current`:
+//! input tables, with no stored per-name row. It serves the fields the API routes read from
+//! `name_current`; the verified lookup (crates/lookup) stays on the served tables until the flip
+//! slice. The row carries:
 //!
 //! - identity: the surface (`name_surfaces`), the selected binding and its resource's token
 //!   lineage (`surface_bindings`, `resources`);
