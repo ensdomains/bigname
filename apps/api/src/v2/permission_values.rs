@@ -235,7 +235,7 @@ mod tests {
         "../../../../crates/adapters/src/schema_v2/protocol/v2_record_resolver/permissions.rs"
     );
     const V1_PROJECTION: &str =
-        include_str!("../../../../crates/project/src/builders/permissions.rs");
+        include_str!("../../../../crates/storage/src/families/control/permissions/grants.rs");
     /// The only powers today's ENSv1 and Basenames interpreters emit.
     const V1_EMITTED_STORAGE_POWERS: &[&str] = &["resource_control", "resolver_control"];
     /// The power a served registry `ApprovalForAll` operator row carries.
@@ -284,21 +284,19 @@ mod tests {
         })
     }
 
-    /// Names the ENSv1 wrapper fuse mask recognises: the `WHEN '<power>' THEN` arms of the
-    /// `CASE power.value` expression in the projection builder.
+    /// Every literal arm of the family reader's wrapper fuse mask.
     fn wrapper_mask_powers() -> impl Iterator<Item = String> {
         let start = V1_PROJECTION
-            .find("CASE power.value")
-            .expect("projection builder must mask powers with CASE power.value");
+            .find("match power {")
+            .expect("family wrapper mask");
         let end = start
             + V1_PROJECTION[start..]
-                .find("ELSE false")
-                .expect("wrapper mask CASE must end with ELSE false");
-        V1_PROJECTION[start..end].lines().filter_map(|line| {
-            let (_, rest) = line.split_once("WHEN '")?;
-            let (power, _) = rest.split_once('\'')?;
-            Some(power.to_owned())
-        })
+                .find("_ => false")
+                .expect("mask fallback");
+        V1_PROJECTION[start..end]
+            .lines()
+            .filter_map(|line| line.split_once(" => "))
+            .flat_map(|(patterns, _)| patterns.split('"').skip(1).step_by(2).map(str::to_owned))
     }
 
     /// Names the NameWrapper interpreter grants: every string literal inside the
