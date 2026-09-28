@@ -1,7 +1,7 @@
 //! `GET /v1/addresses/{address}/resolves_to` (both the single coin type and `coin_type=evm`) over
 //! the families under the publication switch (TYR-36 step 7b).
 //!
-//! Ruling J10: the candidate resources come from the derived inverse address index (F14) alone,
+//! The candidate resources come from the derived inverse address index (F14) alone,
 //! with mirror resolvers from the family classification alone (`candidates.rs`,
 //! `CandidateSource::Index`). The retained-value scan the harness adds stays a harness check:
 //! the switch requires `address_index_misses` 0 first. Each candidate's family record inventory

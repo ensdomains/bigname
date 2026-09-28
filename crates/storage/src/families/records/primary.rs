@@ -1,4 +1,4 @@
-//! Primary-name claims over the families under the publication switch (TYR-36 step 7b, E7):
+//! Primary-name claims over the families under the publication switch (TYR-36 step 7b):
 //! the reverse claim of each (address, namespace, coin type) tuple from F12 (`reverse.rs`) at
 //! the family publication, overlaid with the tuple's hydration from the F12 hydration columns
 //! (`project_reverse_tuple.hydrated_name`, `attempt_block`, `attempt_hash`), as the served read

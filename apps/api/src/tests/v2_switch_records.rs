@@ -1,5 +1,5 @@
 // The records and address group under the publication switch (TYR-36 step 7b slice 3): the
-// address-names page (F13), both `resolves_to` variants (F14 candidates, ruling J10), the name
+// address-names page (F13), both `resolves_to` variants (F14 candidates only), the name
 // records route's inventory, the address routes' record counts and the primary-name claim (F12)
 // answer the same body with the switch off (the served tables) and on (the families),
 // `meta.as_of` excepted, and with the switch on they do not read the served rows.
@@ -245,7 +245,7 @@ async fn v2_family_record_reads_answer_409_while_the_families_rebuild() -> Resul
 }
 
 // The records inventory is read at the family publication only: with the switch on, the
-// records route cannot serve an `at` below it (ruling J5), whatever the served side does.
+// records route cannot serve an `at` below it, whatever the served side does.
 #[tokio::test]
 async fn v2_family_record_inventory_refuses_an_at_below_the_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -263,8 +263,8 @@ async fn v2_family_record_inventory_refuses_an_at_below_the_publication() -> Res
     database.cleanup().await
 }
 
-// The record inventory name detail and the records diagnostic read (ruling J11: the diagnostics
-// routes keep working on the family readers) comes from the families with the switch on: the
+// The record inventory name detail and the records diagnostic read (the diagnostics
+// routes keep serving under the switch, on the family readers) comes from the families with the switch on: the
 // same body both ways, and emptying the served inventory changes nothing.
 #[tokio::test]
 async fn v2_name_detail_and_records_diagnostic_inventories_are_the_same_with_the_switch_off_and_on()

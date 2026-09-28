@@ -49,7 +49,7 @@ pub(crate) enum CandidateSource {
     /// entry the index alone would miss.
     IndexAndRetained,
     /// The index rows alone, with mirror resolvers from the family classification alone: the
-    /// production read under the publication switch (TYR-36 step 7b ruling J10). The harness
+    /// production read under the publication switch (TYR-36 step 7b). The harness
     /// requires the index to miss nothing (`address_index_misses` 0) before a route reads it.
     Index,
 }

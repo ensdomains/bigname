@@ -1057,7 +1057,7 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
 // write whose node is not the name's namehash is served forward and must be found inversely. The
 // index row keeps the name the value was written under, and the index read reaches the pointers
 // at that name's namehash through it, so the index alone finds it: the production resolves_to
-// read, which reads the index alone (TYR-36 step 7b ruling J10), lists it too.
+// read, which reads the index alone (TYR-36 step 7b), lists it too.
 #[tokio::test]
 async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()> {
     let (db, pool) = database("record_id_named_other_node").await?;

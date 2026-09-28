@@ -98,7 +98,7 @@ pub async fn load_family_record_inventory_detail(
 /// (TYR-36 step 7b): the family inventory of the resource `row` serves records through, when the
 /// row has a record-inventory lookup key (`resolution_record_inventory_lookup_key_any_chain`), at
 /// the family marker's publication. The composed name row describes that publication only, so a
-/// selected position other than it is stale (ruling J5), as is a chain whose marker is not
+/// selected position other than it is stale, as is a chain whose marker is not
 /// servable. `None` when the row has no lookup key or the resource no serving pointer.
 pub async fn load_family_record_inventory_for_snapshot(
     pool: &PgPool,
