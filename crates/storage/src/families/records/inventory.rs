@@ -39,26 +39,11 @@ pub enum FamilyAttribution {
     Given(BTreeSet<i64>),
 }
 
-/// A coin-60 pair a row serves: the `AddressChanged` half is the value event, the `AddrChanged`
-/// half one log later its compatibility sibling, emitted in that order by one `setAddr`
-/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f).
-/// The row's provenance lists only the value event, as today's does; the sibling is carried here
-/// for the design's provenance, which names both (step 7).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompatibilityPair {
-    pub record_key: String,
-    pub value_event_id: Option<i64>,
-    pub value_position: FamilyPosition,
-    pub sibling_event_id: Option<i64>,
-    pub sibling_position: FamilyPosition,
-}
-
-/// A family inventory row with what the comparison checks beside it.
+/// A family inventory row and the storage key of its record version boundary.
 #[derive(Clone, Debug)]
 pub struct FamilyRecordInventory {
     pub row: RecordInventoryCurrentRow,
     pub record_version_boundary_key: String,
-    pub compatibility_pairs: Vec<CompatibilityPair>,
     /// The mirror decision, for rows read through a mirror resolver.
     pub mirrored: bool,
 }
@@ -325,7 +310,6 @@ async fn unsupported_mirror(
     Ok(FamilyRecordInventory {
         row,
         record_version_boundary_key,
-        compatibility_pairs: Vec::new(),
         mirrored: true,
     })
 }
@@ -428,7 +412,6 @@ async fn select(
     }
     let probed = probe_events(conn, &identities).await?;
 
-    let mut pairs = Vec::new();
     let mut served = Vec::new();
     for winner in winners.into_values() {
         let sibling = winner
@@ -440,23 +423,14 @@ async fn select(
                     .map(|event| (sibling.clone(), event))
             });
         match sibling {
-            Some((sibling, event)) => {
-                pairs.push(CompatibilityPair {
-                    record_key: winner.record_key.clone(),
-                    value_event_id: Some(event.normalized_event_id),
-                    value_position: sibling.clone(),
-                    sibling_event_id: winner.normalized_event_id,
-                    sibling_position: winner.position.clone(),
-                });
-                served.push(ServedRecord {
-                    record_key: winner.record_key,
-                    position: sibling.clone(),
-                    normalized_event_id: Some(event.normalized_event_id),
-                    source_family: event.source_family.clone(),
-                    stored_status: None,
-                    payload: event.after_state.clone(),
-                });
-            }
+            Some((sibling, event)) => served.push(ServedRecord {
+                record_key: winner.record_key,
+                position: sibling,
+                normalized_event_id: Some(event.normalized_event_id),
+                source_family: event.source_family.clone(),
+                stored_status: None,
+                payload: event.after_state.clone(),
+            }),
             None => served.push(ServedRecord {
                 record_key: winner.record_key,
                 position: winner.position,
@@ -494,7 +468,6 @@ async fn select(
     Ok(FamilyRecordInventory {
         row,
         record_version_boundary_key,
-        compatibility_pairs: pairs,
         mirrored: false,
     })
 }
