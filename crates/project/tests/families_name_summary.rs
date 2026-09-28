@@ -270,7 +270,7 @@ async fn a_binding_that_closes_by_the_clock_is_composed_again_at_the_first_block
     publish(&fixture, 7).await?;
     let (open, _) = summary(&fixture, &name(1)).await?.expect("first row");
     let recompose_at: Option<i64> = sqlx::query_scalar(
-        "SELECT extract(epoch FROM recompose_at)::bigint FROM project_name_summary
+        "SELECT recompose_at FROM project_name_summary
          WHERE chain_id = $1 AND logical_name_id = $2",
     )
     .bind(CHAIN)
@@ -394,5 +394,181 @@ async fn composing_one_summary_reads_only_that_names_zero_owner_candidates() -> 
         "composing one name read {owner_events} registry owner event and {events} event tuples \
          with {OTHERS} other names' unnamed Transfers on the chain"
     );
+    fixture.cleanup().await
+}
+
+// A NameWrapper expiry keeps the whole unsigned word, so a wrapped name's next clock boundary can
+// be any second a 64-bit integer holds, far past the last instant a timestamp holds. The block
+// that writes such a wrapper publishes, and its summary keeps the boundary in seconds (or none
+// when the boundary does not fit a 64-bit integer).
+#[tokio::test]
+async fn a_wrapper_expiry_past_the_timestamp_range_keeps_its_boundary_in_seconds() -> Result<()> {
+    let fixture = Fixture::new("families_name_summary_far_expiry", 12).await?;
+    for (n, expiry) in [(1, json!(1_000_000_000_000_000u64)), (2, json!(u64::MAX))] {
+        let wrapper = uuid(0x2000 + u32::try_from(n)?);
+        fixture
+            .binding(
+                &uuid(200 + u32::try_from(n)?),
+                &name(n),
+                &wrapper,
+                "ens_v1",
+                2,
+                0,
+                None,
+            )
+            .await?;
+        for (log, kind, after) in [
+            (
+                1,
+                "PermissionScopeChanged",
+                json!({"fuses": 65_536 | 1 << 17, "wrapper_state": "emancipated"}),
+            ),
+            (2, "ExpiryChanged", json!({"expiry": expiry})),
+        ] {
+            fixture
+                .write(
+                    3,
+                    10 * i64::try_from(n)? + log,
+                    kind,
+                    "ens_v1_wrapper_l1",
+                    Some(&name(n)),
+                    Some(&wrapper),
+                    after,
+                    REGISTRAR,
+                )
+                .await?;
+        }
+    }
+    publish(&fixture, 4).await?;
+    for (n, boundary) in [
+        (1, Some(1_000_000_000_000_000i64 - 7_776_000 + 1)),
+        (2, None),
+    ] {
+        let stored: Option<i64> = sqlx::query_scalar(
+            "SELECT recompose_at FROM project_name_summary
+             WHERE chain_id = $1 AND logical_name_id = $2",
+        )
+        .bind(CHAIN)
+        .bind(name(n))
+        .fetch_one(&fixture.pool)
+        .await?;
+        ensure!(
+            stored == boundary,
+            "name {n} recomposes at {stored:?}, not {boundary:?}"
+        );
+    }
+    fixture.assert_rebuild_equal(4).await?;
+    fixture.cleanup().await
+}
+
+// A name whose selected binding's token lineage is not readable composes no row, but its
+// composition still changes at a clock boundary: here its binding closes at block 8's time and a
+// readable one, recorded at block 3, opens then. The summary keeps that boundary, and block 8,
+// which touches no fact of the name, composes it again.
+#[tokio::test]
+async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
+    let fixture = Fixture::new("families_name_summary_unreadable", 12).await?;
+    let unreadable = uuid(0x1001);
+    let token = uuid(0x3001);
+    sqlx::query(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 1, 'observed')",
+    )
+    .bind(&token)
+    .bind(CHAIN)
+    .bind(support::hash(1))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2::uuid, $3, $4, 0, 'canonical')",
+    )
+    .bind(&unreadable)
+    .bind(&token)
+    .bind(CHAIN)
+    .bind(support::hash(0))
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .binding(&uuid(101), &name(1), &unreadable, "ens_v1", 2, 0, Some(8))
+        .await?;
+    let readable = uuid(0x1101);
+    fixture.resource(&readable).await?;
+    // The readable binding is recorded at block 3 and opens at block 8's time.
+    sqlx::query(
+        "INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id,
+             binding_kind, authority_arm, active_from, active_to, chain_id, block_hash,
+             block_number, provenance, canonicality_state)
+         VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+                 to_timestamp($4), NULL, $5, $6, 3,
+                 jsonb_build_object('transaction_index', 0, 'log_index', 1), 'canonical')",
+    )
+    .bind(uuid(102))
+    .bind(name(1))
+    .bind(&readable)
+    .bind(block_time(8) as f64)
+    .bind(CHAIN)
+    .bind(support::hash(3))
+    .execute(&fixture.pool)
+    .await?;
+    for (block, lease) in [(2, &unreadable), (3, &readable)] {
+        fixture
+            .write(
+                block,
+                2,
+                "SurfaceBound",
+                V1_REGISTRAR,
+                Some(&name(1)),
+                Some(lease),
+                json!({"authority_kind": "registrar", "state_derived": false,
+                       "registry_contract": REGISTRY, "owner_getter": OWNER}),
+                REGISTRAR,
+            )
+            .await?;
+        fixture
+            .write(
+                block,
+                3,
+                "RegistrationGranted",
+                V1_REGISTRAR,
+                Some(&name(1)),
+                Some(lease),
+                json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                       "expiry": 2_000_000_000u64}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    fixture
+        .event(Event::new(
+            "filler:8",
+            8,
+            90,
+            "PreimageObserved",
+            "ens_v1_registry_l1",
+        ))
+        .await?;
+    publish(&fixture, 7).await?;
+    let (open, _) = summary(&fixture, &name(1)).await?.expect("a summary row");
+    ensure!(
+        open["registration_status"].is_null(),
+        "the unreadable binding composes no row: {open}"
+    );
+    ensure!(
+        open["recompose_at"] == json!(block_time(8)),
+        "the summary with no composed row recomposes at {}, not block 8's time",
+        open["recompose_at"]
+    );
+    fixture
+        .apply(8, bigname_project::families::FamilyMode::Normal)
+        .await;
+    let (opened, _) = summary(&fixture, &name(1)).await?.expect("a summary row");
+    ensure!(
+        !opened["registration_status"].is_null(),
+        "block 8 left the summary {opened}"
+    );
+    fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }

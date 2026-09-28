@@ -24,8 +24,9 @@
 //!   from the readable interpreted events, as the served stage reads them;
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
-//!   expiry or grace boundary); the writer composes the name again at the first block whose time
-//!   reaches it.
+//!   expiry or grace boundary), in Unix seconds, since a NameWrapper expiry can lie past the last
+//!   instant a timestamp holds; kept for a name that composes no row too. The writer composes
+//!   the name again at the first block whose time reaches it.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -38,9 +39,10 @@ use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_ti
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
 /// `project_name_summary` row renders them, keyed by name. Every name with a surface of the chain
 /// at or below the block has one, since a Transfer is attributed to a name whatever its surface's
-/// state; a name the composed reader serves no row for (no active, readable surface) has no arm,
-/// no serving resource, no registration and no clock boundary. `conn` may be the family block's
-/// own transaction, whose writes the composition then reads.
+/// state; a name the composed reader serves no row for has no arm, no serving resource and no
+/// registration, and keeps its clock boundary when it has a readable active surface (a bound name
+/// whose token lineage is not readable). `conn` may be the family block's own transaction, whose
+/// writes the composition then reads.
 pub async fn compose_name_summaries(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
@@ -72,9 +74,8 @@ pub async fn compose_name_summaries(
             .map(|(name, composed)| {
                 json!({
                     "logical_name_id": name,
-                    "namespace": composed.row.namespace,
-                    "declared_summary": composed.row.declared_summary,
-                    "provenance": composed.row.provenance,
+                    "declared_summary": composed.row.as_ref().map(|row| &row.declared_summary),
+                    "provenance": composed.row.as_ref().map(|row| &row.provenance),
                     "recompose_at": composed.recompose_at,
                 })
             })
@@ -101,7 +102,7 @@ pub async fn compose_name_summaries(
     builder.push("::text[])) named LEFT JOIN jsonb_to_recordset(");
     builder.push_bind(&source);
     builder.push(
-        ") AS nc(logical_name_id text, namespace text, declared_summary jsonb, provenance jsonb,
+        ") AS nc(logical_name_id text, declared_summary jsonb, provenance jsonb,
                  recompose_at bigint)
            ON nc.logical_name_id = named.logical_name_id
          CROSS JOIN LATERAL (
@@ -116,7 +117,7 @@ pub async fn compose_name_summaries(
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,
-                to_timestamp(nc.recompose_at) AS recompose_at) summary",
+                nc.recompose_at) summary",
         zero_owner()
     ));
     let rows: Vec<(String, Value)> = builder

@@ -222,17 +222,19 @@ pub(super) async fn load(
             load_chain(conn, &publication, &surfaces, shape, true)
                 .await?
                 .into_iter()
-                .map(|(name, composed)| (name, composed.row)),
+                .filter_map(|(name, composed)| Some((name, composed.row?))),
         );
     }
     Ok(out)
 }
 
-/// One composed name: its row, and the first clock second after the publication at which the
-/// composition can change with no fact changing: a binding interval opening or closing, or a
-/// NameWrapper expiry or grace boundary.
+/// One composed name: its row (none when it serves no row, a bound name whose token lineage is
+/// not readable), and the first clock second after the publication at which the composition can
+/// change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry
+/// or grace boundary. The second is kept for a name with no row, whose row a binding change at
+/// that second can bring back.
 pub(super) struct Composed {
-    pub(super) row: NameCurrentRow,
+    pub(super) row: Option<NameCurrentRow>,
     pub(super) recompose_at: Option<i64>,
 }
 
@@ -380,6 +382,13 @@ pub(super) async fn load_chain(
         // A bound row whose token lineage is not readable is not served
         // (DEFAULT_NAME_CURRENT_READ_FILTER).
         if decided.binding.is_some() && token.is_some_and(|(_, readable)| !readable) {
+            out.insert(
+                name.to_owned(),
+                Composed {
+                    row: None,
+                    recompose_at: recompose_at(facts, clock.timestamp_seconds),
+                },
+            );
             continue;
         }
         let row = compose(
@@ -406,7 +415,7 @@ pub(super) async fn load_chain(
         out.insert(
             name.to_owned(),
             Composed {
-                row,
+                row: Some(row),
                 recompose_at: recompose_at(facts, clock.timestamp_seconds),
             },
         );

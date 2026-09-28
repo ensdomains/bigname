@@ -304,7 +304,7 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     clocked AS (
         SELECT summary.logical_name_id
         FROM project_name_summary summary
-        WHERE summary.chain_id = $1 AND summary.recompose_at <= to_timestamp($3)
+        WHERE summary.chain_id = $1 AND summary.recompose_at <= $3
     ),
     -- A name is composed once it has a surface: every surface since the marker's block.
     surfaced AS (

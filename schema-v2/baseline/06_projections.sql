@@ -3154,7 +3154,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     expires_at timestamptz,
     registered_at timestamptz,
     zero_owner boolean NOT NULL,
-    recompose_at timestamptz,
+    recompose_at bigint,
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
@@ -3176,9 +3176,9 @@ COMMENT ON COLUMN project_name_summary.expires_at IS
 COMMENT ON COLUMN project_name_summary.registered_at IS
     'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.';
 COMMENT ON COLUMN project_name_summary.zero_owner IS
-    'This value is whether the latest ENSv1 or Basenames registry Transfer attributed to the name names the zero owner, which zeroes a registry child''s owner. A Transfer is attributed as the served child build does: by the name it carries, else the latest named registry owner event of its resource and family, else an active, readable surface at its node.';
+    'This value is whether the latest ENSv1 or Basenames registry Transfer attributed to the name names the zero owner, which zeroes a registry child''s owner. A Transfer is attributed as the served child build does: by the name it carries, else the latest named registry event of any kind of its resource and family, else an active, readable surface at its node.';
 COMMENT ON COLUMN project_name_summary.recompose_at IS
-    'This value is the first second after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary. The family step composes the name again at the first block whose time reaches it; null when no such second exists.';
+    'This value is the first second, in Unix seconds, after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary, kept whether or not the name composes a row. The family step composes the name again at the first block whose time reaches it; null when no such second exists. It is a count of seconds, not a timestamp, because a NameWrapper expiry can be any 64-bit word, past the last instant a timestamp holds.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
