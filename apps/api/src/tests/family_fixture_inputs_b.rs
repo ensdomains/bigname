@@ -1,16 +1,6 @@
 // Retained-input fixture helpers for the lookup, history and registry route tests. Every helper
 // writes identity rows, manifests and normalized events, then runs the real family publisher.
 
-/// The mainnet publication head the fixture last selected.
-async fn mainnet_fixture_head(database: &TestDatabase) -> Result<(i64, String)> {
-    Ok(sqlx::query_as(
-        "SELECT latest_block_number, latest_block_hash FROM chain_heads
-         WHERE chain_id = 'ethereum-mainnet'",
-    )
-    .fetch_one(&database.pool)
-    .await?)
-}
-
 /// Rebuild the mainnet families at the fixture's selected head after new inputs were added.
 async fn republish_mainnet_fixture(database: &TestDatabase) -> Result<()> {
     republish_fixture_chain(database, "ethereum-mainnet").await

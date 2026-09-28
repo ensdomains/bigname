@@ -1660,30 +1660,6 @@ async fn seed_v2_registry_operator_fixture() -> Result<TestDatabase> {
     Ok(database)
 }
 
-// Namespace membership comes from retained canonical interpreted events, so namespace-filtered
-// reads need one for every registration they expect to see.
-async fn seed_permission_namespace_event(
-    database: &TestDatabase,
-    namespace: &str,
-    resource_id: Uuid,
-) -> Result<()> {
-    let (chain_id, block_hash, block_number): (String, String, i64) = sqlx::query_as(
-        "SELECT chain_id, block_hash, block_number FROM bigname_phase.resources WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let mut event = history_event(
-        &format!("permission-namespace-{namespace}-{resource_id}"), None, Some(resource_id),
-        Some(&chain_id), Some(block_number), Some(&block_hash), None, None,
-        CanonicalityState::Canonical,
-    );
-    event.namespace = namespace.to_owned();
-    event.event_kind = "PermissionChanged".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-    Ok(())
-}
-
 async fn seed_registry_operator(database: &TestDatabase, resource_id: Uuid) -> Result<()> {
     insert_permission_registry_owner(database, resource_id, V2_OPERATOR_REGISTRY, 120).await?;
     insert_permission_registry_approval(database, true, 121).await?;
