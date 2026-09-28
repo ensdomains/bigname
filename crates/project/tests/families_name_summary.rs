@@ -155,8 +155,11 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
     shadow_support::publish_served(&fixture, 8).await?;
     let outcome = fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
-    ensure!(outcome.skipped.is_none(), "block 8: {:?}", outcome.skipped);
+        .await?;
+    ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(8),
+        "block 8: {outcome:?}"
+    );
     let renewed = assert_matches_served(&fixture, &name(1)).await?;
     assert_matches_served(&fixture, &name(2)).await?;
     ensure!(renewed != first, "the renewal left {renewed}");
@@ -210,7 +213,7 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
     // Replay, then the block-by-block and ranged rebuilds write the same rows.
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (replayed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         replayed == renewed,
@@ -230,7 +233,7 @@ async fn the_family_undo_and_rebuild_keep_every_summary_row() -> Result<()> {
     fixture.assert_undo_restores(7).await?;
     fixture
         .apply(9, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     fixture.assert_rebuild_equal(9).await?;
     let rows = fixture.rows("project_name_summary").await?;
     ensure!(rows.len() == 2, "{rows:#?}");
@@ -306,7 +309,7 @@ async fn a_binding_that_closes_by_the_clock_is_composed_again_at_the_first_block
 
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         closed != open,
@@ -584,7 +587,7 @@ async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
     );
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (opened, _) = summary(&fixture, &name(1)).await?.expect("a summary row");
     ensure!(
         !opened["registration_status"].is_null(),
@@ -611,7 +614,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     // Block 8 has no events: only the clock closes name 1's binding.
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(closed != open, "block 8 left {closed}");
     let journalled: Vec<String> = sqlx::query_scalar(
@@ -631,7 +634,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     ensure!(restored == open, "undo left {restored}, not {open}");
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (replayed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         replayed == closed,
@@ -646,7 +649,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
             .await?;
     fixture
         .apply(9, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let summaries: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_family_undo
          WHERE chain_id = $1 AND block_number = 9 AND family = 'project_name_summary'",
@@ -765,7 +768,7 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
         .with_rebuild_ranges(families::RebuildRanges::Through(7));
     let rebuilt = fixture
         .apply_with(7, families::FamilyMode::Rebuild, &options)
-        .await;
+        .await?;
     let dbg: Vec<(i64, String)> =
         sqlx::query_as("SELECT DISTINCT block_number, 'x' FROM project_family_undo ORDER BY 1")
             .fetch_all(&fixture.pool)
@@ -776,11 +779,11 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
     );
     // Ranges grow 1, 2, 4 blocks: [2], [3, 4] and [5, 6], then the target on its own.
     ensure!(
-        rebuilt.skipped.is_none() && rebuilt.ranges == 3,
+        rebuilt.marker.as_ref().map(|marker| marker.number) == Some(7) && rebuilt.ranges == 3,
         "the rebuild applied {} blocks in {} ranges: {:?}",
         rebuilt.blocks,
         rebuilt.ranges,
-        rebuilt.skipped
+        rebuilt.marker
     );
     for ((table, was), (_, now)) in followed.iter().zip(&fixture.exact().await?) {
         ensure!(
