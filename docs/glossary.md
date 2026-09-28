@@ -974,18 +974,6 @@ copies the stored expiry when a claim passes zero, and emits every renewal's
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registrar/AbstractETHRegistrar.sol:L84-L93 @ ens_v2_sepolia_20260629@ccaeb58)
 
-## Expiry root
-
-an ENSv2 logical name from which Project follows current
-canonical subregistry edges during a bounded redo to recover descendant
-projection scope. Project selects a still-live registration or reservation when
-its expiry crossed the displaced branch's timestamps or its lifecycle changed
-between the affected range's start and the Project target. Interpret also
-preserves the root identity before deleting a state-derived path-expiry release,
-because the losing branch may already have deleted the ancestor's descendant
-projections. Being an expiry root does not itself change serving status or
-authority.
-
 ## Migration controller
 
 an ENSv2 contract that accepts a transferred ENSv1
@@ -1926,15 +1914,6 @@ one atomic family publication and its marker sequence: a normal block, a bounded
 rebuild range or an undo. Always qualify it: the bare word *generation* is also
 used by the unrelated [raw-log retention generation](#generation-raw-log-retention-generation).
 
-<a id="projection-generation-failure"></a>
-## Projection generation failure (`project_generation_failures`)
-
-historical append-only diagnostic evidence from the removed Project batch writer.
-A failed batch rolled back before publication and the phase runner recorded the
-conflict separately. Those rows retain their identities, positions and observed
-canonicality after later success or reorg. The family-only runtime retains this
-audit table but no longer runs the obsolete batch invariants.
-
 <a id="publication-visible-event"></a>
 ## Publication-visible event
 
@@ -1942,9 +1921,7 @@ a normalized event a publication at a target block can read: activated
 (`consumer_visibility = 'activated'`), `canonical`, `safe` or `finalized`
 ([canonicality](#canonicality)), at or below the target, and at the hash the
 canonical lineage holds for its height. It is the set the [owned key
-families](#owned-key-family)' intake reads (`crates/project/src/families/input.rs`),
-and every log read a [shadow read](#shadow-read)'s checks make takes only these
-events.
+families](#owned-key-family)' intake reads (`crates/project/src/families/input.rs`).
 
 <a id="raw-fact"></a>
 ## Raw facts
@@ -2323,15 +2300,6 @@ but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
-## Shadow read
-
-A test comparison between a replacement read implementation and its predecessor
-at the same publication. TYR-36 used this to validate the family readers before
-removing the former serving tables. Permanent production reads now use families;
-the retained corpus checks incremental family state against a rebuild and
-exercises endpoint responses from actual inputs. Historical comparison receipts
-remain evidence of the pre-removal differential, not an alternate serving mode.
-
 ## Sidecar
 
 a retired legacy companion-table pattern that precomputed
@@ -2544,18 +2512,6 @@ from the Project row. During a family rebuild (`bootstrap_pending`) status
 shows the rebuild's progress block as `indexed_block` and reports `degraded`,
 while the gauges show the unavailable -1.
 
-## Publication switch
-
-The retired `BIGNAME_SERVE_FROM_FAMILIES` setting used during TYR-36's reader
-cutover. Step 7c removes the setting and the old serving path. Family publication
-is permanent; this term remains for historical review and rollout records.
-
-## The flip
-
-The historical step 7b-6 change that made family publication the default. Step
-7c subsequently removed the override and obsolete serving tables. Current
-readiness and lookup guards always use the [family marker](#family-marker).
-
 ## Composed name row
 
 A name read model that `bigname_storage::families::name` builds from the
@@ -2586,8 +2542,7 @@ name a block touches and for every name whose `recompose_at`, the first second
 (in Unix seconds, kept even when the name composes no row) its composition can
 change with no fact changing, the block's time has reached;
 it is journalled like every other family
-([projections](projections.md#owned-key-families)). With the [publication
-switch](#publication-switch) on, the child lists read it
+([projections](projections.md#owned-key-families)). The child lists read it
 ([API](api-v1.md#tier-2-product-reads)).
 
 ## Family undo journal
@@ -2702,17 +2657,17 @@ and that order is a disclosed precondition: no two batches of one source are
 known to write one family key, and where batches of two sources write one key
 from one log, the fact with the higher ordinal (then the higher identity
 bytes) wins, not the one inserted last. Its one confirmed instance is the
-NameWrapped registry-node pointer, where the resolver value agrees with the
-served read and only the resource, source family and event attribution differ.
+NameWrapped registry-node pointer, where both batches write the same resolver
+value and only the resource, source family and event attribution differ.
 Four more shapes are read from the adapter code and pinned by tests but not
 yet produced by an adapter run: an F1 binding predecessor, an F4 registrar
 pointer, an F4 enrichment pointer against the registrar surface, and an F13
 controller. The F13 shape is a value difference: the families keep the
-registrant as controller where the served fold would keep the registry owner
+registrant as controller where the removed serving fold kept the registry owner
 ([projections](projections.md#owned-key-families) lists all four). No
-cross-source value difference is exempted. A
-served reader ported to the canonical event order (step 7) must parse the
-ordinal the same way. Only when both indexes are present, match
+cross-source value difference is exempted. Any SQL
+reader that orders by the canonical event order must parse the ordinal the same
+way. Only when both indexes are present, match
 `regexp_match(event_identity COLLATE "C", ':([0-9]+)$') m`, strip leading
 zeros with `d = ltrim(m[1], '0')`, then take
 `CASE WHEN d = '' THEN 0::bigint WHEN length(d) < 10 OR (length(d) = 10 AND d COLLATE "C" <= '4294967295' COLLATE "C") THEN d::bigint END`,

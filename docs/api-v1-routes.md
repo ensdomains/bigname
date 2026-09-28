@@ -63,9 +63,8 @@ historical projection is retained by a pagination token. Their cursors differ:
   without the cursor. A first page, which has no cursor to drop, whose
   publication changed while it was read returns the same `409 stale` with a
   message saying so; retrying the same request reads the new publication.
-  Subnames' time-dependent expiry filtering retains the first page's
-  evaluation time (with the [publication switch](glossary.md#publication-switch)
-  on, it is the published block's timestamp on every page).
+  Subnames' time-dependent expiry filtering evaluates at the published block's
+  timestamp on every page.
 
 The publication fence of these four lists conservatively covers the requested
 namespace, or all active public namespaces when none is selected. A count
@@ -208,7 +207,7 @@ named-resource resolver hint and diverge from a fresh walk
 in as an ignored collision probe).
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
-does not restore `name_current.resource_id`, so the released or expired name's
+does not restore the name's serving `resource_id`, so the released or expired name's
 name and record routes still expose no current record inventory.
 
 Field ownership:
@@ -394,7 +393,7 @@ collection route carry neither header.
   returns retryable `409 stale` if it changed. The API may return an as-filled
   page with `has_more=true` when it reaches the bounded post-filter scan cap;
   clients continue with the returned `next_cursor`. A `resolves_to` input pages
-  `address_records_current` in name order (not primary-first), its cursor
+  the address's resolver-record relations in name order (not primary-first), its cursor
   binds the address, coin type, relation, and public namespace set, and its
   `total_count` is null.
 - Status semantics: per-result `status` uses the common result vocabulary.
@@ -420,10 +419,7 @@ collection route carry neither header.
   authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2
   migration proof or child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
-  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
-  `name_current` row derived with either reason by an earlier Project generation,
-  before the required full-history Interpret redo and its stamped Project redo
-  complete, still returns the unsupported result below. The root, `eth`,
+  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. The root, `eth`,
   `reverse`, and `addr.reverse` follow the same rule as every other name. An
   address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
@@ -438,9 +434,8 @@ collection route carry neither header.
   readable name fetched with the candidate row is the common source for the
   emitted normalized and display names, label-derived fields, primary-name
   ordering, the `is_primary` result, and the reverse cursor. A `resolves_to`
-  input additionally requires each `address_records_current` row it serves to
-  be published at or before the selected head and omits unreadable current name
-  rows. Unsupported rows are also omitted except for the documented TLD
+  input additionally requires each resolver-record relation it serves to be
+  published at or before the selected head and omits unreadable current names. Unsupported rows are also omitted except for the documented TLD
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   case with `current_authority_not_projected`; that case serves resolver records
   without claiming registration authority. Public reverse lookup with no explicit
@@ -491,15 +486,15 @@ collection route carry neither header.
 - Storage mapping: the chain set is the union of
   `bigname_phase.chain_heads` and `bigname_phase.chain_phase_state`.
   `latest_block`, `safe_block`, and `finalized_block` map to the corresponding
-  `chain_heads` positions. `indexed_block` maps to the `project` phase's
-  `current_block_number`. `lag_seconds` compares the timestamps of the exact
-  latest-head and project-current hashes in `bigname_phase.chain_lineage`.
-  With the [publication switch](glossary.md#publication-switch) on,
-  `indexed_block` and both lags come from the
-  [family marker](glossary.md#family-marker) instead. With either setting,
-  both lags are `null` while an Interpret or Project redo is in progress,
-  since lag is unknown during a redo.
-  Missing head, project, or lineage rows preserve the existing nullable fields.
+  `chain_heads` positions. `indexed_block` maps to the
+  [family marker](glossary.md#family-marker)'s block, and `lag_seconds`
+  compares the timestamps of the exact latest-head and marker hashes in
+  `bigname_phase.chain_lineage`; phase status and redo flags still come from
+  the phase rows. During a family rebuild `indexed_block` is the rebuild's
+  progress block and the chain reports `degraded`. Both lags are `null` while
+  an Interpret or Project redo is in progress, since lag is unknown during a
+  redo.
+  Missing head, marker, or lineage rows preserve the existing nullable fields.
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
   shape instead of preventing the API process from starting.
@@ -592,20 +587,11 @@ collection route carry neither header.
   and `expires_at`. Every row has an `expires_at` inside the window. A name
   whose exact-name authority is unsupported is omitted, as on search, because
   a listing row carries no `unsupported_reason`.
-- Coverage: the listing reads `name_current` rows whose
-  `declared_summary.registration.expiry` is the projection's numeric lease
-  expiry (unix seconds) — the form the exact-name builder writes for registrar
-  leases, ENSv2 registrations, and wrapped subnames — and relies on the partial
-  expression index `name_current_registration_expiry_idx` on
-  `(namespace, (registration.expiry)::double precision, logical_name_id)`
-  guarded by `jsonb_typeof(registration.expiry) = 'number'`
-  (`schema-v2/baseline/06_projections.sql`; migration
-  `20260911120200_name_current_registration_expiry_idx.sql` for a phase schema
-  installed before the baseline carried it). With the
-  [publication switch](glossary.md#publication-switch) on, the listing serves
-  the same rows from [composed name rows](glossary.md#composed-name-row),
-  found by walking the retained lifecycle events and NameWrapper states by
-  expiry through `project_lifecycle_event_expiry_idx`,
+- Coverage: the listing serves [composed name rows](glossary.md#composed-name-row)
+  whose `declared_summary.registration.expiry` is the numeric lease expiry
+  (unix seconds) that composition gives registrar leases, ENSv2 registrations,
+  and wrapped subnames. It finds them by walking the retained lifecycle events
+  and NameWrapper states by expiry through `project_lifecycle_event_expiry_idx`,
   `project_lifecycle_event_inexact_expiry_idx` and
   `project_wrapper_state_expiry_idx` (migration
   `20260928140000_project_families_expiry_indexes.sql`). A row whose only expiry is stored
@@ -1429,10 +1415,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   predicates as its list, before the cursor.
 - Snapshot behavior: the parent, child rows and filtered count use one
   revalidated publication, disclosed in `meta.as_of`. Continuations retain its
-  identity and expiry evaluation time. With the
-  [publication switch](glossary.md#publication-switch) on, the expiry
-  evaluation time is the published block's timestamp on every page instead.
-  A changed publication returns `409 stale`
+  identity; the expiry evaluation time is the published block's timestamp on
+  every page. A changed publication returns `409 stale`
   requiring a restart without the cursor; a first page whose publication changes
   during the read can simply be retried. Historical child enumeration is not
   supported.
@@ -1458,13 +1442,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   with no selected authority at all whose arms disagree is omitted entirely.
   On every ENS
   [deployment profile](glossary.md#deployment-profile) (Mainnet and Sepolia), an ENSv1 relation that survives
-  parent reachability and
-  was asserted after a proven ENSv2 child authority began blocks Project
-  publication for that generation,
-  though a positive ENSv2 registration in a locked parent's migration registry
-  is itself entry history and therefore filters the ENSv1 relation before this
-  assertion. The dual-current assertion remains a defensive generation check:
-  an unmigrated parent can expose this contradiction, but no ordinary on-chain
+  parent reachability but was asserted after a proven ENSv2 child authority
+  began is not served, because the child's selected arm is ENSv2; a positive
+  ENSv2 registration in a locked parent's migration registry is itself entry
+  history and filters the ENSv1 relation even earlier. Only an unmigrated
+  parent can leave such a relation standing; no ordinary on-chain
   parent-and-child ENSv1→ENSv2 shape reaches it after parent reachability and
   migration-registry history are applied.
   (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L146-L164 @ ens_v2@a971bd64)
@@ -1585,7 +1567,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   registration, transfer or surface snapshot, registry owner, or NameWrapper
   holder). The controller is set only by a `PermissionChanged` whose scope is
   the name's resource
-  (bigname: `crates/project/src/builders/address_names.rs:238-248`). Upstream
+  (bigname: `crates/project/src/families/addresses.rs:70-83`). Upstream
   reports an ENSv2 role change as an account's roles within an access control
   resource of the emitting contract
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20260916@366de741),
@@ -1802,8 +1784,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   attribution. `scope=name` returns only rows carrying the name's
   `logical_name_id`. A row on a resource that was never bound to the name is
   reachable through `GET /v1/diagnostics/events` via the registry resource
-  recorded internally at
-  `name_current.provenance.read_reachability.serving_resource_id`.
+  recorded internally at the composed name's
+  `provenance.read_reachability.serving_resource_id`.
   `include=child_registrations` is independent of `scope`: the collection is
   the rows `scope` selects plus the direct child registrations, under
   `scope=name`, `scope=registration`, and `scope=both` alike, and child rows
@@ -2349,7 +2331,7 @@ introduces it rebuilds Project from full history before serving the option; see
   default; `dedupe=registration` groups by registration resource.
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
-  from the `address_records_current` projection rather than the authority
+  from the address-to-record family indexes rather than the authority
   relations. It stands alone: `resolves_to` combined with `owner`, `manager`,
   `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
   it, because it is coin-type scoped and its rows are not authority claims.
@@ -2583,8 +2565,9 @@ introduces it rebuilds Project from full history before serving the option; see
   unsupported sources are represented by an entry with `status=unsupported`,
   not omitted.
   Supplying `source=indexed` or `source=verified` narrows the `answers` array
-  to that source for single-source callers; every indexed entry comes from
-  `bigname_phase.primary_names_current`, regardless of source selection. A
+  to that source for single-source callers; every indexed entry comes from the
+  family reverse claims (`project_reverse_node_claim` with its
+  `project_reverse_tuple`), regardless of source selection. A
   successful stored raw claim is normalized for the indexed product name even
   when its raw spelling was not already normalized, unless the projection
   already recorded that spelling as its normalized form, in which case the
@@ -2604,9 +2587,9 @@ introduces it rebuilds Project from full history before serving the option; see
   uses the schema-v2 lookup engine's current readable Ethereum position and
   pins its reverse and optional forward calls to that block hash. It persists
   neither a legacy trace/outcome nor a divergence row. When `source` is omitted,
-  the indexed claim is read from `bigname_phase.primary_names_current` and
+  the indexed claim is read from the family reverse claims and
   returned beside the verified answer only when the current `chain_heads`
-  position and captured `project` publication generation match the
+  position and captured family publication match the
   lookup before verified execution and remain unchanged after the indexed
   read; otherwise the request returns `409 stale`. Live results never change
   the indexed answer. Basenames verified primary-name lookup is unsupported;
@@ -2639,11 +2622,10 @@ introduces it rebuilds Project from full history before serving the option; see
   named it: it applies both to a projected claim and to a name the live reverse
   leg returns, and in the live case the check runs after the reverse leg and
   before the forward call, so a refused name costs no forward dispatch and no
-  CCIP-read follow. A present supported `name_current` row without its selected
+  CCIP-read follow. A present supported composed name without its selected
   [authority arm](glossary.md#authority-epoch) is a projection anomaly and
-  receives the same refusal. A name for which the current projection read finds
-  no exact-name row in `name_current` is instead admitted to live forward
-  verification. The projection cannot state which authority applies to a name
+  receives the same refusal. A name for which the current family read composes
+  no exact-name row is instead admitted to live forward verification. The projection cannot state which authority applies to a name
   outside indexed coverage, and live verification is the only answer path for
   it. A subname known only through offchain or wildcard live resolution has no
   exact-name row because a live provider answer does not materialize one;
