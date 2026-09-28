@@ -427,6 +427,11 @@ async fn seed_abi_batch(
         events.extend(write);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    // Production tables carry statistics; without them the history attribution join picks a
+    // nested loop that scans the chain's events once per pointer, a plan production never runs.
+    sqlx::query("ANALYZE normalized_events")
+        .execute(&database.pool)
+        .await?;
     rebuild_address_fixture(database).await?;
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT normalized_event_id FROM normalized_events WHERE event_identity = ANY($1)",
