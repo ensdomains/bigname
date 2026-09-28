@@ -28,33 +28,10 @@ artifact.
 
 The binary serves this contract under `/v1`; the old v1 REST surface was
 deleted before this contract took over the prefix (#315), and no `/v2` prefix
-is served. The production edge admits `/v1` reads, `POST /v1/lookup`, and
-GraphQL; see [`production.md`](production.md#public-edge) for the edge policy.
-
-## GraphQL compatibility
-
-`POST /graphql` is governed by
-[`consumer-capabilities.md` § GraphQL compatibility](consumer-capabilities.md#graphql-compatibility),
-including its generated-style roots, local extensions, and explicit unsupported
-behavior. This document does not define a second GraphQL contract.
-
-The generated `Domain_filter` serves the complete upstream ID and name operator
-families with conjunctive semantics, direct comparison against the served
-`Domain.id` and `Domain.name` values, and separate case-sensitive and nocase
-pattern operators. Raw-name comparisons and name ordering use expression-local
-PostgreSQL `COLLATE "C"`; canonical fixed-width namehash operands use the
-database-collation index, while noncanonical ID ranges retain C semantics on a
-linear path. Pattern input retains SQL `%`, `_`, and backslash semantics. For
-the generated ID/name families, explicit null equality is
-distinct from omission, while explicit null on the other operators is rejected.
-Generated order ties use the Domain ID in the requested direction. The generated
-`Domain_orderBy` exposes only the exact values listed
-in the capability contract. The legacy `DomainFilter` behavior and local
-`registrationDate` ordering remain separate extensions.
-Graph Node generates these ID and String operator families (upstream:
-.refs/graph_node/graph/src/schema/api.rs:L872-L912 @ graph_node@aefe173), and the
-pinned ENS subgraph declares `Domain.id` as `ID!` and `Domain.name` as `String`
-(upstream: .refs/ens_subgraph/schema.graphql:L1-L7 @ ens_subgraph@723f1b6).
+is served. The production edge admits `/v1` reads and `POST /v1/lookup`; see
+[`production.md`](production.md#public-edge) for the edge policy. The former
+`POST /graphql` compatibility surface has been removed and answers like any
+unknown route.
 
 ## Naming Dictionary
 
@@ -754,7 +731,11 @@ for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
 publication has the stored head's exact block hash. With the
 [publication switch](glossary.md#publication-switch) on, those last two checks
-read the [family marker](glossary.md#family-marker), which must also be `live`.
+read the [family marker](glossary.md#family-marker), which must also pass the
+rest of the serving fence: `live`, on readable lineage, and at most one block
+behind the stored head. Status is mixed-source until the flip: the projected
+block, its timestamp and the Project phase state still come from the project
+row.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -881,8 +862,12 @@ at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
 for equality, so nothing changes on the wire, except that turning the switch on
-or off makes every continuation cursor issued before the change return
-`409 stale` once, asking the client to restart pagination without the cursor.
+or off makes publication-bound current-state continuation cursors (history
+cursors carry no publication token) issued before the change return
+`409 stale`, asking the client to restart pagination without the cursor. Such a
+cursor stays rejected until the client restarts pagination. The API tags these
+cursors with the publication source, so this holds even when the project row's
+version and the marker's `sequence` happen to be the same number.
 Until the later step 7b slices move a route's rows onto the families, that
 route still reads the served tables while the switch is on. The served rows are
 committed before the family marker moves, so a served batch that lands between
@@ -891,12 +876,20 @@ and the check that refuses a read when the publication changed while the
 request was being read does not refuse it. The per-row snapshot checks still
 refuse any row newer than the selected position.
 
+So with the switch on, served-table reads can return inconsistent membership or
+counts despite those per-row target checks, which only drop rows newer than the
+selected position and cannot restore rows or counts from the publication a read
+started on. Production leaves the switch off until the row and guard cutovers
+are complete.
+
 With the switch on, collection expiry filters, such as `include_expired=false`
 on subnames, are evaluated at the published block's timestamp on the first page
 and every continuation, not at the time of the first request; a scope spanning
 several chains uses the earliest of their published block timestamps. Verified
 lookup also requires the marker to pass these checks before provider execution;
-its post-call guard still compares the project row's generation.
+its post-call guard still compares the project row's generation. The lookup
+engine keeps reading the served tables, and its database guard moves to the
+marker in the flip slice; no lookup input moves to the families before that.
 
 With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
 instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
@@ -1175,8 +1168,8 @@ shape. Diagnostics and
 Project use the internal status `success` for a retained value; product routes
 publish that status as `ok`.
 
-The exact-name detail route, resolver-records route, `profile=detail` lookup, and
-GraphQL resolver address fields flatten both projected `{encoding,bytes}`
+The exact-name detail route, resolver-records route, and `profile=detail` lookup
+flatten both projected `{encoding,bytes}`
 address values and projected scalar address values to the same scalar hex
 string. The supported internal shapes therefore do not create a second public
 multicoin-address shape.

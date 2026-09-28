@@ -24,20 +24,14 @@
 		path /v1/lookup
 	}
 
-	@graphql {
-		method POST
-		path /graphql
-	}
-
 	@preflight {
 		method OPTIONS
-		path /v1/lookup /graphql
+		path /v1/lookup
 	}
 
 	route {
 		reverse_proxy @v1_reads {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @v1_lookup {$BIGNAME_PUBLIC_UPSTREAM}
-		reverse_proxy @graphql {$BIGNAME_PUBLIC_UPSTREAM}
 		reverse_proxy @preflight {$BIGNAME_PUBLIC_UPSTREAM}
 		respond 404
 	}

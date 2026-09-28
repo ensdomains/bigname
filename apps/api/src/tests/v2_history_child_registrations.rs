@@ -704,3 +704,18 @@ async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> 
 
     database.cleanup().await
 }
+
+fn collect_plan_nodes<'a>(node: &'a Value, nodes: &mut Vec<&'a Value>) {
+    nodes.push(node);
+    if let Some(children) = node["Plans"].as_array() {
+        for child in children {
+            collect_plan_nodes(child, nodes);
+        }
+    }
+}
+
+fn plan_nodes(plan: &Value) -> Vec<&Value> {
+    let mut nodes = Vec::new();
+    collect_plan_nodes(&plan[0]["Plan"], &mut nodes);
+    nodes
+}

@@ -246,25 +246,33 @@ async fn v2_collection_expiry_clock_is_the_published_block_time_with_the_switch_
     database.cleanup().await
 }
 
-/// A child whose expiry lies after the published block's time but before the request time: live
-/// at the publication, expired by the wall clock.
-async fn seed_subname_expiring_after_the_publication(database: &TestDatabase) -> Result<()> {
+/// Seeds a declared child of `parent.eth` whose registration expires at `expiry`.
+async fn seed_subname_expiring_at(
+    database: &TestDatabase,
+    label: &str,
+    block_number: i64,
+    id: u128,
+    expiry: &str,
+) -> Result<()> {
+    let name = format!("{label}.parent.eth");
+    let logical_name_id = format!("ens:{name}");
+    let namehash = format!("node:{name}");
     seed_v2_subnames_bound_child(
         database,
-        "ens:zeta.parent.eth",
-        "zeta.parent.eth",
-        "node:zeta.parent.eth",
-        86,
-        Uuid::from_u128(0x4040),
-        Uuid::from_u128(0x5040),
-        Uuid::from_u128(0x6040),
+        &logical_name_id,
+        &name,
+        &namehash,
+        block_number,
+        Uuid::from_u128(0x4000 + id),
+        Uuid::from_u128(0x5000 + id),
+        Uuid::from_u128(0x6000 + id),
         json!({
             "registration": {
                 "status": "active",
                 "authority_kind": "registrar",
                 "registrant": "0x00000000000000000000000000000000000000fB",
-                "registered_at": "2025-01-02T03:04:05Z",
-                "expiry": "2026-06-01T00:00:00Z"
+                "registered_at": "2020-01-02T03:04:05Z",
+                "expiry": expiry
             },
             "control": {
                 "registry_owner": "0x00000000000000000000000000000000000000fA"
@@ -276,33 +284,63 @@ async fn seed_subname_expiring_after_the_publication(database: &TestDatabase) ->
         &database.pool,
         &[v2_subnames_declared_child_row(
             "ens:parent.eth",
-            "ens:zeta.parent.eth",
-            "zeta.parent.eth",
-            "node:zeta.parent.eth",
-            906,
-            86,
+            &logical_name_id,
+            &name,
+            &namehash,
+            900 + block_number,
+            block_number,
         )],
     )
     .await?;
     Ok(())
 }
 
+/// Zeta expires after the published block's time but before the request time: live at the
+/// publication, expired by the wall clock. Epsilon expired before the published block: expired
+/// by either clock.
+const ZETA_EXPIRY: &str = "2026-06-01T00:00:00Z";
+const EPSILON_EXPIRY: &str = "2025-06-01T00:00:00Z";
+
 #[tokio::test]
 async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_block_time()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
-    seed_subname_expiring_after_the_publication(&database).await?;
+    seed_subname_expiring_at(&database, "zeta", 86, 0x40, ZETA_EXPIRY).await?;
+    seed_subname_expiring_at(&database, "epsilon", 87, 0x41, EPSILON_EXPIRY).await?;
     seed_live_family_marker(&database.pool, 1).await?;
-    let filtered = "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1";
 
+    // Pin the fixture's clocks, so the assertions below mean what the names say.
+    let published: Vec<sqlx::types::time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT block_timestamp FROM bigname_phase.project_family_marker")
+            .fetch_all(&database.pool)
+            .await?;
+    let [published] = published[..] else {
+        anyhow::bail!("expected one family marker, found {}", published.len());
+    };
+    let expiry = |value: &str| {
+        parse_rfc3339_utc_timestamp(value).map_err(|error| anyhow::anyhow!("{error}"))
+    };
+    assert!(
+        expiry(EPSILON_EXPIRY)? < published
+            && published < expiry(ZETA_EXPIRY)?
+            && expiry(ZETA_EXPIRY)? < sqlx::types::time::OffsetDateTime::now_utc(),
+        "fixture: epsilon expiry < publication ({published}) < zeta expiry < now"
+    );
+
+    let filtered = "/v1/names/Parent.eth/subnames?include_expired=false&page_size=1";
     bigname_storage::publication_source::with_serve_from_families(true, async {
         let mut names = Vec::new();
         let mut uri = filtered.to_owned();
         loop {
             let payload = v2_subnames_payload_for_database(&database, &uri).await?;
             assert_eq!(payload["page"]["total_count"], json!(3), "{uri}");
-            names.extend(v2_subname_names(&payload));
+            let page = v2_subname_names(&payload);
+            assert!(
+                !page.iter().any(|name| name == "epsilon.parent.eth"),
+                "{uri}: epsilon expired before the published block"
+            );
+            names.extend(page);
             let Some(cursor) = payload["page"]["next_cursor"].as_str() else {
                 break;
             };
@@ -312,6 +350,17 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
             names,
             vec!["alpha.parent.eth", "gamma.parent.eth", "zeta.parent.eth"],
             "zeta expires after the published block, so every page keeps it"
+        );
+        let unfiltered = v2_subnames_payload_for_database(
+            &database,
+            "/v1/names/Parent.eth/subnames?include_expired=true",
+        )
+        .await?;
+        assert!(
+            v2_subname_names(&unfiltered)
+                .iter()
+                .any(|name| name == "epsilon.parent.eth"),
+            "epsilon is a child; only the expiry filter drops it"
         );
         anyhow::Ok(())
     })
@@ -326,7 +375,7 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
         assert_eq!(
             v2_subname_names(&payload),
             vec!["alpha.parent.eth", "gamma.parent.eth"],
-            "switch off: zeta has expired by the request time"
+            "switch off: zeta has expired by the request time, epsilon long before"
         );
         anyhow::Ok(())
     })
@@ -356,58 +405,211 @@ async fn api_preflight_requires_the_family_marker_only_with_the_switch_on() -> R
     database.cleanup().await
 }
 
-/// Flipping the switch changes the generation a cursor's publication token is built from (the
-/// Project row's `xmin` or the marker's `sequence`), so an outstanding continuation is refused
-/// once with a restart in either direction; a fresh first page then paginates normally.
-#[tokio::test]
-async fn v2_a_cursor_restarts_once_when_the_switch_flips_either_way() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_live_family_marker(&database.pool, 1).await?;
-    let first_page = "/v1/names/Parent.eth/subnames?page_size=1";
-    let next_cursor = |payload: &Value| {
-        payload["page"]["next_cursor"]
-            .as_str()
-            .map(str::to_owned)
-            .context("the first page has a continuation")
-    };
+/// Sets each family marker's `sequence` to its chain's Project row `xmin`, with both publications
+/// at the same position, so the two generations are the same string and only the publication
+/// source tells them apart. Asserts that precondition.
+async fn collide_marker_sequence_with_project_xmin(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.project_family_marker marker
+         SET sequence = project.xmin::text::bigint
+         FROM bigname_phase.chain_phase_state project
+         WHERE project.chain_id = marker.chain_id
+           AND project.phase_name = 'project'
+           AND project.current_block_number = marker.current_block_number
+           AND project.current_block_hash = marker.current_block_hash",
+    )
+    .execute(pool)
+    .await?;
+    let markers: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT chain_id, current_block_number, current_block_hash
+         FROM bigname_phase.project_family_marker",
+    )
+    .fetch_all(pool)
+    .await?;
+    anyhow::ensure!(!markers.is_empty(), "the fixture has a family marker");
+    for (chain_id, number, hash) in markers {
+        let generation = |on| {
+            bigname_storage::publication_source::with_serve_from_families(
+                on,
+                bigname_storage::load_served_project_generation(
+                    pool, &chain_id, number, &hash, true, true,
+                ),
+            )
+        };
+        let (families, project) = (generation(true).await?, generation(false).await?);
+        assert!(families.is_some(), "{chain_id}: the marker is servable");
+        assert_eq!(families, project, "{chain_id}: the generations collide");
+    }
+    Ok(())
+}
 
-    for (issued, continued) in [(false, true), (true, false)] {
-        let label = format!("issued with the switch {issued}, continued with it {continued}");
-        let cursor = bigname_storage::publication_source::with_serve_from_families(
-            issued,
-            v2_subnames_payload_for_database(&database, first_page),
-        )
-        .await?;
-        let cursor = next_cursor(&cursor)?;
-
-        bigname_storage::publication_source::with_serve_from_families(continued, async {
-            let response = v2_subnames_response_for_database(
-                &database,
+/// A continuation issued with the switch at `issued` and continued with it at `continued` is
+/// refused with a restart, and stays refused on a second attempt; a fresh first page then
+/// paginates normally. `next` reads a page's continuation.
+async fn assert_flip_restarts(
+    database: &TestDatabase,
+    first_page: &str,
+    next: impl Fn(&Value) -> Option<String>,
+    (issued, continued): (bool, bool),
+) -> Result<()> {
+    let label = format!("{first_page}: issued with the switch {issued}, continued with it {continued}");
+    let page = bigname_storage::publication_source::with_serve_from_families(
+        issued,
+        v2_resolver_payload_for_database(database, first_page),
+    )
+    .await?;
+    let cursor = next(&page).context("the first page has a continuation")?;
+    bigname_storage::publication_source::with_serve_from_families(continued, async {
+        for attempt in ["first", "second"] {
+            let response = v2_resolver_response_for_database(
+                database,
                 &format!("{first_page}&cursor={cursor}"),
             )
             .await?;
-            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}, {attempt} attempt");
             let body: Value = read_json(response).await?;
             assert_eq!(body["error"]["code"], json!("stale"), "{label}");
-            assert_eq!(
-                body["error"]["message"],
-                json!(
-                    "collection publication is no longer available; restart pagination without \
-                     a cursor"
-                ),
-                "{label}"
-            );
+            assert_eq!(body["error"]["message"], json!(RESTART_WITHOUT_CURSOR), "{label}");
+        }
+        let restarted = v2_resolver_payload_for_database(database, first_page).await?;
+        let cursor = next(&restarted).context("the restarted first page has a continuation")?;
+        v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={cursor}"))
+            .await?;
+        anyhow::Ok(())
+    })
+    .await
+}
 
-            let restarted = v2_subnames_payload_for_database(&database, first_page).await?;
-            let cursor = next_cursor(&restarted)?;
-            v2_subnames_payload_for_database(&database, &format!("{first_page}&cursor={cursor}"))
-                .await?;
-            anyhow::Ok(())
-        })
+const SWITCH_FLIPS: [(bool, bool); 2] = [(false, true), (true, false)];
+
+fn collection_next_cursor(payload: &Value) -> Option<String> {
+    payload["page"]["next_cursor"].as_str().map(str::to_owned)
+}
+
+fn overview_next_cursor(payload: &Value) -> Option<String> {
+    payload["data"]["bound_names"]["page"]["next_cursor"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Flipping the switch changes the publication source a publication-bound cursor is tagged with,
+/// so an outstanding continuation is refused with a restart in either direction even when the
+/// Project row's `xmin` and the marker's `sequence` are the same number at the same position.
+#[tokio::test]
+async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_subnames_fixture(&database).await?;
+    seed_live_family_marker(&database.pool, 1).await?;
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(
+            &database,
+            "/v1/names/Parent.eth/subnames?page_size=1",
+            collection_next_cursor,
+            flip,
+        )
         .await?;
     }
     database.cleanup().await
+}
+
+/// The resolver overview's bound-names cursor carries the resolver generation beside the
+/// publication token; each is tagged with the publication source on its own. The second half
+/// splices the continuing mode's publication token into the flipped cursor, so only the
+/// resolver generation can refuse it.
+#[tokio::test]
+async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    seed_live_family_marker(&database.pool, 1).await?;
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(&database, &base, overview_next_cursor, flip).await?;
+        assert_generation_alone_restarts(
+            &database,
+            &base,
+            overview_next_cursor,
+            "resolver_generation",
+            "resolver publication changed; restart pagination",
+            flip,
+        )
+        .await?;
+    }
+    database.cleanup().await
+}
+
+/// The resolver `/roles`, `/links` and `/aliases` cursors carry their own generation map beside
+/// the publication token, tagged the same way.
+#[tokio::test]
+async fn v2_a_resolver_collection_cursor_restarts_when_the_switch_flips_either_way() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_roles_pages(&database).await?;
+    seed_live_family_marker(&database.pool, 1).await?;
+    collide_marker_sequence_with_project_xmin(&database.pool).await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    for flip in SWITCH_FLIPS {
+        assert_flip_restarts(&database, &base, collection_next_cursor, flip).await?;
+        assert_generation_alone_restarts(
+            &database,
+            &base,
+            collection_next_cursor,
+            "generation",
+            "resolver collection changed; restart pagination",
+            flip,
+        )
+        .await?;
+    }
+    database.cleanup().await
+}
+
+/// Issues a continuation with the switch at `issued`, replaces its publication token with the
+/// one a first page issues with the switch at `continued`, and continues it there: the
+/// generation named `field` is then the only binding left to refuse it.
+async fn assert_generation_alone_restarts(
+    database: &TestDatabase,
+    first_page: &str,
+    next: impl Fn(&Value) -> Option<String>,
+    field: &str,
+    message: &str,
+    (issued, continued): (bool, bool),
+) -> Result<()> {
+    let label = format!("{first_page} {field}: issued with the switch {issued}, continued with it {continued}");
+    let page = bigname_storage::publication_source::with_serve_from_families(
+        issued,
+        v2_resolver_payload_for_database(database, first_page),
+    )
+    .await?;
+    let flipped = crate::v2::decode(&next(&page).context("a continuation")?)
+        .expect("the issued cursor decodes");
+    assert!(flipped.last_item.contains_key(field), "{label}: the cursor binds {field}");
+    bigname_storage::publication_source::with_serve_from_families(continued, async {
+        let fresh = v2_resolver_payload_for_database(database, first_page).await?;
+        let fresh = next(&fresh).context("a continuation")?;
+        let publication = crate::v2::decode(&fresh).expect("the fresh cursor decodes").last_item
+            ["publication"]
+            .clone();
+        let mut spliced = flipped.clone();
+        spliced.last_item.insert("publication".to_owned(), publication);
+        let response = v2_resolver_response_for_database(
+            database,
+            &format!("{first_page}&cursor={}", crate::v2::encode(&spliced)),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["message"], json!(message), "{label}");
+        v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={fresh}"))
+            .await?;
+        anyhow::Ok(())
+    })
+    .await
 }
 
 #[tokio::test]

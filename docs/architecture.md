@@ -1,6 +1,6 @@
 # Architecture
 
-bigname is a versioned, replayable indexing and read platform for ENS (v1 and v2) and Basenames. It serves the native `v2` REST contract, a narrow GraphQL compatibility surface, and operator health.
+bigname is a versioned, replayable indexing and read platform for ENS (v1 and v2) and Basenames. It serves the native `v2` REST contract and operator health.
 
 This document defines the model. Wire format lives in [`api-v1.md`](api-v1.md) and [`api-v1-routes.md`](api-v1-routes.md); persistence in [`storage.md`](storage.md); manifests, intake, projections, and execution in their own files. Implementation sequencing and parallel-work boundaries live under [`internal/`](internal/).
 
@@ -40,56 +40,6 @@ event, resolver, namespace, and diagnostic routes under `/v1`. Their parameters,
 result vocabulary, snapshot behavior, and pagination rules are defined in
 [`api-v1-routes.md`](api-v1-routes.md). The deleted v1 REST shapes are not a
 compatibility layer for this contract.
-
-### Subgraph-compatible GraphQL surface
-
-Alongside the REST contract, bigname serves a narrow, deliberately scoped subgraph-compatible read surface at `POST /graphql`. It is **not** general subgraph parity: it implements `account`, `accounts`, `domain`, `domains`, `resolver`, `resolvers`, `registrationConnection`, and `domainConnection` over `bigname_phase.name_current`, `bigname_phase.address_names_current`, and `bigname_phase.record_inventory_current` [projections](glossary.md), plus `_meta` for the served publication. Entity reads accept the subgraph-shaped `block` and `subgraphError` arguments, while the current execution boundary remains the [served head](glossary.md#served-head) rather than historical projection reads. All root fields in one HTTP GraphQL request share one served-head selection. Reads admit unchanged rows whose target is at or before that position, carry the same selection into nested record-inventory fields, and verify before returning that the matching completed `project` phase row did not change. Rows whose projection support status is `unsupported` are not exposed; an unsupported record inventory maps to the compatibility surface's existing empty record shapes. GraphQL `createdAt` uses a declared registration or history timestamp; when neither exists, it preserves the non-null response field with Unix epoch `0` because the current phase projection has no legacy surface-creation timestamp. `createdAt` and `expiryDate` are decimal-string `BigInt` values. The GraphQL surface is a compatibility adapter, not a consumer-replacement declaration.
-
-The `domain(id: ...)` point root and legacy-connection `DomainFilter.name` have
-ENS name semantics: they normalize a name, compute its namehash, and match that
-hash, so `ALICE.eth` resolves the same ENS name as `alice.eth`. An `id` already
-shaped as a namehash is matched only within the `ens` namespace. Legacy
-`DomainFilter.name_contains` is ENSIP-15 normalized at the GraphQL boundary and
-then compared byte-for-byte with the stored normalized name; invalid input
-returns a GraphQL error. A single trailing dot remains preserved after
-normalization as a label boundary. One leading dot is also accepted when it is
-followed by a nonempty fragment that does not begin with another dot. The
-following fragment is normalized as usual, and the leading dot is preserved for
-matching. Thus `.eth`, `eth.`, `.eth.`, and `th.e` are accepted contains
-fragments, while `.` and `..` return a GraphQL error. Leading-boundary support is
-specific to the legacy contains filter; REST `match=prefix` fragment behavior is
-unchanged and does not accept a leading dot. Generated `Domain_filter.name`
-members instead compare the served display-name bytes directly, preserve SQL
-wildcards for pattern operators, and use explicit `COLLATE "C"`.
-`Domain_orderBy.name` orders the served display name with that collation. The
-complete split is defined in [`consumer-capabilities.md`](consumer-capabilities.md#graphql-compatibility).
-`DomainFilter.isMigrated` reuses the upstream field name for a different
-protocol event and is a [documented
-divergence](upstream.md#known-divergences): upstream the subgraph sets it in its
-current-registry `NewOwner` handler, recording the 2019 ENS registry migration
-(upstream: .refs/ens_subgraph/src/ensRegistry.ts:L131-L135 @ ens_subgraph@723f1b6),
-while here `isMigrated: true` restricts to names
-whose declared registration authority is the ENSv2 registry — the ENSv1→ENSv2
-migration. Only `true` filters; `false` and an omitted value apply no
-predicate, because the negation of an ENSv2-authority test does not answer the
-upstream question either. `DomainFilter.id` is accepted and applies no
-predicate; use `domain(id:)` for namehash lookup. Both are declared so
-subgraph-shaped variables validate, not because the surface implements them.
-Resolver record fields select the sole projected inventory for the name's
-current control resource or, for an ownerless V1 registry name or an ENSv2 TLD with a
-[root-registry resolver pointer](glossary.md#root-registry-resolver-pointer), its retained
-[serving resource](glossary.md#serving-resource), without coupling the
-inventory's event boundary to the later name-publication target. If a resource has multiple
-inventory rows and no declared boundary selects exactly one, the operation
-errors instead of serving empty records or choosing arbitrarily.
-
-GraphQL availability follows the exact current-head admission rule shared
-with v2 lookup. While the `project` phase catches up to a newly stored chain head, an
-operation that would return projection rows errors instead of serving the
-previous completed publication as a stale view. Connection counts are also
-more expensive than a plain `COUNT(*)`: they compute distinct matched rows and
-rank their publication targets so the API can validate count admission before
-returning the result.
 
 ## Identity model
 
@@ -1845,7 +1795,7 @@ Rust modular monolith. PostgreSQL is the hot indexed/replay store for durable
 selected facts, projections, and guarded divergence observations. The phase
 runner handles ingestion, interpretation, projection, verification, live
 follow, and bounded redo. The API serves v2 projection and lookup reads,
-GraphQL compatibility reads, health, and diagnostic readback.
+health, and diagnostic readback.
 
 Repository layout:
 
@@ -1857,7 +1807,7 @@ Repository layout:
 ## Test matrix
 
 This is a protocol-risk inventory, not a claim that the e2e suite covers every
-row. API crate tests own the v2 and GraphQL route behavior. `tests/e2e` is
+row. API crate tests own the v2 route behavior. `tests/e2e` is
 current contract-to-schema-v2 pipeline evidence: pinned contracts run on
 Anvil, the production `phase-runner` ingests or consumes immutable raw facts,
 and scenarios assert normalized events, phase state, and projections directly.

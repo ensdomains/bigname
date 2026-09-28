@@ -5,6 +5,14 @@
 /// `candidates`, the manifest join, role, support and read features of `classified` to
 /// `summarized`, one row per resolver with a candidate (the manifest with the lowest id when
 /// several of its family are active).
+///
+/// `admissions` starts from the input addresses and asks, per active manifest, for one
+/// qualifying resolver edge: a resolver many names point at has far more edges than the block
+/// has touched resolvers, and every consumer reads only the (address, namespace, family) set.
+/// It checks undated edges separately and searches dated edges newest-first within the requested
+/// block's upper bound, stopping after one qualifying edge. It relies on
+/// `project_families_discovery_edges_resolver_admission_idx`; the served build
+/// (declaration_precedence.rs) keeps its edge-driven scan over every resolver.
 pub(super) const CLASSIFY: &str = r#"
 declared AS (
     SELECT manifest.namespace, manifest.source_family,
@@ -43,25 +51,49 @@ admissions AS (
                WHEN 'basenames_base_registry' THEN 'basenames_base_resolver'
                WHEN 'basenames_base_resolver' THEN 'basenames_base_resolver'
            END AS source_family
-    FROM contract_instance_addresses address
-    JOIN discovery_edges edge
-      ON edge.to_contract_instance_id = address.contract_instance_id
-     AND edge.chain_id = address.chain_id
-    LEFT JOIN manifests origin ON origin.manifest_id = edge.source_manifest_id
-    WHERE address.chain_id = $1
-      AND lower(address.address) IN (SELECT resolver_address FROM input)
-      AND edge.edge_kind = 'resolver'
-      AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND (edge.active_from_block_number IS NULL OR edge.active_from_block_number <= $2)
-      AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
-      AND edge.deactivated_at IS NULL
-      AND (edge.active_from_block_hash IS NULL OR EXISTS (
-          SELECT 1 FROM chain_lineage lineage
-          WHERE lineage.chain_id = edge.chain_id
-            AND lineage.block_number = edge.active_from_block_number
-            AND lineage.block_hash = edge.active_from_block_hash
-            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
-      AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $2)
+    FROM (SELECT DISTINCT resolver_address FROM input) wanted
+    JOIN contract_instance_addresses address
+      ON address.chain_id = $1
+     AND lower(address.address) = wanted.resolver_address
+    CROSS JOIN manifests origin
+    CROSS JOIN LATERAL (
+        (SELECT 1 AS admitted FROM discovery_edges edge
+          WHERE edge.chain_id = address.chain_id
+            AND edge.to_contract_instance_id = address.contract_instance_id
+            AND edge.source_manifest_id = origin.manifest_id
+            AND edge.edge_kind = 'resolver'
+            AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+            AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
+            AND edge.deactivated_at IS NULL
+            AND (edge.active_from_block_hash IS NULL OR EXISTS (
+                SELECT 1 FROM chain_lineage lineage
+                WHERE lineage.chain_id = edge.chain_id
+                  AND lineage.block_number = edge.active_from_block_number
+                  AND lineage.block_hash = edge.active_from_block_hash
+                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
+            AND edge.active_from_block_number IS NULL
+          LIMIT 1)
+        UNION ALL
+        (SELECT 1 AS admitted FROM discovery_edges edge
+          WHERE edge.chain_id = address.chain_id
+            AND edge.to_contract_instance_id = address.contract_instance_id
+            AND edge.source_manifest_id = origin.manifest_id
+            AND edge.edge_kind = 'resolver'
+            AND edge.canonicality_state IN ('canonical', 'safe', 'finalized')
+            AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
+            AND edge.deactivated_at IS NULL
+            AND (edge.active_from_block_hash IS NULL OR EXISTS (
+                SELECT 1 FROM chain_lineage lineage
+                WHERE lineage.chain_id = edge.chain_id
+                  AND lineage.block_number = edge.active_from_block_number
+                  AND lineage.block_hash = edge.active_from_block_hash
+                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
+            AND edge.active_from_block_number <= $2
+          ORDER BY edge.active_from_block_number DESC
+          LIMIT 1)
+        LIMIT 1
+    ) admitting
+    WHERE (address.active_from_block_number IS NULL OR address.active_from_block_number <= $2)
       AND (address.active_to_block_number IS NULL OR address.active_to_block_number > $2)
       AND address.deactivated_at IS NULL
       AND (address.active_from_block_hash IS NULL OR EXISTS (

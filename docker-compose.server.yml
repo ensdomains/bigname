@@ -4,6 +4,9 @@ x-bigname-env: &bigname-env
   RUST_LOG: ${RUST_LOG:-info,sqlx::query=error}
   # Empty means "unset"; both binaries treat empty and the negative spellings as off.
   BIGNAME_LOG_JSON: ${BIGNAME_LOG_JSON:-}
+  # The publication switch, read once at startup by both binaries; set it the same for both.
+  # Empty means off; only 1 or true turns it on. docs/deployment.md § Publication switch.
+  BIGNAME_SERVE_FROM_FAMILIES: ${BIGNAME_SERVE_FROM_FAMILIES:-}
 
 # Docker's json-file driver never rotates on its own; unrotated logs are a
 # slow path to filling the volume PostgreSQL writes to.

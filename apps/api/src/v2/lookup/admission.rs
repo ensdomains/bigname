@@ -1,6 +1,5 @@
 use bigname_storage::{
-    ChainPositions, IdentityNameRecordRow, NameCurrentRow, ReverseIdentityRecordRow,
-    SelectedSnapshot,
+    ChainPositions, IdentityNameRecordRow, ReverseIdentityRecordRow, SelectedSnapshot,
 };
 
 use crate::v2::{V2Error, V2Result, name_record::identity_row_has_current_registration};
@@ -66,13 +65,6 @@ fn require_record_at_served_head(
         )?;
     }
     Ok(())
-}
-
-pub(crate) fn require_name_current_at_served_head(
-    row: &NameCurrentRow,
-    selected_snapshot: &SelectedSnapshot,
-) -> V2Result<()> {
-    require_name_projection_at_served_head(&row.chain_positions, &row.namespace, selected_snapshot)
 }
 
 pub(crate) fn require_name_projection_at_served_head(
