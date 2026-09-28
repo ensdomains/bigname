@@ -881,13 +881,13 @@ CREATE TABLE IF NOT EXISTS project_registry_owner_event (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_registry_owner_event IS
-    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block.';
+    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, and every AuthorityTransferred an ENSv2 registry reported for a named node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block.';
 COMMENT ON COLUMN project_registry_owner_event.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_owner_event.namespace IS
     'This value is the namespace.';
 COMMENT ON COLUMN project_registry_owner_event.node IS
-    'This value is the lower-cased node the event addresses: child_node, else node.';
+    'This value is the lower-cased node the event addresses: child_node, else node; for an ENSv2 registry event, the namehash of its name.';
 COMMENT ON COLUMN project_registry_owner_event.block_number IS
     'This value is the event''s block number.';
 COMMENT ON COLUMN project_registry_owner_event.transaction_index IS

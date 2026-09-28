@@ -583,4 +583,10 @@ BEGIN
         COMMENT ON COLUMN bigname_phase.project_family_marker.state IS
             'This value is live when the families hold a complete publication and bootstrap_pending while a rebuild is populating the families.';
     END IF;
+    IF to_regclass('bigname_phase.project_registry_owner_event') IS NOT NULL THEN
+        COMMENT ON TABLE bigname_phase.project_registry_owner_event IS
+            'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, and every AuthorityTransferred an ENSv2 registry reported for a named node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block.';
+        COMMENT ON COLUMN bigname_phase.project_registry_owner_event.node IS
+            'This value is the lower-cased node the event addresses: child_node, else node; for an ENSv2 registry event, the namehash of its name.';
+    END IF;
 END $comment$;
