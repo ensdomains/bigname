@@ -448,9 +448,6 @@ fn reset_peak_rss_hwm() -> Result<()> {
 }
 
 #[cfg(test)]
-mod publication_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
