@@ -6,11 +6,13 @@ use std::{
 
 use anyhow::{Context, Result};
 use sqlx::{
-    PgPool,
+    PgConnection, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
 mod test_hook_registry;
+#[cfg(test)]
+mod tests;
 
 pub mod interpreter_content_hash {
     pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, interpreter_content_hash};
@@ -20,6 +22,9 @@ pub use bigname_content_hash::{INTERPRETER_CONTENT_HASH, interpreter_content_has
 pub use test_hook_registry::{ScopedTestHookGuard, ScopedTestHookRegistry};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+const TEMPLATE_PREFIX: &str = "bigname_tpl_";
+const TEMPLATE_SCRATCH_PREFIX: &str = "bigname_tpl_scratch";
 
 /// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
@@ -113,29 +118,46 @@ pub struct TestDatabase {
 
 impl TestDatabase {
     pub async fn create(config: TestDatabaseConfig) -> Result<Self> {
-        let database_url = database_url_from_env();
-        let base_options =
-            PgConnectOptions::from_str(&database_url).context(config.parse_context.clone())?;
+        Self::create_copy(config, None).await
+    }
+
+    /// Create a database copied from a template that holds what `build` installs.
+    ///
+    /// The template is built once per server, named `bigname_tpl_<key>_<sha256 of fingerprint>`.
+    /// `fingerprint` must cover every input `build` applies (SQL text, migration checksums), so
+    /// a changed input gets a new template rather than a stale copy. Concurrent test processes
+    /// serialize the build on an advisory lock; it is built under a scratch name and renamed
+    /// only once complete, so a copy never sees a half-built template.
+    pub async fn create_from_template<F, Fut>(
+        config: TestDatabaseConfig,
+        template_key: &str,
+        fingerprint: &[&[u8]],
+        build: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(PgPool) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let base_options = PgConnectOptions::from_str(&database_url_from_env())
+            .context(config.parse_context.clone())?;
+        let admin_pool = connect_admin_pool(&config, &base_options).await?;
+        let template =
+            ensure_template(&admin_pool, &base_options, template_key, fingerprint, build).await;
+        admin_pool.close().await;
+        Self::create_copy(config, Some(&template?)).await
+    }
+
+    async fn create_copy(config: TestDatabaseConfig, template: Option<&str>) -> Result<Self> {
+        let base_options = PgConnectOptions::from_str(&database_url_from_env())
+            .context(config.parse_context.clone())?;
         let database_name = unique_database_name(&config.name_prefix)?;
-        let admin_options = match config.admin_database.as_deref() {
-            Some(database) => base_options.clone().database(database),
-            None => base_options.clone(),
-        };
+        let admin_pool = connect_admin_pool(&config, &base_options).await?;
 
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(config.admin_max_connections)
-            .connect_with(admin_options)
-            .await
-            .with_context(|| {
-                format!(
-                    "{}. {}",
-                    config.admin_connect_context,
-                    test_database_harness_hint()
-                )
-            })?;
-
+        let template_clause = template
+            .map(|template| format!(" TEMPLATE {}", quote_identifier(template)))
+            .unwrap_or_default();
         sqlx::query(&format!(
-            "CREATE DATABASE {}",
+            "CREATE DATABASE {}{template_clause}",
             quote_identifier(&database_name)
         ))
         .execute(&admin_pool)
@@ -200,6 +222,147 @@ impl TestDatabase {
         admin_pool.close().await;
         Ok(())
     }
+}
+
+async fn connect_admin_pool(
+    config: &TestDatabaseConfig,
+    base_options: &PgConnectOptions,
+) -> Result<PgPool> {
+    let admin_options = match config.admin_database.as_deref() {
+        Some(database) => base_options.clone().database(database),
+        None => base_options.clone(),
+    };
+    PgPoolOptions::new()
+        .max_connections(config.admin_max_connections)
+        .connect_with(admin_options)
+        .await
+        .with_context(|| {
+            format!(
+                "{}. {}",
+                config.admin_connect_context,
+                test_database_harness_hint()
+            )
+        })
+}
+
+/// Build the template for `key` and `fingerprint` unless it already exists; return its name.
+async fn ensure_template<F, Fut>(
+    admin_pool: &PgPool,
+    base_options: &PgConnectOptions,
+    key: &str,
+    fingerprint: &[&[u8]],
+    build: F,
+) -> Result<String>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut connection = admin_pool.acquire().await?;
+    let template = template_database_name(&mut connection, key, fingerprint).await?;
+    if template_exists(&mut connection, &template).await? {
+        return Ok(template);
+    }
+    // Session-level lock: one builder per template across every process on this server. A
+    // killed process releases it when its connection closes.
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&template)
+        .execute(&mut *connection)
+        .await?;
+    let built = build_template(&mut connection, base_options, &template, build).await;
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&template)
+        .execute(&mut *connection)
+        .await?;
+    built.map(|()| template)
+}
+
+async fn build_template<F, Fut>(
+    connection: &mut PgConnection,
+    base_options: &PgConnectOptions,
+    template: &str,
+    build: F,
+) -> Result<()>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    if template_exists(connection, template).await? {
+        return Ok(());
+    }
+    let scratch = unique_database_name(TEMPLATE_SCRATCH_PREFIX)?;
+    sqlx::query(&format!("CREATE DATABASE {}", quote_identifier(&scratch)))
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("failed to create template scratch database {scratch}"))?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(base_options.clone().database(&scratch))
+        .await
+        .context("failed to connect template build pool");
+    let built = match pool {
+        Ok(pool) => {
+            let built = build(pool.clone()).await;
+            pool.close().await;
+            built
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = built {
+        let _ = sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            quote_identifier(&scratch)
+        ))
+        .execute(&mut *connection)
+        .await;
+        return Err(error.context(format!("failed to build template database {template}")));
+    }
+    // Flag before publishing: CREATE DATABASE ... TEMPLATE still works, a stray connection cannot.
+    for statement in [
+        format!(
+            "ALTER DATABASE {} WITH IS_TEMPLATE true ALLOW_CONNECTIONS false",
+            quote_identifier(&scratch)
+        ),
+        format!(
+            "ALTER DATABASE {} RENAME TO {}",
+            quote_identifier(&scratch),
+            quote_identifier(template)
+        ),
+    ] {
+        sqlx::query(&statement)
+            .execute(&mut *connection)
+            .await
+            .with_context(|| format!("failed to publish template database {template}"))?;
+    }
+    Ok(())
+}
+
+/// `bigname_tpl_<key>_<first 32 hex digits of sha256>`, within the 63-byte identifier limit.
+/// PostgreSQL computes the digest, so this crate needs no hashing dependency.
+async fn template_database_name(
+    connection: &mut PgConnection,
+    key: &str,
+    fingerprint: &[&[u8]],
+) -> Result<String> {
+    let mut input = Vec::new();
+    for part in fingerprint {
+        input.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        input.extend_from_slice(part);
+    }
+    let digest: String = sqlx::query_scalar("SELECT left(encode(sha256($1), 'hex'), 32)")
+        .bind(input)
+        .fetch_one(connection)
+        .await?;
+    let key = truncate_identifier_prefix(key, 63 - TEMPLATE_PREFIX.len() - 1 - digest.len());
+    Ok(format!("{TEMPLATE_PREFIX}{key}_{digest}"))
+}
+
+async fn template_exists(connection: &mut PgConnection, template: &str) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(template)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 fn unique_database_name(prefix: &str) -> Result<String> {
