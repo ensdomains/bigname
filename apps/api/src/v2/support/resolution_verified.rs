@@ -15,7 +15,7 @@ impl bigname_storage::VerifiedResolutionRecord for ResolutionRecordKey {
 }
 
 /// The record inventory at the mainnet-profile lookup key: name detail's verified source and the
-/// records diagnostic. Under the publication switch it is the family inventory at the family
+/// records diagnostic. It is the family inventory at the family
 /// publication (TYR-36 step 7b); the diagnostic keeps serving under the switch.
 pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
@@ -31,7 +31,7 @@ pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
 }
 
 /// The record inventory at the any-chain lookup key: name detail's indexed source and the records
-/// route. Under the publication switch it is the family inventory at the family publication.
+/// route. It is the family inventory at the family publication.
 pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -52,7 +52,7 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
 /// admit verified execution, which the lookup engine checks separately; name detail and
 /// diagnostics keep their own loaders.
 ///
-/// Under the publication switch the inventory is the family inventory of the resource the name
+/// The inventory is the family inventory of the resource the name
 /// serves records through, at the family publication
 /// (`bigname_storage::families::records::load_family_record_inventory_for_snapshot`); the
 /// verified lookup engine keeps reading the served row until the flip (TYR-36 step 7b).

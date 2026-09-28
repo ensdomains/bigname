@@ -18,7 +18,7 @@ use super::{
 ///
 /// `coin_type` is the decimal ENSIP-9/SLIP-44 coin type. `namespaces` restricts rows to those
 /// public namespaces; `None` reads every namespace. Sort, order, dedupe, and the keyset cursor
-/// use the `address_names_current` vocabulary. Under the publication switch the rows are composed
+/// use the `address_names_current` vocabulary. The rows are composed
 /// from the owned key families instead (`families::records::load_family_resolves_to_page`).
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_records_current_page(

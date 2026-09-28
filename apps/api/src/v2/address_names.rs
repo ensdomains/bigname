@@ -228,7 +228,7 @@ pub(crate) async fn get_address_names(
         {
             return invalid_cursor_error();
         }
-        // Under the publication switch a chain whose families are not published is stale.
+        // A chain whose families are not published is stale.
         super::name_rows_error(super::SnapshotReadResource::Resource, |_| {
             V2Error::internal_error(format!(
                 "failed to load address names for {normalized_address}"

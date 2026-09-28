@@ -139,7 +139,7 @@ pub(super) async fn get_address_resolves_to(
         {
             return invalid_cursor_error();
         }
-        // Under the publication switch a chain whose families are not published is stale.
+        // A chain whose families are not published is stale.
         let message = format!("failed to load names resolving to {normalized_address}");
         name_rows_error(Resource, |_| V2Error::internal_error(message))(error)
     };

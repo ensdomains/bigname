@@ -19,8 +19,7 @@ pub const DEFAULT_RESOLVER_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-/// The resolver overview row. Under the publication switch it comes from the F3 classification
-/// at the family marker's publication instead (`families::topology::load_family_resolver_current`).
+/// The resolver overview from F3 classification at the selected family publication.
 pub async fn load_phase_resolver_current(
     pool: &PgPool,
     chain_id: &str,

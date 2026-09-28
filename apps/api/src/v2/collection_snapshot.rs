@@ -122,10 +122,10 @@ impl CollectionSnapshot {
         bounds
     }
 
-    /// Under the [publication switch](bigname_storage::publication_source), a name with no
+    /// A name with no
     /// composed row may be one a family rebuild has yet to reach: before a route answers it not
     /// found, the family markers of this snapshot's chains must be servable, otherwise it is the
-    /// stale 409 for `resource`. A no-op with the switch off.
+    /// stale 409 for `resource`.
     pub(crate) async fn ensure_families_published(
         &self,
         state: &AppState,
@@ -189,7 +189,7 @@ impl CollectionSnapshot {
     }
 }
 
-/// The expiry clock while the publication switch is on: the published block's time, on a first
+/// The expiry clock: the published block's time, on a first
 /// page and every continuation alike (a cursor's `evaluated_at` is still written but no longer
 /// read). Every selected position is the family marker's block, since the fence admits a scope
 /// only when the marker sits exactly there, so its lineage timestamp is the marker's

@@ -1,10 +1,8 @@
 //! The composed name listings (TYR-36 step 7b): the /v1/search page (ruling J8) and the
-//! expiring listing of /v1/names, served from composed name rows under the publication switch.
+//! expiring listing of /v1/names, served from composed name rows at family publication.
 //!
-//! Both page through the same `filtered_names` CTE, derived columns, predicates, order and
-//! cursor as the served readers (name_current/list.rs, expiring.rs), with the composed rows bound
-//! as the CTE's source in place of `name_current`. What differs is how the candidate names are
-//! found, since no composed row is stored:
+//! Both page through a `filtered_names` CTE populated from composed rows, with shared predicates
+//! and keyset ordering. Their candidate walks differ because no composed row is stored:
 //!
 //! - search walks the readable name surfaces (an input table) in the page order, which is the
 //!   surface's raw name then namespace and namehash, so the first `page_size + 1` composed rows

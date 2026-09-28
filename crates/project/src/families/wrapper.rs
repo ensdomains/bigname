@@ -152,9 +152,7 @@ pub(super) async fn apply(
             set(
                 &mut row,
                 "fuses",
-                // The served modifiers cast the in-range value to bigint (permissions.rs
-                // `modifiers`, address_names.rs `scope_modifiers`), which rejects a non-integral
-                // spelling and fails the served batch, so only an integer reaches a served row.
+                // Retain only an integral fuse value within the storage bigint range.
                 json_number_between(event.after.get("fuses"), i64::MAX.unsigned_abs())
                     .map_or(Value::Null, |number| Value::Number(number.clone())),
             );

@@ -188,8 +188,8 @@ fn invalid_at_error() -> V2Error {
 }
 
 /// The error mapper for a read of name rows (`load_name_current` and its batch readers): a
-/// composed read whose family publication is not servable, a family rebuild in flight under the
-/// publication switch, answers the stale 409 a fence gives
+/// composed read whose family publication is not servable, such as a rebuild in flight,
+/// answers the stale 409 a fence gives
 /// (`requested snapshot is not available for ...`); any other failure is `internal`'s answer.
 pub(crate) fn name_rows_error(
     resource: SnapshotReadResource,

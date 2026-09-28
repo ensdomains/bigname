@@ -79,7 +79,7 @@ pub(super) async fn unverifiable_name_authority(
             return Ok(ForwardGateDecision::ProjectionUnavailable);
         }
         Err(error) if bigname_storage::families::name::is_publication_unavailable(&error) => {
-            // A family rebuild in flight under the publication switch: the stale 409.
+            // A family rebuild in flight: the stale 409.
             warn!(
                 service = "api",
                 namespace = %namespace,

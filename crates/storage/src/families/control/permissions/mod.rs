@@ -1,8 +1,5 @@
-//! F8 and F9, raw permissions: the shadow of `permissions_current`, the restriction block and
-//! registry binding of `permissions_current_resource_summary`, `account_permission_state_current`
-//! and the registry-operator rows the effective-permission reader adds (permissions/effective.rs
-//! :63-72). Under the publication switch `page.rs` serves the effective-permission pages and the
-//! resource summaries of `GET /v1/permissions` from these readers (TYR-36 step 7b).
+//! Effective permissions from F8 grants, F9 account approvals and registry binding state.
+//! `page.rs` serves bounded permission pages and resource summaries at family publication.
 mod candidates;
 mod facts;
 mod grants;

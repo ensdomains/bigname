@@ -178,8 +178,8 @@ and omit `grant_relation`. `include=lineage` emits only the bare `lineage.grant=
 (upstream: .refs/basenames/src/L2/Registry.sol:L46-L52 @ basenames@1809bbc)
 (upstream: .refs/basenames/src/L2/Registry.sol:L148-L158 @ basenames@1809bbc)
 
-The effective relation joins `account_permission_state_current.authority_contract`
-to `permissions_current_resource_summary.registry_contract`. The account row
+The effective relation joins the account-approval family's `authority_contract`
+to the composed registry-owner binding's `registry_contract`. The account row
 also retains `authority_contract_instance_id` as admitted-instance evidence.
 These agree because one admitted address on one chain maps to one contract
 instance across manifest epochs, while a different watched address creates a
@@ -733,16 +733,14 @@ or a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
-publication has the stored head's exact block hash. With the
-[publication switch](glossary.md#publication-switch) on, those last two checks
-read the [family marker](glossary.md#family-marker), which must also pass the
-rest of the serving fence: `live`, on readable lineage, and at most one block
-behind the stored head. With the switch on, the projected block and its
-timestamp (`indexed_block`, and the lags computed from them) are the marker's
-too. The Project phase state and the Project redo flag still come from the
-Project row, and the Interpret redo flag from the Interpret row. With either setting,
-while an Interpret or Project redo is in progress `lag_blocks` and
+publication has the stored head's exact block hash. These checks read the
+[family marker](glossary.md#family-marker), which must also be `live`, on
+readable lineage, and at most one block behind the stored head. The marker
+supplies `indexed_block` and its timestamp, including the lags computed from
+them. Project lifecycle state and redo flags still come from the phase rows.
+While an Interpret or Project redo is in progress, `lag_blocks` and
 `lag_seconds` are `null`, because lag is unknown during a redo.
+
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -810,19 +808,16 @@ may issue 201 provider keys when the primary-address selector was absent; more
 than 200 inventory-derived selectors still returns the same error.
 
 `GET /v1/addresses/{address}/primary-name` keeps its documented `answers` and
-typed `verification` shapes. With the
-[publication switch](glossary.md#publication-switch) off, indexed answers read
-`bigname_phase.primary_names_current`; with it on, they read the reverse-claim
-families at their publication. The request’s `source` parameter only narrows
-the answer list and does not override that process-wide publication source. A successful
-stored raw claim is normalized for the indexed product name even when its raw
+typed `verification` shapes. Indexed answers read the reverse-claim families
+at their publication. The request's `source` parameter narrows the answer list.
+A successful stored raw claim is normalized for the indexed product name even when its raw
 spelling was not already normalized. The verified producer is a fresh ENS/60
 lookup at the current readable Ethereum position. It applies the raw-claim
 normalization gate before forward resolution and persists neither a legacy
 execution outcome nor a divergence row. When `source` is omitted, the route
 returns the indexed and verified answers together only if the current Ethereum
-`chain_heads` position and exact selected publication generation (Project with
-the switch off, the family marker with it on) match that lookup before verified
+`chain_heads` position and exact selected family publication generation match
+that lookup before verified
 execution and remain unchanged after reading the indexed tuple from that
 source; otherwise the whole
 request returns `409 stale` instead of assigning answers from different
@@ -836,84 +831,42 @@ The post-call guard also revalidates the selected Ethereum publication generatio
 selected ENS manifest declarations; a concurrent replacement returns `409
 stale` and no verified answer.
 
-Verified lookup accepts the Project publication captured before provider execution
-while Project is `completed` or `running`, provided that publication is canonical,
-belongs to the compiled interpreter generation, and trails the stored execution
-head by at most one block. The post-call guard compares its captured block number,
-block hash, content hash, and row generation, alongside the unchanged execution
-head and manifest declarations. A new publication, same-height republish, or any
-phase-row update during a provider or CCIP round trip still returns `409 stale`.
-The tolerance admits an already-running publication; it does not promise that a
-request survives a concurrent phase transition. Routes combining indexed and
-verified answers retain their separate requirement that both answers fit the
-reported `meta.as_of` position.
+Verified lookup captures a live family publication before provider execution.
+The post-call guard compares its block identity, interpreter content hash and
+marker sequence, alongside the execution head and manifest declarations. A
+new publication or same-height republish returns `409 stale`. An Interpret or
+Project redo whose range overlaps that publication also refuses the lookup.
+The ledger transaction holds shared locks on both phase rows and the family
+marker through its commit, so an overlapping redo cannot start between the
+check and the write. An unrelated phase-row update alone does not change the
+publication generation. Routes combining indexed and verified answers also
+require both answers to fit the reported `meta.as_of` position.
 
-Indexed snapshot selection serves the project phase's latest publication: the
-project row's current position while the phase is `completed` or `running` (a
-running pass has not yet published beyond that position; a failed, paused, or
-idle phase, or a fresh run that cleared the position, has no publication).
-Live-follow stores a new head as soon as a block arrives and Project publishes
-for it a few seconds later, so the publication may trail the stored head. When
-it trails by exactly one block, the selected position is the publication (and
-`as_of` reports it) whenever the publication is behind the requested `head`,
-`safe`, or `finalized` position; otherwise the requested position is served
-unchanged. A publication further behind, one from a different interpreter
-generation, or one whose block a reorg has orphaned (until Project republishes
-on the new fork) is `409 stale`, so a wedged or paused Project still surfaces.
+Indexed snapshot selection uses the [family marker](glossary.md#family-marker).
+It must be `live`, carry this build's interpreter content hash, sit on readable
+lineage and trail the stored head by at most one block. A `bootstrap_pending`
+marker means a rebuild is still populating the families, and reads return
+`409 stale`. When the publication trails the requested `head`, `safe` or
+`finalized` position by the permitted one-block head lag, the route reports
+the publication in `meta.as_of`. A publication further behind, from another
+interpreter generation or on an orphaned fork is unavailable.
 
-With the [publication switch](glossary.md#publication-switch) on, the
-publication is the [family marker](glossary.md#family-marker)'s block instead
-of the project row's. The marker must be `live`: while a rebuild is still
-populating the [owned key families](glossary.md#owned-key-family) it is
-`bootstrap_pending`, and reads are `409 stale`. It must also carry this build's
-interpreter content hash, sit on readable lineage, and trail the stored head by
-at most one block, as above. The generation the API captures before a read and
-compares after it is the marker's `sequence`, which every family block
-advances, in place of the project row's version. The
-[verified lookup](glossary.md#verified-lookup)'s database guard
-(`revalidate_resolution_lookup_state`, which the divergence writer also calls)
-fences on the same marker: the lookup captures the marker's `sequence` before
-the provider call and is refused as stale, writing no divergence row, if a
-family block or a family rebuild has moved the marker by the time it writes.
-Clients only see the generation compared
-for equality, so nothing changes on the wire, with one exception for cursors
-that bind the publication (subnames, address names, `resolves_to`, permissions,
-registries and their labels, and the resolver `/aliases`, `/links`, and `/roles`
-collections). Such a cursor issued before the switch is turned on or off returns
-`409 stale`, asking the client to restart pagination without the cursor, and
-stays rejected until the client does. The API tags these cursors with the
-publication source, so this holds even when the project row's version and the
-marker's `sequence` happen to be the same number. History cursors and
+The API captures and rechecks the marker's `sequence` around indexed reads.
+Publication-bound cursors (subnames, address names, `resolves_to`, permissions,
+registries and labels, and resolver `/aliases`, `/links` and `/roles`) retain
+their family publication token. Legacy cursors carrying the removed serving
+source return `409 stale` until the client restarts pagination. History and
 [current-state list cursors](#current-state-list-cursors) carry no publication
-token and continue across the change.
-Until the later step 7b slices move a route's rows onto the families, that
-route still reads the served tables while the switch is on. The served rows are
-committed before the family marker moves, so a served batch that lands between
-a read's first check and its recheck leaves the marker's `sequence` unchanged,
-and the check that refuses a read when the publication changed while the
-request was being read does not refuse it. The per-row snapshot checks still
-refuse any row newer than the selected position.
+token.
 
-So with the switch on, served-table reads can return inconsistent membership or
-counts despite those per-row target checks, which only drop rows newer than the
-selected position and cannot restore rows or counts from the publication a read
-started on. Production leaves the switch off until the row and guard cutovers
-are complete.
+Collection expiry filters, including `include_expired=false`, use the published
+block's timestamp on every page; a multi-chain scope uses the earliest selected
+publication timestamp. Lookup composes name topology and indexed comparisons
+in one repeatable-read snapshot. Its guarded writer checks that captured
+publication and the actual execution manifests in the same transaction that
+writes or clears a divergence.
 
-With the switch on, collection expiry filters, such as `include_expired=false`
-on subnames, are evaluated at the published block's timestamp on the first page
-and every continuation, not at the time of the first request; a scope spanning
-several chains uses the earliest of their published block timestamps. Verified
-lookup also requires the marker to pass these checks before provider execution;
-its post-call guard compares the marker's `sequence` (see the served-generation
-paragraph above). The lookup engine composes its name topology and indexed
-comparison from the families in one repeatable-read snapshot. The writer checks
-that captured publication and the real execution manifests in the transaction
-that evaluates the indexed answer and writes or clears its divergence. It has
-no dependency on the stopped served name or inventory rows with the switch on.
-
-With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
-instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
+These routes read [composed name rows](glossary.md#composed-name-row). Name detail (`GET /v1/names/{name}` and the name
 diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
 resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
 whole. The records and address routes read their own rows from the families
@@ -938,12 +891,10 @@ and overflow row. Primary-first ordering, role ranking, filters, and cursors are
 unchanged. History and event routes retain their event sources and join composed
 name rows: `GET /v1/names/{name}/history` (whether the name exists),
 `GET /v1/events`, `GET /v1/diagnostics/events` and
-`GET /v1/addresses/{address}/history` (each event's name). Their bodies are meant to be
-identical to the served ones. Each composed read sees one committed family
+`GET /v1/addresses/{address}/history` (each event's name). Each composed read sees one committed family
 block, so a row never mixes two blocks. A composed row describes the publication
 and has no older position of its own, so an `at` below the publication answers
-`409 stale` with "requested snapshot is not available for name", the answer
-served rows give once Project has republished them. While a family rebuild is
+`409 stale` with "requested snapshot is not available for name". While a family rebuild is
 in flight (the marker is not `live`, carries another build's hash, or sits on a
 block a reorg orphaned) no composed row is served: a route whose fence has not
 already refused answers `409 stale` with "requested snapshot is not available
@@ -966,7 +917,7 @@ Resolver bound-name pages require the selected family publication even when the
 page is empty, so an older `at` answers
 `409 stale` rather than reporting current absence as historical absence.
 
-With the switch on, `GET /v1/permissions` and the resolver routes also serve
+`GET /v1/permissions` and the resolver routes also serve
 their own rows from the families. The permission rows, the registry operator
 rows and each registration's authority context and restrictions are built at
 read from the grants, approvals and registry bindings the families keep, masked
@@ -986,67 +937,37 @@ classification check does not add a redo gate to raw audit diagnostics.
 A role holder's `grant_event` is the earliest permission event of that holder
 at that resolver scope, as before. Grants on a registration whose row is not
 readable are not listed; no other request-time lineage check applies, since a
-dropped block's grants leave the families when that block is undone. The bodies
-are meant to be identical to the served ones, and these routes answer
+dropped block's grants leave the families when that block is undone. These routes answer
 `409 stale` while the families are not servable, as above.
 
-Composed names also refuse a publication while Interpret or Project has a redo
-whose range overlaps it. Interpret's normalization-flag recompute can change a
-surface's visibility before the required Project replay publishes the new name
-state; finishing Interpret alone does not make the old publication readable.
-The composed reader and the collection's final generation check both enforce
-this rule. Diagnostic reads that do not compose published names keep their
-existing snapshot selection. Event diagnostics still return their audit rows
-when the name publication is unavailable, omitting the optional name attachment.
-Resolver bound-name pages require the selected family publication even when the
-page is empty, so an older `at` answers
-`409 stale` rather than reporting current absence as historical absence.
-
-One difference remains with the switch on. After an ENSv1 registry `Transfer` to
+After an ENSv1 registry `Transfer` to
 the zero address leaves a name's registry node ownerless
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f),
-the served name row
-keeps its earlier state (unsupported, so unlisted) until Project next rebuilds
-the served tables, while the composed row reads the node at once (unregistered
-but projected), so `GET /v1/search` can list with the switch on a name it omits
-with the switch off. Composed rows carry the complete declared resolution topology
+the composed name becomes unregistered but remains projected and can be listed
+by `GET /v1/search`. Composed rows carry the complete declared resolution topology
 (`declared_summary.topology`): aliases, wildcard sources, direct and ownerless
 ENS, and admitted Basenames cross-chain transport. Basenames retains its
 execution-manifest admission and the Ethereum position selected at the Base
 publication's timestamp.
 
-With the switch on, `GET /v1/names/{name}/subnames` (with and without
+`GET /v1/names/{name}/subnames` (with and without
 `include=counts`), `GET /v1/registries/{chain_id}/{address}/labels` and the
-registry's `counts.labels` read the child edge families instead of
-`children_current`, with each child's arm, serving resource, zero-owner
+registry's `counts.labels` read the child edge families, with each child's arm, serving resource, zero-owner
 transfer, registration status and times from the stored [name
 summary](glossary.md#name-summary), evaluated against the family marker's
 block. Every per-name child count (`subname_count` under `include=counts`, and
 a name's subname count) is an exact count over the same relation. The parent
-and each child's registration come from composed rows. The bodies are meant to
-be identical to the served ones. Each child read sees one committed family
+and each child's registration come from composed rows. Each child read sees one committed family
 block, and with no servable marker (a rebuild in flight, or another build's
 hash) it answers `409 stale` like the composed reads, never an empty list.
 
-
 Indexed lookup names, record inventories, address-name relations, resolver
-overviews, and resolver bound names now come from `bigname_phase` projections.
-Projection publication is incremental, so an unchanged row retains the target of
-the last projection-phase run that rebuilt it. A row target may therefore be earlier
-than the selected position; it may not be later, and a target at the same
-height must carry the selected hash. The API captures and revalidates the
-completed projection-phase generation around each indexed read. Current lookup and
-latest resolver reads also bind that generation to the selected
-`chain_heads` position; historical resolver reads bind to the current
-generation while admitting only rows at or before the requested position.
-
-This single-source projection consistency check rejects
-future or same-height wrong-fork rows while serving unchanged rows after an
-unrelated head advance. A real phase lag,
-interpreter-hash mismatch, concurrent publication change, or row ahead of the
-selected position still fails closed.
+overviews and bound names all use the selected family publication. Composition
+has no historical per-name row to admit below that publication. Current reads
+capture and revalidate its generation; history routes retain their documented
+event windows and audit semantics.
 
 ### Tier 3: Diagnostics
 
@@ -1545,7 +1466,7 @@ fresh walk ([#560](https://github.com/ensdomains/bigname/issues/560); evidence
 is checked in as an ignored collision probe). If an ended resource still
 retains a resolver pointer to the emitter, its rebuildable record-inventory
 projection may change too. The
-resource-less late event does not restore `name_current.resource_id`, so name
+resource-less late event does not restore the composed name's `resource_id`, so name
 and record reads for the released or expired name continue to expose no current
 record inventory.
 
@@ -1581,8 +1502,7 @@ it runs and returns the rows that sort after that position:
   returned again or not at all: a renewal moves a name's `expires_at` in
   `GET /v1/names`, and a resolver change moves a name into or out of
   `bound_names`. Rows published after the first page can appear on later
-  pages. Turning the [publication switch](glossary.md#publication-switch) on or
-  off between pages does not refuse the cursor either.
+  pages.
 - A position after the last row returns `200` with empty `data`,
   `has_more: false`, and `next_cursor: null`.
 - A cursor that does not decode, comes from another list, carries different

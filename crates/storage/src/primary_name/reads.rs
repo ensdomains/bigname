@@ -17,7 +17,7 @@ pub async fn load_primary_name_current(
 }
 
 /// Load one declared primary-name claim snapshot by exact address, namespace, and coin_type.
-/// Under the publication switch the claim is read from the families instead
+/// The claim is read from the families
 /// (`families::records::load_family_primary_name_snapshot`, TYR-36 step 7b).
 pub async fn load_primary_name_current_snapshot(
     pool: &PgPool,

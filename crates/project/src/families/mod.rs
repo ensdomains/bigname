@@ -171,14 +171,14 @@ pub async fn undo_to(pool: &PgPool, chain_id: &str, number: i64) -> crate::Resul
     Ok(undone)
 }
 
-/// How the loop runs for one served batch.
+/// How the family loop reaches its requested Project target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FamilyMode {
-    /// Follow the served marker from the family marker.
+    /// Advance from the family marker toward the requested target.
     Normal,
-    /// The served tables were rebuilt from scratch: rebuild the families too.
+    /// Reset and rebuild the families from retained inputs.
     Rebuild,
-    /// The served batch redid blocks `from..=to`: undo the families to `from - 1` and replay.
+    /// Undo to `from - 1` and replay the required range `from..=to`.
     Redo { from: i64, to: i64 },
 }
 

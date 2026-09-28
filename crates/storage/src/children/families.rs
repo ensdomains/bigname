@@ -1,5 +1,4 @@
-//! The declared child reads under the publication switch (`serve_from_families`, TYR-36 step 7b
-//! slice 2b): the subnames page, the registry labels page and count, and the per-parent child
+//! The declared child reads: the subnames page, the registry labels page and count, and the per-parent child
 //! counts, read from the family child relation (`families::topology`) with the children's name
 //! summaries, in the served readers' shapes. Every read runs in one read-only repeatable-read
 //! snapshot that first checks the parents' chains have a servable family marker
@@ -7,7 +6,7 @@
 //! which the API answers with the stale 409.
 //!
 //! A family child row carries the wire fields only: the provenance, chain positions,
-//! canonicality summary, manifest version and recompute time `children_current` stamps are not
+//! canonicality summary, manifest version and legacy recompute time are not
 //! family facts, so the rows and summaries built here leave them empty (no route reads them).
 use anyhow::{Context, Result};
 use serde_json::json;

@@ -1,27 +1,10 @@
-//! Shadow readers over the owned key families (docs/projections.md, "Owned key families") for
-//! the subnames page, the registry labels page, the child counts, the alias and wildcard parts
-//! of a name's topology, the resolver overview's classification and bound names, and the
-//! resolver `/aliases`, `/links` and `/roles` collections. They read the family tables
-//! (`project_child_edge_candidate`, `project_parent_subregistry`,
-//! `project_child_registration_state`, `project_wrapper_state`, `project_name_state`,
-//! `project_binding_candidate`, `project_resource_pointer`, `project_name_summary`,
-//! `project_resolver_classification`, `project_name_alias`, `project_resolver_alias`,
-//! `project_resolver_link`, `project_grant`), the identity and lineage tables, and the interim
-//! reads [`shims`] lists, some of which are still inline reads of `name_current`,
-//! `normalized_events`. Under the publication switch
-//! (`publication_source::serve_from_families`) the child readers serve the subnames and registry
-//! labels pages and the child counts (`crate::children`); the phase-runner harness compares every
-//! reader with the served one at one publication.
+//! Production readers for child pages/counts, aliases, wildcard topology and resolver
+//! overview/collections. They use the owned family tables plus retained identity, lineage and
+//! normalized events, composing attached names in the same publication snapshot.
 //!
-//! Every reader takes a storage keyset position and nothing else: no publication token,
-//! generation or request time. Time-dependent filters read the block timestamp of the family
-//! marker (`project_family_marker`). Where a reader compares family positions it uses the
-//! canonical event order (docs/glossary.md#canonical-event-order): block number, transaction
-//! index, log index, the emission ordinal (docs/glossary.md#emission-ordinal), then event
+//! Readers accept storage keyset positions. Time-dependent filters use the family marker's
+//! block timestamp; event ordering uses block, transaction, log, emission ordinal and event
 //! identity, never the generated normalized event id.
-//!
-//! Under the publication switch the resolver routes serve the overview (`overview.rs`) and the
-//! `/aliases`, `/links` and `/roles` collections from here (TYR-36 step 7b slice 4).
 mod children;
 mod children_page;
 mod collections;

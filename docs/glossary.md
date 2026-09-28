@@ -78,7 +78,7 @@ an arm outside that list is refused in band rather than resolved through an
 entrypoint the selection has ruled out. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and migration history together; field
 selection cannot rank events from different arms or combine them in one
-`name_current` row. The related `AuthorityEpochChanged`
+[composed name row](#composed-name-row). The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
@@ -293,8 +293,8 @@ confused.
 
 ## Claim anchor
 
-the `primary_names_current` row for an exact
-(address, coin type, namespace) tuple. It is the only lookup and invalidation
+the reverse-family claim for an exact
+(address, coin type, namespace) tuple at its chain publication. It is the only lookup and invalidation
 key for persisted primary-name claims; presence of the row never widens what
 claim sources are trusted.
 
@@ -676,9 +676,7 @@ normalized value.
 bigname's name for the constraints that bind a registration itself rather than
 any one account's permission row: served as `restrictions` on
 `GET /v1/permissions` (resource-bound reads) and on
-`GET /v1/addresses/{address}/names?include=role_summary` rows, and stored as
-the Project-owned `permissions_current_resource_summary.resource_restrictions`
-column. For a current ENSv1 NameWrapper registration it is the lifecycle label,
+`GET /v1/addresses/{address}/names?include=role_summary` rows, and composed from the current wrapper and permission families. For a current ENSv1 NameWrapper registration it is the lifecycle label,
 the [expiry-effective fuse word](#expiry-effective-namewrapper-fuse-word), and
 the entry expiry; for an ENSv2 registration it is `locked_roles`, the
 token-scoped registry roles whose assignment can no longer change because no
@@ -1640,8 +1638,8 @@ basenames@1809bbc)
 the current, evidence-backed association between an ENSv1 or Basenames permission
 resource, its registry contract, and its registry owner. Registry-wide account
 permission is applicable only when this binding matches the approval's chain,
-contract, and owner. Project first selects `name_current`, then carries registry
-owner observations onto that selected resource rather than the separate resource
+contract, and owner. Family permission composition uses the selected name resource
+and associates registry owner observations with it rather than the separate resource
 that retains registry observations. An observation without an eligible selected resource or
 logical name stays on its emitting resource, and the remapping never crosses onto
 an ENSv2 resource. The latest admitted registry observation wins before its owner
@@ -1913,47 +1911,29 @@ event-sourcing usage); resource-keyed rows additionally require the event's
 resource to resolve to a canonical identity row at rebuild time. Documented
 [hydration](#hydration) is a separate, hash-pinned provider overlay on that
 deterministic baseline, not an input to deterministic replay.
-The closed set of Project-owned maintenance fields is `last_recomputed_at` on
-every projection
-table except `primary_names_current`; `inserted_at` on `name_current`,
-`children_current`, `permissions_current`, `record_inventory_current`,
-`resolver_current`, `address_names_current`, and `address_records_current`; and
-`reverse_hydration_attempted_block_number`,
-`reverse_hydration_attempted_block_hash`, and
-`reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
-publication transaction clock supplies both timestamp fields through database
-defaults; record hydration also advances `last_recomputed_at` from its
-publication transaction clock. Reverse-name hydration supplies its three
-selection fields from the revalidated hydration head and the Project-owned
-attempt-order sequence. These fields are not part of the serving shape, API and
-history consumers never receive them, and rebuilding an affected row clears
-their earlier values. The [projection rules](projections.md#rules) govern every
-other column, including serving fields and storage-only keys or retained
-evidence. The schema-v2 Project phase is the only projection writer.
+Family rows and their undo journal retain the block-derived state and, where
+applicable, hash-pinned hydration observations. Replay and rebuild make no
+provider calls; undo can restore an earlier retained overlay, while a reset
+rebuild starts from event-derived inputs and refreshes eligible values on later
+follow blocks. Operational timestamps and hydration attempt counters are not
+protocol facts or API history. The [projection rules](projections.md#rules)
+govern serving fields, storage-only keys and retained evidence. Project is the
+only projection writer.
 
 ## Projection generation
 
-one Project run that derives and publishes the
-affected projection set for a target block in a single transaction. Always
-qualify it: the bare word *generation* is taken by the schema-migration-era
-[raw-log retention generation](#generation-raw-log-retention-generation), which
-is unrelated.
+one atomic family publication and its marker sequence: a normal block, a bounded
+rebuild range or an undo. Always qualify it: the bare word *generation* is also
+used by the unrelated [raw-log retention generation](#generation-raw-log-retention-generation).
 
 <a id="projection-generation-failure"></a>
 ## Projection generation failure (`project_generation_failures`)
 
-the
-append-only diagnostic row the phase runner appends when a projection-blocking
-invariant aborts a projection generation before publication. The generation
-transaction rolls back and publishes nothing; the evidence is then written in a
-separate transaction, so it survives the rollback. A row records the chain, the
-target block, the interpreter build, the invariant that failed, and the
-identities, positions, and canonicality observed at failure. It marks that
-target's projection generation not ready. A retried generation adds no second
-row for the same conflict, and neither a later success nor a reorg deletes one:
-an orphaned block hash stays resolvable through lineage, which is how a stale
-row is told apart from a live one. Operator diagnostics read this table; product
-routes do not.
+historical append-only diagnostic evidence from the removed Project batch writer.
+A failed batch rolled back before publication and the phase runner recorded the
+conflict separately. Those rows retain their identities, positions and observed
+canonicality after later success or reorg. The family-only runtime retains this
+audit table but no longer runs the obsolete batch invariants.
 
 <a id="publication-visible-event"></a>
 ## Publication-visible event
@@ -2345,17 +2325,12 @@ responses during a migration (the identity route's `profile=shadow`).
 
 ## Shadow read
 
-a value computed from the [owned key families](#owned-key-family) by the
-readers in `bigname_storage::families::control`, compared with the value the
-production reader serves from today's tables at the same publication. Shadow
-reads run only in tests and the fixture-corpus harness. A differing field passes
-only as a disclosed same-block ordering case or under a named cause whose check
-holds for that field, and no API response uses a shadow read
-([projections](projections.md#owned-key-families)). With the
-[publication switch](#publication-switch) off, the default, no served path reads
-the families or their marker; with it on, the API fences on the
-[family marker](#family-marker), while its rows still come from today's tables
-until the later step 7b slices move each route onto the families.
+A test comparison between a replacement read implementation and its predecessor
+at the same publication. TYR-36 used this to validate the family readers before
+removing the former serving tables. Permanent production reads now use families;
+the retained corpus checks incremental family state against a rebuild and
+exercises endpoint responses from actual inputs. Historical comparison receipts
+remain evidence of the pre-removal differential, not an alternate serving mode.
 
 ## Sidecar
 
@@ -2375,7 +2350,7 @@ admission, capability ownership, replay coverage, and provenance attribution.
 the `/* project:<name> */` comment every Project statement starts with. The
 name is the statement's source file under `crates/project/src`, with `.` for
 `/` and without the extension, followed by the statement where the file holds
-more than one (`publish.insert.name_current`, `builders.name_authority.build`).
+more than one (for example `families.hydrate.reverse`).
 PostgreSQL keeps a leading comment in slow-log lines, `pg_stat_activity` and
 `pg_stat_statements`, and ignores it when it computes a query id, so the
 identifier names the statement behind a slow batch without splitting its
@@ -2498,34 +2473,28 @@ state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)
 
 ## Write summary
 
-what one Project batch read and wrote, counted inside its transaction: the
-blocks in its affected range, the changed events that seeded its scope, the
-events it staged for the builders, the keys in each scope when publication
-starts, the rows publication deleted from and inserted into each served table,
-and the elapsed time of each derivation stage. The engine returns it with the
-batch outcome and logs it; the phase runner exports it as the
-`phase_runner_project_*` metrics ([pipeline monitoring
-runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
+The result of one Project family run: blocks and rebuild ranges committed,
+journal generations undone, rows changed per family table, undo rows written,
+per-block elapsed times and total elapsed time. `FamilyOutcome` also reports
+reset, budget, input-revision and planner-statistics progress. The phase runner
+uses this result for its family progress and timing metrics.
 
 ## Owned key family
 
-per-key current state Project keeps for one kind of fact, such as a name's
-binding candidates, a resource's resolver pointer or a resolver's records at a
-node. A block writes only the keys its own events name, and each row holds
-what the latest events of its key left, clears included. No served path reads
-the families until the [per-block publication](#per-block-publication) does;
-the step 3 [shadow readers](#shadow-read) read them in the test harnesses only
-([projections](projections.md#owned-key-families)).
+Per-key current state Project keeps for one kind of fact, such as a name's
+binding candidates, a resource's resolver pointer or a resolver's node records.
+Reducers update affected keys and preserve explicit clears. Production readers
+compose their responses from these tables at the [family marker](#family-marker)
+publication ([projections](projections.md#owned-key-families)).
 
 ## Per-block publication
 
-the planned way Project will serve its current-state reads: straight from the
-[owned key families](#owned-key-family), published block by block, in place of
-the batch builders and the tables they fill. It is not built yet. Until it
-ships the families are unread, and a doc that describes a change taking effect
-with the per-block publication describes planned behaviour.
+Project's publication of current state directly from the
+[owned key families](#owned-key-family). A normal follow block commits its
+changed keys, undo journal and marker together. Rebuilds can group older work
+blocks into bounded ranges; reads remain unavailable until the marker is live.
 
-The families carry labels F1 to F14, used in the difference lists, the table
+The families carry labels F1 to F15, used in the difference lists, the table
 comments and the reducers' module headers. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
 
@@ -2563,14 +2532,13 @@ token and set key. A range records the token fields it read at its opening
 fence and its final block's set key. A block, range or undo applies only
 against the generation it planned from.
 
-While the [publication switch](#publication-switch) is on, the marker is also
-what the API serves from: snapshot selection and the verified lookup's
+The marker is what the API serves from: snapshot selection and the verified lookup's
 admission accept a chain's publication only while its marker is `live` (never
 `bootstrap_pending`, the state of a rebuild still populating the families),
 belongs to this build's interpreter, sits on readable lineage and trails the
 stored head by at most one block, and the marker's `sequence` is the served
 generation a same-request recheck compares, and the verified lookup's guard
-compares too. With the switch on `/v1/status` and the served-lag gauges take
+compares too. `/v1/status` and the served-lag gauges take
 the projected block from the marker, while the Project phase state still comes
 from the Project row. During a family rebuild (`bootstrap_pending`) status
 shows the rebuild's progress block as `indexed_block` and reports `degraded`,
@@ -2578,44 +2546,27 @@ while the gauges show the unavailable -1.
 
 ## Publication switch
 
-`BIGNAME_SERVE_FROM_FAMILIES`: a process-wide setting the API and the phase
-runner read once at startup (`1` or `true` on, `0` or `false` off; unset or empty keeps
-the build's default, off until [the flip](#the-flip); any other value refuses
-to start).
-Off, the serving fence reads the Project row of `chain_phase_state` as it
-always has. On, it reads the [family marker](#family-marker) instead, and
-collection expiry filters are evaluated at the published block's timestamp
-rather than the request time ([API](api-v1.md#tier-2-product-reads)).
-It exists only while the served reads move to the
-[owned key families](#owned-key-family) ahead of the
-[per-block publication](#per-block-publication), and goes with the served
-batch.
+The retired `BIGNAME_SERVE_FROM_FAMILIES` setting used during TYR-36's reader
+cutover. Step 7c removes the setting and the old serving path. Family publication
+is permanent; this term remains for historical review and rollout records.
 
 ## The flip
 
-the change of the [publication switch](#publication-switch)'s default from off
-to on (TYR-36 step 7b-6), after which every serving fence, the verified
-lookup's guard, `/v1/status` and the served-lag gauges follow the
-[family marker](#family-marker) unless `BIGNAME_SERVE_FROM_FAMILIES` overrides
-it. It is a one-line change of the default; the served batch and the switch
-itself are removed later (step 7c).
+The historical step 7b-6 change that made family publication the default. Step
+7c subsequently removed the override and obsolete serving tables. Current
+readiness and lookup guards always use the [family marker](#family-marker).
 
 ## Composed name row
 
-a `name_current`-shaped row that `bigname_storage::families::name` builds for
-one name at read, from the [owned key families](#owned-key-family) and the
-identity input tables, with no stored per-name row besides the [name
-summary](#name-summary) the child lists read: the selection among the
-name's binding candidates, its registration and control, NameWrapper state,
-serving pointer and resolver, history heads and coverage. It describes the
-[family marker](#family-marker)'s publication. With the
-[publication switch](#publication-switch) on, the names group serves these rows
-and every route that joins name rows takes them from here
-([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
-block, and none is served unless the marker is servable by the publication
-fence's rule (`live`, this build's, on the readable lineage). The name
-comparison of the fixture-corpus harness checks every composed row against the
-served row.
+A name read model that `bigname_storage::families::name` builds from the
+[owned key families](#owned-key-family) and retained identity inputs: selected
+binding, registration and control, wrapper state, resolver topology, history
+heads and coverage. It describes the [family marker](#family-marker)'s
+publication. The names routes and other routes that attach a name use this
+composition ([API](api-v1.md#tier-2-product-reads)). Each read sees one committed
+family snapshot and refuses unavailable publication. The stored
+[name summary](#name-summary) provides the selected fields needed for child
+filtering, ordering and counts without composing every candidate at read time.
 
 ## Name summary
 
@@ -2626,9 +2577,9 @@ authority arm, whether the name has a serving resource, its registration
 status, expiry and registration times, and whether the latest registry
 Transfer attributed to it names the zero owner. Each but the last is the value
 the [composed name row](#composed-name-row) carries, from the same selection
-code; the zero-owner flag attributes a Transfer as the served child build does
-(by the name it carries, else the latest named registry event of any kind of its
-resource, else an active surface at its node), which is not the name row's rule. Every
+code; the zero-owner flag attributes a Transfer by the name it carries, else the
+latest named registry event of any kind of its resource, else an active surface
+at its node, which is not the name row's rule. Every
 name with a surface has a row, empty but for that flag when the composed reader
 serves no row for it. The family step writes it for every
 name a block touches and for every name whose `recompose_at`, the first second

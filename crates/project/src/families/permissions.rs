@@ -118,10 +118,8 @@ pub(super) async fn apply(
     load_rows(transaction, rows, &tables::ACCOUNT_APPROVAL, approval_keys).await?;
     for (key, event) in approvals {
         let table = &tables::ACCOUNT_APPROVAL;
-        // The flag as the served `(after_state ->> 'approved')::boolean` reads it. A flag that
-        // reads as no boolean (a spelling PostgreSQL rejects, or null) fails every served batch:
-        // the cast aborts it, or the NOT NULL column refuses the row. That input cannot coexist
-        // with a served batch, so the family keeps nothing for the event rather than guess.
+        // Keep a grant only when its approval value decodes as a PostgreSQL-compatible boolean.
+        // Missing or invalid values provide no approval state to retain.
         let Some(flag) = event.after.get("approved").and_then(json_boolean) else {
             continue;
         };

@@ -1,21 +1,6 @@
-//! Test seams of the composed name reader. Like the
-//! [publication switch](crate::publication_source)'s scoped value each is a task-local, so tests
-//! running in parallel do not see each other's, and each is inert unless a test sets its scope:
-//! with no scope set it takes the production path. They are compiled in wherever the
-//! `test-support` feature is enabled, which feature unification can do for a release build of
-//! the whole workspace.
-//!
-//! - A pause before a composed read opens its snapshot, so a test can change the family marker
-//!   after a route's fence passed and before the composed read sees it
-//!   (apps/api/src/tests/v2_switch_names.rs).
-//! - A pause inside a composed load, between its publication read and the statements that
-//!   follow, so a test can commit the next block in between and prove the load still reads one
-//!   snapshot (crates/project/tests/families_name_snapshot.rs).
-//! - The candidate batch size of the listings (`list.rs`, `bound.rs`), so a test over a handful
-//!   of names can make a page straddle candidate batches.
-//! - A counter of the composed rows the search and expiring walks submit to their page
-//!   statement, summed over every batch, so the harness can measure the walk's cost in rows
-//!   rather than time (flip prerequisite 1).
+//! Task-local test seams for the composed name reader. Parallel tests do not share scoped
+//! hooks; without a hook the production path runs. The seams are compiled by `test-support`,
+//! which workspace feature unification can enable in a release build.
 #[cfg(any(test, feature = "test-support"))]
 mod scoped {
     use std::{

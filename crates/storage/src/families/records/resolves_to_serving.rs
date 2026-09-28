@@ -1,5 +1,5 @@
 //! `GET /v1/addresses/{address}/resolves_to` (both the single coin type and `coin_type=evm`) over
-//! the families under the publication switch (TYR-36 step 7b).
+//! the families at the family publication.
 //!
 //! The candidate resources come from the derived inverse address index (F14) alone,
 //! with mirror resolvers from the family classification alone (`candidates.rs`,

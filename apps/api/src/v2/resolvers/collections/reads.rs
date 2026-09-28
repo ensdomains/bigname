@@ -25,10 +25,8 @@ pub(super) async fn page(
     .await
 }
 
-/// The page under the publication switch: the collection readers over the owned key families
-/// (`bigname_storage::families::topology`), which read at the family marker's publication, the
-/// only position the switch serves (ruling J5), with the same keys, items and totals; `/roles`
-/// then attaches names, registrations and `grant_event` exactly as the served page does.
+/// Resolver collections at the family publication; roles attach the corresponding name,
+/// registration and grant-event evidence from that snapshot.
 async fn family_page(
     pool: &sqlx::PgPool,
     chain: &str,
