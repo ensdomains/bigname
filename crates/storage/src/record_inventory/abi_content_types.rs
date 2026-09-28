@@ -5,14 +5,10 @@
 //! read dereferences those ids instead of re-deriving resolver history, so the resolver
 //! selection, record-version reset, record-link, mirror, and canonicality rules stay Project's.
 //!
-//! The admitted-ABI-event check uses the serving resolver classification. A change to the
-//! classification's manifest, declaration, admission namespace, or upgrade evidence makes Project
-//! republish every dependent inventory row; the remaining family flips do not change
-//! whether ABI observations are admitted. Project also re-stamps an unchanged resolver at newer
-//! targets without republishing those rows, so target blocks cannot be compared. Instead the
-//! classification is read in the statement that confirms the held row (same resource, record
-//! version boundary key, chain positions, and recompute time) is still published; a replaced row
-//! answers `abi_observations_stale` instead of pairing the older row with a newer classification.
+//! Inventories carry the resolver classification captured in their own read snapshot. ABI
+//! admission uses that captured classification, so a later reset or reclassification cannot
+//! pair a held inventory with a newer classification. Referenced events still have to be
+//! retained as canonical, activated evidence.
 //! The public meaning is documented under `GET /v1/names/{name}/records` in
 //! `docs/api-v1-routes.md`.
 
@@ -117,7 +113,6 @@ enum Plan {
     Done(AbiContentTypesUnavailable),
     Classify {
         chain_id: String,
-        resolver_address: Option<String>,
         mirrored_family: Option<String>,
         event_ids: Vec<i64>,
         link_event_ids: BTreeSet<i64>,
@@ -156,7 +151,6 @@ fn plan(input: &AbiContentTypesInput<'_>) -> Plan {
     };
     Plan::Classify {
         chain_id: chain_id.to_owned(),
-        resolver_address,
         mirrored_family,
         event_ids,
         link_event_ids: link_event_ids.into_iter().collect(),
@@ -176,8 +170,8 @@ fn event_ids(value: Option<&Value>) -> Option<Vec<i64>> {
     }
 }
 
-/// Resolve the ABI content types of many inventory rows with a fixed number of statements: one
-/// resolver-classification read and one read of the referenced events, whatever the row count.
+/// Resolve ABI content types using each inventory's captured classification and one batched
+/// read of the referenced events, whatever the row count.
 pub async fn load_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
@@ -185,11 +179,7 @@ pub async fn load_record_inventory_abi_content_types(
     load_abi_content_types(pool, inputs).await
 }
 
-/// [`load_record_inventory_abi_content_types`] for family inventory rows (TYR-36 step 7b, the
-/// records route under the publication switch): a family row is assembled in one snapshot at the
-/// family publication and has no `record_inventory_current` row to confirm, so the held-row check
-/// is not made. The classification is still the served resolver row until the resolver reads
-/// move.
+/// Alias for [`load_record_inventory_abi_content_types`] for family inventory callers.
 pub async fn load_family_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
@@ -202,7 +192,28 @@ async fn load_abi_content_types(
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
-    let classifications = load_classifications(pool, inputs, &plans).await?;
+    let classifications = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let admitted = input
+                .provenance
+                .get("abi_observation_classification")
+                .ok_or(AbiContentTypesUnavailable::ObservationsStale)
+                .map(|classification| {
+                    classification
+                        .get("source_family")
+                        .and_then(Value::as_str)
+                        .is_some_and(|family| {
+                            admits_abi_observations(
+                                family,
+                                classification.get("role").and_then(Value::as_str),
+                            )
+                        })
+                });
+            (index, admitted)
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let mut answers = Vec::with_capacity(plans.len());
     let mut pending = Vec::new();
@@ -302,73 +313,6 @@ fn content_types_from_evidence(
         return AbiContentTypes::Unavailable(AbiContentTypesUnavailable::ContentTypeNotSingleBit);
     }
     AbiContentTypes::Observed(content_types.iter().map(U256::to_string).collect())
-}
-
-/// The statement behind [`load_classifications`]. One statement sees one committed Project publish,
-/// so while the held row is still published the resolver row read here is the one it was built on.
-const ABI_CLASSIFICATION_QUERY: &str = r#"
-    SELECT requested.ordinal,
-           resolver.source_family,
-           resolver.role
-    FROM unnest($1::BIGINT[], $2::TEXT[], $3::TEXT[])
-        AS requested(ordinal, chain_id, resolver_address)
-    LEFT JOIN LATERAL (
-        SELECT resolver.declared_summary #>> '{classification,source_family}' AS source_family,
-               resolver.declared_summary #>> '{classification,role}' AS role
-        FROM {RESOLVER_CLASSIFICATION_RELATION} resolver
-        WHERE resolver.chain_id = requested.chain_id
-          AND resolver.resolver_address = requested.resolver_address
-    ) resolver ON TRUE
-"#;
-
-/// Per input index: whether the held row's resolver admits ABI observations, or stale when the
-/// held row is no longer the published one.
-async fn load_classifications(
-    pool: &PgPool,
-    _inputs: &[AbiContentTypesInput<'_>],
-    plans: &[Plan],
-) -> Result<BTreeMap<usize, std::result::Result<bool, AbiContentTypesUnavailable>>> {
-    let mut ordinals = Vec::new();
-    let mut chain_ids = Vec::new();
-    let mut addresses = Vec::new();
-    for (index, plan) in plans.iter().enumerate() {
-        if let Plan::Classify {
-            chain_id,
-            resolver_address: Some(address),
-            mirrored_family: None,
-            ..
-        } = plan
-        {
-            ordinals.push(i64::try_from(index).context("ABI input index overflows BIGINT")?);
-            chain_ids.push(chain_id.clone());
-            addresses.push(address.clone());
-        }
-    }
-    if ordinals.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let query = ABI_CLASSIFICATION_QUERY.replace(
-        "{RESOLVER_CLASSIFICATION_RELATION}",
-        &crate::families::topology::resolver_classification_relation(),
-    );
-    let rows = sqlx::query(&query)
-        .bind(ordinals)
-        .bind(chain_ids)
-        .bind(addresses)
-        .fetch_all(pool)
-        .await
-        .context("failed to load resolver classifications for ABI content types")?;
-    let mut classifications = BTreeMap::new();
-    for row in rows {
-        let index = usize::try_from(row.try_get::<i64, _>("ordinal")?)
-            .context("ABI classification ordinal is negative")?;
-        let family: Option<String> = row.try_get("source_family")?;
-        let role: Option<String> = row.try_get("role")?;
-        let admitted =
-            Ok(family.is_some_and(|family| admits_abi_observations(&family, role.as_deref())));
-        classifications.insert(index, admitted);
-    }
-    Ok(classifications)
 }
 
 /// The statement behind [`load_evidence`]: each requested id looks up its own event by primary
