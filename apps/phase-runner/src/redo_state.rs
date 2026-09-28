@@ -19,7 +19,6 @@ pub(crate) struct RedoSession {
     attempt_generation: i64,
     recompute_flags: bool,
     required_ingest: bool,
-    stage_project_refresh_on_completion: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
 }
 impl RedoSession {
@@ -52,8 +51,6 @@ pub(crate) async fn begin(
         )
     })?;
     let rows = lock_chain_phase_state(&mut transaction, chain_id).await?;
-    let active = row_for(&rows, phase)?;
-    crate::redo_recompute::reject_separate_project_run(chain_id, phase, active)?;
     require_start(&rows, chain_id, phase, mode)?;
     let mut previous = row_for(&rows, phase)?.clone();
     let range = mode.range().ok_or_else(|| {
@@ -62,13 +59,6 @@ pub(crate) async fn begin(
     if automatic_discovery_ingest {
         crate::redo_discovery_authorization::require_locked(chain_id, phase, range, &previous)?;
     }
-    let stage_project_refresh_on_completion = phase == PhaseName::Project
-        && matches!(mode, RunMode::Redo(_))
-        && previous.redo_in_progress
-        && previous
-            .last_error
-            .as_deref()
-            .is_some_and(crate::redo_recompute::owns_project_refresh);
     let unbound_required_ingest = phase == PhaseName::Ingest
         && previous.redo_manifest_authority_fingerprint.is_none()
         && previous
@@ -129,7 +119,7 @@ pub(crate) async fn begin(
     } else {
         None
     };
-    if phase == PhaseName::Project && !stage_project_refresh_on_completion {
+    if phase == PhaseName::Project {
         crate::ingest_cursor_config::validate_completed_tx(&mut transaction, chain_id, sources)
             .await?;
     }
@@ -269,7 +259,6 @@ pub(crate) async fn begin(
         attempt_generation,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         required_ingest,
-        stage_project_refresh_on_completion,
         manifest_authority_audit: attestation_audit,
     })
 }
@@ -405,7 +394,6 @@ pub(crate) async fn finish(
         range,
         recompute_flags,
         required_ingest,
-        stage_project_refresh_on_completion,
         ..
     } = session;
     if required_ingest
@@ -466,29 +454,6 @@ pub(crate) async fn finish(
             to_block = persisted.to,
             "redo range widened while the phase was running; preserved the full marker"
         );
-        return Ok(());
-    }
-    if stage_project_refresh_on_completion {
-        crate::redo_recompute::stage_project_refresh(
-            &mut transaction,
-            chain_id,
-            crate::redo_recompute::ProjectRefreshCompletion {
-                previous: &previous,
-                verification_level: verification_level.as_deref(),
-                current_hash: restored_current_hash,
-                target_hash: restored_target_hash,
-                content_hash,
-            },
-        )
-        .await?;
-        transaction.commit().await.map_err(|error| {
-            RunnerError::database(
-                format!(
-                    "failed to commit staged recompute-flags project refresh for chain {chain_id}"
-                ),
-                error,
-            )
-        })?;
         return Ok(());
     }
     let recompute_summary = if recompute_flags && phase == PhaseName::Interpret {
@@ -580,9 +545,6 @@ pub(crate) async fn finish(
             "interpret redo completed",
         )
         .await?;
-    }
-    if phase == PhaseName::Interpret && recompute_flags {
-        crate::redo_recompute::clear_staged_project_refresh(&mut transaction, chain_id).await?;
     }
     let stamped_ranges = crate::redo_recompute::stamp_transitions_and_load_ranges(
         &mut transaction,

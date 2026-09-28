@@ -63,11 +63,7 @@ impl PhaseRunner {
                      invalid persisted range"
                 )));
             };
-            let phase_argument = if mode.as_deref() == Some("recompute_flags")
-                || last_error
-                    .as_deref()
-                    .is_some_and(crate::redo_recompute::is_staged_project_refresh)
-            {
+            let phase_argument = if mode.as_deref() == Some("recompute_flags") {
                 "recompute-flags".to_owned()
             } else {
                 phase.clone()

@@ -650,46 +650,36 @@ and downstream Project redo even when the TOML is unchanged. It stamps no
 Ingest redo when namespace enrichment reveals no actual watch-plan widening.
 
 `recompute-flags` recalculates label and name-surface normalization metadata
-under the current normalizer and refreshes the scoped primary-name projection.
-Names that remain active or remain shadow complete without replay. Names that
-cross between active and shadow are reported and merged into the ordinary
-Interpret and Project redo markers; only that replay path may create or retract
-their bindings. After a shadow-to-active recompute commits, the surface has
-active visibility while bindings and projections remain at their pre-transition
-class. The API serves that conservative pre-transition projection state, and
-the stamped markers block normal Interpret work. Run the stamped redo to make
-transitions visible; until then, affected names serve their pre-transition
-state. On completion the command writes one JSON object to standard output with
-the same-class and transition counts plus every stamped phase range; this report
-does not depend on `RUST_LOG`. After a normalizer-version bump (a change to the
-`ENS_NORMALIZER_VERSION` constant), run `recompute-flags` per chain over the
-chain's full retained range (`--from-block`/`--to-block` are required and a
-bounded range skips labels whose only selection arm is range-scoped) and then a
-full-range Project redo per chain over the chain's full retained range — the
-same full-range redo the [rainbow-table import](storage.md#rainbow-table-preimage-import)
-requires: label verdicts gate what Project composes into served names, and a
-verdict flip on a label with no name surface stamps no redo of its own — only
-surface visibility-class transitions do — so the full-range redo is the
-required sequence to move a surface-less flip into served names. An interrupted
-recompute resumes from its durable
-marker; the
-scoped Project refresh marker created by the command is likewise distinguishable
-and resumable. A completed scoped refresh stays marked as "Interpret flags
-pending" until Interpret completion clears or replaces it atomically, so a
-restart in that handoff resumes the same command without repeating Project. An
-unrelated ordinary Project redo that was already pending is widened or
-preserved, never completed by the recompute session; a stop that lands after
-that widening committed and before the flags were recomputed reports the
-widened redo and asks for a `recompute-flags` rerun over the same range, since
-that redo runs as usual but does not recompute the flags. This split
-deliberately narrows the simplification plan's
-bare statement that the mode runs without replay: shadow names suppress
-bindings, so a class transition requires normal binding derivation or
-retraction rather than a direct flag write. Project redo,
-`recompute-flags`, `--phase all`, and an interpret-to-project cascade use
+under the current normalizer through Interpret. It holds the Project lock while
+finalizing metadata and recording any required replay, but does not run Project
+or refresh primary names. Names that remain active or remain shadow complete
+without replay. Names that cross between active and shadow are reported and
+merged atomically into the ordinary Interpret and Project redo markers; only
+that replay path may create or retract their bindings. Complete the stamped
+redo before treating the changed visibility as published family state. On
+completion the command writes one JSON object to standard output with the
+same-class and transition counts plus every stamped phase range; this report
+does not depend on `RUST_LOG`.
+
+After a normalizer-version bump (a change to the `ENS_NORMALIZER_VERSION`
+constant), run `recompute-flags` per chain over the chain's full retained range
+(`--from-block`/`--to-block` are required and a bounded range skips labels whose
+only selection arm is range-scoped), then a full-range Project redo per chain.
+This is the same full-range redo the
+[rainbow-table import](storage.md#rainbow-table-preimage-import) requires:
+label verdicts gate what Project composes into served names, and a verdict flip
+on a label with no name surface stamps no redo of its own. Only surface
+visibility-class transitions stamp replay, so the full-range redo also carries
+surface-less verdict changes into served names.
+
+An interrupted recompute resumes its durable Interpret marker over the same
+range. An unrelated ordinary Project redo remains pending and unchanged unless
+a visibility transition expands its demanded range. There is no preliminary
+Project refresh or separate handoff marker. Recompute and bounded Project
+redo/rebuild require no hydration RPC; current values are refreshed by later
+Project Follow work, whose RPC configuration is
 `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` (or
-`--hydration-rpc CHAIN=HTTP_URL`) for the same current-head enrichment as the
-supervised project phase. `phase-runner rewind` moves the
+`--hydration-rpc CHAIN=HTTP_URL`). `phase-runner rewind` moves the
 published latest marker to an exact stored readable ancestor and uses normal
 head publication to orphan the suffix, clear affected divergence observations,
 and stamp downstream redo. If the rewind makes the end of an uncompleted

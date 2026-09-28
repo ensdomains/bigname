@@ -1459,12 +1459,12 @@ stamp survives and blocks the phase from normal restart until the command is
 run again. That error says which command, built from the stamped mode and
 range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
 --from-block <n> --to-block <n>\` with the chain's configured sources as --source
-options …` — because the stamp records neither the sources, the verifier URL,
-nor the hydration RPC, and the CLI or the Project phase rejects the bare
-command without them: add back the `--source` options the chain runs with,
-`--verification-database-url` when the phase is Verify or `all`, and
-`--hydration-rpc` for the chain (or `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`)
-whenever Project runs — Project, Interpret, `all`, and `recompute-flags`. A redo over several chains that is stopped between two of them exits
+options …` — because the stamp records neither the sources nor the verifier URL:
+add back the `--source` options the chain runs with and
+`--verification-database-url` when the phase is Verify or `all`.
+`recompute-flags` needs neither intake sources nor hydration RPC. Bounded
+Project redo/rebuild also needs no hydration RPC; current enrichment is repaired
+by later Project Follow work. A redo over several chains that is stopped between two of them exits
 nonzero as well, reporting each chain it never started, since only a prefix
 was redone and nothing was stamped for the rest; rerun the command for those
 chains. Distinguish all of these from an exit `137`, which

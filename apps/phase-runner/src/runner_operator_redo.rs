@@ -16,8 +16,6 @@ mod pending;
 #[path = "runner_operator_redo_recompute.rs"]
 mod recompute;
 
-type PendingProjectRedoRow = (String, Option<String>, Option<i64>, Option<i64>);
-
 impl PhaseRunner {
     pub async fn redo(
         &self,

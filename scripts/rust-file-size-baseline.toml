@@ -21,11 +21,6 @@ loc = 714
 justification = "Product vocabulary gained HistoryEventTypeSet canonicalization (history ergonomics), Authority (name-list ergonomics), and the resolves_to relation in parallel branches; split history vocabulary into a submodule now that the branches have landed. Authority moved to vocab/authority.rs when it gained ens_v0, ratcheting this file down from 747 lines."
 
 [[files]]
-path = "apps/phase-runner/src/redo_state.rs"
-loc = 608
-justification = "Redo marker state owns the atomic redo-begin transition and its authority/progress fencing. Discovery repair adds only the shared downstream-stamp call at that boundary; the stamping implementation was extracted to redo_stamp.rs, ratcheting this file down from 610 lines."
-
-[[files]]
 path = "crates/adapters/src/schema_v2/identity.rs"
 loc = 604
 justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
