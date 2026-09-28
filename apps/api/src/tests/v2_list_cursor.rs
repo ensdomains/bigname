@@ -541,6 +541,9 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
     database.cleanup().await
 }
 
+/// One raw-JSON edit of a cursor.
+type RawCursorEdit = Box<dyn FnOnce(&mut Value)>;
+
 /// The raw cursor JSON of `cursor` with `edit` applied, re-encoded.
 fn list_cursor_raw(cursor: &str, edit: impl FnOnce(&mut Value)) -> String {
     let mut raw: Value =
@@ -562,7 +565,7 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
     for on in [false, true] {
         let (_, next) = list_cursor_page(&database, on, &asc.0, asc.1).await?;
         let next = next.context("a continuation")?;
-        let defects: [(&str, Box<dyn FnOnce(&mut Value)>); 7] = [
+        let defects: [(&str, RawCursorEdit); 8] = [
             ("an unknown top-level field", Box::new(|raw| raw["route"] = json!("names"))),
             ("a null position value", Box::new(|raw| raw["last_item"]["name"] = Value::Null)),
             ("a numeric position value", Box::new(|raw| raw["last_item"]["name"] = json!(7))),
@@ -572,6 +575,7 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
             ("a whitespace-only value", Box::new(|raw| raw["last_item"]["name"] = json!("   "))),
             ("a NUL in a value", Box::new(|raw| raw["last_item"]["name"] = json!("beta\u{0}.eth"))),
             ("a null filters object", Box::new(|raw| raw["filters"] = Value::Null)),
+            ("an explicit null evaluation time", Box::new(|raw| raw["evaluated_at"] = Value::Null)),
         ];
         for (label, edit) in defects {
             let cursor = list_cursor_raw(&next, edit);

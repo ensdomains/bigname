@@ -113,17 +113,11 @@ impl ListCursor {
     }
 }
 
-/// Whether the cursor's JSON object has only the fields `Payload` defines: the typed decode
-/// ignores unknown ones, and a list cursor must carry nothing it did not write.
+/// Whether the cursor's JSON object has only the fields a list cursor writes. The typed decode
+/// ignores unknown fields and reads an explicit `"evaluated_at": null` as absent, and the encoder
+/// omits `evaluated_at` for a list cursor, so its key is refused whatever its value.
 fn only_known_fields(cursor: &str) -> bool {
-    const FIELDS: [&str; 6] = [
-        "version",
-        "sort",
-        "filters",
-        "last_item",
-        "snapshot",
-        "evaluated_at",
-    ];
+    const FIELDS: [&str; 5] = ["version", "sort", "filters", "last_item", "snapshot"];
     hex::decode(cursor)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -238,6 +232,10 @@ mod tests {
         let mut raw: serde_json::Value =
             serde_json::from_slice(&hex::decode(list().next(position())).unwrap()).unwrap();
         raw["route"] = serde_json::json!("names");
+        refused(&list(), &hex::encode(serde_json::to_vec(&raw).unwrap()));
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&hex::decode(list().next(position())).unwrap()).unwrap();
+        raw["evaluated_at"] = serde_json::Value::Null;
         refused(&list(), &hex::encode(serde_json::to_vec(&raw).unwrap()));
         let nul = list().next(ListPosition::new([
             ("name", "beta\0.eth".to_owned()),
