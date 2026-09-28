@@ -167,7 +167,7 @@ async fn v2_get_subnames_preserves_stored_ensip15_normalized_name_bytes() -> Res
     )
     .await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
@@ -209,7 +209,7 @@ async fn v2_get_name_preserves_stored_ensip15_normalized_name_bytes() -> Result<
     )
     .await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
@@ -721,14 +721,13 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
 }
 
 #[tokio::test]
-async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_aborts_transport_failure(
-) -> Result<()> {
+async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_aborts_transport_failure()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
-    let execution_block_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let execution_block_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let lookup_pool = database.lookup_pool().await?;
-    let namehash = seed_schema_v2_ens_record_lookup(
+    seed_schema_v2_ens_record_lookup(
         &lookup_pool,
         21_000_003,
         execution_block_hash,
@@ -737,55 +736,13 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     )
     .await?;
 
-    seed_v2_alice_name_record_fixture_migrated(
+    enable_alice_ensip19_inputs(&database).await?;
+    insert_record_lookup_fixture_writes(
         &database,
-        |row| {
-            row.namehash = namehash;
-            row.chain_positions = json!({
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
-        |_, _, inventory| {
-            inventory.selectors = json!([
-                {
-                    "record_key": "addr:2147483648",
-                    "record_family": "addr",
-                    "selector_key": "2147483648",
-                    "cacheable": true
-                }
-            ]);
-            inventory.entries = json!([
-                {
-                    "record_key": "addr:2147483648",
-                    "record_family": "addr",
-                    "selector_key": "2147483648",
-                    "status": "success",
-                    "value": {
-                        "coin_type": "2147483648",
-                        "value": "0x0000000000000000000000000000000000000def"
-                    }
-                }
-            ]);
-            inventory.provenance["read_rules"] = json!([{
-                "kind": "ensip19_default_address",
-                "source_record_key": "addr:2147483648"
-            }]);
-            inventory.record_version_boundary["chain_position"]["block_hash"] =
-                json!(execution_block_hash);
-            inventory.chain_positions = json!({
-                "ethereum-mainnet": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
+        &[family_fixture_record_write(
+            "addr:2147483648",
+            Some(json!("0x0000000000000000000000000000000000000def")),
+        )],
     )
     .await?;
     let executed_address = "0x0000000000000000000000000000000000000e0e";
@@ -845,15 +802,19 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
         .context("v2 repeated verified name profile request failed")?;
     assert_eq!(repeated_response.status(), StatusCode::OK);
     let repeated_payload: Value = read_json(repeated_response).await?;
-    assert_eq!(repeated_payload["data"]["addresses"]["60"], json!(executed_address));
+    assert_eq!(
+        repeated_payload["data"]["addresses"]["60"],
+        json!(executed_address)
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
     drop(listener);
     let mut transport_failure_state = state;
-    transport_failure_state.lookup_chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
-        format!("ethereum-mainnet={unavailable_rpc_url}"),
-    ])?;
+    transport_failure_state.lookup_chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!(
+            "ethereum-mainnet={unavailable_rpc_url}"
+        )])?;
     let transport_failure_response = app_router(transport_failure_state)
         .oneshot(
             Request::builder()
@@ -876,7 +837,11 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     );
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(rpc_requests.len(), 4, "v2 must not reuse a verified cache outcome");
+    assert_eq!(
+        rpc_requests.len(),
+        4,
+        "v2 must not reuse a verified cache outcome"
+    );
     for request in &rpc_requests {
         assert_eq!(request["method"], json!("eth_call"));
         assert_eq!(
@@ -891,11 +856,10 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
             })
         );
     }
-    let ledger_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
+    let ledger_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
+            .fetch_one(&lookup_pool)
+            .await?;
     assert_eq!(ledger_count, 2);
 
     lookup_pool.close().await;
@@ -908,58 +872,14 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
-    let execution_block_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let execution_block_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let lookup_pool = database.lookup_pool().await?;
-    let namehash = seed_schema_v2_ens_record_lookup(
+    seed_schema_v2_ens_record_lookup(
         &lookup_pool,
         21_000_003,
         execution_block_hash,
         "2026-04-17T00:00:03Z",
         "0x0000000000000000000000000000000000000def",
-    )
-    .await?;
-    seed_v2_alice_name_record_fixture_migrated(
-        &database,
-        |row| {
-            row.namehash = namehash;
-            row.chain_positions = json!({
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
-        |_, _, inventory| {
-            inventory.selectors = json!([{
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "cacheable": true
-            }]);
-            inventory.entries = json!([{
-                "record_key": "addr:60",
-                "record_family": "addr",
-                "selector_key": "60",
-                "status": "success",
-                "value": {
-                    "coin_type": "60",
-                    "value": "0x0000000000000000000000000000000000000def"
-                }
-            }]);
-            inventory.record_version_boundary["chain_position"]["block_hash"] =
-                json!(execution_block_hash);
-            inventory.chain_positions = json!({
-                "ethereum-mainnet": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
     )
     .await?;
 
@@ -988,12 +908,13 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
     request_reached
         .await
         .context("verified lookup did not reach its provider call")?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET input_content_hash = 'manifest-authority:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:api-concurrency-test'
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
+    insert_record_lookup_fixture_writes(
+        &database,
+        &[family_fixture_record_write(
+            "addr:60",
+            Some(json!("0x0000000000000000000000000000000000000123")),
+        )],
     )
-    .execute(&lookup_pool)
     .await?;
     release_response
         .send(())
@@ -1005,7 +926,11 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
         .context("v2 concurrent verified records request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unexpected response: {payload}"
+    );
     assert_eq!(payload["error"]["code"], json!("stale"));
     assert!(payload.get("data").is_none());
 
@@ -1020,10 +945,9 @@ async fn v2_verified_records_return_conflict_when_project_generation_changes_dur
 async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
-    let execution_block_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let execution_block_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let lookup_pool = database.lookup_pool().await?;
-    let namehash = seed_schema_v2_ens_record_lookup(
+    seed_schema_v2_ens_record_lookup(
         &lookup_pool,
         21_000_003,
         execution_block_hash,
@@ -1031,39 +955,13 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    let logical_name_id = format!("ens:{namehash}");
-    seed_v2_alice_name_record_fixture_migrated(
+    append_name_resolver_input(
         &database,
-        |row| {
-            row.namehash = namehash.clone();
-            row.declared_summary["resolver"] = json!({"chain_id":null,"address":null});
-            row.declared_summary["topology"]["resolver_path"][0]["address"] = Value::Null;
-            row.chain_positions = json!({
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
-        |_, _, _| {},
+        "ens",
+        "alice.eth",
+        "0x0000000000000000000000000000000000000000",
     )
     .await?;
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             declared_summary #- '{topology}', '{resolver}',
-             '{\"chain_id\":null,\"address\":null}'::jsonb
-         )
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .execute(&lookup_pool)
-    .await?;
-    sqlx::query("DELETE FROM record_inventory_current")
-        .execute(&lookup_pool)
-        .await?;
 
     let executed_address = "0x0000000000000000000000000000000000000e0e";
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -1183,11 +1081,13 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
         no_entrypoint_payload["data"]["records"]["addr:60"]["unsupported_reason"],
         json!("verified_records_not_supported")
     );
-    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 4);
-    let ledger_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
-            .fetch_one(&lookup_pool)
-            .await?;
+    assert_eq!(
+        join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
+        4
+    );
+    let ledger_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+        .fetch_one(&lookup_pool)
+        .await?;
     assert_eq!(ledger_count, 0);
 
     lookup_pool.close().await;
@@ -1208,10 +1108,9 @@ async fn v2_null_resolver_verified_rejects_direct_route_selected_after_admission
 async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
-    let execution_block_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let execution_block_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let lookup_pool = database.lookup_pool().await?;
-    let namehash = seed_schema_v2_ens_record_lookup(
+    seed_schema_v2_ens_record_lookup(
         &lookup_pool,
         21_000_003,
         execution_block_hash,
@@ -1219,32 +1118,19 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         "0x0000000000000000000000000000000000000def",
     )
     .await?;
-    let logical_name_id = format!("ens:{namehash}");
-    seed_v2_alice_name_record_fixture_migrated(
+    append_name_resolver_input(
         &database,
-        |row| {
-            row.namehash = namehash;
-            row.declared_summary["resolver"] = json!({"chain_id":null,"address":null});
-            row.declared_summary["topology"]["resolver_path"][0]["address"] = Value::Null;
-            row.chain_positions = json!({
-                "ethereum": {
-                    "chain_id": "ethereum-mainnet",
-                    "block_number": 21_000_003,
-                    "block_hash": execution_block_hash,
-                    "timestamp": "2026-04-17T00:00:03Z"
-                }
-            });
-        },
-        |_, _, _| {},
+        "ens",
+        "alice.eth",
+        "0x0000000000000000000000000000000000000000",
     )
     .await?;
 
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        resolution_basenames_l1_addr60_response(
+    let (rpc_url, rpc_handle) =
+        spawn_primary_name_mock_rpc(vec![resolution_basenames_l1_addr60_response(
             "0x0000000000000000000000000000000000000e0e",
-        ),
-    ])
-    .await?;
+        )])
+        .await?;
     let state = database
         .app_state_with_lookup_chain_rpc_urls(bigname_lookup::ChainRpcUrls::from_entries(&[
             format!("ethereum-mainnet={rpc_url}"),
@@ -1266,19 +1152,7 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
 
     control.wait_until_reached().await;
     let direct_resolver = "0x1000000000000000000000000000000000000001";
-    sqlx::query(
-        "UPDATE name_current
-         SET declared_summary = jsonb_set(
-             jsonb_set(declared_summary, '{resolver}', $2),
-             '{topology,resolver_path,0,address}', $3
-         )
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .bind(json!({"chain_id":"ethereum-mainnet","address":direct_resolver}))
-    .bind(json!(direct_resolver))
-    .execute(&lookup_pool)
-    .await?;
+    append_name_resolver_input(&database, "ens", "alice.eth", direct_resolver).await?;
     control.resume().await;
 
     let response = request_task
@@ -1287,10 +1161,17 @@ async fn assert_null_resolver_route_flip_is_stale(source: &str) -> Result<()> {
         .context("v2 discovery-route mismatch request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "unexpected response: {payload}");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "unexpected response: {payload}"
+    );
     assert_eq!(payload["error"]["code"], json!("stale"));
     assert!(payload.get("data").is_none());
-    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 1);
+    assert_eq!(
+        join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
+        1
+    );
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -1643,32 +1524,35 @@ async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> R
 #[tokio::test]
 async fn v2_get_name_records_ignores_reservation_audit_selectors_on_every_source() -> Result<()> {
     for source in ["indexed", "auto", "verified"] {
-        let payload = v2_name_records_payload_with_row_and_setup(
-            &format!("/v1/names/Alice.eth/records?source={source}&include=inventory"),
-            |row| {
-                row.declared_summary["registration"] = json!({
-                    "status": "reserved",
-                    "expiry": 4_000_000_000_u64,
-                    "latest_event_kind": "RegistrationReserved"
-                });
-                row.declared_summary["control"] = json!({"status": "reserved"});
-            },
-            |_, _, inventory| {
-                inventory.selectors = Value::Array(
-                    (0..=200)
-                        .map(|index| {
-                            json!({
-                                "record_key": format!("text:audit-{index}"),
-                                "record_family": "text",
-                                "selector_key": format!("audit-{index}"),
-                                "cacheable": true
-                            })
-                        })
-                        .collect(),
-                );
-            },
+        let database = TestDatabase::new_migrated().await?;
+        seed_alice_state_inputs(&database, AliceInputState::Reserved).await?;
+        let writes = (0..=200)
+            .map(|index| {
+                family_fixture_record_write(
+                    &format!("text:audit-{index}"),
+                    Some(json!("retained audit value")),
+                )
+            })
+            .collect::<Vec<_>>();
+        insert_family_fixture_record_writes(
+            &database.pool,
+            "ens",
+            "ethereum-mainnet",
+            "alice.eth",
+            "0x0000000000000000000000000000000000000abc",
+            21_000_003,
+            "0xbinding",
+            &writes,
         )
         .await?;
+        rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding")
+            .await?;
+        let payload = v2_name_record_payload_for_database(
+            &database,
+            &format!("/v1/names/Alice.eth/records?source={source}&include=inventory"),
+        )
+        .await?;
+        database.cleanup().await?;
 
         // Retained audit selectors are not served inventory: no default keys and no 422, even
         // above the 200-key limit.
@@ -2352,27 +2236,33 @@ async fn v2_indexed_records_do_not_derive_for_unflagged_resolvers() -> Result<()
 #[tokio::test]
 async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_records() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, inventory| {
-        inventory.selectors = json!([{
-            "record_key": "text:pre-surface",
-            "record_family": "text",
-            "selector_key": "pre-surface",
-            "cacheable": true
-        }]);
-        inventory.entries = json!([{
-            "record_key": "text:pre-surface",
-            "record_family": "text",
-            "selector_key": "pre-surface",
-            "status": "success",
-            "value": {
-                "key": "pre-surface",
-                "value": "recovered before the name surface"
-            }
-        }]);
-        inventory.explicit_gaps = json!([]);
-        inventory.unsupported_families = json!([]);
-    })
+    seed_alice_name_inputs_with_writes(&database, &[]).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xpre-surface",
+            None,
+            21_000_000,
+            1_640_995_200,
+        )],
+    )
     .await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "alice.eth",
+        "0x0000000000000000000000000000000000000abc",
+        21_000_000,
+        "0xpre-surface",
+        &[family_fixture_record_write(
+            "text:pre-surface",
+            Some(json!("recovered before the name surface")),
+        )],
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     // A closed RPC endpoint makes any accidental verified fallback fail the request.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -2427,14 +2317,12 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
             "known_keys": ["text:pre-surface"],
             "unset_keys": [],
             "unsupported_keys": [],
-            "abi_content_types": null,
-            "abi_unsupported_reason": "abi_observations_not_supported"
+            "abi_content_types": []
         })
     );
-    let divergence_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
-            .fetch_one(&database.lookup_pool)
-            .await?;
+    let divergence_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resolution_divergences")
+        .fetch_one(&database.lookup_pool)
+        .await?;
     assert_eq!(divergence_count, 0);
 
     database.cleanup().await
@@ -2443,46 +2331,7 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
 #[tokio::test]
 async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture_with_row(
-        &database,
-        |row| {
-            let serving_resource_id = row.resource_id.expect("fixture control resource");
-            row.surface_binding_id = None;
-            row.resource_id = None;
-            row.serving_resource_id = Some(serving_resource_id);
-            row.token_lineage_id = None;
-            row.binding_kind = None;
-            row.declared_summary["registration"] = json!({"status":"unregistered"});
-            row.declared_summary["control"] = json!({"status":"unregistered"});
-            row.declared_summary["coverage"] = json!({
-                "status":"projected",
-                "exhaustiveness":"not_asserted",
-                "enumeration_basis":"event_linked_registry_resolver",
-                "unsupported_reason":null
-            });
-            row.provenance["read_reachability"] = json!({
-                "serving_resource_id":serving_resource_id,
-                "basis":"retained_registry_resolver_pointer",
-                "owner_getter_reason":"registry_self",
-                "pointer_event_id":102
-            });
-            row.coverage = json!({
-                "status":"projected",
-                "exhaustiveness":"not_asserted",
-                "enumeration_basis":"event_linked_registry_resolver",
-                "unsupported_reason":null
-            });
-        },
-        |_, _, _| {},
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.resources SET token_lineage_id = NULL
-         WHERE resource_id = $1",
-    )
-    .bind(Uuid::from_u128(0x2200))
-    .execute(&database.pool)
-    .await?;
+    seed_alice_state_inputs(&database, AliceInputState::Ownerless).await?;
 
     for uri in [
         "/v1/names/Alice.eth",
@@ -2516,7 +2365,10 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 json!("inventory_not_available")
             );
         } else {
-            assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+            assert_eq!(
+                payload["data"]["registration_status"],
+                json!("unregistered")
+            );
             assert!(
                 payload["data"].get("token_id").is_none(),
                 "ownerless exact-name payload must not imply token control: {payload}"
@@ -2550,23 +2402,12 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
 
 #[tokio::test]
 async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> Result<()> {
-    let payload = v2_name_record_payload_with_row("/v1/names/Alice.eth", |row| {
-        let serving_resource_id = row.resource_id.expect("fixture resource");
-        row.surface_binding_id = None;
-        row.resource_id = None;
-        row.serving_resource_id = Some(serving_resource_id);
-        row.token_lineage_id = None;
-        row.binding_kind = None;
-        row.declared_summary["registration"] = json!({
-            "status":"reserved",
-            "authority_kind":"ens_v2_registry"
-        });
-        row.declared_summary["control"] = json!({"status":"unregistered"});
-        row.provenance = json!({});
-    })
-    .await?;
+    let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Unbound).await?;
 
-    assert_eq!(payload["data"]["registration_status"], json!("unregistered"));
+    assert_eq!(
+        payload["data"]["registration_status"],
+        json!("unregistered")
+    );
     assert!(payload["data"].get("resolver").is_none());
     assert!(payload["data"].get("addresses").is_none());
     assert!(payload["data"].get("text_records").is_none());
@@ -2696,13 +2537,10 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
 /// `exact_name_authority_not_verifiable` is reserved for a topology-bearing row whose selected
 /// arm the execution declaration does not admit.
 #[tokio::test]
-async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology(
-) -> Result<()> {
-    let payload = v2_name_records_payload_with_setup(
-        "/v1/names/Alice.eth/records?source=verified&keys=addr:60",
-        |_, _, _| {},
-    )
-    .await?;
+async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_topology()
+-> Result<()> {
+    let payload =
+        v2_name_records_payload("/v1/names/Alice.eth/records?source=verified&keys=addr:60").await?;
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(
@@ -2718,56 +2556,27 @@ async fn v2_get_name_records_source_verified_reports_unsupported_without_lookup_
 
 #[tokio::test]
 async fn v2_get_name_records_withholds_unproven_authority_without_verified_lookup() -> Result<()> {
-    // Every unsupported reason short-circuits the records response under its public name; only
-    // `current_authority_not_projected` keeps its own documented inventory reason.
-    for (reason, product_reason) in [
-        (
-            "conflicting_current_ens_authority",
-            "conflicting_current_ens_authority",
-        ),
-        (
-            "mixed_ensv1_ensv2_exact_name_corpus",
-            "mixed_exact_name_corpus",
-        ),
-        (
-            "a_reason_this_build_has_never_seen",
-            "a_reason_this_build_has_never_seen",
-        ),
-        (
-            "current_authority_not_projected",
-            "inventory_not_available",
-        ),
-    ] {
-        for source in ["indexed", "verified", "auto"] {
-            let payload = v2_name_records_payload_with_row_and_setup(
-                &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
-                |row| {
-                    row.coverage = json!({
-                        "status":"unsupported",
-                        "unsupported_reason":reason
-                    });
-                },
-                |_, _, _| {},
-            )
-            .await?;
-
-            assert_eq!(payload["data"]["resolver"], Value::Null);
-            assert_eq!(
-                payload["data"]["records"]["addr:60"],
-                json!({
-                    "status":"unsupported",
-                    "unsupported_reason":product_reason
-                })
-            );
-            assert_eq!(
-                payload["meta"]["source"],
-                json!(if source == "verified" {
-                    "verified"
-                } else {
-                    "indexed"
-                })
-            );
-        }
+    for source in ["indexed", "verified", "auto"] {
+        let payload = v2_alice_state_payload(
+            &format!("/v1/names/Alice.eth/records?source={source}&keys=addr:60"),
+            AliceInputState::Unbound,
+        )
+        .await?;
+        assert_eq!(payload["data"]["resolver"], Value::Null);
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({
+                "status":"unsupported", "unsupported_reason":"inventory_not_available"
+            })
+        );
+        assert_eq!(
+            payload["meta"]["source"],
+            if source == "verified" {
+                "verified"
+            } else {
+                "indexed"
+            }
+        );
     }
 
     Ok(())
@@ -4765,7 +4574,9 @@ async fn enable_alice_ensip19_inputs(database: &TestDatabase) -> Result<()> {
         &payload,
     )
     .await?;
-    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
+    let (block, hash): (i64, String) = sqlx::query_as("SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .fetch_one(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
 }
 
 /// Explicit retained input scenarios used by the name routes. These construct events and
@@ -4777,6 +4588,7 @@ enum AliceInputState {
     Released,
     Reserved,
     Wrapped,
+    Ownerless,
 }
 
 async fn append_alice_name_input(
@@ -4918,14 +4730,52 @@ async fn seed_alice_state_inputs(database: &TestDatabase, state: AliceInputState
             )
             .await?;
             if matches!(state, AliceInputState::Reserved) {
+                // Retain the old resource's record observations after its binding and pointer end.
+                sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(1776384003) WHERE surface_binding_id = $1")
+                    .bind(Uuid::from_u128(0x3300)).execute(&database.pool).await?;
                 append_alice_name_input(
                     database,
-                    "RegistrationReserved",
+                    "SurfaceUnbound",
                     "ens_v2_registry_l1",
-                    json!({"source_event":"NameReserved", "expiry":4_000_000_000_u64}),
+                    json!({"source_event":"LabelReserved", "token_id":"4294967297"}),
                 )
                 .await?;
+                append_alice_name_input(database, "ResolverChanged", "ens_v2_registry_l1",
+                    json!({"source_event":"LabelReserved", "token_id":"4294967297", "resolver":null})).await?;
+                let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+                let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
+                let mut reservation = history_event(
+                    &format!("alice-reserved-{ordinal}"),
+                    Some(&logical),
+                    None,
+                    Some("ethereum-mainnet"),
+                    Some(21_000_003),
+                    Some("0xbinding"),
+                    Some("0xalice-current"),
+                    Some(ordinal),
+                    CanonicalityState::Canonical,
+                );
+                reservation.event_kind = "RegistrationReserved".into();
+                reservation.source_family = "ens_v2_registry_l1".into();
+                reservation.before_state = json!({});
+                reservation.after_state = json!({"source_event":"LabelReserved", "status":"reserved",
+                    "expiry":4_000_000_000_u64, "token_id":"4294967297", "current_token_id":"4294967297",
+                    "registry_contract_instance_id":Uuid::from_u128(0x4400).to_string()});
+                bigname_storage::insert_normalized_event_fixtures(&database.pool, &[reservation])
+                    .await?;
             }
+        }
+        AliceInputState::Ownerless => {
+            sqlx::query("UPDATE surface_bindings SET active_to = to_timestamp(1776384003) WHERE surface_binding_id = $1")
+                .bind(Uuid::from_u128(0x3300)).execute(&database.pool).await?;
+            sqlx::query("UPDATE resources SET token_lineage_id = NULL WHERE resource_id = $1")
+                .bind(Uuid::from_u128(0x2200))
+                .execute(&database.pool)
+                .await?;
+            append_alice_name_input(database, "AuthorityTransferred", "ens_v1_registry_l1",
+                json!({"source_event":"Transfer", "node":bigname_lookup::ens_namehash_hex("alice.eth")?,
+                    "owner":"0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e", "owner_getter":"0x0000000000000000000000000000000000000000",
+                    "registry_owner":"0x0000000000000000000000000000000000000000", "owner_getter_reason":"registry_self"})).await?;
         }
         AliceInputState::Released => {
             append_alice_name_input(
@@ -6507,32 +6357,18 @@ fn assert_no_banned_v1_spellings(value: &Value) {
     }
 }
 
-/// Stamps the seeded ENSv2 migration proof on the Alice row: a `MigrationApplied`
-/// normalized event at `block_number` plus the matching `authority_selection`.
+/// Publishes the migration proof as a named retained event; composition supplies migrated_at.
 async fn stamp_v2_alice_migration_transition(
     database: &TestDatabase,
     block_number: i64,
-    block_timestamp: i64,
 ) -> Result<()> {
-    let block_hash = format!("0xmigration{block_number}");
-    upsert_phase_raw_blocks(
-        &database.pool,
-        &[raw_block(
-            "ethereum-mainnet",
-            &block_hash,
-            None,
-            block_number,
-            block_timestamp,
-        )],
-    )
-    .await?;
-    let event_identity = format!(
-        "ens_v2_migration_l1:1:ethereum-mainnet:{block_hash}:0xtxmigration:0:MigrationApplied:0"
-    );
+    let block_hash: String = sqlx::query_scalar("SELECT block_hash FROM chain_lineage WHERE chain_id = 'ethereum-mainnet' AND block_number = $1 AND canonicality_state = 'canonical'")
+        .bind(block_number).fetch_one(&database.pool).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "alice.eth");
     let mut event = history_event(
-        &event_identity,
-        None,
-        None,
+        &format!("alice-migration-{block_number}"),
+        Some(&logical),
+        Some(Uuid::from_u128(0x2200)),
         Some("ethereum-mainnet"),
         Some(block_number),
         Some(&block_hash),
@@ -6540,32 +6376,13 @@ async fn stamp_v2_alice_migration_transition(
         Some(0),
         CanonicalityState::Canonical,
     );
-    event.event_kind = "MigrationApplied".to_owned();
-    event.source_family = "ens_v2_migration_l1".to_owned();
-    event.derivation_kind = "ens_v2_migration".to_owned();
+    event.event_kind = "MigrationApplied".into();
+    event.source_family = "ens_v2_migration_l1".into();
+    event.derivation_kind = "ens_v2_migration".into();
     event.before_state = json!({});
-    event.after_state = json!({});
+    event.after_state = json!({"transition_id":"alice-migration"});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-    let proof_event_id: i64 = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
-    )
-    .bind(&event_identity)
-    .fetch_one(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET provenance = provenance || jsonb_build_object('authority_selection', $1::jsonb)
-         WHERE namespace = 'ens' AND lower(raw_name) = 'alice.eth'",
-    )
-    .bind(json!({
-        "authority_arm": "ens_v2",
-        "proof_kind": "migration_authority_transition",
-        "proof_event_id": proof_event_id,
-        "lifecycle_state": "registered",
-    }))
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await
 }
 
 #[tokio::test]
@@ -6582,13 +6399,13 @@ async fn v2_get_name_reports_authority_arm_without_migration_transition() -> Res
 #[tokio::test]
 async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_alice_name_inputs(&database).await?;
-    stamp_v2_alice_migration_transition(&database, 21_000_002, 1_717_171_699).await?;
+    seed_alice_state_inputs(&database, AliceInputState::Registry).await?;
+    stamp_v2_alice_migration_transition(&database, 21_000_002).await?;
 
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
-    assert_eq!(data.get("migrated_at"), Some(&json!("2024-05-31T16:08:19Z")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("2024-01-02T03:04:05Z")));
 
     let response = v2_lookup_response_for_database(
         &database,
@@ -6600,7 +6417,7 @@ async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() ->
     let lookup: Value = read_json(response).await?;
     let record = &lookup["data"][0]["record"];
     assert_eq!(record["authority"], json!("ens_v2"));
-    assert_eq!(record["migrated_at"], json!("2024-05-31T16:08:19Z"));
+    assert_eq!(record["migrated_at"], json!("2024-01-02T03:04:05Z"));
 
     database.cleanup().await
 }

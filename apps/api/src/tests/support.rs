@@ -3989,7 +3989,94 @@ async fn insert_family_fixture_record_writes(
 
 /// The default Alice route fixture: first registry observation, registrar grant and current
 /// resolver writes at three actual block times. The response's dates and values are produced.
+/// Append a concrete registry pointer event to the current retained name binding.
+async fn append_name_resolver_input(
+    database: &TestDatabase,
+    namespace: &str,
+    name: &str,
+    resolver: &str,
+) -> Result<()> {
+    let chain = chain_id_for_namespace(namespace);
+    let family = if namespace == "basenames" {
+        "basenames_base_registry"
+    } else {
+        "ens_v1_registry_l1"
+    };
+    let logical = bigname_storage::logical_name_id_for_name(namespace, name);
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(&database.pool)
+    .await?;
+    let resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1 AND active_to IS NULL",
+    )
+    .bind(&logical)
+    .fetch_one(&database.pool)
+    .await?;
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let mut event = history_event(
+        &format!("name-pointer-{ordinal}"),
+        Some(&logical),
+        Some(resource),
+        Some(chain),
+        Some(block),
+        Some(&hash),
+        Some("0xpointer"),
+        Some(ordinal),
+        CanonicalityState::Canonical,
+    );
+    event.namespace = namespace.into();
+    event.event_kind = "ResolverChanged".into();
+    event.source_family = family.into();
+    event.before_state = json!({});
+    event.after_state = json!({"source_event":"NewResolver", "node":bigname_lookup::ens_namehash_hex(name)?, "resolver":resolver});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    rebuild_fixture_families(&database.pool, chain, block, &hash).await
+}
+
+/// Add observations to the direct ENS resolver used by seed_schema_v2_ens_record_lookup.
+async fn insert_record_lookup_fixture_writes(
+    database: &TestDatabase,
+    writes: &[Value],
+) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as("SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .fetch_one(&database.pool).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "alice.eth",
+        "0x1000000000000000000000000000000000000001",
+        block,
+        &hash,
+        writes,
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
 async fn seed_alice_name_inputs(database: &TestDatabase) -> Result<()> {
+    seed_alice_name_inputs_with_writes(
+        database,
+        &[
+            family_fixture_record_write(
+                "addr:60",
+                Some(json!("0x0000000000000000000000000000000000000def")),
+            ),
+            family_fixture_record_write("avatar", Some(json!("https://example.test/avatar.png"))),
+            family_fixture_record_write("contenthash", Some(json!("ipfs://alice"))),
+            family_fixture_record_write("text:description", Some(json!("Alice profile"))),
+        ],
+    )
+    .await
+}
+
+async fn seed_alice_name_inputs_with_writes(
+    database: &TestDatabase,
+    writes: &[Value],
+) -> Result<()> {
     let chain = "ethereum-mainnet";
     let resource = Uuid::from_u128(0x2200);
     let resolver = "0x0000000000000000000000000000000000000abc";
@@ -4069,15 +4156,7 @@ async fn seed_alice_name_inputs(database: &TestDatabase) -> Result<()> {
         resolver,
         21_000_003,
         "0xbinding",
-        &[
-            family_fixture_record_write(
-                "addr:60",
-                Some(json!("0x0000000000000000000000000000000000000def")),
-            ),
-            family_fixture_record_write("avatar", Some(json!("https://example.test/avatar.png"))),
-            family_fixture_record_write("contenthash", Some(json!("ipfs://alice"))),
-            family_fixture_record_write("text:description", Some(json!("Alice profile"))),
-        ],
+        writes,
     )
     .await?;
     rebuild_fixture_families(&database.pool, chain, 21_000_003, "0xbinding").await
@@ -4466,228 +4545,6 @@ async fn seed_identity_name(
         indexed,
         "the actual identity inputs must produce the requested {relation:?} membership"
     );
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn seed_phase_identity_name(
-    database: &TestDatabase,
-    display_name: &str,
-    normalized_name: &str,
-    resource_id: Uuid,
-    token_lineage_id: Uuid,
-    surface_binding_id: Uuid,
-    address: &str,
-    relation: bigname_storage::AddressNameRelation,
-    declared_summary: &Value,
-) -> Result<()> {
-    let projected_namespace: Option<String> = sqlx::query_scalar(
-        "SELECT namespace FROM bigname_phase.name_current WHERE resource_id = $1 LIMIT 1",
-    )
-    .bind(resource_id)
-    .fetch_optional(&database.lookup_pool)
-    .await?;
-    let namespace = projected_namespace.as_deref().unwrap_or_else(|| {
-        if normalized_name.ends_with(".base.eth") && normalized_name != "base.eth" {
-            "basenames"
-        } else {
-            "ens"
-        }
-    });
-    let namehash = bigname_lookup::ens_namehash_hex(normalized_name)?;
-    let logical_name_id = format!("{namespace}:{namehash}");
-    let normalized = bigname_domain::normalization::normalize_name(display_name)
-        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?;
-    let labelhashes = normalized
-        .normalized_labels
-        .iter()
-        .map(|label| Ok(format!("{:#x}", alloy_primitives::keccak256(label.as_bytes()))))
-        .collect::<Result<Vec<_>>>()?;
-    let chain_id = if namespace == "basenames" {
-        "base-mainnet"
-    } else {
-        "ethereum-mainnet"
-    };
-    let (block_hash, block_number, timestamp, timestamp_text): (
-        String,
-        i64,
-        OffsetDateTime,
-        String,
-    ) = sqlx::query_as(
-        r#"
-        SELECT head.latest_block_hash, head.latest_block_number, lineage.block_timestamp,
-               to_char(
-                   lineage.block_timestamp AT TIME ZONE 'UTC',
-                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'
-               )
-        FROM chain_heads head
-        JOIN bigname_phase.chain_lineage lineage
-          ON lineage.chain_id = head.chain_id
-         AND lineage.block_hash = head.latest_block_hash
-         AND lineage.block_number = head.latest_block_number
-        WHERE head.chain_id = $1
-        "#,
-    )
-    .bind(chain_id)
-    .fetch_one(&database.lookup_pool)
-    .await?;
-    let slot = if chain_id == "base-mainnet" { "base" } else { "ethereum" };
-    let publication_positions = json!({
-        slot: {
-            "chain_id": chain_id,
-            "block_number": block_number,
-            "block_hash": block_hash,
-            "timestamp": timestamp_text,
-        }
-    });
-    let mut transaction = database.lookup_pool.begin().await?;
-    sqlx::query(
-        r#"
-        INSERT INTO token_lineages (
-            token_lineage_id, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        ) VALUES ($1, $2, $3, $4, '{}'::jsonb, 'finalized')
-        ON CONFLICT (token_lineage_id) DO NOTHING
-        "#,
-    )
-    .bind(token_lineage_id)
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO resources (
-            resource_id, token_lineage_id, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        ) VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'finalized')
-        ON CONFLICT (resource_id) DO NOTHING
-        "#,
-    )
-    .bind(resource_id)
-    .bind(token_lineage_id)
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO name_surfaces (
-            logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
-            namehash, labelhashes, normalizer_version, visibility_state,
-            normalization_errors, chain_id, block_hash, block_number,
-            provenance, canonicality_state
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, 'active', '[]'::jsonb,
-            $9, $10, $11, '{}'::jsonb, 'finalized'
-        ) ON CONFLICT (logical_name_id) DO NOTHING
-        "#,
-    )
-    .bind(&logical_name_id)
-    .bind(namespace)
-    .bind(&normalized.normalized_name)
-    .bind(&normalized.normalized_labels)
-    .bind(&normalized.dns_encoded_name)
-    .bind(&namehash)
-    .bind(labelhashes)
-    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO surface_bindings (
-            surface_binding_id, logical_name_id, resource_id, binding_kind,
-            authority_arm, active_from, chain_id, block_hash, block_number, provenance,
-            canonicality_state
-        ) VALUES (
-            $1, $2, $3, 'declared_registry_path', 'ens_v1', $4, $5, $6, $7,
-            '{}'::jsonb, 'finalized'
-        ) ON CONFLICT (surface_binding_id) DO NOTHING
-        "#,
-    )
-    .bind(surface_binding_id)
-    .bind(&logical_name_id)
-    .bind(resource_id)
-    .bind(timestamp)
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO name_current (
-            logical_name_id, namespace, raw_name, namehash, surface_binding_id,
-            resource_id, token_lineage_id, binding_kind, declared_summary,
-            support_status, provenance, chain_positions, canonicality_summary,
-            manifest_version
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 'declared_registry_path', $8,
-            'supported', $9, $10, $11, 1
-        ) ON CONFLICT (logical_name_id) DO UPDATE SET
-            declared_summary = EXCLUDED.declared_summary,
-            provenance = EXCLUDED.provenance,
-            chain_positions = EXCLUDED.chain_positions,
-            canonicality_summary = EXCLUDED.canonicality_summary
-        "#,
-    )
-    .bind(&logical_name_id)
-    .bind(namespace)
-    .bind(&normalized.normalized_name)
-    .bind(&namehash)
-    .bind(surface_binding_id)
-    .bind(resource_id)
-    .bind(token_lineage_id)
-    .bind(declared_summary)
-    .bind(json!({ "chain_id": chain_id }))
-    .bind(&publication_positions)
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": block_number,
-        "target_block_hash": block_hash,
-    }))
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO address_names_current (
-            address, logical_name_id, relation, namespace, raw_name, namehash,
-            surface_binding_id, resource_id, token_lineage_id, binding_kind,
-            support_status, provenance, chain_positions, canonicality_summary,
-            manifest_version
-        ) VALUES (
-            lower($1), $2, $3, $4, $5, $6, $7, $8, $9,
-            'declared_registry_path', 'supported', $10, $11, $12, 1
-        ) ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
-            provenance = EXCLUDED.provenance,
-            chain_positions = EXCLUDED.chain_positions,
-            canonicality_summary = EXCLUDED.canonicality_summary
-        "#,
-    )
-    .bind(address)
-    .bind(&logical_name_id)
-    .bind(relation.as_str())
-    .bind(namespace)
-    .bind(&normalized.normalized_name)
-    .bind(&namehash)
-    .bind(surface_binding_id)
-    .bind(resource_id)
-    .bind(token_lineage_id)
-    .bind(json!({ "chain_id": chain_id }))
-    .bind(phase_flat_projection_position(block_number, &block_hash))
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": block_number,
-        "target_block_hash": block_hash,
-    }))
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 

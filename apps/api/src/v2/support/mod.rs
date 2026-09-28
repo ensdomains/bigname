@@ -53,8 +53,6 @@ pub(crate) use records::*;
 pub(crate) use resolution_lookup::*;
 pub(crate) use resolution_verified::*;
 #[cfg(test)]
-pub(crate) use reverse_identity::primary_coherence_test_hooks as identity_facade_primary_coherence_test_hooks;
-#[cfg(test)]
 pub(crate) use reverse_identity::relation_page_test_hooks as identity_facade_relation_page_test_hooks;
 #[cfg(test)]
 pub(crate) use reverse_identity::test_hooks as identity_facade_count_test_hooks;
