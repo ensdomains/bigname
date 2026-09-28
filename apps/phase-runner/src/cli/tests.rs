@@ -200,7 +200,7 @@ fn redo_cli_carries_progress_metrics_configuration() {
 }
 
 #[test]
-fn redo_takes_the_family_run_budget_and_keeps_family_integrity_failures_fatal() {
+fn redo_takes_the_family_run_budget_and_keeps_every_family_failure_fatal() {
     let command = Cli::try_parse_from([
         "phase-runner",
         "redo",
@@ -226,7 +226,37 @@ fn redo_takes_the_family_run_budget_and_keeps_family_integrity_failures_fatal() 
         panic!("expected redo command");
     };
     assert_eq!(project_families.max_blocks_per_run, 10);
-    assert!(!project_families.retry_integrity_failures);
+    assert!(!project_families.retry_family_failures);
+}
+
+#[test]
+fn run_takes_the_family_run_budget_and_retries_family_failures() {
+    configure_redo_source_endpoint();
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "run",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--verification-database-url",
+        "postgres://phase-runner.invalid/verification",
+        "--chain",
+        "ethereum-mainnet",
+        "--source",
+        REDO_SOURCE,
+        "--project-families-max-blocks",
+        "10",
+    ])
+    .expect("run family options must parse")
+    .resolve()
+    .expect("run family options must resolve");
+    let ResolvedCommand::Run {
+        project_families, ..
+    } = command
+    else {
+        panic!("expected run command");
+    };
+    assert_eq!(project_families.max_blocks_per_run, 10);
+    assert!(project_families.retry_family_failures);
 }
 
 #[test]

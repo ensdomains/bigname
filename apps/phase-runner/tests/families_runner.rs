@@ -16,6 +16,7 @@ use phase_runner::{
     capacity::CapacityGuard,
     cli::{Cli, ResolvedCommand},
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::{ErrorKind, RunnerError},
     phase::{
         AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
         PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseSet, RunMode,
@@ -199,7 +200,7 @@ fn default_project(scratch: &ScratchDatabase) -> Arc<dyn Phase> {
 
 /// Run a Project redo through `head` until its family run has failed and the failure is recorded
 /// on the Project row, then stop the command, which the restart loop would otherwise keep
-/// retrying: the injected failures here are transient, which the one-shot command retries too.
+/// retrying: these runs take the supervised family settings, which retry every family failure.
 /// Returns the command's error and the recorded failure.
 async fn redo_until_family_error(
     scratch: &ScratchDatabase,
@@ -374,16 +375,41 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
     scratch.cleanup().await
 }
 
-// The one-shot `redo` command, configured as the command line resolves it, keeps a family
-// data-integrity failure's own kind: the command runs the served redo once, the families stop on
-// the refused block, and the command exits with the family error recorded instead of running the
-// served redo again forever. The redo stays in progress, so a rerun is admitted.
+// The one-shot `redo` command, configured as the command line resolves it, does not retry a
+// family failure of any kind: the command runs the served redo once, the families stop on the
+// refused block, and the command exits with the family error recorded, keeping its own kind,
+// instead of running the served redo again forever. The redo stays in progress, so a rerun is
+// admitted. A plain `RAISE EXCEPTION` is a transient failure, like Interpret being in redo.
 #[tokio::test]
-async fn the_redo_command_exits_on_a_persistent_family_failure_after_one_served_redo() -> Result<()>
+async fn the_redo_command_exits_on_a_transient_family_failure_after_one_served_redo() -> Result<()>
 {
-    let scratch = ready_through("families_runner_redo_exit", 30).await?;
+    redo_command_exits_after_one_served_redo(
+        "families_runner_redo_exit_transient",
+        "",
+        ErrorKind::Transient,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn the_redo_command_exits_on_a_family_integrity_failure_after_one_served_redo() -> Result<()>
+{
+    redo_command_exits_after_one_served_redo(
+        "families_runner_redo_exit_integrity",
+        INTEGRITY,
+        ErrorKind::DataIntegrity,
+    )
+    .await
+}
+
+async fn redo_command_exits_after_one_served_redo(
+    prefix: &str,
+    using: &str,
+    kind: ErrorKind,
+) -> Result<()> {
+    let scratch = ready_through(prefix, 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
-    refuse_marker_integrity(&scratch, 15).await?;
+    refuse_marker_at(&scratch, 15, using).await?;
     let stop = CancellationToken::new();
     // A second served redo would be the retry this test rules out; the stop then ends the command.
     let (project, served) = ServedBatches::cancelling_at(
@@ -405,9 +431,14 @@ async fn the_redo_command_exits_on_a_persistent_family_failure_after_one_served_
     );
     let message = error.to_string();
     assert!(
-        message.contains("owned key families") && message.contains("injected family integrity"),
+        message.contains("owned key families") && message.contains("injected family failure"),
         "{message}"
     );
+    let runner_error = error
+        .downcast_ref::<RunnerError>()
+        .ok_or_else(|| anyhow::anyhow!("not a runner error: {error}"))?;
+    assert_eq!(runner_error.kind(), kind, "the failure keeps its own kind");
+    assert!(!runner_error.is_retryable());
     assert_eq!(marker(&scratch).await?, Some(14), "block 15 was refused");
     assert_eq!(
         redo_progress(&scratch).await?,
@@ -427,7 +458,7 @@ async fn a_family_integrity_failure_is_retried_under_the_supervised_settings_and
 -> Result<()> {
     let scratch = ready_through("families_runner_supervised_retry", 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
-    refuse_marker_integrity(&scratch, 15).await?;
+    refuse_marker_at(&scratch, 15, INTEGRITY).await?;
     let stop = CancellationToken::new();
     let (project, served) = ServedBatches::cancelling_at(
         ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
@@ -612,12 +643,16 @@ async fn a_failed_input_token_read_fails_project_after_its_progress_and_is_retri
     scratch.cleanup().await
 }
 
-/// A trigger that refuses the family marker's move to `block` with a data-integrity error.
-async fn refuse_marker_integrity(scratch: &ScratchDatabase, block: i64) -> Result<()> {
+/// The `RAISE` clause that makes an injected failure a data-integrity one.
+const INTEGRITY: &str = " USING ERRCODE = 'check_violation'";
+
+/// A trigger that refuses the family marker's move to `block`, raising with the `using` clause:
+/// empty for a plain `RAISE EXCEPTION` (P0001, transient) or [`INTEGRITY`].
+async fn refuse_marker_at(scratch: &ScratchDatabase, block: i64, using: &str) -> Result<()> {
     sqlx::raw_sql(&format!(
         "CREATE FUNCTION refuse_marker() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN
-             RAISE EXCEPTION 'injected family integrity failure' USING ERRCODE = 'check_violation';
+             RAISE EXCEPTION 'injected family failure'{using};
          END $$;
          CREATE TRIGGER refuse_marker BEFORE INSERT OR UPDATE ON project_family_marker
          FOR EACH ROW WHEN (NEW.current_block_number = {block})

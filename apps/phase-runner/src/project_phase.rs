@@ -32,10 +32,11 @@ pub struct FamilySettings {
     /// The most family blocks one family run applies or undoes. A batch starts runs one after
     /// another until the families reach its served marker, so this bounds a run, not the batch.
     pub max_blocks_per_run: u64,
-    /// Whether a family data-integrity failure fails the Project run as retryable. The supervised
-    /// runner retries it, so the lag gauge shows the stall; the one-shot `redo` command turns this
-    /// off, so the failure keeps its kind and the command exits instead of retrying forever.
-    pub retry_integrity_failures: bool,
+    /// Whether a family failure fails the Project run as retryable, a data-integrity one included.
+    /// The supervised runner retries every one, so the lag gauge shows the stall; the one-shot
+    /// `redo` command turns this off, so a failure of any kind keeps its own kind, is not
+    /// retried, and the command exits instead of running the served redo again forever.
+    pub retry_family_failures: bool,
     /// Which work blocks a family rebuild applies several to a transaction; production keeps the
     /// switch below the chain's safe block.
     pub rebuild_ranges: RebuildRanges,
@@ -46,7 +47,7 @@ impl Default for FamilySettings {
         Self {
             enabled: true,
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
-            retry_integrity_failures: true,
+            retry_family_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
         }
     }
@@ -166,7 +167,7 @@ impl ProjectPhase {
     /// nothing serves, the supervised runner retries every failure short of a configuration
     /// error, a data-integrity one included, and the family lag gauge shows the stall rather than
     /// the served publication stopping for tables nothing reads. Under the one-shot `redo` command
-    /// a failure keeps its kind, so a persistent one ends the command.
+    /// a failure keeps its own kind and is not retried, so any family failure ends the command.
     fn family_error(
         &self,
         chain_id: &str,
@@ -174,25 +175,25 @@ impl ProjectPhase {
         standing: &FamilyOutcome,
         error: &ProjectError,
     ) -> RunnerError {
+        let retry = self.families.retry_family_failures;
         let kind = match error.kind() {
             ProjectErrorKind::Configuration => ErrorKind::Configuration,
-            ProjectErrorKind::DataIntegrity if !self.families.retry_integrity_failures => {
-                ErrorKind::DataIntegrity
-            }
+            ProjectErrorKind::DataIntegrity if !retry => ErrorKind::DataIntegrity,
             ProjectErrorKind::Transient | ProjectErrorKind::DataIntegrity => ErrorKind::Transient,
         };
         let marker = standing.marker.as_ref().map_or_else(
             || "no block".to_owned(),
             |marker| format!("block {} ({})", marker.number, marker.hash),
         );
-        RunnerError::new(
+        let error = RunnerError::new(
             kind,
             format!(
                 "owned key families of chain {chain_id} stopped at {marker}, short of served \
                  marker block {} ({}): {error}",
                 target.number, target.hash
             ),
-        )
+        );
+        if retry { error } else { error.not_retried() }
     }
 
     async fn redo_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {

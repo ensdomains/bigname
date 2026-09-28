@@ -1718,17 +1718,17 @@ follow the retry runs a served batch again before the families: an empty
 incremental batch over the recorded head, which commits a publication as an
 idle cycle does. A failed redo stays in progress, and its retry runs the served
 redo again before the families. While the families are a shadow that nothing
-serves, the supervised runner retries a data-integrity family failure like a
-transient one instead of stopping the phase, so the lag gauge shows the stall;
-since Project runs inside the post-Live fence, a persistent failure also holds
-the chain's Live and Interpret cycle until it clears. The one-shot `redo`
-command keeps a family failure's own kind instead: a data-integrity failure
-ends the command with the family error recorded, the redo stays in progress
-and a rerun is admitted, where retrying would run the served redo again
-forever. A stop abandons a
-family run under way: its open transaction rolls back and the Project run ends
-as cancelled, so a redo stays in progress and rerunning it repairs the
-families. The Project phase reads the Interpret and Project rows of
+serves, the supervised runner, its required redos included, retries a
+data-integrity family failure like a transient one instead of stopping the
+phase, so the lag gauge shows the stall. Project runs inside the chain's Live
+cycle, so while it retries, Live and Interpret wait until the failure clears.
+The one-shot `redo` command retries no family failure: any family failure,
+transient or data-integrity, ends the command with its own kind and the family
+error recorded, the redo stays in progress and a rerun is admitted. Retrying
+would run the served redo again each time, forever when the failure persists,
+as it does while Interpret is in redo. A stop abandons a family run under way:
+its open transaction rolls back and the Project run ends as cancelled, so a
+redo stays in progress and rerunning it repairs the families. The Project phase reads the Interpret and Project rows of
 `chain_phase_state` for the family run before the batch's progress is
 recorded, while a finished redo's session is still open.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
