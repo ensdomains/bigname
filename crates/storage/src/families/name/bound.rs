@@ -130,23 +130,27 @@ async fn candidates(
              JOIN bigname_phase.normalized_events event
                ON event.event_identity = pointer.event_identity
              WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
-               AND event.logical_name_id IS NOT NULL
+               AND pointer.resource_id IS NULL AND event.logical_name_id IS NOT NULL
              UNION
-             -- A selected resource always comes from one of the name's binding candidates.
-             -- If its latest pointer belongs to another name, compose the candidate name to
-             -- inspect its own pointer. This superset deliberately does not filter by resolver:
-             -- that pointer can name a different resolver from the resource's latest pointer.
-             -- Discovery reads family keys and one event by identity per resource, rather than
-             -- rescanning the resolver's entire historical event range for every batch.
-             SELECT candidate.logical_name_id
-             FROM bigname_phase.project_binding_candidate candidate
-             JOIN bigname_phase.project_resource_pointer pointer
-               ON pointer.chain_id = candidate.chain_id
-              AND pointer.resource_id = candidate.resource_id
-             LEFT JOIN bigname_phase.normalized_events latest
-               ON latest.event_identity = pointer.pointer_position ->> 'event_identity'
-             WHERE candidate.chain_id = $1
-               AND latest.logical_name_id IS DISTINCT FROM candidate.logical_name_id
+             -- A name whose own pointer on a resource names the resolver while the resource's
+             -- latest pointer (F5) belongs to another name: F5 keeps one pointer per resource,
+             -- and the composed row reads the name's own (loaders.rs, named_resource_pointers).
+             -- The predicates are normalized_events_resolver_current_address_lookup_idx's.
+             SELECT event.logical_name_id
+             FROM bigname_phase.normalized_events event
+             WHERE event.chain_id = $1 AND event.event_kind = 'ResolverChanged'
+               AND lower(event.after_state ->> 'resolver') = lower($2)
+               AND event.logical_name_id IS NOT NULL AND event.resource_id IS NOT NULL
+               AND event.after_state ->> 'resolver' IS NOT NULL
+               AND event.after_state ->> 'resolver' <> ''
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND EXISTS (
+                   SELECT 1
+                   FROM bigname_phase.project_resource_pointer shared
+                   JOIN bigname_phase.normalized_events latest
+                     ON latest.event_identity = shared.pointer_position ->> 'event_identity'
+                   WHERE shared.chain_id = $1 AND shared.resource_id = event.resource_id
+                     AND latest.logical_name_id IS DISTINCT FROM event.logical_name_id)
          )
          SELECT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
          FROM reached
