@@ -104,6 +104,13 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
             registry_results.push((uri, response.status(), read_json::<Value>(response).await?));
         }
     }
+    // The children read also joins label preimages, discovery edges and migration associations.
+    let uri = "/v1/names/alpha.eth/subnames".to_owned();
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+        .await?;
+    registry_results.push((uri, response.status(), read_json::<Value>(response).await?));
     restricted_pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool)
@@ -113,9 +120,15 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         .await?;
 
     assert_eq!(status, StatusCode::OK);
-    for (uri, status, payload) in registry_results {
-        assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
+    for (uri, status, payload) in &registry_results {
+        assert_eq!(*status, StatusCode::OK, "{uri}: {payload}");
     }
+    let (_, _, subnames) = registry_results.last().context("subnames result")?;
+    assert_eq!(
+        subnames["data"].as_array().map(Vec::len),
+        Some(3),
+        "{subnames}"
+    );
     assert!(
         payload["database"]["identity"]
             .as_str()
