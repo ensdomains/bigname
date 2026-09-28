@@ -1,5 +1,5 @@
-//! The canonical event order (D12 as amended by Tate on 2026-09-26; docs/projections.md, "Owned
-//! key families"): block number, transaction index, log index, then, when the event has both a
+//! The canonical event order (docs/glossary.md#canonical-event-order; docs/projections.md,
+//! "Owned key families"): block number, transaction index, log index, then, when the event has both a
 //! transaction and a log index, the emission ordinal its identity ends with
 //! (docs/glossary.md#emission-ordinal), then the event identity compared as bytes. `None` sorts
 //! first at each step. The ordinal is the fact's index in the adapter emission batch that wrote

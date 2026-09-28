@@ -1,4 +1,4 @@
-//! The family fidelity cases of the step 2 review: unnamed resource pointers (F5), links only
+//! Family fidelity cases: unnamed resource pointers (F5), links only
 //! from the resolver that emits them (F7), the registry owner group and the observation that
 //! follows a name's current binding (F2c), the raw grant authority kind (F2a), and reverse claims
 //! per resolver with their raw input (F12). Every case undoes its last block byte for byte and

@@ -1,4 +1,4 @@
-//! The deciding fact of a released ENSv2 tombstone (TYR-36 step 6, de24ff32). When nothing
+//! The deciding fact of a released ENSv2 tombstone. When nothing
 //! ENSv2 is open for a name and the latest lifecycle fact of the registration it was last bound
 //! to is a release, authority selection keeps the name on that registration's tombstone and
 //! records the fact that decided it (name_authority/build.sql:48-271, :584-587); name_current

@@ -415,4 +415,3 @@ pub fn effective_operator_rows(
     rows.sort_by(|left, right| (&left.subject, &left.scope).cmp(&(&right.subject, &right.scope)));
     rows
 }
-

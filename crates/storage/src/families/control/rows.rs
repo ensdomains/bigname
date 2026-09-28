@@ -1,5 +1,5 @@
 //! The family rows the control readers read, decoded from `to_jsonb(row)` so that the column
-//! types of the step 2 migrations (20260926100100 and 20260926100400) need no per-column
+//! types of the family tables need no per-column
 //! mapping. Every row keeps the canonical position of the event that last wrote it.
 use serde_json::Value;
 
@@ -27,7 +27,7 @@ pub(crate) fn json(row: &Value, field: &str) -> Value {
 
 /// One retained lifecycle event of `project_lifecycle_event`: an event of the six kinds the
 /// authority-admitted readers consume, kept per key and never pruned, with the name the adapter
-/// emitted (`original_logical_name_id`) beside the name step 2 decoded.
+/// emitted (`original_logical_name_id`) beside the name the family writer decoded.
 #[derive(Clone, Debug)]
 pub struct LifecycleEvent {
     pub state_kind: String,
@@ -149,7 +149,7 @@ pub fn family_arm(source_family: &str) -> Option<&'static str> {
 }
 
 /// A membership maximum of a key state or triple summary: the position of the event that set it
-/// and the fields the reducer kept with it (step 2 families/lifecycle.rs, `maxima`).
+/// and the fields the reducer kept with it (Project families/lifecycle.rs, `maxima`).
 #[derive(Clone, Debug)]
 pub struct Mark {
     pub position: Position,
@@ -299,11 +299,10 @@ impl BindingCandidate {
         })
     }
 
-    /// A NameWrapper binding: step 2 records the transaction, the emitter, the wrapped registrar
+    /// A NameWrapper binding: the family writer records the transaction, the emitter, the wrapped registrar
     /// lease and the node only for a SurfaceBound from ens_v1_wrapper_l1
     /// (families/identity.rs, `candidate_row`), so any one of them marks it. A NameWrapper
-    /// SurfaceBound with none of the four is not recognised (step 2 retention follow-up: keep
-    /// the SurfaceBound's source family on the candidate).
+    /// SurfaceBound with none of the four is not recognised.
     pub fn is_wrapper(&self) -> bool {
         self.transaction_hash.is_some()
             || self.emitting_address.is_some()
@@ -312,10 +311,9 @@ impl BindingCandidate {
     }
 
     /// The order stage.rs compares candidates in: block, transaction and log with a missing one
-    /// read as -1, then the binding id. This is not the D12 event order: two candidates at the
-    /// same place break the tie by binding id, not by their SurfaceBound identities, as the
-    /// served stage does (fixture in admission.rs). The D12 claim covers event-derived latest
-    /// selections only.
+    /// read as -1, then the binding id. This is not the canonical event order: two candidates at
+    /// the same place break the tie by binding id, not by their SurfaceBound identities (fixture
+    /// in admission.rs). The canonical order covers event-derived latest selections only.
     pub fn order(&self) -> (i64, i64, i64, &str) {
         (
             self.block_number,

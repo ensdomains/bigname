@@ -358,8 +358,7 @@ async fn load_search_storage_page(
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
 ) -> V2Result<bigname_storage::NameCurrentListPage> {
-    // The rows are composed from the owned key families; the
-    // candidates are the name surfaces (ruling J8).
+    // The rows are composed from the owned key families; the candidates are the name surfaces.
     let page = {
         bigname_storage::families::name::load_family_search_page(
             &state.pool,

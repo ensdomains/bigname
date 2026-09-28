@@ -68,7 +68,7 @@ impl LinkSelection {
 /// The link selection of `resolver_address` for `namehash`: two probes of
 /// `project_resolver_link`, exact then default. `None` when the resolver has neither link. Each
 /// probe takes the row F7 kept, the newest link at that node whatever its storage model, as the
-/// resolver keeps one record id per node (PR 954, the newest-link ruling under Decisions).
+/// resolver keeps one record id per node.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,

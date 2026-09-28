@@ -79,7 +79,7 @@ pub struct Candidate {
 }
 
 /// The candidate of one key: candidate_active, candidate_path and candidate_explicit with the
-/// witness rule, latest of the three (design:63, restating build.sql:322-341 under D12). Every
+/// witness rule, latest of the three. Every
 /// comparison is the name-membership order (`EventOrder::name_membership`).
 pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
     let after = |left: &Position, right: &Position| order.name_membership(left, right).is_gt();

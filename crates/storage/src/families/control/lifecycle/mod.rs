@@ -4,7 +4,7 @@
 //! The F1 selection is an input, not a recomputation: the reader takes the authority selection
 //! the served row carries in `provenance.authority_selection` (build.sql:235-252), plus the
 //! selected binding's registry-only handoff facts from `project_binding_candidate`. The name
-//! authority selection is plan step 6's contract, so taking it as input keeps the lifecycle proof
+//! authority selection is its own contract, so taking it as input keeps the lifecycle proof
 //! apart from the selection proof. The one selection output the row does not carry, the fact
 //! that decided a released ENSv2 tombstone, is found again from the retained events and the
 //! binding candidates with their identity rows' open windows, by the rules that chose it
@@ -121,7 +121,7 @@ pub struct TripleFacts {
 }
 
 impl TripleFacts {
-    /// The retained-event key of the triple (step 2 families/lifecycle.rs, `StateKey::text`).
+    /// The retained-event key of the triple (Project families/lifecycle.rs, `StateKey::text`).
     pub fn state_key(&self) -> String {
         Value::from(self.key.to_vec()).to_string()
     }

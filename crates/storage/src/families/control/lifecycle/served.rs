@@ -407,11 +407,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     }
 
-    // A wrapper grant's control is built like any other grant's: TYR-36 step 6 (de24ff32,
-    // "serve the control owner of a wrapper grant") removed the served "ENSv1 wrapper effective
-    // control is not yet projected" section from name_current/build.sql (the control CASE,
-    // :105-108 before that commit) and from the API's declared control section
-    // (declared_state.rs:91-100 before it).
+    // A wrapper grant's control is built like any other grant's.
     let live_control = || {
         let mut control = Map::new();
         let status = if selected_kind == Some("RegistrationReserved") {

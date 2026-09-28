@@ -18,9 +18,9 @@ use crate::families::control::{
 
 /// Whether `event` is a reservation already expired when written: its expiry is a JSON number
 /// at or before its own block's timestamp, so it is never live (v2_lifecycle_events.sql:28-36,
-/// the rule name_authority/build.sql:212-239 applies). Since TYR-36 step 6 such a reservation
-/// takes no part in a name's registration fold or ENSv2 latest kind (name_current/build.sql
-/// :322, :326, :331, :385); it stays among the retained events and in every other fold.
+/// the rule name authority selection applies). Such a reservation takes no part in a name's
+/// registration fold or ENSv2 latest kind; it stays among the retained events and in every
+/// other fold.
 ///
 /// The served rule compares the JSON number with the block's epoch as exact numeric
 /// (v2_lifecycle_events.sql:32-35). Block timestamps are whole seconds, so an integer expiry
@@ -82,7 +82,7 @@ pub fn maxima_of<'a>(
 }
 
 /// `maxima_of` in the name-membership order (`EventOrder::name_membership`), the order a name's
-/// registration fold reads in since TYR-36 step 6 (build.sql:322-347).
+/// registration fold reads in.
 pub fn name_maxima_of<'a>(
     events: impl IntoIterator<Item = &'a LifecycleEvent>,
     order: &EventOrder,

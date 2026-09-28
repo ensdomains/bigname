@@ -1,4 +1,4 @@
-//! A composed name load reads one snapshot (TYR-36 step 7b): its publication (the family
+//! A composed name load reads one snapshot: its publication (the family
 //! marker) and every family and identity statement after it see the same committed state, so the
 //! row's facts and the position it is stamped with name the same block. The test pauses a load
 //! right after its publication read (`families::name::seams`), commits the next family block on

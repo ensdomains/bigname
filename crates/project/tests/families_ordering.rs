@@ -1,5 +1,5 @@
-//! D12 as amended (Tate, 2026-09-26): several facts of one adapter emission batch at one log
-//! fold in the order the adapter wrote them. Within one (block, transaction, log) the trailing
+//! The canonical event order (docs/glossary.md#canonical-event-order): several facts of one
+//! adapter emission batch at one log fold in the order the adapter wrote them. Within one (block, transaction, log) the trailing
 //! emission ordinal (docs/glossary.md#emission-ordinal) of the event identity decides before the
 //! identity bytes. The wrapper transfer shapes are the adapter's
 //! own (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-169, permissions.rs:47-123):
@@ -320,7 +320,7 @@ async fn an_invalid_or_overflowing_suffix_sorts_before_an_ordinal() -> Result<()
 }
 
 // Two sources writing one grant key at one log (a shape the adapter is not known to produce; the
-// D12 precondition rules it out). The rule orders by ordinal first, so manifest 7's second fact
+// canonical order's precondition rules it out). The rule orders by ordinal first, so manifest 7's second fact
 // follows manifest 9's first although its identity bytes are lower; at equal ordinals the
 // identity bytes decide and manifest 9 follows manifest 7.
 #[tokio::test]

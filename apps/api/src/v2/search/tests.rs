@@ -89,7 +89,7 @@ fn search_cursor_rejects_cross_filter_match_namespace_or_sort() {
     assert!(read(&binding, &crate::v2::encode(&payload)).is_err());
 }
 
-// A current-state list cursor holds no snapshot (D10, `list_cursor`): one carrying the snapshot
+// A current-state list cursor holds no snapshot (`list_cursor`): one carrying the snapshot
 // component search cursors held before July 2026 is refused, and the client restarts.
 #[test]
 fn search_cursor_refuses_legacy_snapshot_component() {

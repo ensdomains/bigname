@@ -431,7 +431,7 @@ async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> R
     database.cleanup().await
 }
 
-// D10: the overview's bound-names cursor carries no publication or resolver generation, so a
+// The overview's bound-names cursor carries no publication or resolver generation, so a
 // same-height republish between pages does not refuse it; a cursor that still carries the
 // resolver generation answers 400.
 #[tokio::test]
@@ -506,7 +506,7 @@ const RESTART_WITHOUT_CURSOR: &str =
     "collection publication is no longer available; restart pagination without a cursor";
 const RETRY_REQUEST: &str = "collection publication changed during the read; retry the request";
 
-// D10: a publication during the continuation's own read still refuses it, but its cursor is
+// A publication during the continuation's own read still refuses it, but its cursor is
 // not bound to the publication it replaced, so the answer asks for a retry, and the same cursor
 // then continues.
 #[tokio::test]

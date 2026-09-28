@@ -52,7 +52,7 @@ pub(super) fn select_v2<'a>(
         // the key. The interpreter's path-expiry release names the resource and no name
         // (adapters v2_registry/expiry.rs:58-59), so it is the key's candidate when it is the
         // latest, and the name is served released: an expired or released ENSv2 registration
-        // stays ENSv2 and is served unregistered (Tate's ruling on TYR-36 step 3). On chain a
+        // stays ENSv2 and is served unregistered. On chain a
         // registration is over once its expiry has passed: the registry then reports no owner
         // and no resolver for it, and unregistering sets the expiry to the current time.
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @ ens_v2@a971bd64)

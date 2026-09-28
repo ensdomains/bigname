@@ -1,4 +1,4 @@
-//! F2b, the NameWrapper masks at the publication block's clock (TYR-36 D6): the served state and
+//! F2b, the NameWrapper masks at the publication block's clock: the served state and
 //! fuses past the wrapper expiry, the owner lapse of an emancipated or locked name, and the
 //! `.eth` grace period. The clock is the publication block's timestamp, passed in, never the
 //! request time.

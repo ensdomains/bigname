@@ -1,5 +1,5 @@
-//! Names that resolve to an address, read over the families instead of
-//! `address_records_current` (address_records.rs and storage address_names/resolves_to.rs).
+//! Names that resolve to an address, read over the families (the page is address_names/
+//! resolves_to.rs).
 //!
 //! The candidates are the inverse address index (F14) rows and every retained address value that
 //! names the address (`candidates.rs`), a superset of the (resolver, node) and (resolver, record
@@ -7,8 +7,8 @@
 //! through it (F5 pointers at that resolver and node, pointers at a mirror resolver for that node,
 //! pointers at a resolver whose link selects that record id), assembles each resource's family
 //! record inventory to apply the arms, the combined boundary, the link selection and the mirror
-//! substitution, keeps the entries that still resolve to the address, and joins today's
-//! `name_current` for name eligibility (the family read model for it is step 3). Exact entries
+//! substitution, keeps the entries that still resolve to the address, and joins the composed
+//! name rows for name eligibility. Exact entries
 //! shadow the ENSIP-19 default address as the forward read does: the resolvers read the default
 //! only when the coin's own stored bytes are empty and the coin is an EVM coin.
 //! (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)

@@ -1,4 +1,4 @@
-//! The name summary (TYR-36 step 7b slice 2b, the stored `project_name_summary` family): the
+//! The name summary (the stored `project_name_summary` family): the
 //! per-name fields the child and label lists filter, sort and count by inside one statement,
 //! which the lists cannot compose at read for every child of a parent. The family step writes
 //! them for the names each block touches, from the same composition as the composed name row

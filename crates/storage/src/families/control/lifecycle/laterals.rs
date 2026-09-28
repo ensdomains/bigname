@@ -216,8 +216,8 @@ pub(super) fn admitted_registry_only<'a>(
 /// (build.sql:411-438), with the authority kind and key its after-state carries: the retained
 /// grant's columns, F1's latest AuthorityEpochChanged per arm, the binding candidate's
 /// SurfaceBound. A successor lease granted under a registry-only binding's handoff names the
-/// registration, not the authority, and is left out (build.sql:421-433); step 2 folds the
-/// successor as the handoff's lease (`lease_resource_id`, name_authority/stage.rs:60, :81-119).
+/// registration, not the authority, and is left out; the family writer folds the successor as
+/// the handoff's lease (`lease_resource_id`).
 pub(super) fn authority_context(
     facts: &NameFacts,
     authority: &Authority<'_>,
@@ -394,7 +394,7 @@ pub(super) fn latest_event_kind(
 /// takes that SurfaceBound by block and generated id, so the candidates compare by their
 /// SurfaceBound positions in the read's order: the canonical order in a read, block and
 /// generated id in the same-block counterfactual. A candidate without a SurfaceBound position
-/// stands at its own place with the identity `binding:<id>`, as step 2 places it
+/// stands at its own place with the identity `binding:<id>`, as the family writer places it
 /// (families/identity.rs `binding_position`).
 pub(super) fn registrar_resource<'a>(
     facts: &'a NameFacts,

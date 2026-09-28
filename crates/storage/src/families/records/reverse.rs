@@ -2,8 +2,8 @@
 //! `BUILD_PRIMARY_NAMES`): the tuple's latest `ReverseChanged`, the reverse node's current resolver
 //! from the registry-node pointer (F4) or a resource pointer (F5) at that node, and the claim a
 //! `ReverseClaimed` tuple selects through the node, else the tuple's direct claim, with the claim's
-//! stored normalization. Hydration stays with the served rows (D11), so the result is the
-//! pre-hydration claim.
+//! stored normalization. The result is the pre-hydration claim; the primary-name reader applies
+//! the hydration overlay (`primary.rs`).
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row};

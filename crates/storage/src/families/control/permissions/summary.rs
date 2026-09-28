@@ -27,7 +27,7 @@ const ROLES: [(&str, &str); 5] = [
 ];
 
 /// The sorted distinct union of a `project_resource_admin_aggregate.admin_powers` map, whose
-/// values are each holder's admin powers (step 2 families/permissions.rs:300-339).
+/// values are each holder's admin powers (Project families/permissions.rs).
 pub fn admin_powers(aggregate: &Value) -> Vec<String> {
     aggregate
         .as_object()
@@ -53,7 +53,7 @@ pub fn locked_roles(own: &[String], root: &[String]) -> Value {
 }
 
 /// Whether the wrapper's newest mint, holder grant, holder revocation or unwrap leaves it
-/// unwrapped (resource_summary.rs:172-197): step 2 keeps that verdict on the wrapper row
+/// unwrapped: the family writer keeps that verdict on the wrapper row
 /// (`project_wrapper_state.lifecycle_unwrapped`), NameUnwrapped included.
 pub fn wrapper_unwrapped(wrapper: Option<&WrapperRow>) -> bool {
     wrapper.is_some_and(|row| row.lifecycle_unwrapped == Some(true))

@@ -1,4 +1,4 @@
-//! The composed name reader (TYR-36 step 7b, ruling J3): a `name_current`-shaped row assembled at
+//! The composed name reader: a `name_current`-shaped row assembled at
 //! read from the owned key families (docs/projections.md, "Owned key families") and the identity
 //! input tables, without persisting the composed row. It serves the fields the API routes read from
 //! `name_current`, including the verified lookup inputs. The row carries:
@@ -10,7 +10,7 @@
 //!   (`selection.rs`);
 //! - `declared_summary.registration` and `.control` from the F2a lifecycle read
 //!   (`control::lifecycle::evaluate`), with `registration.created_at` from F1 name history
-//!   (ruling J4) and a released ENSv1 tombstone's lapsed authority;
+//!   and a released ENSv1 tombstone's lapsed authority;
 //! - the NameWrapper state and fuses (F2b) masked at the publication's block time;
 //! - the serving pointer and the resolver block from the F4 and F5 pointers (`serving.rs`);
 //! - `declared_summary.history`, the name's latest events, read by key from `normalized_events`
@@ -27,8 +27,7 @@
 //!
 //! Every row describes the family marker's publication (the "publication" below): its
 //! `chain_positions` and `canonicality_summary` name the marker's block, so a row carries no
-//! position of its own and an `at` below the publication cannot be served from it
-//! (docs/api-v1.md, "Publication switch").
+//! position of its own and an `at` below the publication cannot be served from it.
 mod batch;
 mod bound;
 mod compose;
@@ -60,14 +59,14 @@ pub use batch::{
 };
 pub(crate) use batch::{ensure_published, read_snapshot};
 /// The composed loads and the marker read on a caller's connection, for readers of other
-/// families that join composed name rows inside their own snapshot (TYR-36 step 7b slice 4).
+/// families that join composed name rows inside their own snapshot.
 pub(crate) use batch::{load as load_names_on, publication as publication_on};
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
 /// rebuild is still populating the families) or written by another interpreter build. The rule
 /// is the publication fence's (snapshot_selection/project.rs), so a caller that did not fence
 /// first, or whose fence passed before a rebuild began, still cannot compose from half-built
-/// families. API callers answer it with the stale 409 (docs/api-v1.md, "Publication switch").
+/// families. API callers answer it with the stale 409.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyPublicationUnavailable {
     pub chain_id: String,

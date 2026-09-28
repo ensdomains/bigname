@@ -5,11 +5,10 @@ use serde_json::Value;
 use super::FamilyPosition;
 
 // The shared vectors, a third literal copy. Its twins assert the same three lists against the
-// project crate's comparator and reader, in crates/project/src/families/position_tests.rs (step
-// 2, PR 952, bbb7d0ab), and against step 3's storage copy, in
-// crates/storage/src/families/control/position.rs (PR 956). Keep the three copies identical,
-// since a drift between the comparators moves the shadow reads away from the families they
-// read. The three copies collapse into one fixture when the branches meet on main.
+// project crate's comparator and reader, in crates/project/src/families/position_tests.rs, and
+// against the control readers' copy, in crates/storage/src/families/control/position.rs. Keep
+// the three copies identical, since a drift between the comparators moves the storage reads
+// away from the families they read.
 type Place = (i64, Option<i64>, Option<i64>, &'static str);
 /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
 /// decimal point, and far past `u32::MAX`: no ordinal.

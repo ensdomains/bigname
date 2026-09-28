@@ -1,4 +1,4 @@
-//! The canonical event order (TYR-36 D12 as amended on 2026-09-26, the project crate's
+//! The canonical event order (docs/glossary.md#canonical-event-order, the project crate's
 //! families/position.rs): block number, transaction index, log index, then, when the event has
 //! both a transaction and a log index, the emission ordinal its identity ends with, then the
 //! event identity compared as a byte string. `None` sorts first at each step, so an event with
@@ -123,11 +123,10 @@ impl EventOrder {
         }
     }
 
-    /// The order ENSv2 name membership reads in. Since TYR-36 step 6 (de24ff32) today's builders
-    /// compare block, then transaction and log with a missing one read as -1, then the generated
-    /// id, for every step of the name's registration fold (name_current/build.sql:319-347) and
-    /// for the deciding fact of a released tombstone (name_authority/build.sql:57-245); an event
-    /// without a generated id falls back to the canonical order.
+    /// The order ENSv2 name membership reads in: block, then transaction and log with a missing
+    /// one read as -1, then the generated id, for every step of the name's registration fold and
+    /// for the deciding fact of a released tombstone; an event without a generated id falls back
+    /// to the canonical order.
     pub fn name_membership(&self, left: &Position, right: &Position) -> Ordering {
         match (self.generated(left), self.generated(right)) {
             (Some(left_id), Some(right_id)) => left
@@ -269,10 +268,9 @@ mod tests {
 
     // The shared vectors. Their twin, the same three lists asserted against the project crate's
     // comparator and reader (`Ord` and `of_row`), is in
-    // crates/project/src/families/position_tests.rs (step 2, PR 952). At step 2's bbb7d0ab the
-    // two copies' literal lists and their order and partial tests are identical; keep them so,
-    // since a drift between the comparators moves the shadow read and the canonical excuse read
-    // together.
+    // crates/project/src/families/position_tests.rs. The two copies' literal lists and their
+    // order and partial tests are identical; keep them so, since a drift between the comparators
+    // moves the storage reads away from the families they read.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
     /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
     /// decimal point, and far past `u32::MAX`: no ordinal.

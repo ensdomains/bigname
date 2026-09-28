@@ -1852,7 +1852,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-01-02T00:00:00Z",
             created_at: "2023-01-02T00:00:00Z",
             expires_at: "2027-01-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         V2SearchSpec {
             namespace: "ens",
@@ -1863,7 +1862,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-02-02T00:00:00Z",
             created_at: "2023-02-02T00:00:00Z",
             expires_at: "2027-02-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         V2SearchSpec {
             namespace: "ens",
@@ -1874,7 +1872,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-03-02T00:00:00Z",
             created_at: "2023-03-02T00:00:00Z",
             expires_at: "2027-03-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         // `_under.eth` and `bunder.eth` both match the unescaped LIKE prefix `_und%`.
         V2SearchSpec {
@@ -1886,7 +1883,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-04-02T00:00:00Z",
             created_at: "2023-04-02T00:00:00Z",
             expires_at: "2027-04-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         V2SearchSpec {
             namespace: "ens",
@@ -1897,7 +1893,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-05-02T00:00:00Z",
             created_at: "2023-05-02T00:00:00Z",
             expires_at: "2027-05-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         V2SearchSpec {
             namespace: "ens",
@@ -1918,7 +1913,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-08-02T00:00:00Z",
             created_at: "2023-08-02T00:00:00Z",
             expires_at: "2027-08-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         V2SearchSpec {
             namespace: "basenames",
@@ -1929,7 +1923,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-08-03T00:00:00Z",
             created_at: "2023-08-03T00:00:00Z",
             expires_at: "2027-08-03T00:00:00Z",
-            ..V2SearchSpec::default()
         },
         // Not a public namespace: the default namespace set must exclude it.
         V2SearchSpec {
@@ -1941,7 +1934,6 @@ fn v2_search_specs() -> Vec<V2SearchSpec> {
             registered_at: "2024-09-02T00:00:00Z",
             created_at: "2023-09-02T00:00:00Z",
             expires_at: "2027-09-02T00:00:00Z",
-            ..V2SearchSpec::default()
         },
     ]
 }

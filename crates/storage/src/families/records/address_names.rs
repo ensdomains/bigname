@@ -1,4 +1,4 @@
-//! `GET /v1/addresses/{address}/names` over the families (TYR-36 step 7b, F13): the names the
+//! `GET /v1/addresses/{address}/names` over the families (F13): the names the
 //! address index (`project_address_name_index`) lists for the address, composed at read
 //! (`families::name`), with each name's relations recomputed at its publication
 //! (`address_relations.rs`). The index holds every address a relation can take under some

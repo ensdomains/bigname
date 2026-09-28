@@ -969,7 +969,7 @@ async fn a_binding_in_a_block_without_events_survives_a_rebuild() -> Result<()> 
     fixture.cleanup().await
 }
 
-/// F1 name history (TYR-36 step 7b): the first block naming a name fixes `created_at` and is not
+/// F1 name history: the first block naming a name fixes `created_at` and is not
 /// moved by later events; ENSv2 events set the corpus flag; each authority event votes its arm,
 /// except an ENSv2 registry expiry change (never) and release (decided at read). The row is
 /// written only when a fact is added, so an event adding nothing leaves its position alone.

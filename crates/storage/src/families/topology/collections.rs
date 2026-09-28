@@ -6,8 +6,8 @@
 //! and paged in SQL so the database's collation orders both alike. The readers take a keyset
 //! position and nothing else, no publication token, generation or height: each reads in one
 //! read-only REPEATABLE READ snapshot at the block the family marker names, and fails with
-//! [`FamilyPublicationUnavailable`] when the marker is not servable. Under the publication
-//! switch the resolver routes serve them (TYR-36 step 7b slice 4).
+//! [`FamilyPublicationUnavailable`] when the marker is not servable. The resolver routes serve
+//! them.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -204,13 +204,11 @@ pub async fn load_resolver_links_shadow(
 /// `/roles`: the served permission rows of this resolver's scope with non-empty powers, each
 /// resource's rows computed from its F8 grants as `GET /v1/permissions` computes them
 /// (`load_shadow_permissions_on`: the wrapper fuse and grace masks at the publication's block
-/// time, the ENSv2 path-expiry drop and the empty-row drop), on resources that are readable, the
-/// resource predicate of the served read filter (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`).
-/// The filter's other two predicates, the row's own canonicality and its publication lineage,
-/// are not checked: the family undo removes the grants of a dropped block (ruling J13).
-/// `event_ids` are the grant's evidence events read by key from `normalized_events`
-/// (`resolver_grant_evidence`), the served row's `provenance.normalized_event_ids` permission
-/// events, from which the route picks the `grant_event` it attaches.
+/// time, the ENSv2 path-expiry drop and the empty-row drop), on resources that are readable. No
+/// per-row canonicality or lineage check is needed: the family undo removes the grants of a
+/// dropped block. `event_ids` are the grant's evidence events read by key from
+/// `normalized_events` (`resolver_grant_evidence`), from which the route picks the `grant_event`
+/// it attaches.
 pub async fn load_resolver_roles_shadow(
     pool: &PgPool,
     chain_id: &str,

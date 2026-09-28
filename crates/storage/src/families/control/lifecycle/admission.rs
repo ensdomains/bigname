@@ -2,7 +2,7 @@
 //! selection (design, note "F2a authority admission", table at design:88-95), and the two
 //! staging passes that name an unnamed `.eth` registrar row (name_authority/stage.rs:149-158 and
 //! :174-198). The passes are recomputed from the immutable original name and the current binding
-//! candidates on every read, never read from the name step 2 decoded (design:111); step 2 does
+//! candidates on every read, never read from the name the family writer decoded; the writer does
 //! the same at write time in crates/project/src/families/decode.rs:110-140, and this is a
 //! deliberate second copy because the storage crate cannot depend on the Project crate.
 use std::collections::BTreeSet;
@@ -114,8 +114,7 @@ impl<'a> Authority<'a> {
     /// two only when pass one matches no name. A pass names the row only through one name: a
     /// logical name id is `<namespace>:<namehash>` and every match carries the row's namehash,
     /// so two names can match only across namespaces, which a registrar lease does not span;
-    /// if it ever did, the pass names nothing, as the step 2 decoder does, where today's stage
-    /// UPDATE would take whichever match it met first. The NameWrapper columns
+    /// if it ever did, the pass names nothing, as the family decoder does. The NameWrapper columns
     /// (`wrapped_registrar_resource_id`, `node`) exist only on a NameWrapper candidate, so pass
     /// two needs no other wrapper evidence.
     fn attachment(&self, event: &LifecycleEvent) -> Option<(&'a str, Pass)> {
@@ -321,10 +320,8 @@ impl<'a> Authority<'a> {
 
     /// Whether `project_authority_events` holds the probe for this name (authority_events.sql
     /// :12-261). The caller has already established that the probe carries the name. No epoch
-    /// bound applies: TYR-36 step 6 (de24ff32) deleted the served cut of events before a proof's
-    /// authority epoch start, with its exception for leases the selected NameWrapper recorded
-    /// (authority_events.sql:262-311 before it), so a migration's proof id is history and admits
-    /// or refuses nothing.
+    /// bound applies: no cut of events before a proof's authority epoch start is made, so a
+    /// migration's proof id is history and admits or refuses nothing.
     pub(crate) fn admits(&self, probe: &Probe<'_>) -> bool {
         match self.selection.unsupported_reason.as_deref() {
             None => {
@@ -427,12 +424,12 @@ mod tests {
         }
     }
 
-    /// Item 5 of the TYR-36 step 3 review (Q8): two ENSv1 bindings of one name at the same block,
+    /// Two ENSv1 bindings of one name at the same block,
     /// transaction and log, whose binding ids sort opposite to their SurfaceBound identities.
     /// The binding order mirrors stage.rs and ends with the binding id, so the predecessor is
     /// the binding with the larger id, not the one whose event is later in the canonical order.
-    /// The D12 claim covers event-derived latest selections only; this binding-id tie-break is
-    /// pinned as it is today.
+    /// The canonical event order covers event-derived latest selections only; this binding-id
+    /// tie-break is pinned as it is.
     #[test]
     fn equal_position_bindings_break_the_tie_by_binding_id_not_event_identity() {
         let by_id = candidate("binding-b", "lease-1", 10, "event-a");

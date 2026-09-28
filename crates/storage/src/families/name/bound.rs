@@ -1,21 +1,19 @@
-//! The composed bound-name listing of `GET /v1/resolvers/{chain_id}/{address}` (TYR-36 step 7b,
-//! E1d): the names whose composed resolver block names the resolver, with the served listing's
-//! predicates, order and keyset (`load_phase_resolver_bound_name_rows`).
+//! The composed bound-name listing of `GET /v1/resolvers/{chain_id}/{address}`: the names whose
+//! composed resolver block names the resolver, with the listing's predicates, order and keyset.
 //!
 //! A composed name's resolver comes from one of three pointers (`serving.rs`,
 //! `resolver_block`): an F5 resource pointer or an F4 registry-node pointer whose event names the
 //! name, or, for an ENSv2 root-registry TLD, an F5 root-registry pointer at the name's namehash.
 //! The candidates are therefore the names those pointers reach when they name the resolver,
 //! walked through the readable surfaces in the page order (raw name, namespace, namehash). Each
-//! batch is composed and bound in place of `name_current` under the served predicate text
+//! batch is composed and bound as the name relation under the predicate text
 //! (`BOUND_NAME_PREDICATES`), so the rows a batch admits are final and the walk stops once the
 //! page is full.
 //!
 //! A page is read in one snapshot (`batch::read_snapshot`).
 //!
 //! The serving-only capability gate reads the resolver's binding support from its F3
-//! classification row (`topology::overview`, packet E5), the rule the served
-//! `resolver_current.declared_summary.bindings.status` is built by.
+//! classification row (`topology::overview`).
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Row};
@@ -31,7 +29,7 @@ use crate::{
 /// At least this many candidates are composed per walk step.
 const BATCH_FLOOR: i64 = 200;
 
-/// `load_phase_resolver_bound_name_rows`'s contract over the composed rows: up to `limit` names
+/// The bound-name listing over the composed rows: up to `limit` names
 /// bound to `resolver_address` on `chain_id`, after `cursor`, in name order.
 pub async fn load_family_bound_names(
     pool: &PgPool,

@@ -1,4 +1,4 @@
-//! The composed name listings (TYR-36 step 7b): the /v1/search page (ruling J8) and the
+//! The composed name listings: the /v1/search page and the
 //! expiring listing of /v1/names, served from composed name rows at family publication.
 //!
 //! Both page through a `filtered_names` CTE populated from composed rows, with shared predicates

@@ -1,4 +1,4 @@
-//! The history order under D12: block number, transaction index, log index, then
+//! The history order (docs/glossary.md#canonical-event-order): block number, transaction index, log index, then
 //! `event_identity`, with events that have no transaction position first in their block. The
 //! transaction hash and the generated normalized event id never decide an order.
 
