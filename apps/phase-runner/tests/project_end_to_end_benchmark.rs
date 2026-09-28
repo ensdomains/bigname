@@ -1,86 +1,27 @@
-//! End-to-end Project benchmark: each target runs as one committed Normal batch through the
-//! runner's Project phase, so the engine commit, hydration and the progress marker all happen,
-//! and the clock stops only when a storage reader serves the new publication. The rollback
-//! benchmark in `bigname-project` stops before commit and never writes the marker; this one
-//! measures what a client waits for.
-//!
-//! The timed path is the engine commit, the batch log, hydration, the progress write and the
-//! synchronous metrics handoff: the phase records the write summary on the metrics feed, and the
-//! feed is notified that the batch committed. It does not include the runner's `confirm_progress`,
-//! which production awaits before that notification, nor the metrics worker applying the summary
-//! or a scrape reading it; this test starts no metrics worker.
-//!
-//! It commits, so it runs only against a disposable copy carrying the marker of
-//! docs/runbooks/benchmark-gate.md. The copy must be paused with Project published at
-//! `BIGNAME_BENCHMARK_PREVIOUS`. A target above the stored head moves the head there first, as
-//! Live does; a target below it must be within the publication lag tolerance, because a
-//! publication further behind the head is never served. On a paused copy that means one target at
-//! its head, unless the copy was rewound.
-//!
-//! With `BIGNAME_END_TO_END_COMPARE=1` each target is then rebuilt from scratch and committed at
-//! the same block on the same copy, and the name and subname readers must serve the same values
-//! for every name and every subname in either state, apart from rows the batch was allowed to
-//! keep (`project_end_to_end/endpoint.rs`). That is a reader-value comparison against a full
-//! rebuild, not the rollback benchmark's contract oracle. The next target continues from that
-//! rebuilt state.
-//!
-//! In the same mode, once the owned key families reach each target, the step 5 family readers
-//! (`bigname_storage::families::topology`) must serve what the served subname, topology, resolver
-//! and resolver collection readers serve at that publication
-//! (`project_end_to_end/topology_shadow.rs`).
-//!
-//! With `BIGNAME_END_TO_END_SHADOW=1` (always on the fixture) each target, and each rebuild when
-//! compared, also compares the owned key family readers with today's readers
-//! (`project_end_to_end/records_shadow.rs`), and the control and topology comparisons above run
-//! at each target as well, without the rebuild: a disposable copy can compare all three family
-//! reader groups per target with `SHADOW=1` alone, and reserve `COMPARE=1`, which rebuilds the
-//! whole copy at every target, for one target.
-//!
-//! Every test runs under the publication switch the binaries would hold
-//! (`BIGNAME_SERVE_FROM_FAMILIES` over the build's default; `project_end_to_end/families_mode.rs`).
-//! With it on, the Project batch is the family run, so the served clock is the family run and
-//! stops when the family marker is servable; the batch must write no served row, and the served
-//! tables the shadow comparisons read are published after the clock by the served engine and
-//! hydrator driven directly (`project_end_to_end/served_batch.rs`). The rebuild comparison reads
-//! the owned key families through the routes' readers, the shadow comparisons keep their served
-//! side on the served tables, and the listing walks' cost is printed in submitted rows. Either
-//! way each target prints the family block timing, `phase_runner_project_family_block_seconds` as the
-//! runner's metrics endpoint reports it.
+//! Permanent family publication corpus. The real Project phase publishes each target, then
+//! all registered family rows and the route readers' name/subname values are compared strictly
+//! with a rebuild at that same target. No served-table oracle or retained-row allowance remains.
+//! Disposable-copy mode still requires the existing explicit fresh copy marker before writing.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
 #[path = "project_end_to_end/families_mode.rs"]
 mod families_mode;
-#[path = "project_end_to_end/name_shadow.rs"]
-mod name_shadow;
-#[path = "project_end_to_end/permissions_shadow.rs"]
-mod permissions_shadow;
-#[path = "project_end_to_end/records_shadow.rs"]
-mod records_shadow;
 #[path = "project_end_to_end/served_batch.rs"]
-mod served_batch;
-#[path = "project_end_to_end/shadow.rs"]
-mod shadow;
+mod family_metrics;
 #[allow(dead_code)]
 mod support;
-#[allow(dead_code)]
-#[path = "project_end_to_end/topology_shadow.rs"]
-mod topology_shadow;
 
 use std::{str::FromStr, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use bigname_lookup::ChainRpcUrls;
 use bigname_project::families::RebuildRanges;
-use bigname_storage::{
-    PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, load_name_current, load_served_project_generation,
-};
+use bigname_storage::{PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, load_served_project_generation};
 use phase_runner::{
     INTERPRETER_CONTENT_HASH, RunnerPhaseProgress,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
-    phase::{
-        AfterProgress, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume, RunMode,
-    },
+    phase::{Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::{FamilySettings, ProjectPhase},
     state::PhaseStore,
 };
@@ -136,30 +77,11 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
     let targets = parse_targets(&std::env::var("BIGNAME_BENCHMARK_TARGETS")?)?;
     let compare = (std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    let shadow = (std::env::var("BIGNAME_END_TO_END_SHADOW").as_deref() == Ok("1"))
-        .then_some(COPY_CHILDREN_PAGE);
-    let (_, shadows) =
-        families_mode::scoped(run(&pool, previous, &targets, compare, false, shadow)).await??;
+    run(&pool, previous, &targets, compare, false).await?;
     pool.close().await;
-    if shadow.is_some() {
-        records_shadow::require_clean(&shadows)?;
-    }
     Ok(())
 }
 
-/// The same mode on the rebuild-performance seed, so it keeps working and can be timed locally:
-/// `BIGNAME_END_TO_END_FIXTURE_NAMES`, `_PREVIOUS` and `_TARGETS` size it (defaults 400, 30 and
-/// 35,40).
-///
-/// The seed's registry-only names (`i % 10 = 9`) become subnames of one parent once their block
-/// is published, and the subname reader serves about half of them (the seed gives half a zero
-/// owner). The defaults serve 3 subnames at block 35 and 4 at block 40, so with pages of one row
-/// every target reads that parent over several pages, which the test requires. More names or
-/// later targets serve more: 5,000 names at blocks 241 to 245 serve 240.
-/// One seeded fixture database with the disposable-copy marker: the rebuild-performance seed
-/// with observed blocks past `previous`, subnames, and Interpret through the last target. The two
-/// fixture tests below share it and take turns on `FIXTURE_LOCK`, since the control reports they
-/// count live in one store (`shadow::take_reports`).
 async fn seed_fixture() -> Result<(ScratchDatabase, i64, Vec<i64>)> {
     let setting = |name: &str, default: &str| {
         std::env::var(format!("BIGNAME_END_TO_END_FIXTURE_{name}"))
@@ -223,147 +145,19 @@ async fn seed_fixture() -> Result<(ScratchDatabase, i64, Vec<i64>)> {
     Ok((scratch, previous, targets))
 }
 
-static FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Result<()> {
-    let _turn = FIXTURE_LOCK.lock().await;
     let (scratch, previous, targets) = seed_fixture().await?;
-    let pool = scratch.pool();
-    shadow::take_reports();
-    let (compared, shadows) = families_mode::scoped(run(
-        pool,
+    let compared = run(
+        scratch.pool(),
         previous,
         &targets,
         Some(FIXTURE_CHILDREN_PAGE),
         true,
-        Some(FIXTURE_CHILDREN_PAGE),
-    ))
-    .await??;
-    ensure!(compared.len() == targets.len(), "every target is compared");
-    shadow::assert_fixture_corpus_counts(&targets)?;
-    ensure!(
-        shadows.len() == 2 * targets.len(),
-        "every target and every rebuild is shadow compared"
-    );
-    records_shadow::require_clean(&shadows)?;
-    // The fixture writes a coin-60 `AddressChanged` with its `AddrChanged` sibling for every
-    // ENSv1 name, so every comparison must have checked pairs; a disposable copy need not. Its
-    // address values are 16 bytes (`substr(md5(..), 1, 40)` in seed.sql), so no address key is
-    // listed and no address page is compared here.
-    for shadow in &shadows {
-        ensure!(
-            shadow.report.compatibility_pairs > 0,
-            "the {} shadow comparison at {} checked no compatibility pairs",
-            shadow.stage,
-            shadow.target
-        );
-    }
-    for compared in &compared {
-        // The harness cannot tell whether a dropped key was in the batch's full scope (see
-        // `endpoint::Outcome::dropped`), so the fixture must produce none.
-        ensure!(
-            compared.outcome.dropped == 0,
-            "target {} dropped {} baseline keys",
-            compared.target,
-            compared.outcome.dropped
-        );
-        // The subname comparison must have traversed a parent over more than one page, not just
-        // printed that it could.
-        ensure!(
-            compared.subname_rows > 0 && compared.subname_pages > compared.subname_parents,
-            "target {} served {} subnames over {} pages for {} parents; raise \
-             BIGNAME_END_TO_END_FIXTURE_NAMES so a parent spans several pages",
-            compared.target,
-            compared.subname_rows,
-            compared.subname_pages,
-            compared.subname_parents
-        );
-    }
+    )
+    .await?;
+    ensure!(compared == targets.len(), "every target must be compared");
     scratch.cleanup().await
-}
-
-/// The same fixture under `BIGNAME_END_TO_END_SHADOW=1` alone, the disposable-copy shape: no
-/// baseline read and no rebuild, and the control, records and topology comparisons all run at
-/// each target. The corpus counts prove the control comparison ran; one records report per target
-/// proves the rebuild did not.
-#[tokio::test]
-async fn fixture_corpus_compares_the_family_readers_under_the_shadow_switch_alone() -> Result<()> {
-    let _turn = FIXTURE_LOCK.lock().await;
-    let (scratch, previous, targets) = seed_fixture().await?;
-    let pool = scratch.pool();
-    shadow::take_reports();
-    let (compared, shadows) = families_mode::scoped(run(
-        pool,
-        previous,
-        &targets,
-        None,
-        true,
-        Some(FIXTURE_CHILDREN_PAGE),
-    ))
-    .await??;
-    ensure!(
-        compared.is_empty(),
-        "no target is rebuilt without the compare switch"
-    );
-    shadow::assert_fixture_corpus_counts(&targets)?;
-    ensure!(
-        shadows.len() == targets.len(),
-        "every target, and no rebuild, is shadow compared"
-    );
-    ensure!(
-        shadows.iter().all(|shadow| shadow.stage == "incremental"),
-        "only incremental records comparisons run without the compare switch"
-    );
-    records_shadow::require_clean(&shadows)?;
-    for shadow in &shadows {
-        ensure!(
-            shadow.report.compatibility_pairs > 0,
-            "the {} shadow comparison at {} checked no compatibility pairs",
-            shadow.stage,
-            shadow.target
-        );
-    }
-    scratch.cleanup().await
-}
-
-/// The corpus count check takes exactly one shadow report per target: a duplicate, a missing
-/// or an unexpected target fails it.
-#[test]
-fn the_corpus_counts_take_one_report_per_target() {
-    let report =
-        |target: i64| -> shadow::Counted { (target, Default::default(), Default::default(), None) };
-    assert!(shadow::one_report_per_target(&[report(35), report(40)], &[35, 40]).is_ok());
-    assert!(shadow::one_report_per_target(&[report(40), report(35)], &[35, 40]).is_ok());
-    for (case, reports, targets) in [
-        (
-            "duplicate",
-            vec![report(35), report(35), report(40)],
-            vec![35, 40],
-        ),
-        (
-            "duplicate standing in for a missing one",
-            vec![report(35), report(35)],
-            vec![35, 40],
-        ),
-        ("missing", vec![report(35)], vec![35, 40]),
-        (
-            "unexpected",
-            vec![report(35), report(40), report(41)],
-            vec![35, 40],
-        ),
-        ("none", vec![], vec![35, 40]),
-        (
-            "repeated expectation",
-            vec![report(35), report(35)],
-            vec![35, 35],
-        ),
-    ] {
-        assert!(
-            shadow::one_report_per_target(&reports, &targets).is_err(),
-            "{case} must fail"
-        );
-    }
 }
 
 fn parse_targets(value: &str) -> Result<Vec<i64>> {
@@ -392,8 +186,6 @@ async fn require_disposable_copy(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Seed state a runner would have left: Ingest and Interpret complete through the last target,
-/// the head and Project at `previous`, Project published by a full rebuild.
 async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64) -> Result<()> {
     let store = PhaseStore::new(pool.clone());
     store.initialize_chain(CHAIN).await?;
@@ -435,37 +227,18 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
             outcome.progress(),
         )
         .await?;
-    // With the switch on the routes read the families, so they serve the previous publication
-    // before the first target, as on a deployment that already follows the chain: the rebuild
-    // comparison's baseline read needs them there. With it off the families start empty, as
-    // before.
-    if families_mode::configured()? {
-        while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
-    }
     Ok(())
 }
 
-/// What the rebuild comparison saw at one target.
-struct Compared {
-    target: i64,
-    outcome: endpoint::Outcome,
-    subname_rows: usize,
-    subname_pages: usize,
-    subname_parents: usize,
-}
-
-/// `compare` is the subname page size of the rebuild comparison, when it runs; it returns what
-/// each comparison saw.
 async fn run(
     pool: &PgPool,
     previous: i64,
     targets: &[i64],
     compare: Option<u64>,
     corpus: bool,
-    shadow: Option<u64>,
-) -> Result<(Vec<Compared>, Vec<records_shadow::Shadow>)> {
+) -> Result<usize> {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
+        .with_env_filter("bigname_project::families=info")
         .with_target(false)
         .with_ansi(false)
         .try_init();
@@ -490,34 +263,17 @@ async fn run(
         last = number;
     }
     let mut resume = load_marker(pool, previous).await?;
-    let mut compared = Vec::new();
-    let mut shadows = Vec::new();
-    let mut topology_targets = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
     );
     let store = PhaseStore::new(pool.clone());
-    // The runner starts the phase once and then runs batches; starting sets the running status
-    // and this binary's interpreter hash, which the publication fence requires.
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    // The metrics feed is wired as main.rs wires it, so the batch log and the metrics handoff fall
-    // inside the clock. No metrics worker consumes the feed here: applying the summary and
-    // scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
-    // A disposable copy may start with empty families, so their first run is a rebuild over the
-    // whole chain; every batch, the harness's as the runner's, runs the families to its served
-    // marker. The fixture's families fit in one budget either way. That work is outside the
-    // served clock and is reported separately.
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_family_settings(FamilySettings {
-            // With no safe block published the production switch point sits 256 blocks under
-            // the target, below every fixture block, so no fixture block would form a range; the
-            // fixture corpus puts every work block below the target in rebuild ranges, so each
-            // rebuild comparison covers them. A disposable copy keeps the production policy, so
-            // its timing measures what a deployment runs.
             rebuild_ranges: if corpus {
                 RebuildRanges::Through(i64::MAX)
             } else {
@@ -526,8 +282,6 @@ async fn run(
             ..FamilySettings::default()
         })
         .with_metrics_feed(metrics_feed.clone());
-    // The runner's metrics endpoint, scraped only for the family block timing after each target's families
-    // (`phase_runner_project_family_block_seconds`); the scrape is outside every clock.
     let metrics_stop = tokio_util::sync::CancellationToken::new();
     let metrics_address = phase_runner::metrics::start(
         "127.0.0.1:0".parse()?,
@@ -540,26 +294,15 @@ async fn run(
     )
     .await?;
     let _metrics_stop = metrics_stop.drop_guard();
-    let mut block_seconds = served_batch::FamilyBlockSeconds::default();
-    // With the switch on the runner's batch no longer publishes the served tables; the shadow
-    // comparisons' served side is published here instead, outside the served clock.
-    let served_side = families_mode::on().then(|| served_batch::ServedBatch::new(pool));
+    let mut block_seconds = family_metrics::FamilyBlockSeconds::default();
+    let mut compared = 0;
     for &number in targets {
         let target = follow_head(pool, number).await?;
-        let baseline = match compare {
-            Some(children_page) => Some(endpoint::Served::read(pool, children_page).await?),
-            None => None,
-        };
-        let batch_started: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
-            .fetch_one(pool)
-            .await?;
         let started = Instant::now();
-        // With the switch on the batch is the family loop, which answers Continue while it spends
-        // its budget; the runner records each answer and calls again, and so does the harness.
-        let mut batch_resume = resume.clone();
+        let mut batch_resume = Some(resume.clone());
         loop {
             let outcome = project
-                .run_batch(context(&target, Some(&batch_resume)))
+                .run_batch(context(&target, batch_resume.as_ref()))
                 .await?;
             store
                 .record_progress(
@@ -570,413 +313,158 @@ async fn run(
                     outcome.progress(),
                 )
                 .await?;
-            // The runner notifies here too, after `confirm_progress`, which this test skips.
             metrics_feed.batch_committed();
             match outcome {
                 PhaseBatchOutcome::Continue(progress) => {
-                    batch_resume = progress.current.context("a continued batch has progress")?;
+                    batch_resume =
+                        Some(progress.current.context("a continued batch has progress")?);
                 }
                 _ => break,
             }
         }
-        // With the switch on the served publication is the family marker, so the family run is
-        // inside the clock; with it off the families follow outside it, below.
-        let families_in_clock = families_mode::on();
-        // With the switch on the batch above is the family run itself.
-        let families_started = if families_in_clock {
-            started
-        } else {
-            Instant::now()
-        };
-        if families_in_clock {
-            while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
-        }
-        while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
-            .await?
-            .is_none()
-        {
-            ensure!(
-                started.elapsed().as_secs() < 60,
-                "the publication at {number} never became servable"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        let families_ms = families_in_clock.then(|| families_started.elapsed().as_millis());
-        let served_side_ms = match &served_side {
-            Some(served_side) => {
-                // The served batch stopped: nothing the batch did reached a served table.
-                let written: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM name_current
-                     WHERE last_recomputed_at >= $1::timestamptz",
-                )
-                .bind(&batch_started)
-                .fetch_one(pool)
-                .await?;
-                ensure!(
-                    written == 0,
-                    "the Project batch rewrote {written} served name rows under the switch"
-                );
-                let served_started = Instant::now();
-                served_side.publish(CHAIN, &target, Some(&resume)).await?;
-                Some(served_started.elapsed().as_millis())
-            }
-            None => None,
-        };
-        let rewritten: Vec<String> = sqlx::query_scalar(
-            "SELECT logical_name_id FROM name_current
-             WHERE last_recomputed_at >= $1::timestamptz ORDER BY logical_name_id",
-        )
-        .bind(&batch_started)
-        .fetch_all(pool)
-        .await?;
-        let read = match rewritten.first() {
-            Some(name) => {
-                load_name_current(pool, name)
-                    .await?
-                    .with_context(|| format!("the name reader did not serve {name}"))?;
-                "observed"
-            }
-            None => "nothing_rewritten",
-        };
-        let elapsed = started.elapsed();
-        eprintln!(
-            "SEPOLIA_END_TO_END target={number} elapsed_ms={} commit=included hydration=invoked \
-             marker=written read={read} rewritten_names={} served={}{}",
-            elapsed.as_millis(),
-            rewritten.len(),
-            if families_in_clock {
-                "families"
-            } else {
-                "project"
-            },
-            served_side_ms.map_or_else(String::new, |ms| format!(
-                " served_batch=stopped comparison_side_ms={ms}"
-            ))
-        );
-        // The owned key families follow in their own transactions once progress is recorded,
-        // as the runner calls them; with the switch off their time is outside the served clock.
-        let families_ms = match families_ms {
-            Some(ms) => ms,
-            None => {
-                let families_started = Instant::now();
-                while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
-                families_started.elapsed().as_millis()
-            }
-        };
-        let family_marker: Option<i64> = sqlx::query_scalar(
-            "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
-        )
-        .bind(CHAIN)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
-        eprintln!("SEPOLIA_END_TO_END_FAMILIES target={number} families_ms={families_ms}");
-        metrics_feed.batch_committed();
-        let before = block_seconds;
-        block_seconds =
-            served_batch::FamilyBlockSeconds::scrape(metrics_address, CHAIN, before).await?;
-        eprintln!("{}", block_seconds.line(before, number));
         ensure!(
-            family_marker == Some(number),
-            "the owned key families stopped at {family_marker:?}, not at target {number}"
+            load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
+                .await?
+                .is_some(),
+            "the family publication is not servable at {number}"
         );
-        // The control and topology family readers beside the served readers at the same
-        // publication, under either switch; the rebuild below stays behind `compare`.
-        let readers_page = compare.or(shadow);
-        // The resources and names the control comparison excuses, which the permission
-        // comparison reads without.
-        let mut control_differing = std::collections::BTreeSet::new();
-        if readers_page.is_some() {
-            // The family readers beside the served readers at the same publication.
-            // With `corpus`, the comparison also reads the fixture corpus's expected counts at
-            // this publication, which the corpus test asserts after the run.
-            let options = shadow::Options {
-                corpus,
-                ..shadow::Options::default()
-            };
-            let publication = shadow::Publication {
-                number,
-                hash: target.hash.clone(),
-            };
-            let report = families_mode::served_side(shadow::compare_with(
-                pool,
-                CHAIN,
-                &publication,
-                options,
-            ))
-            .await?;
-            report.print(number);
-            ensure!(
-                report.mismatched == 0,
-                "the family readers differ from the served values at {number}"
-            );
-            control_differing = report.differing_keys.clone();
-            // The composed name rows beside the served name rows (TYR-36 step 7b).
-            let names =
-                families_mode::served_side(name_shadow::compare(pool, CHAIN, number)).await?;
-            names.print();
-            names.require_clean()?;
-            ensure!(names.names > 0, "no name was compared at {number}");
-        }
         ensure!(
             publication(pool).await? == (Some(number), Some(target.hash.clone()), false),
-            "the progress marker is not at target {number}"
+            "the runner progress is not at target {number}"
         );
-        let hash: Option<String> = sqlx::query_scalar(
-            "SELECT input_content_hash FROM chain_phase_state
-             WHERE chain_id = $1 AND phase_name = 'project'",
-        )
-        .bind(CHAIN)
-        .fetch_one(pool)
-        .await?;
+        eprintln!(
+            "SEPOLIA_END_TO_END target={number} elapsed_ms={} commit=included hydration=invoked marker=written source=families",
+            started.elapsed().as_millis()
+        );
+        let before = block_seconds;
+        block_seconds =
+            family_metrics::FamilyBlockSeconds::scrape(metrics_address, CHAIN, before).await?;
+        eprintln!("{}", block_seconds.line(before, number));
+        let (page_size, max_pages) = if corpus {
+            (FIXTURE_CHILDREN_PAGE, u64::MAX)
+        } else {
+            (COPY_CHILDREN_PAGE, 20)
+        };
+        let (search, expiring) =
+            families_mode::measure_walks(pool, number, CHAIN, "ens", page_size, max_pages).await?;
         ensure!(
-            hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
-            "the publication does not carry this binary's interpreter hash"
+            search.rows > 0 && expiring.rows > 0,
+            "the composed listings served nothing at {number}"
         );
-        if families_in_clock {
-            // Flip prerequisite 1: the composed listing walks' cost in submitted rows. The
-            // fixture walks every page; a copy walks the first pages only.
-            let (page_size, max_pages) = if corpus {
-                (FIXTURE_CHILDREN_PAGE, u64::MAX)
-            } else {
-                (COPY_CHILDREN_PAGE, 20)
-            };
-            let (search, expiring) =
-                families_mode::measure_walks(pool, number, CHAIN, "ens", page_size, max_pages)
+        if corpus {
+            ensure!(
+                !search.capped && !expiring.capped,
+                "fixture walks must complete"
+            );
+        }
+        if let Some(children_page) = compare {
+            compare_with_rebuild(pool, &project, &target, children_page, corpus).await?;
+            // Rebuild samples must not enter the next normal target's timing delta.
+            metrics_feed.batch_committed();
+            block_seconds =
+                family_metrics::FamilyBlockSeconds::scrape(metrics_address, CHAIN, block_seconds)
                     .await?;
-            ensure!(
-                search.rows > 0 && expiring.rows > 0,
-                "the composed listings served nothing at {number}"
-            );
-        }
-        if let Some(page_size) = shadow {
-            shadows.push(
-                families_mode::served_side(records_shadow::compare(
-                    pool,
-                    CHAIN,
-                    &target,
-                    page_size,
-                    "incremental",
-                ))
-                .await?,
-            );
-        }
-        if let Some(children_page) = readers_page {
-            let report = families_mode::served_side(topology_shadow::compare(
-                pool,
-                CHAIN,
-                topology_shadow::Settings {
-                    children_page,
-                    collection_page: children_page,
-                    every_child_filter: children_page == FIXTURE_CHILDREN_PAGE,
-                    prefixes: &[],
-                },
-            ))
-            .await?;
-            eprintln!("{}", report.line());
-            ensure!(
-                report.mismatches.is_empty(),
-                "the family readers differ from the served readers at {number}: {:#}",
-                topology_shadow::describe(&report)
-            );
-            // The listings compared as one sequence without the names the control comparison
-            // decides, and those names, are pinned for the fixture, so a growing excuse list
-            // fails rather than hiding a difference.
-            if corpus {
-                let excused: Vec<&str> = report.excused.iter().map(String::as_str).collect();
-                ensure!(
-                    FIXTURE_LISTING_EXCUSES
-                        .iter()
-                        .any(|(target, listings, names)| {
-                            (*target, *listings, *names)
-                                == (number, report.listing_excused, &excused[..])
-                        }),
-                    "at {number} {} listings were compared without {excused:?}; the fixture \
-                     expects {FIXTURE_LISTING_EXCUSES:?}",
-                    report.listing_excused
-                );
-            }
-            // Step 2 fills project_resolver_classification block by block and the comparison runs
-            // once the families have caught up, so every resolver is read from its row and
-            // compared in full. A resolver on the declaration fallback, or with no shadow
-            // classification at all, would only have its mirror compared, so it fails here.
-            let partial: Vec<(&String, &&str)> = report
-                .classification_sources
-                .iter()
-                .filter(|(_, source)| **source != "family")
-                .collect();
-            ensure!(
-                report.f3_unfilled == 0 && partial.is_empty(),
-                "resolvers compared only in part at {number}: {partial:?}; {}",
-                report.line()
-            );
-            // The corpus declares every resolver it uses, so step 2's extra
-            // resolver_manifest_not_active rows must not appear either.
-            ensure!(
-                report.f3_extra_not_active.is_empty(),
-                "extra resolver_manifest_not_active rows at {number}: {:?}",
-                report.f3_extra_not_active
-            );
-            topology_targets.push(report.target);
-            // The permission and resolver collection reads under both switch states (TYR-36
-            // step 7b slice 4).
-            let permissions =
-                permissions_shadow::compare(pool, CHAIN, children_page, &control_differing).await?;
-            eprintln!("{}", permissions.line());
-            permissions.require_clean()?;
-            ensure!(
-                permissions.subjects > 0 && permissions.resolvers > 0,
-                "no permission subject or resolver was compared at {number}"
-            );
-        }
-        if let (Some(children_page), Some(baseline)) = (compare, baseline) {
-            let retention = endpoint::Retention::load(
-                pool,
-                baseline,
-                (resume.number + 1, number),
-                resume.number,
-            )
-            .await?;
-            compared.push(
-                compare_with_rebuild(pool, &project, &target, children_page, &retention).await?,
-            );
-            if let Some(page_size) = shadow {
-                shadows.push(
-                    families_mode::served_side(records_shadow::compare(
-                        pool, CHAIN, &target, page_size, "rebuild",
-                    ))
-                    .await?,
-                );
-            }
+            compared += 1;
         }
         resume = target;
     }
-    // Either switch runs the topology comparison at every target; the branch above proving that
-    // for itself would not notice a guard that skips it.
-    let expected_topology_targets: &[i64] = if compare.is_some() || shadow.is_some() {
-        targets
-    } else {
-        &[]
-    };
-    ensure!(
-        topology_targets.as_slice() == expected_topology_targets,
-        "expected topology comparisons at {expected_topology_targets:?}, got {topology_targets:?}"
-    );
-    Ok((compared, shadows))
+    Ok(compared)
 }
 
-/// Per fixture target: how many composed listings are compared without the excused names, and
-/// those names, the ones the name comparison leaves to the control comparison because of the
-/// served bug `served_membership_skips_unnamed_path_expiry` (project_end_to_end/shadow.rs).
-const FIXTURE_LISTING_EXCUSES: &[(i64, usize, &[&str])] = &[
-    (
-        35,
-        7,
-        &[
-            "ens:0xb5048aa885a2dbcb32dd2db99146b96e27fbf55bf9f0105f920b797eaa46b792",
-            "ens:0xb555773768bc1a672947d7f41f9c247f36604411a85db2bd9e97e22bfb5b692d",
-        ],
-    ),
-    (
-        40,
-        7,
-        &[
-            "ens:0x85386162967e21a9847e97d2771fe4ae05ea0654df27241b8d244a19258f8adc",
-            "ens:0xac2bb57e8f734fa733cc2a7982b075afad50e612c90034101b81f34fffe65f85",
-            "ens:0xb5048aa885a2dbcb32dd2db99146b96e27fbf55bf9f0105f920b797eaa46b792",
-            "ens:0xb555773768bc1a672947d7f41f9c247f36604411a85db2bd9e97e22bfb5b692d",
-        ],
-    ),
-];
-
-/// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
-/// reads them again and compares. A row that differs must be one the batch was allowed to keep
-/// (see [`endpoint::Retention`]).
 async fn compare_with_rebuild(
     pool: &PgPool,
     project: &ProjectPhase,
     target: &BlockMarker,
     children_page: u64,
-    retention: &endpoint::Retention,
-) -> Result<Compared> {
+    corpus: bool,
+) -> Result<()> {
     let candidate = endpoint::Served::read(pool, children_page).await?;
-    let incremental_families = families(pool).await?;
+    ensure!(
+        !candidate.names.is_empty(),
+        "no names read at {}",
+        target.number
+    );
+    if corpus {
+        ensure!(
+            candidate.subname_rows() > 0 && candidate.pages_read > candidate.parents,
+            "the fixture must traverse nonempty subname pages"
+        );
+    }
+    let incremental = families(pool).await?;
     let started = Instant::now();
-    // With the switch on this batch is the family rebuild itself, continued until it completes.
+    let token = bigname_project::families::input_token(pool, CHAIN).await?;
+    let mut options = bigname_project::families::FamilyOptions::new(INTERPRETER_CONTENT_HASH);
+    options.max_blocks_per_run = 0;
+    let reset = bigname_project::families::apply(
+        pool,
+        CHAIN,
+        &bigname_project::Marker {
+            number: target.number,
+            hash: target.hash.clone(),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &token,
+        &options,
+    )
+    .await?;
+    ensure!(
+        reset.reset && reset.marker.is_none(),
+        "the comparison must start from an actual empty rebuild"
+    );
     let mut resume = None;
     while let PhaseBatchOutcome::Continue(progress) =
         project.run_batch(context(target, resume.as_ref())).await?
     {
         resume = progress.current;
     }
-    let rebuild_ms = started.elapsed().as_millis();
-    // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
-    // families the incremental blocks left, row for row, the marker's sequence aside.
-    let families_started = Instant::now();
-    while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
-    let families_rebuild_ms = if families_mode::on() {
-        rebuild_ms
-    } else {
-        families_started.elapsed().as_millis()
-    };
-    // The served tables' own rebuild for the comparison side, which the switch-on batch no
-    // longer runs.
-    if families_mode::on() {
-        served_batch::ServedBatch::new(pool)
-            .publish(CHAIN, target, None)
-            .await?;
-    }
-    let rebuilt_families = families(pool).await?;
-    let differing: Vec<&str> = incremental_families
+    let rebuilt = families(pool).await?;
+    let differing = incremental
         .iter()
-        .zip(&rebuilt_families)
-        .filter(|(incremental, rebuilt)| incremental != rebuilt)
+        .zip(&rebuilt)
+        .filter(|(before, after)| before != after)
         .map(|((table, _), _)| table.as_str())
-        .collect();
+        .collect::<Vec<_>>();
     ensure!(
-        differing.is_empty(),
-        "the owned key families differ from a rebuild at {}: {differing:?}",
+        incremental == rebuilt,
+        "family rows differ after rebuild at {}: {differing:?}",
+        target.number
+    );
+    let rebuilt_reads = endpoint::Served::read(pool, children_page).await?;
+    ensure!(
+        candidate.names == rebuilt_reads.names,
+        "name reader values differ at {}",
+        target.number
+    );
+    ensure!(
+        candidate.children == rebuilt_reads.children,
+        "subname reader values differ at {}",
         target.number
     );
     eprintln!(
-        "SEPOLIA_END_TO_END_FAMILIES_COMPARE target={} tables={} rebuild_ms={families_rebuild_ms} \
-         result=equal",
+        "SEPOLIA_END_TO_END_COMPARE target={} tables={} names={} subname_rows={} subname_pages={} rebuild_ms={} result=equal",
         target.number,
-        rebuilt_families.len()
-    );
-    let rebuilt = endpoint::Served::read(pool, children_page).await?;
-    let stamp = endpoint::Target::load(pool, target.number, &target.hash).await?;
-    let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
-    eprintln!(
-        "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} \
-         subname_parents={} exact={} retained={} removed={} dropped={} rebuild_ms={rebuild_ms} \
-         result=equal",
-        target.number,
+        rebuilt.len(),
         candidate.names.len(),
         candidate.subname_rows(),
         candidate.pages_read,
-        candidate.parents,
-        outcome.exact,
-        outcome.retained,
-        outcome.removed,
-        outcome.dropped,
+        started.elapsed().as_millis()
     );
-    Ok(Compared {
-        target: target.number,
-        outcome,
-        subname_rows: candidate.subname_rows(),
-        subname_pages: candidate.pages_read,
-        subname_parents: candidate.parents,
-    })
+    Ok(())
 }
 
-/// Every owned key family table as ordered JSON text, then the family marker without its
-/// sequence, which every block and undo advances.
 async fn families(pool: &PgPool) -> Result<Vec<(String, String)>> {
     let mut tables = Vec::new();
     for table in bigname_project::families::family_tables() {
+        // Retained child history has operational wall-clock stamps, unlike the native
+        // family rows. Its writer and replay tests exclude these same two audit columns;
+        // event identity, event/target positions, provenance and every other field stay exact.
+        let row = if table == "child_registration_events" {
+            "to_jsonb(t) - ARRAY['last_recomputed_at', 'inserted_at']"
+        } else {
+            "to_jsonb(t)"
+        };
         let rows: String = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text
              FROM {table} t"
         ))
         .fetch_one(pool)
