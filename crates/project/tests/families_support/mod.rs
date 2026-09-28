@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
 pub const CHAIN: &str = "ethereum-sepolia";
-pub const CONTENT_HASH: &str = "families-fixture-hash";
+/// The interpreter hash of this build: the composed name reader serves only a marker written by
+/// it, as the publication fence does.
+pub const CONTENT_HASH: &str = bigname_test_support::INTERPRETER_CONTENT_HASH;
 
 pub fn hash(block: i64) -> String {
     format!("0x{block:064x}")
@@ -46,6 +48,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_resolver_classification",
     "project_registry_pointer",
     "project_resource_pointer",
+    "project_named_resource_pointer",
     "project_node_record_partition",
     "project_node_record_value",
     "project_record_id_value",
@@ -65,6 +68,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
+    "project_name_history",
 ];
 
 pub struct Fixture {

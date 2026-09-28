@@ -118,8 +118,8 @@ pub(crate) use search::get_search;
 pub(crate) use search::public_namespace_read_test_hooks as search_public_namespace_read_test_hooks;
 pub(crate) use snapshots::{
     SnapshotReadResource, api_error_to_v2, api_error_to_v2_for_resource, as_of_meta,
-    decode_at_token, encode_at_token, resolve_v2_snapshot_for, sanitized_snapshot_internal_error,
-    snapshot_meta,
+    decode_at_token, encode_at_token, name_rows_error, resolve_v2_snapshot_for,
+    sanitized_snapshot_internal_error, snapshot_meta, stale_name_rows_api_error,
 };
 pub(crate) use status::get_status;
 pub(crate) use strict_query::{

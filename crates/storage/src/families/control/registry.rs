@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::{
     position::{EventOrder, Position},
@@ -51,6 +51,7 @@ pub struct OwnerEvent {
     pub registry_owner: Option<String>,
     pub owner_word_unmasked: Option<bool>,
     pub owner_getter: Option<String>,
+    pub owner_getter_reason: Option<String>,
 }
 
 impl OwnerEvent {
@@ -67,6 +68,7 @@ impl OwnerEvent {
             registry_owner: lower(row, "registry_owner"),
             owner_word_unmasked: flag(row, "owner_word_unmasked"),
             owner_getter: lower(row, "owner_getter"),
+            owner_getter_reason: text(row, "owner_getter_reason"),
         })
     }
 
@@ -152,6 +154,20 @@ pub async fn load_registry_nodes(
     chain_id: &str,
     keys: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), RegistryNode>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for registry node states")?;
+    load_registry_nodes_on(&mut conn, chain_id, keys).await
+}
+
+/// [`load_registry_nodes`] on one connection, so a caller's transaction reads both statements
+/// in its snapshot.
+pub async fn load_registry_nodes_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    keys: &[(String, String)],
+) -> Result<BTreeMap<(String, String), RegistryNode>> {
     let (namespaces, nodes_wanted): (Vec<String>, Vec<String>) = keys.iter().cloned().unzip();
     let rows: Vec<Value> = sqlx::query_scalar(
         "/* storage:families.control.registry.nodes */ SELECT jsonb_build_object(
@@ -166,7 +182,7 @@ pub async fn load_registry_nodes(
     .bind(chain_id)
     .bind(&namespaces)
     .bind(&nodes_wanted)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load registry node states")?;
     let mut nodes: BTreeMap<(String, String), RegistryNode> = rows
@@ -185,7 +201,7 @@ pub async fn load_registry_nodes(
     .bind(chain_id)
     .bind(&namespaces)
     .bind(&nodes_wanted)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load registry owner events")?;
     for (namespace, node, row) in events {

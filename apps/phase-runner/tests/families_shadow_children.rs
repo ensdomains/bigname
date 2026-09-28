@@ -3,6 +3,9 @@
 //! Each case seeds interpreted events, publishes through the runner's Project phase with the
 //! families on, and runs the shadow comparison of `project_end_to_end/topology_shadow.rs`.
 #[allow(dead_code)]
+#[path = "project_end_to_end/name_shadow.rs"]
+mod name_shadow;
+#[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
 #[allow(dead_code)]
@@ -244,9 +247,32 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     // incremental batch used to keep it until a rebuild, because the children scope took only an
     // event's `child_node`; main's #958 restages transferred child edges, so the served page now
     // drops it at once and matches the shadow under every filter.
-    let report = fixture.compare(2).await?;
-    unexpected(&report, &[])?;
+    //
+    // The same Transfer leaves the surfaced name's registry node ownerless. The composed name row
+    // reads that at once (unregistered, projected, so `/v1/search` lists it); the served batch
+    // restages the child edge but not the name row, which keeps its block-6 state (unsupported,
+    // unlisted) until the rebuild below. So the name comparison differs on that one name, and the
+    // two search listings that would list it are named expected differences, gone after the
+    // rebuild.
     let surfaced = format!("ens:{}", word(8));
+    let names = name_shadow::compare(fixture.pool(), CHAIN, 9).await?;
+    ensure!(
+        names.mismatched == 1
+            && names
+                .lines
+                .iter()
+                .all(|line| line.starts_with(&format!("MISMATCH {surfaced} "))),
+        "{:#?}",
+        names.lines
+    );
+    let report = fixture.compare(2).await?;
+    unexpected(
+        &report,
+        &[
+            r#"search ens prefix Some("s") contains None"#.to_owned(),
+            r#"search ens prefix None contains Some("eth")"#.to_owned(),
+        ],
+    )?;
     let (_, clock) = topology_shadow::publication(fixture.pool(), CHAIN).await?;
     for (index, filter) in topology_shadow::child_filters(clock, true, &[])
         .iter()
@@ -290,6 +316,9 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
         );
     }
     fixture.rebuild().await?;
+    name_shadow::compare(fixture.pool(), CHAIN, 9)
+        .await?
+        .require_clean()?;
     let report = fixture.compare(2).await?;
     unexpected(&report, &[])?;
     let first_children = topology_shadow::shadow_children(fixture.pool(), &first).await?;

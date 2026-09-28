@@ -968,3 +968,97 @@ async fn a_binding_in_a_block_without_events_survives_a_rebuild() -> Result<()> 
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+/// F1 name history (TYR-36 step 7b): the first block naming a name fixes `created_at` and is not
+/// moved by later events; ENSv2 events set the corpus flag; each authority event votes its arm,
+/// except an ENSv2 registry expiry change (never) and release (decided at read). The row is
+/// written only when a fact is added, so an event adding nothing leaves its position alone.
+#[tokio::test]
+async fn a_name_keeps_its_first_block_and_its_history_facts() -> Result<()> {
+    let fixture = Fixture::new("families_identity_history", 20).await?;
+    let resource = uuid(1);
+    fixture
+        .write(
+            10,
+            1,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            None,
+            json!({"resolver": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&resource),
+            json!({"authority_kind": "registrar", "registrant": OWNER, "expiry": 100}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            1,
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            Some(&name(1)),
+            None,
+            json!({"expiry": 200}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            14,
+            1,
+            "RegistrationRenewed",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&resource),
+            json!({"expiry": 300}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_name_history").await?;
+    assert_eq!(rows.len(), 1);
+    let first: String = sqlx::query_scalar(
+        "SELECT to_jsonb(block_timestamp) #>> '{}' FROM chain_lineage
+         WHERE chain_id = $1 AND block_number = 10",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        columns(
+            &rows[0],
+            &[
+                "first_block_number",
+                "has_ens_v2_events",
+                "event_arms",
+                "block_number"
+            ]
+        ),
+        json!({"first_block_number": 10, "has_ens_v2_events": true,
+               "event_arms": ["ens_v1"], "block_number": 13}),
+        "the first block stays, the ENSv2 expiry change sets the flag without voting, and the \
+         renewal adds nothing"
+    );
+    assert_eq!(
+        rows[0]["created_at"]
+            .as_str()
+            .map(|at| at.replace('T', " ")),
+        Some(first.replace('T', " ")),
+        "created_at is the first block's time"
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_undo_restores(14).await?;
+    fixture.assert_rebuild_equal(14).await?;
+    fixture.cleanup().await
+}

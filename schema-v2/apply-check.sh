@@ -660,7 +660,11 @@ for migration_file in \
     "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql" \
     "$ROOT/migrations/20260926102100_project_families_wrapper_expiry_integer.sql" \
     "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" \
-    "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql"
+    "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql" \
+    "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
+    "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -963,7 +967,15 @@ for migration_file in \
     "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" \
     "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" \
     "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql" \
-    "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql"
+    "$ROOT/migrations/20260928120000_project_families_resolver_admission_index.sql" \
+    "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
+    "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
+    "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
+    "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4254,6 +4266,7 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_named_resource_pointer'),
             ('project_node_record_partition'),
             ('project_node_record_value'),
             ('project_record_id_value'),
@@ -4273,6 +4286,7 @@ BEGIN
             ('project_address_name_index'),
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),
+            ('project_name_history'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -4358,6 +4372,7 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_named_resource_pointer'),
             ('project_node_record_partition'),
             ('project_node_record_value'),
             ('project_record_id_value'),
@@ -4377,6 +4392,7 @@ BEGIN
             ('project_address_name_index'),
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),
+            ('project_name_history'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),

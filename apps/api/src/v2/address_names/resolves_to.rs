@@ -198,11 +198,14 @@ pub(super) async fn get_address_resolves_to(
         &logical_name_ids,
     )
     .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load registration summaries for names resolving to {normalized_address}"
-        ))
-    })?;
+    .map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Resource,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load registration summaries for names resolving to {normalized_address}"
+            ))
+        },
+    ))?;
     let migrated_logical_name_ids = name_rows
         .values()
         .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))

@@ -361,17 +361,32 @@ async fn load_search_storage_page(
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
 ) -> V2Result<bigname_storage::NameCurrentListPage> {
-    bigname_storage::load_name_current_list_page(
-        &state.pool,
-        filter,
-        NameCurrentListSort::Name,
-        NameCurrentListOrder::Asc,
-        cursor,
-        page_size,
-        false,
-    )
-    .await
-    .map_err(|_| V2Error::internal_error("failed to load search results"))
+    // Under the publication switch the rows are composed from the owned key families; the
+    // candidates are the name surfaces (ruling J8).
+    let page = if bigname_storage::publication_source::serve_from_families() {
+        bigname_storage::families::name::load_family_search_page(
+            &state.pool,
+            filter,
+            cursor,
+            page_size,
+        )
+        .await
+    } else {
+        bigname_storage::load_name_current_list_page(
+            &state.pool,
+            filter,
+            NameCurrentListSort::Name,
+            NameCurrentListOrder::Asc,
+            cursor,
+            page_size,
+            false,
+        )
+        .await
+    };
+    page.map_err(crate::v2::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |_| V2Error::internal_error("failed to load search results"),
+    ))
 }
 
 fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String> {

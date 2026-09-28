@@ -40,6 +40,15 @@ pub(super) fn deciding_fact<'a>(
     if facts.input.selection.authority_arm.as_deref() != Some("ens_v2") {
         return Ok(None);
     }
+    released_fact(facts, clock)
+}
+
+/// The released ENSv2 tombstone's deciding fact whatever arm is selected
+/// (name_authority/build.sql:246-271): the selection reads it to decide the arm.
+pub(super) fn released_fact<'a>(
+    facts: &'a NameFacts,
+    clock: &Clock,
+) -> Result<Option<Tombstone<'a>>> {
     let bindings: Vec<&BindingCandidate> = facts
         .candidates
         .iter()

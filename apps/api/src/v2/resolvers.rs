@@ -98,7 +98,10 @@ pub(crate) async fn get_resolver(
     .continuing_from_request_cursor(params.cursor.is_some());
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
-    let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;
+    // Family bound names describe only their publication, including an empty page. A served
+    // resolver row can retain an older target, so checking returned rows alone is insufficient.
+    let require_selected_head = bigname_storage::publication_source::serve_from_families()
+        || (params.at.is_none() && params.finality == Finality::Latest);
     let selected_snapshot = resolve_v2_snapshot_for(
         &state.pool,
         &scope,
@@ -287,20 +290,36 @@ async fn load_bound_name_rows(
     chain_id: u64,
     resolver_address: &str,
 ) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
-    let loaded = bigname_storage::load_phase_resolver_bound_name_rows(
-        pool,
-        chain_id_slug,
-        resolver_address,
-        namespace,
-        cursor,
-        page_size.saturating_add(1) as i64,
-    )
-    .await
-    .map_err(|_| {
-        V2Error::internal_error(format!(
-            "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
-        ))
-    })?;
+    let limit = page_size.saturating_add(1) as i64;
+    let loaded = if bigname_storage::publication_source::serve_from_families() {
+        bigname_storage::families::name::load_family_bound_names(
+            pool,
+            chain_id_slug,
+            resolver_address,
+            namespace,
+            cursor,
+            limit,
+        )
+        .await
+    } else {
+        bigname_storage::load_phase_resolver_bound_name_rows(
+            pool,
+            chain_id_slug,
+            resolver_address,
+            namespace,
+            cursor,
+            limit,
+        )
+        .await
+    }
+    .map_err(crate::v2::name_rows_error(
+        SnapshotReadResource::Resolver,
+        |_| {
+            V2Error::internal_error(format!(
+                "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
+            ))
+        },
+    ))?;
     let mut rows = loaded
         .into_iter()
         .map(|row| NameCurrentListRow {

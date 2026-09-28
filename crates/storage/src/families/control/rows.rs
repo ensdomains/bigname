@@ -210,6 +210,8 @@ pub struct BindingCandidate {
     pub logical_name_id: String,
     pub authority_arm: String,
     pub resource_id: String,
+    /// The surface binding's kind (`surface_bindings.binding_kind`).
+    pub binding_kind: Option<String>,
     pub canonicality_state: Option<String>,
     pub surface_namehash: Option<String>,
     /// The binding's place: its block and the transaction and log its provenance records, with
@@ -257,6 +259,7 @@ impl BindingCandidate {
             logical_name_id: text(row, "logical_name_id")?,
             authority_arm: text(row, "authority_arm").unwrap_or_default(),
             resource_id: text(row, "resource_id")?,
+            binding_kind: text(row, "binding_kind"),
             canonicality_state: text(row, "canonicality_state"),
             surface_namehash: lower(row, "surface_namehash"),
             block_number: row.get("block_number").and_then(Value::as_i64)?,

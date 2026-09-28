@@ -4563,3 +4563,289 @@ async fn join_primary_name_mock_rpc_requests(
         .await
         .context("mock primary-name RPC task panicked or was cancelled")?
 }
+
+// The publication switch differential (TYR-36 step 7b, ruling J9): a route moved onto the owned
+// key families must answer the same body with the switch off (the served tables) and on (the
+// families), `meta.as_of` excepted. The fixture runs the production Project batch and then the
+// families over the same normalized events, so both sides come from one set of facts rather than
+// from seeded rows.
+
+/// Blocks 200..=241 of ethereum-mainnet (hash `0xhistory{n}`, time 1_700_000_000 + n), the
+/// shape the bounded-membership tests use.
+const SWITCH_CHAIN: &str = "ethereum-mainnet";
+const SWITCH_FIRST_BLOCK: i64 = 200;
+
+/// A name for the differential: its surface, its own resource with a token lineage, and an open
+/// binding under `arm`, all at the first block. Returns the name id and the resource.
+async fn seed_switch_name(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    arm: &str,
+) -> Result<(String, Uuid)> {
+    let (logical_name_id, namehash) = phase_logical_identity("ens", name)?;
+    let (resource_id, token_lineage_id, surface_binding_id) = (
+        Uuid::from_u128(seed),
+        Uuid::from_u128(seed + 1),
+        Uuid::from_u128(seed + 2),
+    );
+    let hash = format!("0xhistory{SWITCH_FIRST_BLOCK}");
+    upsert_test_name_surfaces(
+        &database.pool,
+        &[NameSurface {
+            logical_name_id: logical_name_id.clone(),
+            namespace: "ens".to_owned(),
+            input_name: name.to_owned(),
+            canonical_display_name: name.to_owned(),
+            normalized_name: name.to_owned(),
+            dns_encoded_name: name.as_bytes().to_vec(),
+            namehash: namehash.clone(),
+            labelhashes: Vec::new(),
+            normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: SWITCH_CHAIN.to_owned(),
+            block_hash: hash.clone(),
+            block_number: SWITCH_FIRST_BLOCK,
+            provenance: json!({"seed": "switch_differential"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_token_lineages(
+        &database.pool,
+        &[TokenLineage {
+            token_lineage_id,
+            chain_id: SWITCH_CHAIN.to_owned(),
+            block_hash: hash.clone(),
+            block_number: SWITCH_FIRST_BLOCK,
+            provenance: json!({"seed": "switch_differential"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id,
+            token_lineage_id: Some(token_lineage_id),
+            chain_id: SWITCH_CHAIN.to_owned(),
+            block_hash: hash.clone(),
+            block_number: SWITCH_FIRST_BLOCK,
+            provenance: json!({"seed": "switch_differential"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_test_surface_bindings(
+        &database.pool,
+        &[SurfaceBinding {
+            surface_binding_id,
+            // The helper derives the name id from `namespace:name`.
+            logical_name_id: format!("ens:{name}"),
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            authority_arm: arm.to_owned(),
+            active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + SWITCH_FIRST_BLOCK)?,
+            active_to: None,
+            chain_id: SWITCH_CHAIN.to_owned(),
+            block_hash: hash,
+            block_number: SWITCH_FIRST_BLOCK,
+            provenance: json!({"seed": "switch_differential", "transaction_index": 0,
+                               "log_index": 0}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    Ok((logical_name_id, resource_id))
+}
+
+/// One event of the differential at `block` and `log` in transaction 0.
+#[allow(clippy::too_many_arguments)]
+fn switch_event(
+    identity: &str,
+    logical_name_id: Option<&str>,
+    resource_id: Option<Uuid>,
+    kind: &str,
+    family: &str,
+    block: i64,
+    log: i64,
+    after_state: Value,
+) -> NormalizedEvent {
+    let mut event = v2_history_event(identity, logical_name_id, resource_id, kind, block);
+    event.source_family = family.to_owned();
+    event.log_index = Some(log);
+    event.after_state = after_state;
+    event
+}
+
+/// Run the production Project batch to `target`, publish it, then follow it with the owned key
+/// families, so both publications stand on `target`.
+async fn publish_project_and_families(database: &TestDatabase, target: i64) -> Result<()> {
+    bigname_project::Engine::new(database.pool.clone())
+        .run_batch(bigname_project::BatchRequest {
+            chain_id: SWITCH_CHAIN.to_owned(),
+            target_block: target,
+            affected_from_block: SWITCH_FIRST_BLOCK,
+            affected_to_block: target,
+            resume_current: None,
+            mode: bigname_project::RunMode::Normal,
+        })
+        .await?;
+    publish_bounded_membership_at(database, target).await?;
+    // Collections also require an Interpret phase that is not redoing history.
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number,
+             current_block_hash, target_block_number, target_block_hash, input_content_hash,
+             started_at, finished_at)
+         VALUES ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(target)
+    .bind(format!("0xhistory{target}"))
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.pool)
+    .await?;
+    let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
+    let outcome = bigname_project::families::apply(
+        &database.pool,
+        SWITCH_CHAIN,
+        &bigname_project::Marker {
+            number: target,
+            hash: format!("0xhistory{target}"),
+        },
+        bigname_project::families::FamilyMode::Normal,
+        &token,
+        &bigname_project::families::FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
+    )
+    .await;
+    anyhow::ensure!(
+        outcome.skipped.is_none() && outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
+        "the families followed {target}: {outcome:?}"
+    );
+    Ok(())
+}
+
+/// GET `uri` with the switch off and on; the status and body must be equal, `meta.as_of`
+/// excepted. Returns the status and the switch-off body.
+async fn assert_switch_differential(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<(StatusCode, Value)> {
+    let mut answers = Vec::new();
+    for on in [false, true] {
+        let response = bigname_storage::publication_source::with_serve_from_families(
+            on,
+            v2_get_response(database, uri),
+        )
+        .await?;
+        let status = response.status();
+        let mut body: Value = read_json(response).await?;
+        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut) {
+            meta.remove("as_of");
+        }
+        answers.push((status, body));
+    }
+    let on = answers.pop().expect("switch-on answer");
+    let off = answers.pop().expect("switch-off answer");
+    assert_eq!(
+        (off.0, &off.1),
+        (on.0, &on.1),
+        "{uri}: the switch-off answer (left) and the switch-on answer (right) differ"
+    );
+    Ok(off)
+}
+
+/// GET `uri` with the switch on after emptying `served_tables`: the answer must not change, so
+/// the route reads the families rather than the served rows.
+async fn assert_switch_on_ignores_served_tables(
+    database: &TestDatabase,
+    uri: &str,
+    served_tables: &[&str],
+) -> Result<()> {
+    let read = || async {
+        let response = bigname_storage::publication_source::with_serve_from_families(
+            true,
+            v2_get_response(database, uri),
+        )
+        .await?;
+        let status = response.status();
+        let mut body: Value = read_json(response).await?;
+        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut) {
+            meta.remove("as_of");
+        }
+        anyhow::Ok((status, body))
+    };
+    let before = read().await?;
+    // Each test owns its database, so nothing is restored.
+    for table in served_tables {
+        sqlx::query(&format!("DELETE FROM bigname_phase.{table}"))
+            .execute(&database.pool)
+            .await?;
+    }
+    let after = read().await?;
+    assert_eq!(
+        (before.0, &before.1),
+        (after.0, &after.1),
+        "{uri}: the switch-on answer changed when {served_tables:?} were emptied"
+    );
+    Ok(())
+}
+
+/// Walk every page of `uri` (which must carry `page_size`) with the switch off and on, following
+/// each side's own cursors; each page's status, data and `has_more` must be equal. A cursor binds
+/// its side's served generation, so the cursors themselves differ. Returns the switch-off pages.
+async fn assert_switch_differential_pages(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Vec<Value>> {
+    assert_switch_differential_pages_in(database, uri, "").await
+}
+
+/// `assert_switch_differential_pages` for a page nested in the body: `holder` is the JSON pointer
+/// of the object carrying `data` and `page` (the empty pointer for the envelope itself).
+async fn assert_switch_differential_pages_in(
+    database: &TestDatabase,
+    uri: &str,
+    holder: &str,
+) -> Result<Vec<Value>> {
+    let mut sides = Vec::new();
+    for on in [false, true] {
+        let mut pages = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let page_uri = match &next {
+                None => uri.to_owned(),
+                Some(cursor) => format!("{uri}&cursor={cursor}"),
+            };
+            let response = bigname_storage::publication_source::with_serve_from_families(
+                on,
+                v2_get_response(database, &page_uri),
+            )
+            .await?;
+            let status = response.status();
+            let body: Value = read_json(response).await?;
+            anyhow::ensure!(status == StatusCode::OK, "{page_uri} (switch {on}): {body:#}");
+            let held = body
+                .pointer(holder)
+                .with_context(|| format!("{page_uri}: no {holder} in {body:#}"))?;
+            next = held["page"]["next_cursor"].as_str().map(str::to_owned);
+            pages.push(json!({"data": held["data"], "has_more": held["page"]["has_more"]}));
+            if next.is_none() {
+                break;
+            }
+            anyhow::ensure!(pages.len() < 100, "{uri}: too many pages");
+        }
+        sides.push(pages);
+    }
+    assert_eq!(
+        sides[0], sides[1],
+        "{uri}: the switch-off pages (left) and the switch-on pages (right) differ"
+    );
+    Ok(sides.swap_remove(0))
+}

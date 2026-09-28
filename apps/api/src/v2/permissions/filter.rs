@@ -286,7 +286,10 @@ async fn control_resource_for_registration(
     for logical_name_id in logical_name_ids {
         let row = bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
-            .map_err(failed)?;
+            .map_err(crate::v2::name_rows_error(
+                crate::v2::SnapshotReadResource::Resource,
+                failed,
+            ))?;
         let Some(row) = row.as_ref().filter(|row| registration_row(row)) else {
             continue;
         };

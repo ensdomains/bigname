@@ -891,6 +891,63 @@ its post-call guard still compares the project row's generation. The lookup
 engine keeps reading the served tables, and its database guard moves to the
 marker in the flip slice; no lookup input moves to the families before that.
 
+With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
+instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
+diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
+resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
+whole. The following routes keep their own pages on the served tables until a
+later step 7b slice moves them, and take only the name rows they join from
+composed rows: `GET /v1/names/{name}/subnames` (the parent and each child's
+registration), `GET /v1/registries/{chain_id}/{address}/labels` (each child's
+registration), `GET /v1/names/{name}/history` (whether the name exists),
+`GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
+name of each registration), `GET /v1/addresses/{address}/names` (each name's
+registration, `relation=resolves_to` included), `GET /v1/events`,
+`GET /v1/diagnostics/events` and `GET /v1/addresses/{address}/history` (each
+event's name), and the primary-name claim gate of
+`GET /v1/addresses/{address}/primary-name`. Their bodies are meant to be
+identical to the served ones. Each composed read sees one committed family
+block, so a row never mixes two blocks. A composed row describes the publication
+and has no older position of its own, so an `at` below the publication answers
+`409 stale` with "requested snapshot is not available for name", the answer
+served rows give once Project has republished them. While a family rebuild is
+in flight (the marker is not `live`, carries another build's hash, or sits on a
+block a reorg orphaned) no composed row is served: a route whose fence has not
+already refused answers `409 stale` with "requested snapshot is not available
+for" its resource, including when the rebuild starts after the fence passed. A
+composed read that finds no name to compose (a name with no surface, an empty
+bound-name or expiring walk) still reads its chains' markers, so a rebuild
+answers `409 stale` rather than `404` or an empty page, and the expiring listing
+composes only names of the requested namespace, so another namespace's rebuild
+does not refuse it.
+
+Composed names also refuse a publication while Interpret or Project has a redo
+whose range overlaps it. Interpret's normalization-flag recompute can change a
+surface's visibility before the required Project replay publishes the new name
+state; finishing Interpret alone does not make the old publication readable.
+The composed reader and the collection's final generation check both enforce
+this rule. Diagnostic reads that do not compose published names keep their
+existing snapshot selection. Event diagnostics still return their audit rows
+when the name publication is unavailable, omitting the optional name attachment.
+Resolver bound-name pages require the selected family publication even when the
+page is empty, so an older `at` answers
+`409 stale` rather than reporting current absence as historical absence.
+
+Two differences remain with the switch on. A bound-name listing still decides
+whether the resolver serves bound names at all from the served resolver row
+(`resolver_current`'s bindings status); that gate moves with the resolver
+reads. And after an ENSv1 registry `Transfer` to the zero address leaves a
+name's registry node ownerless (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f),
+the served name row keeps its earlier state
+(unsupported, so unlisted) until Project next rebuilds the served tables, while
+the composed row reads the node at once (unregistered but projected), so
+`GET /v1/search` can list with the switch on a name it omits with the switch
+off. A composed row also does not yet carry the declared resolution topology
+(`declared_summary.topology`), which the records route's verified lookup
+admission and avatar readback read; that moves with the record inventories.
+
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
 Projection publication is incremental, so an unchanged row retains the target of

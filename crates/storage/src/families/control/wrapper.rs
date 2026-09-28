@@ -4,7 +4,7 @@
 //! request time.
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::PgExecutor;
 
 use super::rows::WrapperRow;
 
@@ -114,7 +114,7 @@ pub fn restrictions(row: &WrapperRow, clock_seconds: i64) -> Option<Value> {
 
 /// The F2b rows of `resource_ids`.
 pub async fn load_wrapper_rows(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     chain_id: &str,
     resource_ids: &[String],
 ) -> Result<Vec<WrapperRow>> {
@@ -128,7 +128,7 @@ pub async fn load_wrapper_rows(
     )
     .bind(chain_id)
     .bind(resource_ids)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .context("failed to load the wrapper family rows")?;
     Ok(rows.iter().filter_map(WrapperRow::from_row).collect())

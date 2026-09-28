@@ -5,7 +5,10 @@
 //! opened it (state-derived, authority kind, and for a NameWrapper binding the registrar lease it
 //! recorded, the node, transaction and emitter; name_authority/stage.rs), and for a
 //! registry-only binding the binding it replaced and the lease that stands for it, to begin with
-//! the replaced binding's resource (stage.rs, `registry_only_handoffs`).
+//! the replaced binding's resource (stage.rs, `registry_only_handoffs`). A name also keeps the
+//! whole-history facts no other family holds (`history.rs`): its first event's block and time,
+//! whether ENSv2 events name it, and the authority arms its authority events vote.
+mod history;
 mod lease;
 
 use std::collections::BTreeMap;
@@ -43,7 +46,8 @@ pub(super) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     names(transaction, context, events, rows).await?;
-    candidates(transaction, context, events, rows).await
+    candidates(transaction, context, events, rows).await?;
+    history::apply(transaction, context, events, rows).await
 }
 
 /// The name-state and binding-candidate keys one block's events and bindings name.
@@ -55,6 +59,7 @@ pub(super) fn preload(chain: &Value, events: &[BlockEvent], bindings: &[Row], in
             .map(|(event, name)| name_key(chain, event, name)),
     );
     into.add(&tables::BINDING_CANDIDATE, bindings.iter().map(binding_key));
+    history::preload(chain, events, into);
 }
 
 /// The migrations and epochs of the block, with the name each names.

@@ -11,14 +11,13 @@
 //! whose only expiry is in one of those forms is outside this listing by design.
 
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
+use sqlx::{PgExecutor, PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
 
 use super::list::{
     NAME_CURRENT_LIST_SELECT, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
-    decode_name_current_list_row, name_current_list_cursor_from_row,
-    push_filtered_name_current_cte_with, push_name_current_list_cursor_after,
-    push_name_current_list_order,
+    decode_name_current_list_row, name_current_list_cursor_from_row, push_filtered_name_list_cte,
+    push_name_current_list_cursor_after, push_name_current_list_order,
 };
 use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
 
@@ -45,6 +44,19 @@ pub async fn load_name_current_expiring_page(
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
+) -> Result<NameCurrentListPage> {
+    expiring_page_from(pool, filter, order, cursor, page_size, None).await
+}
+
+/// The expiring page over the served rows, or with `composed` over those rows instead (see
+/// `list_page_from`). One statement, so the composed reader runs it inside its read snapshot.
+pub(crate) async fn expiring_page_from(
+    executor: impl PgExecutor<'_>,
+    filter: &NameCurrentExpiringFilter,
+    order: NameCurrentListOrder,
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+    composed: Option<&serde_json::Value>,
 ) -> Result<NameCurrentListPage> {
     if filter.expires_after.is_none() && filter.expires_before.is_none() {
         bail!("name_current expiring page requires an expires_after or expires_before bound");
@@ -85,7 +97,7 @@ pub async fn load_name_current_expiring_page(
         .map(|time| (time.unix_timestamp() + i64::from(time.nanosecond() != 0)) as f64);
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte_with(&mut builder, &list_filter, |builder| {
+    push_filtered_name_list_cte(&mut builder, &list_filter, composed, |builder| {
         builder.push(" AND JSONB_TYPEOF(nc.declared_summary #> ");
         builder.push(REGISTRATION_EXPIRY_JSON_PATH);
         builder.push(") = 'number'");
@@ -126,7 +138,7 @@ pub async fn load_name_current_expiring_page(
 
     let rows = builder
         .build()
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .with_context(|| format!("failed to load name_current expiring page for {filter:?}"))?;
     let mut rows = rows

@@ -187,6 +187,37 @@ fn invalid_at_error() -> V2Error {
     V2Error::invalid_input("at is invalid")
 }
 
+/// The error mapper for a read of name rows (`load_name_current` and its batch readers): a
+/// composed read whose family publication is not servable, a family rebuild in flight under the
+/// publication switch, answers the stale 409 a fence gives
+/// (`requested snapshot is not available for ...`); any other failure is `internal`'s answer.
+pub(crate) fn name_rows_error(
+    resource: SnapshotReadResource,
+    internal: impl FnOnce(anyhow::Error) -> V2Error,
+) -> impl FnOnce(anyhow::Error) -> V2Error {
+    move |error| {
+        if bigname_storage::families::name::is_publication_unavailable(&error) {
+            warn!(
+                service = "api",
+                resource = %resource.label(),
+                error = %error,
+                "composed name rows are not servable"
+            );
+            return V2Error::stale(stale_snapshot_message(resource));
+        }
+        internal(error)
+    }
+}
+
+/// [`name_rows_error`]'s stale 409 for a caller answering an [`ApiError`].
+pub(crate) fn stale_name_rows_api_error(resource: SnapshotReadResource) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "stale",
+        message: stale_snapshot_message(resource),
+    }
+}
+
 fn stale_snapshot_message(resource: SnapshotReadResource) -> String {
     format!(
         "requested snapshot is not available for {}",
@@ -435,6 +466,33 @@ mod tests {
         assert_eq!(
             internal.envelope().error.message,
             "failed to select requested snapshot for name records"
+        );
+    }
+
+    #[test]
+    fn unservable_composed_name_rows_answer_the_stale_409() {
+        let unavailable = anyhow::Error::new(
+            bigname_storage::families::name::FamilyPublicationUnavailable {
+                chain_id: "ethereum-mainnet".to_owned(),
+            },
+        )
+        .context("the composed read of ens:alpha");
+        let mapped = name_rows_error(SnapshotReadResource::Name, |_| {
+            V2Error::internal_error("failed to load subnames")
+        })(unavailable);
+        assert_eq!(mapped.code(), ErrorCode::Stale);
+        assert_eq!(
+            mapped.envelope().error.message,
+            "requested snapshot is not available for name"
+        );
+        let other = name_rows_error(SnapshotReadResource::Name, |_| {
+            V2Error::internal_error("failed to load subnames")
+        })(anyhow::anyhow!("connection reset"));
+        assert_eq!(other.code(), ErrorCode::InternalError);
+        let api = stale_name_rows_api_error(SnapshotReadResource::Name);
+        assert_eq!(
+            (api.status, api.code),
+            (axum::http::StatusCode::CONFLICT, "stale")
         );
     }
 

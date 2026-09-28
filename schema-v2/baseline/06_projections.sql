@@ -2053,6 +2053,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
     PRIMARY KEY (chain_id, namespace, node),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_registry_pointer_resolver_idx ON project_registry_pointer (chain_id, resolver_address);
 COMMENT ON TABLE project_registry_pointer IS
     'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS
@@ -2136,6 +2137,45 @@ COMMENT ON COLUMN project_resource_pointer.boundary_position IS
     'This value is that boundary event''s position.';
 COMMENT ON COLUMN project_resource_pointer.boundary_block_timestamp IS
     'This value is that boundary event''s block timestamp.';
+
+CREATE TABLE IF NOT EXISTS project_named_resource_pointer (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    resolver_address text,
+    source_family text NOT NULL,
+    PRIMARY KEY (chain_id, resource_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+CREATE INDEX IF NOT EXISTS project_named_resource_pointer_resolver_idx
+    ON project_named_resource_pointer (chain_id, resolver_address, logical_name_id, resource_id);
+COMMENT ON TABLE project_named_resource_pointer IS
+    'Project-owned named resource resolver pointer of family F5: the latest named ResolverChanged per resource and logical name in canonical event order, including clears. An unnamed pointer or an event naming another name leaves this row unchanged. The composed name reader loads exact resource/name pairs; bound-name discovery walks retained pointer keys by resolver instead of normalized event history. Released names keep their pointer facts and are filtered by the composed binding admission.';
+COMMENT ON COLUMN project_named_resource_pointer.chain_id IS
+    'This value is the chain whose events wrote the row.';
+COMMENT ON COLUMN project_named_resource_pointer.resource_id IS
+    'This value is the resource named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.logical_name_id IS
+    'This value is the logical name named by the event.';
+COMMENT ON COLUMN project_named_resource_pointer.block_number IS
+    'This value is the block number of the latest named ResolverChanged for the key.';
+COMMENT ON COLUMN project_named_resource_pointer.transaction_index IS
+    'This value is the transaction index of that event; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_named_resource_pointer.log_index IS
+    'This value is the log index of that event; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_named_resource_pointer.event_identity IS
+    'This value is that event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_named_resource_pointer.normalized_event_id IS
+    'This value names that event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_named_resource_pointer.resolver_address IS
+    'This value is the lower-cased resolver from that event, including null, empty and zero-address clears.';
+COMMENT ON COLUMN project_named_resource_pointer.source_family IS
+    'This value is that event''s source family.';
 
 CREATE TABLE IF NOT EXISTS project_node_record_partition (
     chain_id text NOT NULL,
@@ -3078,3 +3118,57 @@ COMMENT ON COLUMN project_address_record_id_index.record_id IS
     'This value is the record id.';
 CREATE INDEX IF NOT EXISTS project_address_record_id_index_record_idx
     ON project_address_record_id_index (chain_id, resolver_address, record_id);
+
+CREATE TABLE IF NOT EXISTS project_name_history (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    namespace text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    first_block_number bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    has_ens_v2_events boolean NOT NULL,
+    event_arms jsonb NOT NULL,
+    PRIMARY KEY (chain_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_name_history IS
+    'Project-owned whole-history facts of family F1: per name, the block and time of the first readable event naming it, whether ENSv2 events name it, and the authority arms its authority events vote. Written once when the first event naming the name is applied and changed only when a later event adds a fact; a row leaves only when undo removes the block that created it. The composed name reader reads it for created_at, the coverage of a name with no selected arm, and the arm of a name with no open binding.';
+COMMENT ON COLUMN project_name_history.chain_id IS
+    'This value is the chain whose events wrote the row; each chain keeps its own row for a name.';
+COMMENT ON COLUMN project_name_history.logical_name_id IS
+    'This value is the name.';
+COMMENT ON COLUMN project_name_history.namespace IS
+    'This value is the namespace of the first event naming the name.';
+COMMENT ON COLUMN project_name_history.block_number IS
+    'This value is the block number of the event that last changed the row.';
+COMMENT ON COLUMN project_name_history.transaction_index IS
+    'This value is the transaction index of the event that last changed the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_name_history.log_index IS
+    'This value is the log index of the event that last changed the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_name_history.event_identity IS
+    'This value is the event identity of the event that last changed the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_name_history.normalized_event_id IS
+    'This value names the event that last changed the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_name_history.first_block_number IS
+    'This value is the block of the first readable event naming the name.';
+COMMENT ON COLUMN project_name_history.created_at IS
+    'This value is the block time of the first readable event naming the name, which the name row reports as registration.created_at (name_current/build.sql, the created lateral).';
+COMMENT ON COLUMN project_name_history.has_ens_v2_events IS
+    'This value is whether any event naming the name came from the ENSv2 root, registry or registrar families (name_current/build.sql, the corpus lateral).';
+COMMENT ON COLUMN project_name_history.event_arms IS
+    'This value is the sorted array of authority arms (ens_v1, ens_v2, basenames) voted by the name''s registration, renewal, release, expiry change, authority transfer, token transfer and authority epoch events (name_authority/build.sql, event_arms), without the ENSv2 root and registry expiry changes, which never vote, and releases, which the reader decides against the binding candidates.';
+
+-- The composed expiring listing's candidate indexes (TYR-36 step 7b).
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx
+    ON project_lifecycle_event (expiry_seconds)
+    WHERE expiry_seconds IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_inexact_expiry_idx
+    ON project_lifecycle_event (chain_id)
+    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
+CREATE INDEX IF NOT EXISTS project_wrapper_state_expiry_idx
+    ON project_wrapper_state (expiry_seconds)
+    WHERE expiry_seconds IS NOT NULL;

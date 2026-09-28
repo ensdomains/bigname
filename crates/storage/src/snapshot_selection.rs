@@ -15,6 +15,7 @@ pub use project::{
     CURRENT_PROJECT_PUBLICATION_JOIN, PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
     load_served_project_generation,
 };
+pub(crate) use project::{family_inputs_not_in_redo, servable_family_marker};
 pub use selection::{
     SelectedSnapshot, SnapshotAt, SnapshotProjectionRead, SnapshotSelectorInput,
     ensure_projection_chain_positions_match, resolve_exact_name_snapshot_selection,

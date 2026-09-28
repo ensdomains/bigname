@@ -4,6 +4,9 @@
 //! compared. The `/aliases` alias-path binding arm over F5 has no fixture: no producer writes a
 //! `resolver_alias_path` binding (the ENSv2 resolver adapter observes those names unbound).
 #[allow(dead_code)]
+#[path = "project_end_to_end/name_shadow.rs"]
+mod name_shadow;
+#[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
 #[allow(dead_code)]

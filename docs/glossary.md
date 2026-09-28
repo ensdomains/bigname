@@ -2517,13 +2517,13 @@ the reducer under `crates/project/src/families/` that writes them:
 
 | Label | Tables | Reducer |
 | --- | --- | --- |
-| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F1, name identity | `project_name_state`, `project_binding_candidate`, `project_name_history` | `identity.rs` |
 | F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
 | F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
 | F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
 | F3, resolver classification | `project_resolver_classification` | `classification.rs` |
 | F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
-| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer`, `project_named_resource_pointer` | `resolver.rs` |
 | F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
 | F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
 | F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
@@ -2570,6 +2570,22 @@ It exists only while the served reads move to the
 [owned key families](#owned-key-family) ahead of the
 [per-block publication](#per-block-publication), and goes with the served
 batch.
+
+## Composed name row
+
+a `name_current`-shaped row that `bigname_storage::families::name` builds for
+one name at read, from the [owned key families](#owned-key-family) and the
+identity input tables, with no stored per-name row: the selection among the
+name's binding candidates, its registration and control, NameWrapper state,
+serving pointer and resolver, history heads and coverage. It describes the
+[family marker](#family-marker)'s publication. With the
+[publication switch](#publication-switch) on, the names group serves these rows
+and every route that joins name rows takes them from here
+([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
+block, and none is served unless the marker is servable by the publication
+fence's rule (`live`, this build's, on the readable lineage). The name
+comparison of the fixture-corpus harness checks every composed row against the
+served row.
 
 ## Family undo journal
 
