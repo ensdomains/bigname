@@ -181,7 +181,7 @@ pub async fn contract_instance_stable_keys(
     Ok(rows.into_iter().collect())
 }
 
-fn normalize_contract_instance_ids(
+pub fn normalize_contract_instance_ids(
     value: &mut Value,
     contract_instances: &BTreeMap<String, String>,
 ) {

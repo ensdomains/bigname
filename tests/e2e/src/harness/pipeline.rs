@@ -8,6 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use tokio::process::{Child, Command};
 
+use super::families;
+
 type ProfileSnapshot = Vec<(PathBuf, Vec<u8>)>;
 const E2E_MANIFEST_PROFILE_ENV: &str = "BIGNAME_E2E_MANIFEST_PROFILE_ROOT";
 const RUNTIME_PROFILE_MIRROR_PREFIX: &str = ".bigname-e2e-runtime-profile-";
@@ -85,50 +87,6 @@ impl Drop for ProfileRunnerBinary {
         }
     }
 }
-type NameProjectionRow = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Value,
-    String,
-    Option<String>,
-    Value,
-    Value,
-    Value,
-);
-type RecordInventoryRow = (Value, Value, Option<Value>, Value, String, Option<String>);
-type ChildProjectionRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Value,
-    Value,
-    Value,
-);
-type AddressNameProjectionRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-    Value,
-    Value,
-    Value,
-);
-type PrimaryNameProjectionRow = (String, Option<String>, bool, Option<String>, Value);
 
 static PROCESS_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -1666,9 +1624,10 @@ pub async fn phase_runner_replay_current_projections(
     Ok("phase-runner projection replay completed".to_owned())
 }
 
-/// Direct schema-v2 projection reader. The route-shaped methods preserve
-/// recognizable scenario assertions; no API process starts and no public API
-/// behavior is implied.
+/// Route-shaped reader over the published Project families. Each route composes
+/// its response from the storage family readers the API serves from
+/// (`harness::families`), keeping recognizable scenario assertions; no API
+/// process starts and no public API response shape is implied.
 pub struct ProjectionReader {
     pool: sqlx::PgPool,
 }
@@ -1745,97 +1704,50 @@ impl ProjectionReader {
         namespace: &str,
         name: &str,
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let row: Option<NameProjectionRow> = sqlx::query_as(
-            "SELECT logical_name_id, namespace, raw_name, namehash,
-                    resource_id::text, token_lineage_id::text, binding_kind,
-                    declared_summary, support_status, unsupported_reason,
-                    provenance, chain_positions, canonicality_summary
-             FROM name_current
-             WHERE namespace = $1 AND raw_name = $2",
-        )
-        .bind(namespace)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((
-            logical_name_id,
-            namespace,
-            raw_name,
-            namehash,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            mut declared_state,
-            support_status,
-            unsupported_reason,
-            provenance,
-            chain_positions,
-            canonicality_summary,
-        )) = row
-        else {
-            return Ok((
-                reqwest::StatusCode::NOT_FOUND,
-                serde_json::json!({"error":{"code":"not_found"}}),
-            ));
+        let Some(row) = families::name_by_raw(&self.pool, namespace, name).await? else {
+            return Ok(not_found());
         };
-
-        if let Some(resource_id) = &resource_id {
-            let inventory: Option<RecordInventoryRow> = sqlx::query_as(
-                "SELECT selectors, unsupported_families, last_change,
-                            record_version_boundary, support_status, unsupported_reason
-                     FROM record_inventory_current
-                     WHERE resource_id = $1::uuid
-                     ORDER BY inserted_at DESC LIMIT 1",
-            )
-            .bind(resource_id)
-            .fetch_optional(&self.pool)
-            .await?;
-            if let Some((
-                selectors,
-                unsupported_families,
-                last_change,
-                record_version_boundary,
-                inventory_support,
-                inventory_reason,
-            )) = inventory
-                && let Some(object) = declared_state.as_object_mut()
-            {
-                object.insert(
-                    "record_inventory".to_owned(),
-                    serde_json::json!({
-                        "selectors": selectors,
-                        "unsupported_families": unsupported_families,
-                        "last_change": last_change,
-                        "record_version_boundary": record_version_boundary,
-                        "support_status": inventory_support,
-                        "unsupported_reason": inventory_reason,
-                    }),
-                );
-            }
+        let mut declared_state = row.declared_summary.clone();
+        if let Some(resource_id) = row.resource_id
+            && let Some(inventory) = families::record_inventory(&self.pool, resource_id).await?
+            && let Some(object) = declared_state.as_object_mut()
+        {
+            let (support_status, unsupported_reason) = inventory_support(&inventory.coverage);
+            object.insert(
+                "record_inventory".to_owned(),
+                serde_json::json!({
+                    "selectors": inventory.selectors,
+                    "unsupported_families": inventory.unsupported_families,
+                    "last_change": inventory.last_change,
+                    "record_version_boundary": inventory.record_version_boundary,
+                    "support_status": support_status,
+                    "unsupported_reason": unsupported_reason,
+                }),
+            );
         }
         let coverage = declared_state
             .get("coverage")
             .cloned()
-            .context("name_current.declared_summary omitted persisted coverage")?;
+            .context("the composed declared summary omitted its coverage")?;
         Ok((
             reqwest::StatusCode::OK,
             serde_json::json!({
                 "data": {
-                    "normalized_name": raw_name,
-                    "logical_name_id": logical_name_id,
-                    "namespace": namespace,
-                    "namehash": namehash,
-                    "resource_id": resource_id,
-                    "token_lineage_id": token_lineage_id,
-                    "binding_kind": binding_kind,
+                    "normalized_name": row.normalized_name,
+                    "logical_name_id": row.logical_name_id,
+                    "namespace": row.namespace,
+                    "namehash": row.namehash,
+                    "resource_id": row.resource_id.map(|id| id.to_string()),
+                    "token_lineage_id": row.token_lineage_id.map(|id| id.to_string()),
+                    "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
                 },
                 "declared_state": declared_state,
                 "coverage": coverage,
-                "support_status": support_status,
-                "unsupported_reason": unsupported_reason,
-                "provenance": provenance,
-                "chain_positions": chain_positions,
-                "canonicality_summary": canonicality_summary,
+                "support_status": families::support_status(&row),
+                "unsupported_reason": row.coverage.get("unsupported_reason").cloned(),
+                "provenance": row.provenance,
+                "chain_positions": row.chain_positions,
+                "canonicality_summary": row.canonicality_summary,
             }),
         ))
     }
@@ -1846,49 +1758,34 @@ impl ProjectionReader {
         name: &str,
         path: &str,
     ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
-        let current: Option<(Option<String>, Option<String>, Value)> = sqlx::query_as(
-            "SELECT resource_id::text, serving_resource_id::text, declared_summary
-             FROM name_current WHERE namespace = $1 AND raw_name = $2",
-        )
-        .bind(namespace)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((resource_id, serving_resource_id, declared_summary)) = current else {
-            return Ok((
-                reqwest::StatusCode::NOT_FOUND,
-                serde_json::json!({"error":{"code":"not_found"}}),
-            ));
+        let Some(row) = families::name_by_raw(&self.pool, namespace, name).await? else {
+            return Ok(not_found());
         };
-        let resolver_address = declared_summary
+        let resolver_address = row
+            .declared_summary
             .pointer("/resolver/address")
             .cloned()
             .unwrap_or(Value::Null);
-        let inventory: Option<(Value, Value, Value, String, Option<String>)> =
-            if let Some(resource_id) = serving_resource_id.or(resource_id) {
-                sqlx::query_as(
-                    "SELECT entries, selectors, record_version_boundary,
-                            support_status, unsupported_reason
-                     FROM record_inventory_current
-                     WHERE resource_id = $1::uuid
-                     ORDER BY inserted_at DESC LIMIT 1",
-                )
-                .bind(resource_id)
-                .fetch_optional(&self.pool)
-                .await?
-            } else {
-                None
-            };
-        let (entries, selectors, boundary, support_status, unsupported_reason) = inventory
-            .unwrap_or_else(|| {
-                (
+        let (entries, selectors, boundary, support_status, unsupported_reason) =
+            match families::name_record_inventory(&self.pool, &row).await? {
+                Some(inventory) => {
+                    let (status, reason) = inventory_support(&inventory.coverage);
+                    (
+                        inventory.entries,
+                        inventory.selectors,
+                        inventory.record_version_boundary,
+                        status.to_owned(),
+                        reason,
+                    )
+                }
+                None => (
                     serde_json::json!([]),
                     serde_json::json!([]),
                     serde_json::json!({}),
                     "unsupported".to_owned(),
-                    Some("name_has_no_current_resource".to_owned()),
-                )
-            });
+                    Some(Value::String("name_has_no_current_resource".to_owned())),
+                ),
+            };
 
         let mut coin_addresses = serde_json::Map::new();
         let mut text_records = serde_json::Map::new();
@@ -1959,62 +1856,27 @@ impl ProjectionReader {
                 serde_json::json!({"error":{"code":"invalid_input"}}),
             ));
         }
-        let parent_id: Option<String> = sqlx::query_scalar(
-            "SELECT logical_name_id FROM name_current
-             WHERE namespace = $1 AND raw_name = $2",
-        )
-        .bind(namespace)
-        .bind(parent)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(parent_id) = parent_id else {
-            return Ok((
-                reqwest::StatusCode::NOT_FOUND,
-                serde_json::json!({"error":{"code":"not_found"}}),
-            ));
+        let Some(parent_row) = families::name_by_raw(&self.pool, namespace, parent).await? else {
+            return Ok(not_found());
         };
-        let rows: Vec<ChildProjectionRow> = sqlx::query_as(
-            "SELECT child_logical_name_id, decoded_name, decoded_label,
-                    namehash, labelhash, owner, registrant, provenance,
-                    chain_positions, canonicality_summary
-             FROM children_current
-             WHERE parent_logical_name_id = $1
-             ORDER BY decoded_name NULLS LAST, child_logical_name_id",
-        )
-        .bind(parent_id)
-        .fetch_all(&self.pool)
-        .await?;
-        let data = rows
+        let data = families::children(&self.pool, &parent_row.logical_name_id)
+            .await?
             .into_iter()
-            .map(
-                |(
-                    logical_name_id,
-                    decoded_name,
-                    decoded_label,
-                    namehash,
-                    labelhash,
-                    owner,
-                    registrant,
-                    provenance,
-                    chain_positions,
-                    canonicality_summary,
-                )| {
-                    let normalized_name =
-                        decoded_name.unwrap_or_else(|| format!("[{labelhash}].{parent}"));
-                    serde_json::json!({
-                        "logical_name_id": logical_name_id,
-                        "normalized_name": normalized_name,
-                        "label": decoded_label,
-                        "namehash": namehash,
-                        "labelhash": labelhash,
-                        "owner": owner,
-                        "registrant": registrant,
-                        "provenance": provenance,
-                        "chain_positions": chain_positions,
-                        "canonicality_summary": canonicality_summary,
-                    })
-                },
-            )
+            .map(|child| {
+                let label = (!child.canonical_display_name.starts_with('['))
+                    .then(|| child.canonical_display_name.split('.').next())
+                    .flatten()
+                    .map(str::to_owned);
+                serde_json::json!({
+                    "logical_name_id": child.child_logical_name_id,
+                    "normalized_name": child.canonical_display_name,
+                    "label": label,
+                    "namehash": child.namehash,
+                    "labelhash": child.labelhash,
+                    "owner": child.owner,
+                    "registrant": child.registrant,
+                })
+            })
             .collect::<Vec<_>>();
         Ok((reqwest::StatusCode::OK, serde_json::json!({"data": data})))
     }
@@ -2027,60 +1889,36 @@ impl ProjectionReader {
         let query = query_parameters(path);
         let namespace = query.get("namespace").copied();
         let relation = query.get("relation").copied();
-        let rows: Vec<AddressNameProjectionRow> = sqlx::query_as(
-            "SELECT logical_name_id, relation, namespace, raw_name, namehash,
-                    resource_id::text, token_lineage_id::text, binding_kind,
-                    support_status, unsupported_reason, provenance,
-                    chain_positions, canonicality_summary
-             FROM address_names_current
-             WHERE lower(address) = lower($1)
-               AND ($2::text IS NULL OR namespace = $2)
-               AND ($3::text IS NULL OR relation = $3)
-             ORDER BY raw_name, relation",
-        )
-        .bind(address)
-        .bind(namespace)
-        .bind(relation)
-        .fetch_all(&self.pool)
-        .await?;
-        let data = rows
-            .into_iter()
-            .map(
-                |(
-                    logical_name_id,
-                    relation,
-                    namespace,
-                    raw_name,
-                    namehash,
-                    resource_id,
-                    token_lineage_id,
-                    binding_kind,
-                    support_status,
-                    unsupported_reason,
-                    provenance,
-                    chain_positions,
-                    canonicality_summary,
-                )| {
-                    serde_json::json!({
-                        "logical_name_id": logical_name_id,
-                        "normalized_name": raw_name,
-                        "namespace": namespace,
-                        "namehash": namehash,
-                        "resource_id": resource_id,
-                        "token_lineage_id": token_lineage_id,
-                        "binding_kind": binding_kind,
-                        "relation": relation,
-                        "relation_facets": [relation],
-                        "support_status": support_status,
-                        "unsupported_reason": unsupported_reason,
-                        "provenance": provenance,
-                        "chain_positions": chain_positions,
-                        "canonicality_summary": canonicality_summary,
-                    })
-                },
-            )
-            .collect::<Vec<_>>();
-        Ok((reqwest::StatusCode::OK, serde_json::json!({"data": data})))
+        let mut rows = Vec::new();
+        for entry in families::address_names(&self.pool, address, namespace).await? {
+            for entry_relation in &entry.relations {
+                let entry_relation = entry_relation.as_str();
+                if relation.is_some_and(|relation| relation != entry_relation) {
+                    continue;
+                }
+                rows.push(serde_json::json!({
+                    "logical_name_id": entry.logical_name_id,
+                    "normalized_name": entry.normalized_name,
+                    "namespace": entry.namespace,
+                    "namehash": entry.namehash,
+                    "resource_id": entry.resource_id.to_string(),
+                    "token_lineage_id": entry.token_lineage_id.map(|id| id.to_string()),
+                    "binding_kind": entry.binding_kind.as_str(),
+                    "relation": entry_relation,
+                    "relation_facets": [entry_relation],
+                    "provenance": entry.provenance,
+                    "chain_positions": entry.chain_positions,
+                    "canonicality_summary": entry.canonicality_summary,
+                }));
+            }
+        }
+        rows.sort_by(|left, right| {
+            (left["normalized_name"].as_str(), left["relation"].as_str()).cmp(&(
+                right["normalized_name"].as_str(),
+                right["relation"].as_str(),
+            ))
+        });
+        Ok((reqwest::StatusCode::OK, serde_json::json!({"data": rows})))
     }
 
     async fn primary_name_projection(
@@ -2094,29 +1932,18 @@ impl ProjectionReader {
         let mode = query.get("mode").copied().unwrap_or("declared");
         anyhow::ensure!(
             mode == "declared",
-            "ProjectionReader exposes only persisted declared primary-name state; mode={mode} requires API lookup coverage"
+            "ProjectionReader exposes only published declared primary-name state; mode={mode} requires API lookup coverage"
         );
-        let row: Option<PrimaryNameProjectionRow> = sqlx::query_as(
-            "SELECT claim_status, raw_claim_name, claim_name_is_normalized,
-                    unsupported_reason, claim_provenance
-             FROM primary_names_current
-             WHERE lower(address) = lower($1) AND namespace = $2 AND coin_type = $3",
-        )
-        .bind(address)
-        .bind(namespace)
-        .bind(coin_type)
-        .fetch_optional(&self.pool)
-        .await?;
-        let (status, raw_name, normalized, unsupported_reason, provenance) =
-            row.unwrap_or_else(|| {
-                (
-                    "not_found".to_owned(),
-                    None,
-                    false,
-                    None,
-                    serde_json::json!({}),
-                )
-            });
+        let snapshot = families::primary_name(&self.pool, address, namespace, coin_type).await?;
+        let (status, raw_name, normalized, provenance) = match snapshot {
+            Some(snapshot) => (
+                snapshot.row.claim_status.as_str(),
+                snapshot.row.raw_claim_name,
+                snapshot.claim_name_is_normalized,
+                snapshot.row.claim_provenance,
+            ),
+            None => ("not_found", None, false, serde_json::json!({})),
+        };
         let mut claimed = serde_json::json!({
             "status": status,
             "provenance": provenance,
@@ -2125,9 +1952,6 @@ impl ProjectionReader {
             claimed["name"] = raw_name.clone().map(Value::String).unwrap_or(Value::Null);
         } else if status == "invalid_name" {
             claimed["raw_claim_name"] = raw_name.clone().map(Value::String).unwrap_or(Value::Null);
-        }
-        if let Some(reason) = unsupported_reason {
-            claimed["unsupported_reason"] = Value::String(reason);
         }
         claimed["claim_name_is_normalized"] = Value::Bool(normalized);
         Ok((
@@ -2169,6 +1993,22 @@ impl ProjectionReader {
             reqwest::StatusCode::OK,
             serde_json::json!({"declared_state":{"manifests":manifests}}),
         ))
+    }
+}
+
+fn not_found() -> (reqwest::StatusCode, Value) {
+    (
+        reqwest::StatusCode::NOT_FOUND,
+        serde_json::json!({"error":{"code":"not_found"}}),
+    )
+}
+
+/// The record inventory's coarse support and reason, from its coverage.
+fn inventory_support(coverage: &Value) -> (&'static str, Option<Value>) {
+    if coverage.get("status").and_then(Value::as_str) == Some("unsupported") {
+        ("unsupported", coverage.get("unsupported_reason").cloned())
+    } else {
+        ("supported", None)
     }
 }
 
@@ -2485,14 +2325,12 @@ pub async fn prove_normal_sepolia_http(
             let resource: sqlx::types::Uuid = sqlx::query_scalar(
                 "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1 AND authority_arm = 'ens_v2' AND active_to IS NULL AND canonicality_state = 'canonical'",
             ).bind(&logical).fetch_one(&db.pool).await?;
-            let published: sqlx::types::Uuid = sqlx::query_scalar(
-                "SELECT resource_id FROM name_current WHERE logical_name_id = $1",
-            )
-            .bind(&logical)
-            .fetch_one(&db.pool)
-            .await?;
+            let published = families::name(&db.pool, &logical)
+                .await?
+                .and_then(|row| row.resource_id);
             anyhow::ensure!(
-                published == resource && body["data"]["registration_id"] == resource.to_string(),
+                published == Some(resource)
+                    && body["data"]["registration_id"] == resource.to_string(),
                 "published/indexed name must select V2 resource {resource}: {body}"
             );
             let mut cursor: Option<String> = None;
