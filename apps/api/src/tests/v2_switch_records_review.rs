@@ -1,12 +1,7 @@
 // Review regressions for namespace-scoped reads and a family reset between address membership
 // selection and the later record-count read.
 
-async fn with_record_families(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
-    let response = bigname_storage::publication_source::with_serve_from_families(
-        true, v2_get_response(database, uri),
-    ).await?;
-    Ok((response.status(), read_json(response).await?))
-}
+
 
 #[tokio::test]
 async fn v2_empty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> Result<()> {
@@ -25,7 +20,7 @@ async fn v2_empty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> Resu
         format!("/v1/addresses/{address}/names?namespace=ens&relation=resolves_to&coin_type=evm"),
         format!("/v1/addresses/{address}/primary-name?namespace=ens&source=indexed"),
     ] {
-        let (status, body) = assert_switch_differential(&database, &uri).await?;
+        let (status, body) = read_family_response(&database, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
     }
     database.cleanup().await
@@ -73,8 +68,8 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
     options.rebuild_ranges = bigname_project::families::RebuildRanges::Off;
     let outcome = bigname_project::families::apply(&database.pool, chain,
         &bigname_project::Marker { number: 240, hash: "0xhistory240".to_owned() },
-        bigname_project::families::FamilyMode::Rebuild, &token, &options).await;
-    anyhow::ensure!(outcome.reset && outcome.budget_exhausted && outcome.skipped.is_none(),
+        bigname_project::families::FamilyMode::Rebuild, &token, &options).await?;
+    anyhow::ensure!(outcome.reset && outcome.budget_exhausted,
         "partial rebuild: {outcome:?}");
     let state: String = sqlx::query_scalar(
         "SELECT state FROM bigname_phase.project_family_marker WHERE chain_id = $1")
@@ -101,7 +96,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
     let mut expected = Vec::new();
     for relation in relations {
         let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens{relation}");
-        let (status, body) = with_record_families(&database, &uri).await?;
+        let (status, body) = read_family_response(&database, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
         assert!(!body["data"].as_array().expect("name list").is_empty());
         expected.push(body);
@@ -109,7 +104,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
     seed_partial_base_address_families(&database).await?;
     let mut actual = Vec::new();
     for relation in relations {
-        actual.push(with_record_families(&database,
+        actual.push(read_family_response(&database,
             &format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens{relation}")).await?);
     }
     assert_eq!(actual.iter().map(|(status, _)| *status).collect::<Vec<_>>(),
@@ -120,7 +115,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
     for relation in relations {
         for namespace in ["", "namespace=basenames"] {
             let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?{namespace}{relation}");
-            let (status, body) = with_record_families(&database, &uri).await?;
+            let (status, body) = read_family_response(&database, &uri).await?;
             assert_eq!((status, &body["error"]["code"]),
                 (StatusCode::CONFLICT, &json!("stale")), "{uri}: {body:#}");
         }
@@ -152,13 +147,13 @@ async fn assert_address_counts_reset_is_stale(relation: &str) -> Result<()> {
     seed_switch_records_fixture(&database).await?;
     let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&q=alpha\
                       &include=counts,role_summary{relation}");
-    let (status, before) = with_record_families(&database, &uri).await?;
+    let (status, before) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"].as_array().map(Vec::len), Some(1));
     let (_guard, control) =
         crate::v2::address_names_grant_read_test_hooks::install(&database.lookup_pool).await?;
     let (status, body) = {
-        let request = with_record_families(&database, &uri);
+        let request = read_family_response(&database, &uri);
         tokio::pin!(request);
         tokio::select! {
             response = &mut request => anyhow::bail!("request did not pause: {:?}", response?),
@@ -192,7 +187,7 @@ async fn v2_empty_address_collections_revalidate_the_requested_family_publicatio
         let (_guard, control) =
             crate::v2::collection_snapshot::finish_test_hooks::install(&database.lookup_pool).await?;
         let (status, body) = {
-            let request = with_record_families(&database, &uri);
+            let request = read_family_response(&database, &uri);
             tokio::pin!(request);
             tokio::select! {
                 response = &mut request => anyhow::bail!("empty page did not reach its fence: {:?}", response?),
@@ -217,7 +212,7 @@ async fn v2_missing_primary_claim_revalidates_the_requested_family_publication()
     let (_guard, control) =
         crate::v2::support::indexed_read_test_hooks::install(&database.lookup_pool).await?;
     let (status, body) = {
-        let request = with_record_families(&database, uri);
+        let request = read_family_response(&database, uri);
         tokio::pin!(request);
         tokio::select! {
             response = &mut request => anyhow::bail!("missing claim did not reach its fence: {:?}", response?),

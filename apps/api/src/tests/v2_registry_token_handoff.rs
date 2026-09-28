@@ -5,7 +5,6 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
     StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
-use bigname_project::{BatchRequest, Engine, RunMode};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
@@ -256,16 +255,7 @@ async fn token_only_handoff_follows_actual_nodeless_authority_epoch() -> Result<
     // All observations, including both token handoffs, are activated before publication.
     // Only the published bound may affect the mapping or the permission projection.
     for (block, expected_control) in [(121, registry), (122, lease), (123, registry)] {
-        Engine::new(database.pool.clone())
-            .run_batch(BatchRequest {
-                chain_id: CHAIN.into(),
-                target_block: block,
-                affected_from_block: 120,
-                affected_to_block: block,
-                resume_current: None,
-                mode: RunMode::Normal,
-            })
-            .await?;
+        publish_test_families_on(&database.pool, CHAIN, block).await?;
         database.seed_snapshot_selector_chain_positions(&json!({CHAIN:{"chain_id":CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":"2023-11-14T22:15:23Z"}})).await?;
         let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_current")
             .fetch_one(&database.pool)

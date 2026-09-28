@@ -5,7 +5,6 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, ManifestInput, PriorEventInput, RawBlockInput,
     RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
-use bigname_project::{BatchRequest, Engine, RunMode};
 use time::OffsetDateTime;
 
 const CHAIN: &str = "ethereum-mainnet";
@@ -126,16 +125,7 @@ async fn registry_owned_subname_permission_handle_is_followable_from_real_new_ow
     .execute(&database.pool)
     .await?;
     persist(&database.pool, &output).await?;
-    Engine::new(database.pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: BLOCK,
-            affected_from_block: BLOCK,
-            affected_to_block: BLOCK,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    publish_test_families_on(&database.pool, CHAIN, BLOCK).await?;
     let row = bigname_storage::load_name_current(&database.pool, logical)
         .await?
         .expect("projected name");

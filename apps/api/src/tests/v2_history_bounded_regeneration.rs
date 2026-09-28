@@ -11,7 +11,6 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, BatchOutput, DiscoveryRuleInput, ManifestInput,
     RawBlockInput, RawLogInput, StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
-use bigname_project::{BatchRequest, Engine, RunMode};
 
 const CHAIN: &str = "ethereum-mainnet";
 const REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
@@ -365,16 +364,7 @@ async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
 }
 
 async fn project_to(pool: &PgPool, target: i64) -> Result<()> {
-    Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: target,
-            affected_from_block: REGISTERED,
-            affected_to_block: target,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    publish_test_families_on(pool, CHAIN, target).await?;
     Ok(())
 }
 

@@ -337,16 +337,7 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
         ],
     )
     .await?;
-    bigname_project::Engine::new(database.pool.clone())
-        .run_batch(bigname_project::BatchRequest {
-            chain_id: BOUNDED_CHAIN.to_owned(),
-            target_block: 240,
-            affected_from_block: 200,
-            affected_to_block: 240,
-            resume_current: None,
-            mode: bigname_project::RunMode::Normal,
-        })
-        .await?;
+    publish_test_families(&database, 240).await?;
     let cited: (i64, i64) = sqlx::query_as(
         "SELECT (anc.provenance ->> 'normalized_event_id')::bigint,
                 (anc.chain_positions ->> 'block_number')::bigint
