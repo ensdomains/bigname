@@ -512,7 +512,10 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         "the lineage join must exclude losing normalized rows before stamped redo"
     );
     let logical_name_id = support::schema_v2_logical_name_id(&format!("ens:{NAME}"));
-    let production_history = bigname_storage::load_event_history(
+    // Until the stamped redo publishes again, the family marker still names the orphaned head,
+    // so the read may refuse as unpublished (409 stale on the API). If it answers, it must not
+    // expose a losing event.
+    match bigname_storage::load_event_history(
         &db.pool,
         bigname_storage::EventHistoryFilter {
             namespace: Some("ens".to_owned()),
@@ -525,13 +528,18 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         true,
     )
     .await
-    .context("history read after the rewind, before the stamped redo")?;
-    assert!(
-        production_history
-            .iter()
-            .all(|event| event.block_hash.as_deref() != Some(losing_hash.as_str())),
-        "the production canonical-history reader exposed a losing event through row-local canonicality after lineage orphaning"
-    );
+    {
+        Ok(production_history) => assert!(
+            production_history
+                .iter()
+                .all(|event| event.block_hash.as_deref() != Some(losing_hash.as_str())),
+            "the production canonical-history reader exposed a losing event through row-local canonicality after lineage orphaning"
+        ),
+        Err(error) if bigname_storage::families::name::is_publication_unavailable(&error) => {}
+        Err(error) => {
+            return Err(error.context("history read after the rewind, before the stamped redo"));
+        }
+    }
     pipeline::run_rpc_ingest_redo(
         &root,
         &db.url,

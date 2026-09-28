@@ -38,6 +38,15 @@ fn strip_corpus_minted(value: &mut Value) {
             {
                 *value = Value::String("<normalized_event_id>".to_owned());
             }
+            // An event identity's second segment is the corpus-minted source
+            // manifest id; everything else in it is chain-derived.
+            if let Some(Value::String(identity)) = map.get_mut("event_identity") {
+                let mut parts: Vec<&str> = identity.split(':').collect();
+                if parts.len() > 2 {
+                    parts[1] = "N";
+                    *identity = parts.join(":");
+                }
+            }
             // authority_key's third segment is the corpus-minted contract
             // instance ordinal; everything else in it is chain-derived.
             if let Some(Value::String(key)) = map.get_mut("authority_key") {
