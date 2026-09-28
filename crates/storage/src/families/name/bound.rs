@@ -57,6 +57,9 @@ pub async fn load_family_bound_names(
     ))
     .unwrap_or(i64::MAX);
     let mut snapshot = batch::read_snapshot(pool).await?;
+    // The walk reads family tables, which a rebuild empties: read the marker first, so a rebuild
+    // refuses rather than answers a resolver with no names.
+    batch::ensure_published(&mut snapshot, &[chain_id.to_owned()]).await?;
     let mut out = Vec::new();
     while out.len() < wanted {
         let candidates = candidates(

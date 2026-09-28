@@ -218,12 +218,16 @@ async fn search_candidates(
 }
 
 /// The composed expiring page of /v1/names (`load_name_current_expiring_page`'s contract).
+/// `chains` are the chains the request selected for `filter.namespace`: their markers are read
+/// before the walk, which reads family tables a rebuild empties, so a rebuild refuses rather than
+/// answers an empty page. Only names of `filter.namespace` are walked and composed.
 pub async fn load_family_expiring_page(
     pool: &PgPool,
     filter: &NameCurrentExpiringFilter,
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
+    chains: &[String],
 ) -> Result<NameCurrentListPage> {
     anyhow::ensure!(
         filter.expires_after.is_some() || filter.expires_before.is_some(),
@@ -249,13 +253,16 @@ pub async fn load_family_expiring_page(
     }
     let batch = batch_size(page_size);
     let mut snapshot = batch::read_snapshot(pool).await?;
+    batch::ensure_published(&mut snapshot, chains).await?;
+    let namespace = filter.namespace.as_str();
     let mut gathered = Gathered::default();
-    let inexact = inexact_expiry_names(&mut snapshot).await?;
+    let inexact = inexact_expiry_names(&mut snapshot, namespace).await?;
     gathered.add(&mut snapshot, inexact).await?;
     let mut position: Option<(i64, String)> = None;
     loop {
         let pairs = expiry_pairs(
             &mut snapshot,
+            namespace,
             (low, high),
             ascending,
             position.as_ref(),
@@ -314,9 +321,9 @@ fn truncate(mut page: NameCurrentListPage, page_size: u64) -> NameCurrentListPag
     page
 }
 
-/// Names with a retained lifecycle event whose expiry is a JSON number but not an integral
-/// second: the walk cannot place them, so they are always considered.
-async fn inexact_expiry_names(conn: &mut PgConnection) -> Result<Vec<String>> {
+/// Names of `namespace` with a retained lifecycle event whose expiry is a JSON number but not an
+/// integral second: the walk cannot place them, so they are always considered.
+async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Result<Vec<String>> {
     sqlx::query_scalar(
         "/* storage:families.name.inexact_expiry_names */
          SELECT DISTINCT name.logical_name_id
@@ -327,20 +334,26 @@ async fn inexact_expiry_names(conn: &mut PgConnection) -> Result<Vec<String>> {
              UNION SELECT event.state_key::jsonb ->> 0 WHERE event.state_kind = 'triple'
          ) name(logical_name_id)
          WHERE event.expiry_seconds IS NULL AND jsonb_typeof(event.expiry) = 'number'
-           AND name.logical_name_id IS NOT NULL",
+           AND name.logical_name_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM bigname_phase.name_surfaces surface
+               WHERE surface.logical_name_id = name.logical_name_id
+                 AND surface.namespace = $1)",
     )
+    .bind(namespace)
     .fetch_all(conn)
     .await
     .context("failed to load the names with an inexact expiry")
 }
 
 /// The next (expiry second, name) pairs of the walk after `after`: every retained lifecycle
-/// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name whose
-/// lifecycle read can load it (control::lifecycle::load): the event's own names, the triple's
-/// name, and the names whose binding candidates, associations or key states name the resource
-/// it sits on.
+/// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name of
+/// `namespace` whose lifecycle read can load it (control::lifecycle::load): the event's own
+/// names, the triple's name, and the names whose binding candidates, associations or key states
+/// name the resource it sits on.
 async fn expiry_pairs(
     conn: &mut PgConnection,
+    namespace: &str,
     (low, high): (Option<i64>, Option<i64>),
     ascending: bool,
     after: Option<&(i64, String)>,
@@ -392,6 +405,10 @@ async fn expiry_pairs(
                  WHERE state.chain_id = hits.chain_id AND state.resource_id = hits.resource_id
              ) name(logical_name_id)
              WHERE name.logical_name_id IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM bigname_phase.name_surfaces surface
+                   WHERE surface.logical_name_id = name.logical_name_id
+                     AND surface.namespace = $6)
          )
          SELECT at, logical_name_id FROM pairs
          WHERE $3::bigint IS NULL OR (at, logical_name_id) {compare} ($3, $4)
@@ -404,6 +421,7 @@ async fn expiry_pairs(
         .bind(after.map(|(at, _)| *at))
         .bind(after.map(|(_, name)| name.as_str()))
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)
+        .bind(namespace)
         .fetch_all(conn)
         .await
         .context("failed to walk the expiry candidates")?;

@@ -34,6 +34,7 @@ use crate::{
 /// statement and holds for every statement after it, so a composed read cannot mix two family
 /// blocks. The caller commits it (nothing is written) once the read is done.
 pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+    super::seams::before_snapshot().await;
     let mut transaction = pool
         .begin()
         .await
@@ -59,15 +60,38 @@ pub async fn load_family_publication(
     publication(&mut conn, chain_id).await
 }
 
+/// Refuses with [`FamilyPublicationUnavailable`] unless every chain of `chain_ids` has a
+/// servable marker. A read that may find no name to compose (an empty walk, a name with no
+/// surface) checks the chains it was asked about with it, so a rebuild answers stale rather than
+/// an empty or missing result.
+pub(super) async fn ensure_published(conn: &mut PgConnection, chain_ids: &[String]) -> Result<()> {
+    for chain_id in chain_ids {
+        if publication(conn, chain_id).await?.is_none() {
+            return Err(FamilyPublicationUnavailable {
+                chain_id: chain_id.clone(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// [`ensure_published`] on its own snapshot, for a caller holding a pool.
+pub async fn ensure_family_publications(pool: &PgPool, chain_ids: &[String]) -> Result<()> {
+    let mut snapshot = read_snapshot(pool).await?;
+    ensure_published(&mut snapshot, chain_ids).await?;
+    snapshot.commit().await?;
+    Ok(())
+}
+
+/// The chain's servable marker, by the fence's rule (`servable_family_marker`).
 async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         "/* storage:families.name.publication */
-         SELECT chain_id, current_block_number, current_block_hash, block_timestamp,
-                to_jsonb(block_timestamp) AS block_timestamp_json
-         FROM bigname_phase.project_family_marker
-         WHERE chain_id = $1 AND state = 'live' AND input_content_hash = $2
-           AND current_block_number IS NOT NULL",
-    )
+         SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,
+                marker.block_timestamp, to_jsonb(marker.block_timestamp) AS block_timestamp_json",
+        crate::snapshot_selection::servable_family_marker!()
+    ))
     .bind(chain_id)
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .fetch_optional(conn)
