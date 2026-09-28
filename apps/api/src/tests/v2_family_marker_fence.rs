@@ -513,30 +513,34 @@ async fn v2_a_subnames_cursor_restarts_when_the_switch_flips_either_way() -> Res
     database.cleanup().await
 }
 
-/// The resolver overview's bound-names cursor carries the resolver generation beside the
-/// publication token; each is tagged with the publication source on its own. The second half
-/// splices the continuing mode's publication token into the flipped cursor, so only the
-/// resolver generation can refuse it. With the switch on the bound names are composed from the
-/// owned key families, so the fixture publishes both the served tables and the families from the
-/// same events (`seed_switch_names_fixture`), giving a second page in either mode.
+/// D10: the resolver overview's bound-names cursor carries no publication, source or resolver
+/// generation, so flipping the switch between pages does not refuse it: the continuation reads
+/// the bound names the new source serves after the cursor's position. With the switch on the
+/// bound names are composed from the owned key families, so the fixture publishes both the
+/// served tables and the families from the same events (`seed_switch_names_fixture`).
 #[tokio::test]
-async fn v2_a_resolver_overview_cursor_restarts_when_the_switch_flips_either_way() -> Result<()> {
+async fn v2_a_resolver_overview_cursor_continues_when_the_switch_flips_either_way() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
     seed_switch_resolver_current(&database).await?;
     collide_marker_sequence_with_project_xmin(&database.pool).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
-    for flip in SWITCH_FLIPS {
-        assert_flip_restarts(&database, &base, overview_next_cursor, flip).await?;
-        assert_generation_alone_restarts(
-            &database,
-            &base,
-            overview_next_cursor,
-            "resolver_generation",
-            "resolver publication changed; restart pagination",
-            flip,
+    for (issued, continued) in SWITCH_FLIPS {
+        let page = bigname_storage::publication_source::with_serve_from_families(
+            issued,
+            v2_resolver_payload_for_database(&database, &base),
         )
         .await?;
+        assert_eq!(page["data"]["bound_names"]["data"][0]["name"], json!("alpha.eth"));
+        let cursor = overview_next_cursor(&page).context("the first page has a continuation")?;
+        let next = bigname_storage::publication_source::with_serve_from_families(
+            continued,
+            v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")),
+        )
+        .await?;
+        let names = &next["data"]["bound_names"];
+        assert_eq!(names["data"][0]["name"], json!("beta.eth"), "{issued} -> {continued}");
+        assert_eq!(names["page"]["next_cursor"], Value::Null, "{issued} -> {continued}");
     }
     database.cleanup().await
 }
