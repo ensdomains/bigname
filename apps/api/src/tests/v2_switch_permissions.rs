@@ -397,3 +397,21 @@ async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_r
     }
     database.cleanup().await
 }
+
+// Resolver preflight can pass just before a family rebuild. The first family snapshot then
+// refuses the read, and both the overview and the collection must preserve the stale error.
+#[tokio::test]
+async fn v2_resolver_family_reads_answer_409_after_preflight() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_permissions_fixture(&database).await?;
+    for suffix in ["", "/aliases", "/links", "/roles"] {
+        let uri = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}{suffix}");
+        let (status, body) = v2_get_with_marker_flip_after_fence(
+            &database, &uri,
+            "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+        ).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {body:#}");
+        assert_eq!(body["error"]["code"], json!("stale"));
+    }
+    database.cleanup().await
+}

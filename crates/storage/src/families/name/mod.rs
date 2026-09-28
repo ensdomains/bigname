@@ -51,13 +51,13 @@ pub(crate) use batch::{
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 
-/// The composed loads and the marker read on a caller's connection, for readers of other
-/// families that join composed name rows inside their own snapshot (TYR-36 step 7b slice 4).
-pub(crate) use batch::{load as load_names_on, publication as publication_on, read_snapshot};
 pub use batch::{
     ensure_family_publications, load_family_name, load_family_names_by_logical_name_ids,
     load_family_names_by_resource_ids, load_family_publication,
 };
+/// The composed loads and the marker read on a caller's connection, for readers of other
+/// families that join composed name rows inside their own snapshot (TYR-36 step 7b slice 4).
+pub(crate) use batch::{load as load_names_on, publication as publication_on};
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
 /// rebuild is still populating the families) or written by another interpreter build. The rule

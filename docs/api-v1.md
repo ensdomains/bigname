@@ -934,7 +934,10 @@ With the switch on, `GET /v1/permissions` and the resolver routes also serve
 their own rows from the families. The permission rows, the registry operator
 rows and each registration's authority context and restrictions are built at
 read from the grants, approvals and registry bindings the families keep, masked
-at the published block's time. The resolver overview (`GET
+at the published block's time. Permission pages seek and compose bounded permission-key
+batches after the cursor, applying namespace membership before checking those
+resources' publications. Address `include=role_summary` uses the same bounded reader
+with its existing 1000-row inline-expansion limit. The resolver overview (`GET
 /v1/resolvers/{chain_id}/{address}`, including whether it lists bound names)
 and whether its `/aliases`, `/links` and `/roles` collections are supported come
 from the families' resolver classification, and those collections list the

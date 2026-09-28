@@ -5,9 +5,9 @@
 //! read dereferences those ids instead of re-deriving resolver history, so the resolver
 //! selection, record-version reset, record-link, mirror, and canonicality rules stay Project's.
 //!
-//! The admitted-ABI-event check needs the resolver's classification from `resolver_current`. A
-//! change to the classification's manifest, declaration, admission namespace, or upgrade evidence
-//! makes Project republish every dependent inventory row; the remaining family flips do not change
+//! The admitted-ABI-event check uses the serving resolver classification. A change to the
+//! classification's manifest, declaration, admission namespace, or upgrade evidence makes Project
+//! republish every dependent inventory row; the remaining family flips do not change
 //! whether ABI observations are admitted. Project also re-stamps an unchanged resolver at newer
 //! targets without republishing those rows, so target blocks cannot be compared. Instead the
 //! classification is read in the statement that confirms the held row (same resource, record
@@ -328,7 +328,7 @@ const ABI_CLASSIFICATION_QUERY: &str = r#"
     LEFT JOIN LATERAL (
         SELECT resolver.declared_summary #>> '{classification,source_family}' AS source_family,
                resolver.declared_summary #>> '{classification,role}' AS role
-        FROM bigname_phase.resolver_current resolver
+        FROM {RESOLVER_CLASSIFICATION_RELATION} resolver
         WHERE resolver.chain_id = requested.chain_id
           AND resolver.resolver_address = requested.resolver_address
           {DEFAULT_RESOLVER_CURRENT_READ_FILTER}
@@ -370,21 +370,31 @@ async fn load_classifications(
     if ordinals.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let rows = sqlx::query(&ABI_CLASSIFICATION_QUERY.replace(
-        "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
-        DEFAULT_RESOLVER_CURRENT_READ_FILTER,
-    ))
-    .bind(ordinals)
-    .bind(resource_ids)
-    .bind(boundary_keys)
-    .bind(chain_positions)
-    .bind(recomputed_at)
-    .bind(chain_ids)
-    .bind(addresses)
-    .bind(!confirm_published)
-    .fetch_all(pool)
-    .await
-    .context("failed to load resolver classifications for ABI content types")?;
+    let query = ABI_CLASSIFICATION_QUERY
+        .replace(
+            "{RESOLVER_CLASSIFICATION_RELATION}",
+            &crate::families::topology::resolver_classification_relation(),
+        )
+        .replace(
+            "{DEFAULT_RESOLVER_CURRENT_READ_FILTER}",
+            if crate::publication_source::serve_from_families() {
+                ""
+            } else {
+                DEFAULT_RESOLVER_CURRENT_READ_FILTER
+            },
+        );
+    let rows = sqlx::query(&query)
+        .bind(ordinals)
+        .bind(resource_ids)
+        .bind(boundary_keys)
+        .bind(chain_positions)
+        .bind(recomputed_at)
+        .bind(chain_ids)
+        .bind(addresses)
+        .bind(!confirm_published)
+        .fetch_all(pool)
+        .await
+        .context("failed to load resolver classifications for ABI content types")?;
     let mut classifications = BTreeMap::new();
     for row in rows {
         let index = usize::try_from(row.try_get::<i64, _>("ordinal")?)

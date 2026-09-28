@@ -3,7 +3,7 @@
 //! readers' keyset, sort, filters and shapes (permissions/effective.rs, resource_summary.rs).
 //!
 //! - Direct rows are each resource's served permission rows computed from its F8 grants
-//!   ([`load_shadow_permissions_on`]: the wrapper fuse and grace masks at the publication's block
+//!   ([`super::load_shadow_permissions_on`]: the wrapper fuse and grace masks at the publication's block
 //!   time, the ENSv2 path-expiry drop, the empty-row drop and the NameWrapper operator fan-out).
 //! - Registry-operator rows are the F9 approvals of the resource's F2c registry binding
 //!   (`operators.rs`).
@@ -26,8 +26,8 @@ use uuid::Uuid;
 use super::{
     OperatorRow, ResourceInput, ServedGrant, effective_operator_rows,
     facts::{authority_facts, in_namespace, readable_resources},
-    load_shadow_permissions_on,
-    operators::{approvals_of_subject, bindings_for, registry_approvals, resources_bound_to},
+    load_permissions_on,
+    operators::{bindings_for, registry_approvals},
 };
 use crate::{
     EffectivePermissionRow, EffectivePermissionScope, EffectivePermissionsAccountResourcePage,
@@ -65,25 +65,16 @@ pub async fn load_family_effective_permissions_page(
         "effective permissions page_size must fit usize",
     )?;
     let mut snapshot = read_snapshot(pool).await?;
-    let mut rows = effective_rows(&mut snapshot, subject, resource_id, namespace).await?;
+    let rows = page_rows(
+        &mut snapshot,
+        subject,
+        resource_id,
+        namespace,
+        cursor,
+        size + 1,
+    )
+    .await?;
     snapshot.commit().await?;
-    let key = |row: &EffectivePermissionRow| {
-        (
-            row.subject.clone().into_bytes(),
-            row.resource_id,
-            row.scope.storage_key().into_bytes(),
-        )
-    };
-    if let Some(cursor) = cursor {
-        let after = (
-            cursor.subject.clone().into_bytes(),
-            cursor.resource_id,
-            cursor.scope.clone().into_bytes(),
-        );
-        rows.retain(|row| key(row) > after);
-    }
-    rows.sort_by_key(key);
-    rows.truncate(size.saturating_add(1));
     let (rows, next_cursor) = split_keyset_page(rows, size, |row| {
         PermissionsCurrentAccountResourceCursor::from(row)
     });
@@ -92,6 +83,86 @@ pub async fn load_family_effective_permissions_page(
         next_cursor,
         summary: None,
     })
+}
+
+/// A sentinel-bounded inline expansion for address `include=role_summary`, in one read snapshot.
+pub async fn load_family_bounded_permissions(
+    pool: &PgPool,
+    resource_ids: &[Uuid],
+    namespace: Option<&str>,
+    max_rows: u64,
+) -> Result<Vec<EffectivePermissionRow>> {
+    let limit = checked_page_limit_i64(
+        max_rows,
+        "positive grant budget required",
+        "grant budget too large",
+    )? as usize;
+    if resource_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut snapshot = read_snapshot(pool).await?;
+    let mut rows = Vec::new();
+    for resource in resource_ids.iter().copied().collect::<BTreeSet<_>>() {
+        rows.extend(
+            page_rows(
+                &mut snapshot,
+                None,
+                Some(resource),
+                namespace,
+                None,
+                limit - rows.len(),
+            )
+            .await?,
+        );
+        if rows.len() == limit {
+            break;
+        }
+    }
+    snapshot.commit().await?;
+    Ok(rows)
+}
+
+async fn page_rows(
+    conn: &mut PgConnection,
+    subject: Option<&str>,
+    resource: Option<Uuid>,
+    namespace: Option<&str>,
+    cursor: Option<&PermissionsCurrentAccountResourceCursor>,
+    limit: usize,
+) -> Result<Vec<EffectivePermissionRow>> {
+    if let Some(resource) = resource {
+        if let Some(namespace) = namespace
+            && !in_namespace(conn, &[resource], namespace)
+                .await?
+                .contains(&resource)
+        {
+            return Ok(Vec::new());
+        }
+        published(conn, &[resource]).await?;
+    }
+    let mut after = cursor.cloned();
+    let mut rows = Vec::new();
+    while rows.len() < limit {
+        let batch_size = (limit - rows.len()).min(64);
+        let keys = super::candidates::page(
+            conn,
+            subject,
+            resource,
+            namespace,
+            after.as_ref(),
+            batch_size as i64,
+        )
+        .await?;
+        let exhausted = keys.len() < batch_size;
+        after = keys
+            .last()
+            .map(PermissionsCurrentAccountResourceCursor::from);
+        rows.extend(effective_rows(conn, &keys).await?);
+        if exhausted {
+            break;
+        }
+    }
+    Ok(rows)
 }
 
 /// The served summaries of [`crate::load_permissions_current_resource_summaries`], read from the
@@ -125,19 +196,12 @@ pub async fn load_family_permission_summaries(
                 }
             })
             .collect();
-        let shadows = load_shadow_permissions_on(
-            &mut snapshot,
-            chain_id,
-            &clock(&publication),
-            &inputs,
-            &EventOrder::Canonical,
-        )
-        .await?;
+        let restrictions =
+            super::restrictions::load(&mut snapshot, chain_id, &clock(&publication), &inputs)
+                .await?;
         for input in inputs {
             let resource: Uuid = input.resource_id.parse()?;
-            let restrictions = shadows
-                .get(&input.resource_id)
-                .and_then(|shadow| shadow.restrictions.clone());
+            let restrictions = restrictions.get(&input.resource_id).cloned();
             out.insert(
                 resource,
                 PermissionsCurrentResourceSummary {
@@ -232,24 +296,20 @@ fn canonicality(publication: &FamilyPublication) -> Value {
     })
 }
 
-/// Every effective row of `subject` and/or `resource_id`, unordered.
+/// Compose only a bounded batch of keys; wrapper holder inputs are retained just for the
+/// selected operators. The cursor and namespace predicate have already run in the candidate SQL.
 async fn effective_rows(
     conn: &mut PgConnection,
-    subject: Option<&str>,
-    resource_id: Option<Uuid>,
-    namespace: Option<&str>,
+    keys: &[super::candidates::Key],
 ) -> Result<Vec<EffectivePermissionRow>> {
-    let (direct_candidates, operator_approvals) = match (resource_id, subject) {
-        (Some(resource), _) => (vec![resource], None),
-        (None, Some(subject)) => (
-            subject_resources(conn, subject).await?,
-            Some(approvals_of_subject(conn, subject, "registry").await?),
-        ),
-        (None, None) => bail!("effective permissions require subject or resource_id"),
-    };
+    let resources: Vec<Uuid> = keys
+        .iter()
+        .map(|key| key.resource_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let mut rows = Vec::new();
-    for (publication, resources) in published(conn, &direct_candidates).await? {
-        let chain_id = publication.chain_id.clone();
+    for (publication, resources) in published(conn, &resources).await? {
         let inputs: Vec<ResourceInput> = resources
             .iter()
             .map(|resource| ResourceInput {
@@ -257,137 +317,58 @@ async fn effective_rows(
                 ..ResourceInput::default()
             })
             .collect();
-        let shadows = load_shadow_permissions_on(
+        let shadows = load_permissions_on(
             conn,
-            &chain_id,
+            &publication.chain_id,
             &clock(&publication),
             &inputs,
             &EventOrder::Canonical,
+            Some(keys),
         )
         .await?;
         for shadow in shadows.values() {
             for grant in &shadow.grants {
-                if subject.is_none_or(|subject| grant.subject == subject) {
-                    rows.push(direct_row(grant, &publication)?);
-                }
+                rows.push(direct_row(grant, &publication)?);
             }
         }
-        if resource_id.is_some() {
-            for resource in &resources {
-                rows.extend(
-                    resource_operator_rows(conn, &publication, *resource)
-                        .await?
-                        .into_iter()
-                        .filter(|row| subject.is_none_or(|subject| row.subject == subject)),
-                );
-            }
-        }
-    }
-    if let Some(approvals) = operator_approvals {
-        rows.extend(subject_operator_rows(conn, &approvals).await?);
-    }
-    if let Some(namespace) = namespace {
-        let ids: Vec<Uuid> = rows
-            .iter()
-            .map(|row| row.resource_id)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let members = in_namespace(conn, &ids, namespace).await?;
-        rows.retain(|row| members.contains(&row.resource_id));
-    }
-    Ok(rows)
-}
-
-/// The resources whose served rows can name `subject`: its own grants, and the wrapper holder
-/// grants of every holder that approved it as a NameWrapper operator on that wrapper contract
-/// (the fan-out of `with_operators`).
-async fn subject_resources(conn: &mut PgConnection, subject: &str) -> Result<Vec<Uuid>> {
-    let resources: Vec<Uuid> = sqlx::query_scalar(
-        "/* storage:families.control.permissions.subject_resources */
-         SELECT grant_row.resource_id
-         FROM bigname_phase.project_grant grant_row
-         WHERE grant_row.subject = $1
-         UNION
-         SELECT grant_row.resource_id
-         FROM bigname_phase.project_account_approval approval
-         JOIN bigname_phase.project_grant grant_row
-           ON grant_row.chain_id = approval.chain_id AND grant_row.subject = approval.owner
-         WHERE approval.subject = $1 AND approval.authority_kind = 'wrapper' AND approval.approved
-           AND grant_row.grant_source ->> 'authority_kind' = 'wrapper'
-           AND grant_row.grant_source ->> 'relation_kind' = 'holder'
-           AND lower(grant_row.grant_source ->> 'authority_contract') =
-               approval.authority_contract",
-    )
-    .bind(subject)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the resources of an account's permissions")?;
-    Ok(resources)
-}
-
-/// The registry-operator rows of one resource under its registry binding.
-async fn resource_operator_rows(
-    conn: &mut PgConnection,
-    publication: &FamilyPublication,
-    resource: Uuid,
-) -> Result<Vec<EffectivePermissionRow>> {
-    let chain_id = publication.chain_id.as_str();
-    let bindings = bindings_for(conn, chain_id, &[resource]).await?;
-    let Some(binding) = bindings.get(&resource) else {
-        return Ok(Vec::new());
-    };
-    let (Some(contract), Some(owner)) = (&binding.registry_contract, &binding.registry_owner)
-    else {
-        return Ok(Vec::new());
-    };
-    let approvals = registry_approvals(conn, chain_id, contract, owner).await?;
-    effective_operator_rows(chain_id, &resource.to_string(), binding, &approvals)
-        .iter()
-        .map(|row| operator_row(row, publication))
-        .collect()
-}
-
-/// The registry-operator rows of a subject's approvals: for each approved `(chain, registry
-/// contract, owner)`, every published resource whose registry binding is that pair.
-async fn subject_operator_rows(
-    conn: &mut PgConnection,
-    approvals: &[(String, super::ServedApproval)],
-) -> Result<Vec<EffectivePermissionRow>> {
-    let mut by_pair: BTreeMap<(String, String, String), Vec<super::ServedApproval>> =
-        BTreeMap::new();
-    for (chain_id, approval) in approvals {
-        by_pair
-            .entry((
-                chain_id.clone(),
-                approval.authority_contract.clone(),
-                approval.owner.clone(),
-            ))
-            .or_default()
-            .push(approval.clone());
-    }
-    let mut rows = Vec::new();
-    for ((chain_id, contract, owner), approvals) in by_pair {
-        let candidates = resources_bound_to(conn, &chain_id, &contract, &owner).await?;
-        for (publication, resources) in published(conn, &candidates).await? {
-            if publication.chain_id != chain_id {
+        let bindings = bindings_for(conn, &publication.chain_id, &resources).await?;
+        for (resource, binding) in bindings {
+            let (Some(contract), Some(owner)) =
+                (&binding.registry_contract, &binding.registry_owner)
+            else {
                 continue;
-            }
-            let bindings = bindings_for(conn, &chain_id, &resources).await?;
-            for (resource, binding) in bindings {
-                if binding.registry_contract.as_deref() != Some(contract.as_str())
-                    || binding.registry_owner.as_deref() != Some(owner.as_str())
-                {
-                    continue;
-                }
-                for row in
-                    effective_operator_rows(&chain_id, &resource.to_string(), &binding, &approvals)
-                {
-                    rows.push(operator_row(&row, &publication)?);
-                }
+            };
+            let subjects: Vec<String> = keys
+                .iter()
+                .filter(|key| key.resource_id == resource)
+                .map(|key| key.subject.clone())
+                .collect();
+            let approvals =
+                registry_approvals(conn, &publication.chain_id, contract, owner, &subjects).await?;
+            for row in effective_operator_rows(
+                &publication.chain_id,
+                &resource.to_string(),
+                &binding,
+                &approvals,
+            ) {
+                rows.push(operator_row(&row, &publication)?);
             }
         }
     }
+    rows.retain(|row| {
+        keys.iter().any(|key| {
+            key.resource_id == row.resource_id
+                && key.subject == row.subject
+                && key.scope == row.scope.storage_key()
+        })
+    });
+    rows.sort_by_key(|row| {
+        (
+            row.subject.clone(),
+            row.resource_id,
+            row.scope.storage_key(),
+        )
+    });
     Ok(rows)
 }
 

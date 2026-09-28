@@ -135,7 +135,10 @@ pub(crate) async fn all_servable_publications(
 }
 
 /// The chain's servable marker, by the fence's rule (`servable_family_marker`).
-pub(crate) async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
+pub(crate) async fn publication(
+    conn: &mut PgConnection,
+    chain_id: &str,
+) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(concat!(
         "/* storage:families.name.publication */
          SELECT marker.chain_id, marker.current_block_number, marker.current_block_hash,

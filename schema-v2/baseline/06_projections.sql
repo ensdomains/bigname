@@ -3141,3 +3141,15 @@ CREATE INDEX IF NOT EXISTS project_lifecycle_event_inexact_expiry_idx
 CREATE INDEX IF NOT EXISTS project_wrapper_state_expiry_idx
     ON project_wrapper_state (expiry_seconds)
     WHERE expiry_seconds IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS project_grant_subject_resource_idx
+    ON project_grant (subject COLLATE "C", resource_id, scope COLLATE "C");
+
+CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_target_idx
+    ON project_registry_binding_observation (chain_id, registry_contract, registry_owner, target_resource_id);
+
+CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_resource_idx
+    ON project_registry_binding_observation (chain_id, registry_contract, registry_owner, resource_id);
+
+CREATE INDEX IF NOT EXISTS project_grant_resource_subject_idx
+    ON project_grant (resource_id, subject COLLATE "C", scope COLLATE "C");

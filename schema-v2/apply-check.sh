@@ -664,7 +664,8 @@ for migration_file in \
     "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
-    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql"
+    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -975,7 +976,9 @@ for migration_file in \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
     "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
-    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql"
+    "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
+    "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

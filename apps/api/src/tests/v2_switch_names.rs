@@ -543,8 +543,7 @@ async fn v2_routes_with_composed_name_rows_are_the_same_with_the_switch_off_and_
 #[tokio::test]
 async fn v2_composed_name_reads_answer_409_while_the_families_rebuild() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_switch_routes_fixture(&database).await?;
     sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
         .execute(&database.pool)
         .await?;
@@ -643,8 +642,7 @@ async fn v2_get_with_marker_flip_after_fence(
 async fn v2_composed_listings_answer_409_when_the_marker_changes_after_their_fence() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_switch_routes_fixture(&database).await?;
     let bound_names = format!("/v1/resolvers/1/{SWITCH_RESOLVER}");
     let mut answers = Vec::new();
     for uri in [SWITCH_EXPIRING, SWITCH_SEARCH, bound_names.as_str()] {

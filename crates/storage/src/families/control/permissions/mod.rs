@@ -3,10 +3,12 @@
 //! and the registry-operator rows the effective-permission reader adds (permissions/effective.rs
 //! :63-72). Under the publication switch `page.rs` serves the effective-permission pages and the
 //! resource summaries of `GET /v1/permissions` from these readers (TYR-36 step 7b).
+mod candidates;
 mod facts;
 mod grants;
 mod operators;
 pub mod page;
+mod restrictions;
 mod summary;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,6 +103,19 @@ pub(crate) async fn load_shadow_permissions_on(
     resources: &[ResourceInput],
     order: &EventOrder,
 ) -> Result<BTreeMap<String, ShadowPermissions>> {
+    load_permissions_on(conn, chain_id, clock, resources, order, None).await
+}
+
+/// Evaluate only selected permission keys. Holder rows are retained when needed to derive
+/// those operator keys; unrelated grants and operator approvals are not read.
+async fn load_permissions_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    clock: &Clock,
+    resources: &[ResourceInput],
+    order: &EventOrder,
+    keys: Option<&[candidates::Key]>,
+) -> Result<BTreeMap<String, ShadowPermissions>> {
     let mut ids: BTreeSet<String> = resources
         .iter()
         .map(|input| input.resource_id.clone())
@@ -111,30 +126,51 @@ pub(crate) async fn load_shadow_permissions_on(
             .filter_map(|input| input.root_resource_id.clone()),
     );
     let ids: Vec<String> = ids.into_iter().collect();
-    let grants: Vec<GrantRow> = rows_for(
-        &mut *conn,
+    let grants: Vec<GrantRow> = sqlx::query_scalar::<_, Value>(
         "/* storage:families.control.permissions.grants */ SELECT to_jsonb(grant_row)
          FROM bigname_phase.project_grant grant_row
-         WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])",
-        chain_id,
-        &ids,
+         WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])
+           AND ($3::jsonb IS NULL OR EXISTS (
+               SELECT 1 FROM jsonb_to_recordset($3) wanted(resource_id uuid, subject text, scope text)
+               WHERE wanted.resource_id = grant_row.resource_id AND wanted.subject = grant_row.subject
+                 AND wanted.scope = grant_row.scope) OR (
+               grant_row.grant_source ->> 'authority_kind' = 'wrapper'
+               AND grant_row.grant_source ->> 'relation_kind' = 'holder'
+               AND EXISTS (SELECT 1 FROM bigname_phase.project_account_approval approval
+                   WHERE approval.chain_id = grant_row.chain_id
+                     AND approval.authority_kind = 'wrapper' AND approval.approved
+                     AND approval.owner = grant_row.subject
+                     AND EXISTS (SELECT 1 FROM jsonb_to_recordset($3) wanted(resource_id uuid, subject text, scope text)
+                         WHERE wanted.resource_id = grant_row.resource_id
+                           AND wanted.scope = grant_row.scope AND wanted.subject = approval.subject)
+                     AND approval.authority_contract =
+                         lower(grant_row.grant_source ->> 'authority_contract'))))",
     )
+    .bind(chain_id)
+    .bind(&ids)
+    .bind(keys.map(serde_json::to_value).transpose()?)
+    .fetch_all(&mut *conn)
     .await?
     .iter()
     .filter_map(GrantRow::from_row)
     .collect();
-    let aggregates: BTreeMap<String, Value> = rows_for(
-        &mut *conn,
-        "/* storage:families.control.permissions.admin_aggregates */ SELECT to_jsonb(aggregate)
+    // Page callers only consume grants; admin maps are used by the unrestricted shadow.
+    let aggregates: BTreeMap<String, Value> = if keys.is_some() {
+        BTreeMap::new()
+    } else {
+        rows_for(
+            &mut *conn,
+            "/* storage:families.control.permissions.admin_aggregates */ SELECT to_jsonb(aggregate)
          FROM bigname_phase.project_resource_admin_aggregate aggregate
          WHERE aggregate.chain_id = $1 AND aggregate.resource_id = ANY($2::uuid[])",
-        chain_id,
-        &ids,
-    )
-    .await?
-    .iter()
-    .filter_map(|row| Some((text(row, "resource_id")?, row.get("admin_powers")?.clone())))
-    .collect();
+            chain_id,
+            &ids,
+        )
+        .await?
+        .iter()
+        .filter_map(|row| Some((text(row, "resource_id")?, row.get("admin_powers")?.clone())))
+        .collect()
+    };
     let key_states: BTreeMap<String, Maxima> = rows_for(
         &mut *conn,
         "/* storage:families.control.permissions.key_states */ SELECT to_jsonb(state)
@@ -170,15 +206,18 @@ pub(crate) async fn load_shadow_permissions_on(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let approvals: Vec<WrapperApproval> = rows_for(
-        &mut *conn,
+    let approvals: Vec<WrapperApproval> = sqlx::query_scalar::<_, Value>(
         "/* storage:families.control.permissions.wrapper_approvals */ SELECT to_jsonb(approval)
          FROM bigname_phase.project_account_approval approval
          WHERE approval.chain_id = $1 AND approval.authority_kind = 'wrapper'
-           AND approval.owner = ANY($2)",
-        chain_id,
-        &holders,
+           AND approval.owner = ANY($2) AND ($3::jsonb IS NULL OR EXISTS (
+               SELECT 1 FROM jsonb_to_recordset($3) wanted(subject text)
+               WHERE wanted.subject = approval.subject))",
     )
+    .bind(chain_id)
+    .bind(&holders)
+    .bind(keys.map(serde_json::to_value).transpose()?)
+    .fetch_all(&mut *conn)
     .await?
     .iter()
     .filter_map(|row| {

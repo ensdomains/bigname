@@ -134,7 +134,10 @@ async fn collection(
     };
     let row = bigname_storage::load_phase_resolver_current(&state.pool, slug, &address)
         .await
-        .map_err(|_| read_error())?
+        .map_err(crate::v2::name_rows_error(
+            SnapshotReadResource::Resolver,
+            |_| read_error(),
+        ))?
         .ok_or_else(|| V2Error::not_found("resolver was not found"))?;
     require_phase_target_snapshot(&row.chain_positions, slug, &selected)?;
     let summary_key = match section {

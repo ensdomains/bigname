@@ -116,11 +116,11 @@ pub(crate) async fn get_resolver(
         &normalized_address,
     )
     .await
-    .map_err(|_| {
+    .map_err(super::name_rows_error(SnapshotReadResource::Resolver, |_| {
         V2Error::internal_error(format!(
             "failed to load resolver data for chain_id {chain_id_slug} address {normalized_address}"
         ))
-    })?;
+    }))?;
     let Some(row) = row else {
         let current = load_resolver_project_generations(
             &state.pool,

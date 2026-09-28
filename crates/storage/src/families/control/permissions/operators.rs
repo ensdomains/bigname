@@ -87,55 +87,13 @@ async fn attributions(
         .collect())
 }
 
-/// The resources an applicable observation of `(registry_contract, registry_owner)` can reach:
-/// its target, its own resource, and the current resource of the name it carries. The caller
-/// keeps those whose binding is that pair.
-pub(super) async fn resources_bound_to(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    registry_contract: &str,
-    registry_owner: &str,
-) -> Result<Vec<Uuid>> {
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.permissions.binding_owner_observations */
-         SELECT to_jsonb(observation)
-         FROM bigname_phase.project_registry_binding_observation observation
-         WHERE observation.chain_id = $1 AND observation.registry_contract = $2
-           AND observation.registry_owner = $3 AND observation.applicable",
-    )
-    .bind(chain_id)
-    .bind(registry_contract)
-    .bind(registry_owner)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the registry-binding observations of a registry owner")?;
-    let observations: Vec<Observation> = rows.iter().filter_map(Observation::from_row).collect();
-    let names = attributions(conn, &observations).await?;
-    let mut candidates = BTreeSet::new();
-    for observation in &observations {
-        candidates.insert(observation.target_resource_id.clone());
-        candidates.insert(observation.resource_id.clone());
-        if let Some(resource) = observation
-            .logical_name_id
-            .as_ref()
-            .and_then(|name| names.get(name))
-            .and_then(|name| name.current_resource_id.clone())
-        {
-            candidates.insert(resource);
-        }
-    }
-    candidates
-        .into_iter()
-        .map(|resource| resource.parse().context("observation resource id"))
-        .collect()
-}
-
 /// The registry approvals of `(authority_contract, owner)` on `chain_id` with relation operator.
 pub(super) async fn registry_approvals(
     conn: &mut PgConnection,
     chain_id: &str,
     authority_contract: &str,
     owner: &str,
+    subjects: &[String],
 ) -> Result<Vec<ServedApproval>> {
     let rows: Vec<Value> = sqlx::query_scalar(
         "/* storage:families.control.permissions.registry_approvals */
@@ -143,37 +101,15 @@ pub(super) async fn registry_approvals(
          FROM bigname_phase.project_account_approval approval
          WHERE approval.chain_id = $1 AND approval.authority_kind = 'registry'
            AND approval.authority_contract = $2 AND approval.owner = $3
-           AND approval.relation_kind = 'operator'",
+           AND approval.relation_kind = 'operator'
+           AND approval.subject = ANY($4::text[])",
     )
     .bind(chain_id)
     .bind(authority_contract)
     .bind(owner)
+    .bind(subjects)
     .fetch_all(&mut *conn)
     .await
     .context("failed to load the registry operator approvals")?;
     Ok(rows.iter().filter_map(ServedApproval::from_row).collect())
-}
-
-/// Every approval `subject` holds as `authority_kind` operator, with its chain.
-pub(super) async fn approvals_of_subject(
-    conn: &mut PgConnection,
-    subject: &str,
-    authority_kind: &str,
-) -> Result<Vec<(String, ServedApproval)>> {
-    let rows: Vec<(String, Value)> = sqlx::query_as(
-        "/* storage:families.control.permissions.subject_approvals */
-         SELECT approval.chain_id, to_jsonb(approval)
-         FROM bigname_phase.project_account_approval approval
-         WHERE approval.subject = $1 AND approval.authority_kind = $2
-           AND approval.relation_kind = 'operator' AND approval.approved",
-    )
-    .bind(subject)
-    .bind(authority_kind)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load an account's operator approvals")?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(chain, row)| Some((chain, ServedApproval::from_row(&row)?)))
-        .collect())
 }
