@@ -167,10 +167,24 @@ forwards it from the host environment or `.env.server` to both the `api` and
 the `phase-runner` services; Compose forwards only the variables it lists, so
 without that entry the containers would never see it. Unset or empty means
 off, and only `1` or `true` turns it on. Both binaries read it once at startup,
-so set it the same for both and restart both to change it. Production leaves it
-off until the row and guard cutovers are complete: with it on, served-table
-reads can return inconsistent membership or counts (see
-[`api-v1.md`](api-v1.md), the publication switch paragraph).
+so set it the same for both. To change it, edit `.env.server` (or the host
+environment) and recreate both containers:
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml up -d --force-recreate api phase-runner
+```
+
+`docker compose restart` does not reload changed environment configuration, so
+a restart alone keeps the old value.
+
+The direct `docker run` selectors under [Container contents](#container-contents)
+do not forward the variable: anyone running the binaries that way must pass
+`-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
+the `phases` invocations.
+
+Production leaves the switch off until the row and guard cutovers are complete:
+with it on, served-table reads can return inconsistent membership or counts
+(see [`api-v1.md`](api-v1.md), the publication switch paragraph).
 
 ## Phase-runner configuration
 
