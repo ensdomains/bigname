@@ -608,7 +608,7 @@ impl Fixture {
 
     /// Rebuild changes only operational timestamps of retained child-history rows. Undo
     /// comparisons still use exact(), preserving every restored timestamp byte for byte.
-    async fn rebuild_state(&self) -> Result<Vec<(String, String)>> {
+    pub async fn rebuild_state(&self) -> Result<Vec<(String, String)>> {
         let mut state = self.exact().await?;
         for (table, rows) in &mut state {
             if table == "child_registration_events" {
