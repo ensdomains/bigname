@@ -197,7 +197,9 @@ impl PhaseRunner {
     /// The phase's shadow work after a recorded batch, call after call until it is done; its
     /// error fails the run with the batch kept. Between calls the loop progress and the phase
     /// heartbeat are recorded as a batch settlement records them, so a family catch-up that spans
-    /// hours stays visibly alive. A stop abandons waiting work: returns false when one did.
+    /// hours stays visibly alive, and the capacity guard is re-entered as before a batch, with no
+    /// write reservation since a family run carries no estimate. A stop abandons waiting work:
+    /// returns false when one did.
     pub(super) async fn follow_batch(
         &self,
         chain: &ChainConfig,
@@ -216,7 +218,7 @@ impl PhaseRunner {
                 return Ok(true);
             }
             self.record_loop_progress(&chain.chain_id);
-            let recorded = until_cancelled(cancellation, async {
+            let admitted = until_cancelled(cancellation, async {
                 phase_lock.check_alive().await?;
                 heartbeat
                     .record_if_due(
@@ -225,10 +227,14 @@ impl PhaseRunner {
                         &chain.chain_id,
                         phase.name(),
                     )
-                    .await
+                    .await?;
+                let stopped = self
+                    .wait_for_capacity(chain, phase.name(), 0, cancellation, heartbeat, phase_lock)
+                    .await?;
+                Ok::<_, RunnerError>(!stopped)
             })
             .await?;
-            if recorded.is_none() {
+            if admitted != Some(true) {
                 return Ok(false);
             }
         }

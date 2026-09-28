@@ -1686,7 +1686,8 @@ After each Project batch commits and its progress is recorded, the phase runner
 applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. Only a rebuild groups
-blocks: below its switch point it applies the work blocks in [rebuild
+blocks: below its switch point it applies the [work
+blocks](glossary.md#work-block) in [rebuild
 ranges](glossary.md#rebuild-range), described below. A batch's publication never
 waits for them, since it has committed before they run, but the Project phase
 does not finish a batch until the families reach its served marker. One family
@@ -1696,7 +1697,9 @@ budget and applies or undoes at least one block, the runner starts another, in
 normal mode, so a rebuild or a long catch-up holds up the next batch until it
 ends. Between runs the runner records the phase heartbeat and its loop progress
 as it does after a batch, so a catch-up that spans hours does not read as a
-stalled phase. The one-shot `redo` command runs the same loop and returns with
+stalled phase, and checks storage capacity as it does before a batch: while the
+database is over its ceiling or free disk under its floor, the Project phase is
+paused and no further run starts. The one-shot `redo` command runs the same loop and returns with
 the families on the served marker. The family work is driven by served batches
 and held in memory, but every Project run starts with a batch, an empty
 incremental one when the head has not moved, so after a restart the families

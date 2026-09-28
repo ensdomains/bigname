@@ -2561,10 +2561,22 @@ range, so it is undone as one step. Rows are kept back to the lowest of
 256 blocks below the marker, the finalized block, the safe block and an active
 repair's floor ([projections](projections.md#owned-key-families)).
 
+## Work block
+
+a block on the readable lineage that carries [owned key
+family](#owned-key-family) input: one with an activated canonical event, a
+canonical surface binding, a resolver discovery edge or its target's contract
+address starting or stopping there, or the start block of a manifest
+declaration the run captured. A rebuild visits only these blocks, plus its
+target, since no other block owns a family fact; the block-by-block catch-up
+outside a rebuild applies every block. The sources are the five unions of `work_blocks` in
+`crates/project/src/families/input.rs`
+([projections](projections.md#owned-key-families)).
+
 ## Rebuild range
 
-several work blocks of an owned key family rebuild applied in one transaction:
-the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
+several [work blocks](#work-block) of an owned key family rebuild applied in
+one transaction: the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
 target with no safe block). The range folds its blocks one by one exactly as
 single blocks would, then journals, writes and advances the [family
 marker](#family-marker) once, to its last block, as one generation

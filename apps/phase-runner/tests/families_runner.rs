@@ -4,7 +4,7 @@ mod support;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -13,9 +13,10 @@ use anyhow::Result;
 use clap::Parser;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
-    capacity::CapacityGuard,
+    capacity::{CapacityFuture, CapacityGuard, CapacityMeasurement, CapacityProbe},
     cli::{Cli, ResolvedCommand},
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    database::RunnerDatabase,
     error::{ErrorKind, RunnerError},
     phase::{
         AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
@@ -26,6 +27,7 @@ use phase_runner::{
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use support::{ScratchDatabase, seed_lineage};
@@ -543,6 +545,125 @@ async fn a_family_catch_up_of_several_runs_keeps_the_phase_heartbeat_fresh() -> 
     scratch.cleanup().await
 }
 
+// A family catch-up of several runs re-enters the capacity guard before each run after the first,
+// as the runner does before each batch. The probe reports the database over its ceiling once the
+// first run has moved the family marker, so the phase pauses with the marker where that run left
+// it; once the probe clears, the phase resumes and the remaining runs finish the rebuild.
+#[tokio::test]
+async fn a_family_catch_up_pauses_between_runs_while_capacity_is_breached() -> Result<()> {
+    let scratch = ready_through("families_runner_capacity", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    let probe = Arc::new(CeilingOnceTheMarkerMoves::default());
+    let capacity = CapacityGuard::new(
+        CapacityConfig {
+            database_max_bytes: Some(1 << 40),
+            poll_interval: Duration::from_millis(5),
+            ..CapacityConfig::default()
+        },
+        probe.clone(),
+    );
+    let project = Arc::new(
+        ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+            max_blocks_per_run: 10,
+            ..FamilySettings::default()
+        }),
+    );
+    let mut task = tokio::spawn({
+        let scratch_runner = scratch.runner();
+        async move {
+            redo_with_capacity(
+                scratch_runner,
+                project,
+                30,
+                CancellationToken::new(),
+                capacity,
+            )
+            .await
+        }
+    });
+    let paused_at = tokio::select! {
+        () = probe.breached.notified() => marker(&scratch).await?,
+        finished = tokio::time::timeout(Duration::from_secs(60), &mut task) => {
+            finished???;
+            anyhow::bail!(
+                "the rebuild finished without the capacity guard running between its runs; \
+                 the family marker reached {:?}",
+                marker(&scratch).await?
+            );
+        }
+    };
+    assert!(
+        paused_at.is_some_and(|block| block < 30),
+        "the guard ran after the first run only: {paused_at:?}"
+    );
+    wait_for_project_status(&scratch, "paused").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        marker(&scratch).await?,
+        paused_at,
+        "no family run started while the database was over its ceiling"
+    );
+    assert_eq!(project_state(&scratch).await?.0, "paused");
+
+    probe.released.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(60), task).await???;
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(30),
+        "the resumed runs finished the rebuild"
+    );
+    scratch.cleanup().await
+}
+
+/// Reports the database over any ceiling while the family marker stands short of block 30, until
+/// released; before the first family run there is no marker, so the served batch is admitted.
+#[derive(Default)]
+struct CeilingOnceTheMarkerMoves {
+    breached: Notify,
+    released: AtomicBool,
+}
+
+impl CapacityProbe for CeilingOnceTheMarkerMoves {
+    fn measure<'a>(
+        &'a self,
+        pool: &'a sqlx::PgPool,
+        _writable_path: &'a std::path::Path,
+    ) -> CapacityFuture<'a> {
+        Box::pin(async move {
+            let marker: Option<i64> = sqlx::query_scalar(
+                "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
+            )
+            .bind(CHAIN)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| RunnerError::transient(format!("probe marker read: {error}")))?
+            .flatten();
+            let over = !self.released.load(Ordering::SeqCst) && marker.is_some_and(|b| b < 30);
+            if over {
+                self.breached.notify_one();
+            }
+            Ok(CapacityMeasurement {
+                database_size_bytes: if over { u64::MAX } else { 0 },
+                free_disk_bytes: u64::MAX,
+            })
+        })
+    }
+}
+
+async fn wait_for_project_status(scratch: &ScratchDatabase, status: &str) -> Result<()> {
+    for _ in 0..2_000 {
+        if project_state(scratch).await?.0 == status {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    anyhow::bail!("project never reached status {status}")
+}
+
 // An input token that fails to read is the family run's failure, raised after the batch's
 // progress is recorded, and the restart loop retries it. Here only the token read fails: the
 // Project phase reads `chain_phase_state` through a view whose `last_error` column, which only the
@@ -841,14 +962,25 @@ async fn redo_with_phase_and_stop(
     head: i64,
     stop: CancellationToken,
 ) -> Result<()> {
+    let capacity = CapacityGuard::system(CapacityConfig::default());
+    redo_with_capacity(scratch.runner(), project, head, stop, capacity).await
+}
+
+async fn redo_with_capacity(
+    runner_store: RunnerDatabase,
+    project: Arc<dyn Phase>,
+    head: i64,
+    stop: CancellationToken,
+    capacity: CapacityGuard,
+) -> Result<()> {
     PhaseRunner::new(
-        scratch.runner(),
+        runner_store,
         PhaseSet::with_ingest_interpret_and_project(
             Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
             project,
         )?,
-        CapacityGuard::system(CapacityConfig::default()),
+        capacity,
         "families-runner",
         TimingConfig {
             initial_backoff: Duration::from_millis(1),
