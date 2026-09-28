@@ -85,6 +85,7 @@
 
   /* the request line: the URL is the form */
   .req { margin-top: 32px; }
+  .page .internal { margin-top: 32px; font-size: 14px; color: var(--ink-soft); max-width: 62ch; }
   .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 0; border: 1.5px solid var(--line); background: var(--card); border-radius: 12px; padding: 9px 8px 9px 14px; font-family: var(--mono); font-size: 13.5px; line-height: 1.8; }
   .line .m { font-weight: 600; margin-right: 10px; flex: none; }
   .line .u { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
@@ -951,7 +952,7 @@ const ROUTES = [
   related: ['events', 'history', 'diag-coverage'],
 },
 {
-  id: 'healthz', method: 'GET', path: '/healthz', title: 'Health',
+  id: 'healthz', method: 'GET', path: '/healthz', title: 'Health', internal: true,
   summary: 'Probes the process and its database. This route lives outside <code>/v1</code>, does not use the envelope, and bypasses global admission with a reserved single-connection pool and a two-second check so that it answers even under load.',
   keywords: ['health', 'liveness', 'readiness', 'probe', 'database', 'identity', 'phase_runner', 'interpreter_content_hash', 'version', 'build_sha'],
   sample: {}, params: [],
@@ -1051,6 +1052,9 @@ const ROUTES = [
     return [p.in === 'path' ? 'in the path' : p.in === 'body' ? null : 'query', p.required ? 'required' : null, p.values ? `one of ${p.values.join(', ')}` : (p.type && p.type !== 'enum' ? p.type : null), p.default !== undefined ? `default ${p.default}` : null].filter(Boolean).join(' · ');
   }
   const refDl = rows => `<dl class="ref">${rows.map(([k, meta, v]) => `<dt>${esc(k)}${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</dt><dd>${v || ''}</dd>`).join('')}</dl>`;
+  // A route the process serves on its internal address only: the public edge
+  // does not admit it, so its page has no request line to run from here.
+  const INTERNAL_NOTE = '<p class="internal">The API process serves this route on its internal address for probes and operators; the public edge does not forward it, so it cannot be run from this page.</p>';
   function routeHtml(r) {
     const ex = exampleHtml(r, 'main');
     let ref = '';
@@ -1060,7 +1064,7 @@ const ROUTES = [
     if (r.outcomes) ref += `<h2>Status codes</h2>${refDl(r.outcomes.map(([c, w]) => [c, '', w]))}`;
     if (r.notes && r.notes.length) ref += '<h2>Notes</h2>' + r.notes.map(n => `<details class="note"><summary>${n.h}</summary><div class="body">${n.html}</div></details>`).join('');
     const also = (r.related || []).filter(id => BY_ID[id]).map(id => `<a href="#${id}">${esc(nameOf(BY_ID[id]))}</a>`).join('');
-    return friendly(`<div class="word-title">${word(r.method.toLowerCase(), 6)}</div><h1 class="path">${pathHtml(r.path)}</h1><p class="lede">${r.summary}</p><form class="req" id="req"></form><div class="out${ex ? ' ex' : ''}" id="out"${ex ? '' : ' hidden'}>${ex}</div><div class="ref">${ref}</div>${also ? `<div class="also"><span class="l">see also</span>${also}</div>` : ''}`);
+    return friendly(`<div class="word-title">${word(r.method.toLowerCase(), 6)}</div><h1 class="path">${pathHtml(r.path)}</h1><p class="lede">${r.summary}</p>${r.internal ? INTERNAL_NOTE : '<form class="req" id="req"></form>'}<div class="out${ex ? ' ex' : ''}" id="out"${ex ? '' : ' hidden'}>${ex}</div><div class="ref">${ref}</div>${also ? `<div class="also"><span class="l">see also</span>${also}</div>` : ''}`);
   }
   function exampleHtml(r, which) {
     const alt = r.response && r.response.alt, main = r.response && r.response.sample;
@@ -1181,7 +1185,7 @@ const ROUTES = [
     setCurrent(e.id);
     $('#page').innerHTML = `<a class="back" href="#">&larr; ${esc(PREFIX)}</a>` + (e.kind === 'route' ? routeHtml(e) : guideHtml(e));
     document.title = e.id === 'overview' ? 'bigname API docs' : `${nameOf(e)} · bigname API docs`;
-    if (e.kind === 'route') wireRequest(e);
+    if (e.kind === 'route' && !e.internal) wireRequest(e);
   }
   function route() {
     const [id, anchor] = decodeURIComponent(location.hash.replace(/^#\/?/, '')).split('/');

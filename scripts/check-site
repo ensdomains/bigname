@@ -115,6 +115,12 @@ for page in "${pages[@]}"; do
   grep -q 'NET.mount(' "$page" || fail "$page does not render the network switcher"
 done
 
+# The public edge forwards only /v1 (and /openapi.json), so a manual page for
+# any other path must be marked internal and get no request line to run.
+if grep -nE "path: '/" site/docs/index.html | grep -vE "path: '/v1/" | grep -vF 'internal: true'; then
+  fail "a route outside /v1 in site/docs/index.html is not marked internal: true"
+fi
+
 # apps/api/src/tests/site_pages.rs reads these entries to hold the router and
 # the reference together; an empty set would make that test vacuous.
 route_entries="$(grep -c "path: '/v1/" site/docs/index.html || true)"
