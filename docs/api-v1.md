@@ -905,17 +905,26 @@ With the switch on, these routes read [composed name rows](glossary.md#composed-
 instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
 diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
 resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
-whole. The following routes keep their own pages on the served tables until a
-later step 7b slice moves them, and take only the name rows they join from
-composed rows: `GET /v1/names/{name}/subnames` (the parent and each child's
-registration), `GET /v1/registries/{chain_id}/{address}/labels` (each child's
-registration), `GET /v1/names/{name}/history` (whether the name exists),
-`GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
-name of each registration), `GET /v1/addresses/{address}/names` (each name's
-registration, `relation=resolves_to` included), `GET /v1/events`,
-`GET /v1/diagnostics/events` and `GET /v1/addresses/{address}/history` (each
-event's name), and the primary-name claim gate of
-`GET /v1/addresses/{address}/primary-name`. Their bodies are meant to be
+whole. The records and address routes read their own rows from the families
+too: the record inventory of `GET /v1/names/{name}/records` (default keys,
+indexed answers and `include=inventory`, read at the publication only, so an
+`at` below it answers `409 stale`), the same inventory for name detail's
+record fields (`GET /v1/names/{name}`, both sources) and for
+`GET /v1/diagnostics/names/{name}/records`, the address-name relations of
+`GET /v1/addresses/{address}/names`, recomputed at read from the address index
+and the composed names, its `relation=resolves_to` pages (both the exact coin
+type and `coin_type=evm`) from the record-id index alone, the record counts of
+`include=counts`, and the indexed primary-name claim of
+`GET /v1/addresses/{address}/primary-name`. The verified lookup engine keeps
+reading the served tables until the flip. The following routes keep their own
+pages on the served tables until a later step 7b slice moves them, and take
+only the name rows they join from composed rows:
+`GET /v1/names/{name}/subnames` (the parent and each child's registration),
+`GET /v1/registries/{chain_id}/{address}/labels` (each child's registration),
+`GET /v1/names/{name}/history` (whether the name exists), `GET /v1/permissions`
+and `GET /v1/resolvers/{chain_id}/{address}/roles` (the name of each
+registration), `GET /v1/events`, `GET /v1/diagnostics/events` and
+`GET /v1/addresses/{address}/history` (each event's name). Their bodies are meant to be
 identical to the served ones. Each composed read sees one committed family
 block, so a row never mixes two blocks. A composed row describes the publication
 and has no older position of its own, so an `at` below the publication answers
@@ -935,7 +944,7 @@ the composed row reads the node at once (unregistered but projected), so
 `GET /v1/search` can list with the switch on a name it omits with the switch
 off. A composed row also does not yet carry the declared resolution topology
 (`declared_summary.topology`), which the records route's verified lookup
-admission and avatar readback read; that moves with the record inventories.
+admission and avatar readback read; the record inventories moved without it.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.

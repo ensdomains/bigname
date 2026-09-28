@@ -2,7 +2,7 @@
 //! pointer when it is not a clear (linked_records.rs, `project_record_pointers`), its
 //! support from the resolver classification (record_inventory.rs, `pointer_eligibility`).
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::{
@@ -31,7 +31,7 @@ pub(crate) struct ServingPointer {
 /// serves no records here, as today's serving pointer requires one; the comparison then reports
 /// the row that today's reader serves through an older named pointer.
 pub(crate) async fn serving_pointer(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     pointer: &FamilyResourcePointer,
 ) -> Result<Option<ServingPointer>> {
     let (Some(resolver_address), Some(position)) =
@@ -42,7 +42,7 @@ pub(crate) async fn serving_pointer(
     if is_cleared(Some(resolver_address)) {
         return Ok(None);
     }
-    let probed = probe_events(pool, std::slice::from_ref(&position.event_identity)).await?;
+    let probed = probe_events(conn, std::slice::from_ref(&position.event_identity)).await?;
     let event = probed.get(&position.event_identity);
     let Some(logical_name_id) = event.and_then(|event| event.logical_name_id.clone()) else {
         return Ok(None);

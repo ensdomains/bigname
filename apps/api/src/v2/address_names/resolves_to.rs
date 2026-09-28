@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::v2::{
     AddressNamesDedupe, AddressNamesSort, CursorPayload, Envelope, Page, QueryParams, Relation,
+    SnapshotReadResource::Resource,
     SortOrder, V2Error, V2Result, api_error_to_v2,
     cursor::{cursor_value, invalid_cursor_error},
-    decode, encode,
+    decode, encode, name_rows_error,
     permission_support::{apply_role_summary_support_meta, permission_support_for_resources},
     restrictions::ResourceRestrictions,
     support::parse_primary_name_coin_type,
@@ -138,9 +139,9 @@ pub(super) async fn get_address_resolves_to(
         {
             return invalid_cursor_error();
         }
-        V2Error::internal_error(format!(
-            "failed to load names resolving to {normalized_address}"
-        ))
+        // Under the publication switch a chain whose families are not published is stale.
+        let message = format!("failed to load names resolving to {normalized_address}");
+        name_rows_error(Resource, |_| V2Error::internal_error(message))(error)
     };
     let (rows, next_storage_cursor) = match &coins {
         ResolvesToCoins::Single { coin_type, numeric } => {
@@ -412,9 +413,9 @@ async fn load_primary_names_by_namespace<'a>(
             pool, address, namespace, coin_type,
         )
         .await
-        .map_err(|_| {
+        .map_err(name_rows_error(Resource, |_| {
             V2Error::internal_error(format!("failed to load primary name for address {address}"))
-        })?
+        }))?
         .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
         .and_then(|snapshot| {
             snapshot

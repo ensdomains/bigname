@@ -7,11 +7,13 @@ use super::types::{
 };
 use super::{
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+    source::RowSource,
 };
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
+    source: RowSource<'a>,
     address: &'a str,
     namespace: Option<&'a str>,
     relations: Option<&'a [AddressNameRelation]>,
@@ -20,9 +22,9 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     authority: Option<&'a str>,
     is_migrated: Option<bool>,
 ) {
+    source.push_with(builder);
     builder.push(
-        r#"
-        WITH filtered AS (
+        r#"filtered AS (
             SELECT
                 anc.address,
                 anc.logical_name_id,
@@ -52,9 +54,9 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                     WHEN 'effective_controller' THEN 2
                     ELSE 99
                 END AS relation_rank
-            FROM bigname_phase.address_names_current anc
-        "#,
+            FROM "#,
     );
+    source.push_address_names(builder);
     builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
     builder.push(" WHERE anc.address =");
     builder.push(" ");
@@ -79,8 +81,9 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push(" ESCAPE '\\'");
     }
     if let Some(authority) = authority {
-        crate::name_current::push_public_authority_filter(
+        crate::name_current::push_public_authority_filter_in(
             builder,
+            source.names(),
             "anc.logical_name_id",
             authority,
         );
@@ -92,8 +95,11 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
             builder.push(" AND NOT ");
         }
         // Use the same proof and timestamp join as load_name_migration_transition_timestamps.
-        builder.push(r#"EXISTS (
-            SELECT 1 FROM bigname_phase.name_current migration_nc
+        builder.push(format!(
+            "EXISTS (SELECT 1 FROM {} migration_nc",
+            source.names()
+        ));
+        builder.push(r#"
             JOIN bigname_phase.normalized_events proof
               ON proof.normalized_event_id = CASE
                 WHEN migration_nc.provenance #>> '{authority_selection,proof_event_id}' ~ '^[0-9]+$'
@@ -257,6 +263,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
 
 pub(super) fn push_address_names_current_sortable_entries_cte(
     builder: &mut QueryBuilder<'_, Postgres>,
+    names: &str,
     sort: AddressNamesCurrentSort,
 ) {
     if !sort.is_timestamp() {
@@ -271,15 +278,15 @@ pub(super) fn push_address_names_current_sortable_entries_cte(
         "#,
     );
     push_address_names_current_sort_timestamp_expr(builder, sort);
-    builder.push(
-        r#"
+    builder.push(format!(
+        "
                 AS sort_timestamp
             FROM entries
-            LEFT JOIN name_current nc
+            LEFT JOIN {names} nc
               ON nc.logical_name_id = entries.logical_name_id
         )
-        "#,
-    );
+        "
+    ));
 }
 
 pub(super) fn push_address_names_current_cursor_after<'a>(

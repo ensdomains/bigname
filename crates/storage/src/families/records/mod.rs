@@ -11,6 +11,8 @@
 //! when both indexes are present, then the event identity as bytes, with a synthesised event's
 //! missing positions first; see `FamilyPosition`), so a same-position tie can resolve differently
 //! from today's readers, which break it by the generated event id.
+mod address_names;
+mod address_relations;
 mod assemble;
 mod candidates;
 mod compare;
@@ -21,17 +23,21 @@ mod mirror;
 mod pair_oracle;
 mod payload;
 mod pointer;
+mod primary;
 mod resolves_to;
+mod resolves_to_serving;
 mod reverse;
 mod rows;
 mod serving;
 mod shadow;
+mod shadow_pages;
 
 use std::cmp::Ordering;
 
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
+pub use address_names::load_family_address_names_page;
 pub use compare::{
     Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
     compare_primary_name, compare_record_inventory,
@@ -41,20 +47,23 @@ pub use facts::{
     load_classification as load_family_resolver_classification,
 };
 pub use inventory::{
-    CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_inventory,
-    load_family_record_inventory_detail,
+    CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
+    load_family_record_inventory, load_family_record_inventory_detail,
+    load_family_record_inventory_for_snapshot, load_family_supported_record_inventory_for_snapshot,
 };
 pub use links::{
     DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
+pub use primary::{load_family_primary_name_snapshot, load_family_primary_name_snapshots};
 pub use resolves_to::{
     FamilyAddressRecords, FamilyAddressRecordsPage, load_family_address_records,
     load_family_address_records_page, page_family_address_records,
 };
+pub use resolves_to_serving::{load_family_resolves_to_evm_page, load_family_resolves_to_page};
 pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
-pub use shadow::{ShadowReport, compare_family_reads};
+pub use shadow::{ShadowReport, compare_family_reads, compare_family_reads_excusing};
 
 /// The resolver address a clear writes: the zero address, or the empty string for a pointer event
 /// without a resolver.

@@ -38,10 +38,13 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
+mod record_counts;
 mod resolves_to;
 mod resolves_to_evm;
 mod role_summary;
 mod storage_mapping;
+
+use record_counts::load_address_name_record_counts;
 
 pub(crate) use self::storage_mapping::{
     dedupe_to_storage, order_to_storage, relation_from_storage, relation_set_to_storage,
@@ -225,9 +228,12 @@ pub(crate) async fn get_address_names(
         {
             return invalid_cursor_error();
         }
-        V2Error::internal_error(format!(
-            "failed to load address names for {normalized_address}"
-        ))
+        // Under the publication switch a chain whose families are not published is stale.
+        super::name_rows_error(super::SnapshotReadResource::Resource, |_| {
+            V2Error::internal_error(format!(
+                "failed to load address names for {normalized_address}"
+            ))
+        })(error)
     })?;
 
     let logical_name_ids = storage_page
@@ -426,11 +432,14 @@ async fn load_primary_names_by_namespace<'a>(
         let primary_name =
             bigname_storage::load_primary_name_current_snapshot(pool, address, namespace, "60")
                 .await
-                .map_err(|_| {
-                    V2Error::internal_error(format!(
-                        "failed to load primary name for address {address}"
-                    ))
-                })?
+                .map_err(crate::v2::name_rows_error(
+                    crate::v2::SnapshotReadResource::Resource,
+                    |_| {
+                        V2Error::internal_error(format!(
+                            "failed to load primary name for address {address}"
+                        ))
+                    },
+                ))?
                 .filter(|snapshot| snapshot.row.claim_status == PrimaryNameClaimStatus::Success)
                 .and_then(|snapshot| {
                     snapshot
@@ -441,35 +450,6 @@ async fn load_primary_names_by_namespace<'a>(
         primary_names.insert(namespace.to_owned(), primary_name);
     }
     Ok(primary_names)
-}
-
-async fn load_address_name_record_counts<'a>(
-    pool: &sqlx::PgPool,
-    names: impl Iterator<Item = &'a str>,
-    name_rows: &BTreeMap<String, NameCurrentRow>,
-) -> anyhow::Result<BTreeMap<String, u64>> {
-    let mut logical_name_ids = Vec::new();
-    let mut keys = Vec::new();
-    for logical_name_id in names {
-        let Some(name_row) = name_rows.get(logical_name_id) else {
-            continue;
-        };
-        let Some((resource_id, boundary)) =
-            bigname_storage::resolution_record_inventory_lookup_key_any_chain(name_row)
-        else {
-            continue;
-        };
-        logical_name_ids.push(logical_name_id.to_owned());
-        keys.push((resource_id, boundary));
-    }
-
-    let counts =
-        bigname_storage::count_record_inventory_selectors_by_lookup_keys(pool, &keys).await?;
-    Ok(logical_name_ids
-        .into_iter()
-        .zip(counts)
-        .filter_map(|(logical_name_id, count)| count.map(|count| (logical_name_id, count)))
-        .collect())
 }
 
 pub(crate) fn build_address_name(

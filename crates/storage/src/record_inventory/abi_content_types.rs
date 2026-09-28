@@ -184,8 +184,28 @@ pub async fn load_record_inventory_abi_content_types(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
 ) -> Result<Vec<AbiContentTypes>> {
+    load_abi_content_types(pool, inputs, true).await
+}
+
+/// [`load_record_inventory_abi_content_types`] for family inventory rows (TYR-36 step 7b, the
+/// records route under the publication switch): a family row is assembled in one snapshot at the
+/// family publication and has no `record_inventory_current` row to confirm, so the held-row check
+/// is not made. The classification is still the served resolver row until the resolver reads
+/// move.
+pub async fn load_family_record_inventory_abi_content_types(
+    pool: &PgPool,
+    inputs: &[AbiContentTypesInput<'_>],
+) -> Result<Vec<AbiContentTypes>> {
+    load_abi_content_types(pool, inputs, false).await
+}
+
+async fn load_abi_content_types(
+    pool: &PgPool,
+    inputs: &[AbiContentTypesInput<'_>],
+    confirm_published: bool,
+) -> Result<Vec<AbiContentTypes>> {
     let plans = inputs.iter().map(plan).collect::<Vec<_>>();
-    let classifications = load_classifications(pool, inputs, &plans).await?;
+    let classifications = load_classifications(pool, inputs, &plans, confirm_published).await?;
 
     let mut answers = Vec::with_capacity(plans.len());
     let mut pending = Vec::new();
@@ -291,7 +311,7 @@ fn content_types_from_evidence(
 /// so while the held row is still published the resolver row read here is the one it was built on.
 const ABI_CLASSIFICATION_QUERY: &str = r#"
     SELECT requested.ordinal,
-           EXISTS (
+           $8 OR EXISTS (
                SELECT 1
                FROM bigname_phase.record_inventory_current inventory
                WHERE inventory.resource_id = requested.resource_id
@@ -321,6 +341,7 @@ async fn load_classifications(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
     plans: &[Plan],
+    confirm_published: bool,
 ) -> Result<BTreeMap<usize, std::result::Result<bool, AbiContentTypesUnavailable>>> {
     let mut ordinals = Vec::new();
     let mut resource_ids = Vec::new();
@@ -360,6 +381,7 @@ async fn load_classifications(
     .bind(recomputed_at)
     .bind(chain_ids)
     .bind(addresses)
+    .bind(!confirm_published)
     .fetch_all(pool)
     .await
     .context("failed to load resolver classifications for ABI content types")?;

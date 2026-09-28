@@ -32,7 +32,7 @@ use crate::{
 /// A read-only REPEATABLE READ transaction on `pool`: its snapshot is taken at its first
 /// statement and holds for every statement after it, so a composed read cannot mix two family
 /// blocks. The caller commits it (nothing is written) once the read is done.
-pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+pub(crate) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
     let mut transaction = pool
         .begin()
         .await
@@ -56,6 +56,48 @@ pub async fn load_family_publication(
         .await
         .context("failed to acquire a connection for the family marker")?;
     publication(&mut conn, chain_id).await
+}
+
+/// The publication of `chain_id` read on `conn`, or [`FamilyPublicationUnavailable`] when its
+/// marker is not servable. A family read that is not keyed by a name (the address and record
+/// readers) checks its chains with it.
+pub(crate) async fn servable_publication(
+    conn: &mut PgConnection,
+    chain_id: &str,
+) -> Result<FamilyPublication> {
+    match publication(conn, chain_id).await? {
+        Some(publication) => Ok(publication),
+        None => Err(FamilyPublicationUnavailable {
+            chain_id: chain_id.to_owned(),
+        }
+        .into()),
+    }
+}
+
+/// Every chain's publication, or [`FamilyPublicationUnavailable`] for the first chain whose
+/// marker is not servable (or `none` when no marker exists): an address read that found no rows
+/// cannot tell an empty answer from families still being built otherwise.
+pub(crate) async fn all_servable_publications(
+    conn: &mut PgConnection,
+) -> Result<Vec<FamilyPublication>> {
+    let chains: Vec<String> = sqlx::query_scalar(
+        "/* storage:families.name.marker_chains */
+         SELECT chain_id FROM bigname_phase.project_family_marker ORDER BY chain_id",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to list the family markers")?;
+    if chains.is_empty() {
+        return Err(FamilyPublicationUnavailable {
+            chain_id: "none".to_owned(),
+        }
+        .into());
+    }
+    let mut out = Vec::with_capacity(chains.len());
+    for chain_id in chains {
+        out.push(servable_publication(conn, &chain_id).await?);
+    }
+    Ok(out)
 }
 
 async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
@@ -161,7 +203,7 @@ pub async fn load_family_names_by_resource_ids(
 
 /// The composed rows of `logical_name_ids` read on `conn`, which the caller holds in one
 /// [`read_snapshot`].
-pub(super) async fn load(
+pub(crate) async fn load(
     conn: &mut PgConnection,
     logical_name_ids: &[String],
     shape: CoverageShape,

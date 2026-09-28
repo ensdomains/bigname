@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 
 /// Attribution columns of one event, read from `normalized_events` by its event identity, which
 /// is unique there. The family rows keep only a secondary position (block, transaction, log and
@@ -20,7 +20,7 @@ pub(crate) struct ProbedEvent {
 }
 
 pub(crate) async fn probe_events(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     identities: &[String],
 ) -> Result<HashMap<String, ProbedEvent>> {
     if identities.is_empty() {
@@ -33,7 +33,7 @@ pub(crate) async fn probe_events(
          WHERE event_identity = ANY($1::text[])",
     )
     .bind(identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to read family events back by event identity")?;
     rows.into_iter()
@@ -60,7 +60,7 @@ pub(crate) struct BlockStamp {
 }
 
 pub(crate) async fn block_stamps(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     blocks: &[i64],
 ) -> Result<BTreeMap<i64, BlockStamp>> {
@@ -79,7 +79,7 @@ pub(crate) async fn block_stamps(
     )
     .bind(chain_id)
     .bind(blocks)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to read the readable blocks of family rows")?;
     rows.into_iter()
@@ -152,8 +152,21 @@ impl ResolverClassification {
     }
 }
 
+/// The classification of `resolver_address`, as [`load_classification_on`] reads it.
 pub async fn load_classification(
-    pool: &PgPool,
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    resolver_address: &str,
+) -> Result<Option<ResolverClassification>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for a resolver classification")?;
+    load_classification_on(&mut conn, chain_id, resolver_address).await
+}
+
+pub(crate) async fn load_classification_on(
+    conn: &mut PgConnection,
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
@@ -214,7 +227,7 @@ pub async fn load_classification(
     )
     .bind(chain_id)
     .bind(resolver_address.to_ascii_lowercase())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the classification of resolver {resolver_address}"))?;
     row.map(|row| {
@@ -233,13 +246,16 @@ pub async fn load_classification(
 
 /// `texts` in the order `ORDER BY` gives them in the database collation, which the served rows
 /// use for their record keys and family names.
-pub(crate) async fn collation_order(pool: &PgPool, texts: Vec<String>) -> Result<Vec<String>> {
+pub(crate) async fn collation_order(
+    conn: &mut PgConnection,
+    texts: Vec<String>,
+) -> Result<Vec<String>> {
     if texts.len() < 2 {
         return Ok(texts);
     }
     sqlx::query_scalar("SELECT text FROM unnest($1::text[]) text ORDER BY text")
         .bind(texts)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .context("failed to order family record keys")
 }

@@ -37,6 +37,11 @@ pub(super) async fn unverifiable_claim_authority(
         Err(error) if projection_unavailable(&error) => {
             return Ok(ForwardGateDecision::ProjectionUnavailable);
         }
+        Err(error) if bigname_storage::families::name::is_publication_unavailable(&error) => {
+            return Err(crate::v2::stale_name_rows_api_error(
+                crate::v2::SnapshotReadResource::Resource,
+            ));
+        }
         Err(error) => {
             error!(
                 service = "api",

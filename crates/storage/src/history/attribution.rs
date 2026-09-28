@@ -145,7 +145,7 @@ pub async fn load_bounded_record_attribution(
     load_attribution_map(&mut connection, resource_ids, published).await
 }
 
-async fn load_attribution_map(
+pub(crate) async fn load_attribution_map(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,

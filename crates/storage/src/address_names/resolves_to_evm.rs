@@ -12,15 +12,16 @@
 //! chosen, so a representative never hides another coin type the group matched, and a group past
 //! the limit is always reported by its count.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{ENSIP19_DEFAULT_COIN_TYPE, ETH_COIN_TYPE};
-use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, postgres::PgRow};
 
 use super::{
     resolves_to::{
         AddressRecordCurrentEntry, AddressRecordsCoinSelector, AddressRecordsFilter,
         load_sorted_entries,
     },
+    source::RowSource,
     types::{
         AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
         AddressNamesCurrentSortedCursor,
@@ -68,10 +69,51 @@ pub struct AddressRecordsCurrentEvmPage {
 
 /// Load a bounded page of current names whose stored `addr:<coin_type>` record for any EVM coin
 /// type resolves to `address`. Arguments mean what they mean for
-/// [`super::load_address_records_current_page`].
+/// [`super::load_address_records_current_page`], including the switch branch.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_records_current_evm_page(
     pool: &PgPool,
+    address: &str,
+    namespaces: Option<&[String]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    authority: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<AddressRecordsCurrentEvmPage> {
+    if crate::publication_source::serve_from_families() {
+        return crate::families::records::load_family_resolves_to_evm_page(
+            pool, address, namespaces, dedupe_by, q, authority, sort, order, cursor, page_size,
+        )
+        .await;
+    }
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for an evm address_records_current page")?;
+    load_address_records_evm_page_from(
+        &mut conn,
+        RowSource::Served,
+        address,
+        namespaces,
+        dedupe_by,
+        q,
+        authority,
+        sort,
+        order,
+        cursor,
+        page_size,
+    )
+    .await
+}
+
+/// The `coin_type=evm` page over `source`, on `conn`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn load_address_records_evm_page_from(
+    conn: &mut PgConnection,
+    source: RowSource<'_>,
     address: &str,
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
@@ -89,9 +131,10 @@ pub async fn load_address_records_current_evm_page(
         dedupe_by,
         q,
         authority,
+        source,
     };
     let (rows, next_cursor) =
-        load_sorted_entries(pool, &filter, sort, order, cursor, page_size).await?;
+        load_sorted_entries(conn, &filter, sort, order, cursor, page_size).await?;
     let entries = rows
         .into_iter()
         .map(|row| {
@@ -134,6 +177,7 @@ pub async fn explain_address_records_current_evm_page_for_test(
         dedupe_by,
         q: None,
         authority: None,
+        source: RowSource::Served,
     };
     let mut plans = Vec::new();
     if let Some(cursor) = cursor {
@@ -165,6 +209,7 @@ pub fn address_records_current_evm_page_sql_for_test(
         dedupe_by,
         q: None,
         authority: None,
+        source: RowSource::Served,
     };
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_page_statement(&mut builder, &filter, sort, order, None, 51);
@@ -192,14 +237,12 @@ fn push_evm_coin_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
 /// which visits every address's rows.
 pub(super) fn push_evm_address_rows_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
+    source: RowSource<'a>,
     address: &'a str,
 ) {
-    builder.push(
-        r#"evm_address_rows AS MATERIALIZED (
-            SELECT arc.*
-            FROM bigname_phase.address_records_current arc
-            WHERE arc.address = "#,
-    );
+    builder.push("evm_address_rows AS MATERIALIZED (\n            SELECT arc.*\n            FROM ");
+    source.push_address_records(builder);
+    builder.push("\n            WHERE arc.address = ");
     builder.push_bind(address);
     push_evm_coin_predicate(builder);
     builder.push("\n        ),\n        ");

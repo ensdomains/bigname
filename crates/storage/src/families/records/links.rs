@@ -1,7 +1,7 @@
 //! Readers the edge and topology step shares: the resolver link selection over F7, and the alias
 //! and wildcard views of the F5 resource pointer.
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{FamilyPosition, is_cleared, load_family_resource_pointer};
@@ -75,6 +75,20 @@ pub async fn load_family_link_selection(
     resolver_address: &str,
     namehash: &str,
 ) -> Result<Option<LinkSelection>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for a family link selection")?;
+    load_family_link_selection_on(&mut conn, chain_id, resolver_address, namehash).await
+}
+
+/// [`load_family_link_selection`] on `conn`.
+pub(crate) async fn load_family_link_selection_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resolver_address: &str,
+    namehash: &str,
+) -> Result<Option<LinkSelection>> {
     let rows = sqlx::query(
         "SELECT node, record_id, block_number, transaction_index, log_index, event_identity,
                 normalized_event_id
@@ -87,7 +101,7 @@ pub async fn load_family_link_selection(
         namehash.to_ascii_lowercase(),
         DEFAULT_RECORD_NODE.to_owned(),
     ])
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the family links of resolver {resolver_address}"))?;
     let mut exact = None;

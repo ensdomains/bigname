@@ -6,8 +6,11 @@ mod read;
 mod resolves_to;
 mod resolves_to_evm;
 mod resolves_to_filter;
+mod resolves_to_page;
+mod source;
 mod types;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
+pub(crate) use page::load_address_names_page_from;
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,
@@ -25,8 +28,8 @@ pub use read::{
 };
 pub use resolves_to::{
     AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
-    load_address_records_current_page,
 };
+pub(crate) use resolves_to_evm::load_address_records_evm_page_from;
 pub use resolves_to_evm::{
     AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, load_address_records_current_evm_page,
@@ -36,6 +39,9 @@ pub use resolves_to_evm::{
     address_records_current_evm_page_sql_for_test,
     explain_address_records_current_evm_page_for_test,
 };
+pub use resolves_to_page::load_address_records_current_page;
+pub(crate) use resolves_to_page::load_address_records_page_from;
+pub(crate) use source::RowSource;
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,

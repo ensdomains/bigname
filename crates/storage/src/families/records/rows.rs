@@ -2,7 +2,7 @@
 //! as record candidates, and the partition version events that are boundary candidates.
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, Row, postgres::PgRow};
 
 use super::{FamilyPosition, facts::ResolverClassification, serving::ServingPointer};
 
@@ -134,7 +134,7 @@ const VALUE_COLUMNS: &str =
 
 /// The admitted partitions' version events and their retained writes.
 pub(crate) async fn load_partitions(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resolver_address: &str,
     partitions: &[(&'static str, String)],
@@ -153,7 +153,7 @@ pub(crate) async fn load_partitions(
     .bind(resolver_address)
     .bind(&arms)
     .bind(&identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record partitions")?
     .into_iter()
@@ -175,7 +175,7 @@ pub(crate) async fn load_partitions(
     .bind(resolver_address)
     .bind(&arms)
     .bind(&identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the admitted record values")?
     .iter()
@@ -186,7 +186,7 @@ pub(crate) async fn load_partitions(
 
 /// The retained writes of one record id at a resolver.
 pub(crate) async fn load_record_id_values(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resolver_address: &str,
     record_id: &str,
@@ -199,7 +199,7 @@ pub(crate) async fn load_record_id_values(
     .bind(chain_id)
     .bind(resolver_address)
     .bind(record_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the linked record values")?
     .iter()
