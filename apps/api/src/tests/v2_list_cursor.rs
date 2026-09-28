@@ -197,7 +197,7 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
 
 /// Publishes block 241 for Project and the families over whatever events are stored.
 async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
-    publish_project_and_families(database, 241).await
+    publish_test_families(database, 241).await
 }
 
 /// A cursor issued at block 240 continues after the publication moves to 241: the page reads
@@ -436,7 +436,7 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     let (gamma, gamma_resource) =
         seed_switch_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
     seed_switch_resolver_declaration(&database).await?;
-    publish_project_and_families(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let at_240 = switch_timestamp(1_700_000_240)?;
     let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
@@ -649,5 +649,5 @@ async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -
 async fn seed_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
     seed_switch_names_events(database).await?;
     seed_switch_resolver_declaration(database).await?;
-    publish_project_and_families(database, 240).await
+    publish_test_families(database, 240).await
 }

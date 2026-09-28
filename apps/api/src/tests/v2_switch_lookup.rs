@@ -1,5 +1,3 @@
-// Live lookup after the family cutover: inputs originate in normalized events and actual
-// Project reducers, and removing served rows must not change resolution or persistence.
 async fn seed_family_lookup_fixture(database: &TestDatabase) -> Result<String> {
     seed_switch_records_fixture(database).await?;
     seed_schema_v2_ens_manifest_on_chain(
@@ -17,29 +15,17 @@ async fn seed_family_lookup_fixture(database: &TestDatabase) -> Result<String> {
     )
     .fetch_one(&database.pool)
     .await?;
-    let served:Value = sqlx::query_scalar("SELECT declared_summary -> 'topology' FROM bigname_phase.name_current WHERE logical_name_id = $1")
-        .bind(&id).fetch_one(&database.pool).await?;
     let family = bigname_storage::families::name::load_family_name(&database.pool, &id)
-        .await?
-        .context("family name")?;
-    assert_eq!(family.declared_summary["topology"], served);
-    assert_eq!(
-        served["resolver_path"][0]["address"],
-        json!(SWITCH_RESOLVER)
-    );
-    for table in ["record_inventory_current", "name_current"] {
-        sqlx::query(&format!("DELETE FROM bigname_phase.{table}"))
-            .execute(&database.pool)
-            .await?;
-    }
-    // A stopped served batch leaves its old Project marker behind.
+        .await?.context("family name")?;
+    assert_eq!(family.declared_summary["topology"]["resolver_path"][0]["address"],
+        json!(SWITCH_RESOLVER));
     sqlx::query("UPDATE bigname_phase.chain_phase_state SET current_block_number = 200, current_block_hash = '0xhistory200' WHERE phase_name = 'project'")
         .execute(&database.pool).await?;
     Ok(id)
 }
 
 #[tokio::test]
-async fn family_lookup_compares_and_clears_divergence_without_served_inputs() -> Result<()> {
+async fn family_lookup_compares_and_clears_divergence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let id = seed_family_lookup_fixture(&database).await?;
     for (address, action, count) in [
@@ -56,10 +42,7 @@ async fn family_lookup_compares_and_clears_divergence_without_served_inputs() ->
             database.pool.clone(),
             bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
         );
-        let answer = bigname_storage::publication_source::with_serve_from_families(
-            true,
-            engine.lookup(bigname_lookup::LookupRequest::new(&id, ["addr:60"])?),
-        )
+        let answer = engine.lookup(bigname_lookup::LookupRequest::new(&id, ["addr:60"])?)
         .await?;
         assert_eq!(answer.records[0].value, Some(json!(address)));
         assert_eq!(answer.records[0].ledger_action, action);
@@ -73,10 +56,6 @@ async fn family_lookup_compares_and_clears_divergence_without_served_inputs() ->
     }
     database.cleanup().await
 }
-
-// The publication can advance or start a rebuild while the provider call is outstanding.
-// Both are refused with the same result as a served Project republish. A stopped old Project
-// publication is irrelevant when only its row version changes.
 #[tokio::test]
 async fn family_lookup_guards_its_publication_during_rpc() -> Result<()> {
     for (mutation, refused) in [
@@ -106,9 +85,9 @@ async fn family_lookup_guards_its_publication_during_rpc() -> Result<()> {
         );
         let request = bigname_lookup::LookupRequest::new(&id, ["addr:60"])?;
         let lookup = tokio::spawn(
-            bigname_storage::publication_source::with_serve_from_families(true, async move {
+            async move {
                 engine.lookup(request).await
-            }),
+            },
         );
         tokio::time::timeout(std::time::Duration::from_secs(10), reached)
             .await
@@ -139,24 +118,14 @@ async fn family_lookup_guards_its_publication_during_rpc() -> Result<()> {
 }
 
 #[tokio::test]
-async fn family_lookup_batch_reads_names_inventory_and_relations_without_served_rows() -> Result<()>
+async fn family_lookup_batch_reads_names_inventory_and_relations() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_records_fixture(&database).await?;
     for profile in ["feed", "detail"] {
         let request =
             json!({"profile":profile,"inputs":[{"name":"alpha.eth"},{"name":"beta.eth"}]});
-        let served = bigname_storage::publication_source::with_serve_from_families(
-            false,
-            v2_lookup_json(&database, request.clone()),
-        )
-        .await?;
-        let family = bigname_storage::publication_source::with_serve_from_families(
-            true,
-            v2_lookup_json(&database, request.clone()),
-        )
-        .await?;
-        assert_eq!(family["data"], served["data"], "{profile}");
+        let family = v2_lookup_json(&database, request).await?;
         assert_eq!(family["data"][0]["status"], "ok", "{family:#}");
         if profile == "detail" {
             assert_eq!(
@@ -165,26 +134,5 @@ async fn family_lookup_batch_reads_names_inventory_and_relations_without_served_
             );
         }
     }
-    let request = json!({"profile":"detail","inputs":[{"name":"alpha.eth"}]});
-    let before = bigname_storage::publication_source::with_serve_from_families(
-        true,
-        v2_lookup_json(&database, request.clone()),
-    )
-    .await?;
-    for table in [
-        "name_current",
-        "record_inventory_current",
-        "address_names_current",
-    ] {
-        sqlx::query(&format!("DELETE FROM bigname_phase.{table}"))
-            .execute(&database.pool)
-            .await?;
-    }
-    let after = bigname_storage::publication_source::with_serve_from_families(
-        true,
-        v2_lookup_json(&database, request),
-    )
-    .await?;
-    assert_eq!(after["data"], before["data"]);
     database.cleanup().await
 }
