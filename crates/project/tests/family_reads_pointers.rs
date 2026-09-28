@@ -1,14 +1,17 @@
 //! Family reader contracts over explicit family rows: resolver classification and manifest
 //! admission bounded by its publication, the link
 //! selection's exact-then-default rule, the alias source's latest-then-reject pointer and the
-//! wildcard source's historical resolver.
+//! wildcard source's historical resolver. The batch inventory read over a shared link is
+//! published through the family publisher.
 #[path = "families_support/mod.rs"]
 mod families_support;
 
 use anyhow::{Context, Result};
 use bigname_storage::families::records::{
-    DEFAULT_RECORD_NODE, load_family_alias_source_pointer, load_family_link_selection,
-    load_family_resolver_classification, load_family_wildcard_source,
+    DEFAULT_RECORD_NODE, FamilyAttribution, load_family_alias_source_pointer,
+    load_family_link_selection, load_family_record_inventories_on,
+    load_family_record_inventory_detail, load_family_resolver_classification,
+    load_family_wildcard_source,
 };
 use families_support::{CHAIN, Fixture, hash, uuid};
 use serde_json::{Value, json};
@@ -302,5 +305,79 @@ async fn alias_rejects_a_later_clear_and_wildcard_keeps_the_historical_resolver(
         .await?
         .context("a live alias source")?;
     assert_eq!(alias.resolver_address, R3);
+    fixture.cleanup().await
+}
+
+// Two resources of one name can point at the same resolver, for example its ENSv1 and ENSv2
+// resources, so they share one (resolver, node) link selection. A batch read gives each of them
+// the selection and matches the single-resource read of each.
+#[tokio::test]
+async fn a_batch_gives_every_resource_at_a_shared_resolver_node_its_link() -> Result<()> {
+    let fixture = Fixture::new("family_reads_shared_link", 4).await?;
+    let name = format!("ens:{NODE}");
+    let resources = [uuid(1), uuid(2)];
+    for (log, resource) in (1..).zip(&resources) {
+        fixture
+            .write(
+                1,
+                log,
+                "ResolverChanged",
+                "ens_v1_registry_l1",
+                Some(&name),
+                Some(resource),
+                json!({"node": NODE, "resolver": R1}),
+                "0x00000000000000000000000000000000000000e1",
+            )
+            .await?;
+    }
+    fixture
+        .write(
+            2,
+            1,
+            "ResolverRecordLinked",
+            "ens_v2_resolver_l1",
+            None,
+            None,
+            json!({"node": NODE, "resolver": R1, "resolver_record_id": "7",
+                   "storage_model": "resolver_record_id", "source_event": "Linked"}),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            3,
+            1,
+            "RecordChanged",
+            "ens_v2_resolver_l1",
+            None,
+            None,
+            json!({"resolver": R1, "resolver_record_id": "7", "storage_model": "resolver_record_id",
+                   "record_key": "text:avatar", "record_family": "text", "selector_key": "avatar",
+                   "value": "a", "source_event": "TextUpdated"}),
+            R1,
+        )
+        .await?;
+    fixture
+        .apply(3, bigname_project::families::FamilyMode::Normal)
+        .await?;
+    let ids = resources
+        .iter()
+        .map(|resource| resource.parse())
+        .collect::<Result<Vec<uuid::Uuid>, _>>()?;
+    let attribution = || FamilyAttribution::Given(Default::default());
+    let mut conn = fixture.pool.acquire().await?;
+    let batch = load_family_record_inventories_on(&mut conn, CHAIN, &ids, attribution()).await?;
+    drop(conn);
+    for id in &ids {
+        let single = load_family_record_inventory_detail(&fixture.pool, CHAIN, *id, attribution())
+            .await?
+            .context("a single read")?;
+        let batched = batch.get(id).context("a batch read")?;
+        assert_eq!(batched.row, single.row, "{id}");
+        assert_eq!(
+            batched.record_version_boundary_key,
+            single.record_version_boundary_key
+        );
+    }
     fixture.cleanup().await
 }

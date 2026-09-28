@@ -404,14 +404,16 @@ pub async fn load_family_record_inventories_on(
             )
         })
         .collect();
-    let mut link_selections =
-        load_family_link_selections_on(conn, chain_id, &link_requests).await?;
+    // Distinct resources can share a (resolver, node), for example one name's ENSv1 and ENSv2
+    // resources at the same resolver, so every plan gets its own copy of the selection.
+    let link_selections = load_family_link_selections_on(conn, chain_id, &link_requests).await?;
     let links: Vec<Option<LinkSelection>> = link_requests
         .iter()
         .map(|(resolver, namehash)| {
             link_selections
-                .get_mut(&link_key(resolver, namehash))
-                .and_then(Option::take)
+                .get(&link_key(resolver, namehash))
+                .cloned()
+                .flatten()
         })
         .collect();
     let record_ids: Vec<Option<(String, String)>> = classified
