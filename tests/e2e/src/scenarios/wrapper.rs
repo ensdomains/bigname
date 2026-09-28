@@ -3,7 +3,7 @@ use sqlx::types::Uuid;
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer};
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
@@ -252,23 +252,25 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         vec![(196_608, "emancipated".into()), (196_621, "locked".into())],
         "wrap then setFuses should derive the expected lifecycle states"
     );
-    let wrapper_subject_grants: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM permissions_current \
-         WHERE subject = $1 AND scope = 'resource' \
-         AND effective_powers ? 'resource_control'",
+    let wrapper_subject_grants = families::subject_permissions(
+        &wrapped.db.pool,
+        &format!("{:#x}", deployment.name_wrapper.address),
     )
-    .bind(format!("{:#x}", deployment.name_wrapper.address))
-    .fetch_one(&wrapped.db.pool)
-    .await?;
+    .await?
+    .iter()
+    .filter(|row| {
+        families::is_resource_scope(row)
+            && families::powers(row)
+                .iter()
+                .any(|power| power == "resource_control")
+    })
+    .count();
     assert!(
         wrapper_subject_grants >= 1,
         "the NameWrapper contract should hold the registrar-anchor resource_control grant"
     );
-    let locked_wrapper_permissions: Vec<(String, Vec<String>)> =
-        sqlx::query_as("SELECT subject, ARRAY(SELECT jsonb_array_elements_text(effective_powers) ORDER BY 1) FROM permissions_current WHERE resource_id = $1 AND scope = 'resource' ORDER BY subject")
-            .bind(locked_wrapper_resource)
-            .fetch_all(&wrapped.db.pool)
-            .await?;
+    let locked_wrapper_permissions =
+        families::resource_scope_powers(&wrapped.db.pool, locked_wrapper_resource).await?;
     assert_eq!(
         locked_wrapper_permissions,
         vec![(
@@ -283,27 +285,40 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         )],
         "the holder grant must retain only powers allowed by the locked name's fuses"
     );
-    let locked_holder_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM address_names_current \
-         WHERE lower(address) = $1 AND namespace = 'ens' \
-           AND raw_name = 'locked.eth' AND resource_id = $2",
-    )
-    .bind(format!("{bob:#x}"))
-    .bind(locked_wrapper_resource)
-    .fetch_one(&wrapped.db.pool)
-    .await?;
+    let locked_holder_rows =
+        families::address_names(&wrapped.db.pool, &format!("{bob:#x}"), Some("ens"))
+            .await?
+            .iter()
+            .filter(|entry| {
+                entry.normalized_name == "locked.eth"
+                    && entry.resource_id == locked_wrapper_resource
+            })
+            .count();
     assert!(
         locked_holder_rows >= 1,
-        "locked.eth must remain in the wrapper holder's schema-v2 address-name projection"
+        "locked.eth must remain in the wrapper holder's address names"
     );
-    let locked_controller_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM address_names_current
-         WHERE raw_name = 'locked.eth' AND resource_id = $1
-           AND relation = 'effective_controller'",
+    // Every address Project indexes as a possible controller of locked.eth serves none.
+    let mut locked_controller_rows = 0;
+    for address in families::indexed_addresses(
+        &wrapped.db.pool,
+        "ens:0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b",
+        "effective_controller",
     )
-    .bind(locked_wrapper_resource)
-    .fetch_one(&wrapped.db.pool)
-    .await?;
+    .await?
+    {
+        locked_controller_rows += families::address_names(&wrapped.db.pool, &address, None)
+            .await?
+            .iter()
+            .filter(|entry| {
+                entry.normalized_name == "locked.eth"
+                    && entry.resource_id == locked_wrapper_resource
+                    && entry
+                        .relations
+                        .contains(&bigname_storage::AddressNameRelation::EffectiveController)
+            })
+            .count();
+    }
     assert_eq!(locked_controller_rows, 0);
 
     let kid_body = exact_name(&wrapped.api, "ens", "kid.locked.eth").await?;
@@ -335,11 +350,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         kid_resource, locked_wrapper_resource,
         "wrapped child should have its own resource_id"
     );
-    let kid_permissions: Vec<(String, Vec<String>)> =
-        sqlx::query_as("SELECT subject, ARRAY(SELECT jsonb_array_elements_text(effective_powers) ORDER BY 1) FROM permissions_current WHERE resource_id = $1 AND scope = 'resource' ORDER BY subject")
-            .bind(kid_resource)
-            .fetch_all(&wrapped.db.pool)
-            .await?;
+    let kid_permissions = families::resource_scope_powers(&wrapped.db.pool, kid_resource).await?;
     assert_eq!(
         kid_permissions,
         vec![(

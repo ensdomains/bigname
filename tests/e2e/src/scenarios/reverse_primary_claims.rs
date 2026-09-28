@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::support;
 use crate::harness::responses::{pointer, primary_name};
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -39,16 +39,12 @@ fn assert_declared_name(body: &Value, expected_name: &str) {
 }
 
 async fn assert_persisted_not_found(run: &support::PipelineRun, address: &str) -> Result<()> {
-    let row: (String, Option<String>) = sqlx::query_as(
-        "SELECT claim_status, raw_claim_name FROM primary_names_current \
-         WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
-    )
-    .bind(address)
-    .fetch_one(&run.db.pool)
-    .await
-    .with_context(|| format!("load persisted primary-name tuple for {address}"))?;
-    assert_eq!(row.0, "not_found");
-    assert_eq!(row.1, None);
+    let row = families::primary_name(&run.db.pool, address, "ens", "60")
+        .await?
+        .with_context(|| format!("load persisted primary-name tuple for {address}"))?
+        .row;
+    assert_eq!(row.claim_status.as_str(), "not_found");
+    assert_eq!(row.raw_claim_name, None);
     Ok(())
 }
 
@@ -218,14 +214,11 @@ async fn authorised_third_party_name_record_keys_claimed_address() -> Result<()>
 
     let claimed = primary_name(&run.api, "ens", 60, &claimed_path, "declared").await?;
     assert_declared_name(&claimed, "thirdparty.eth");
-    let operator_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM primary_names_current \
-         WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
-    )
-    .bind(&operator_path)
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert_eq!(operator_rows, 0, "tx sender must not become the claim key");
+    let operator_row = families::primary_name(&run.db.pool, &operator_path, "ens", "60").await?;
+    assert!(
+        operator_row.is_none(),
+        "tx sender must not become the claim key: {operator_row:?}"
+    );
 
     run.db.cleanup().await?;
     Ok(())
@@ -305,16 +298,16 @@ async fn undeclared_reverse_resolver_record_populates_declared_claim() -> Result
         );
     }
 
-    let persisted: (String, Option<String>) = sqlx::query_as(
-        "SELECT claim_status, raw_claim_name FROM primary_names_current \
-         WHERE address = $1 AND namespace = 'ens' AND coin_type = '60'",
-    )
-    .bind(&claimant_path)
-    .fetch_one(&run.db.pool)
-    .await?;
+    let persisted = families::primary_name(&run.db.pool, &claimant_path, "ens", "60")
+        .await?
+        .context("published claimant reverse claim")?
+        .row;
     assert_eq!(
-        persisted,
-        ("success".to_owned(), Some("hidden.eth".to_owned()))
+        (
+            persisted.claim_status.as_str(),
+            persisted.raw_claim_name.as_deref()
+        ),
+        ("success", Some("hidden.eth"))
     );
     let body = primary_name(&run.api, "ens", 60, &claimant_path, "declared").await?;
     assert_declared_name(&body, "hidden.eth");

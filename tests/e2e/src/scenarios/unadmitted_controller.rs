@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
@@ -107,14 +107,10 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .await?;
     assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
 
-    // `children_current` is keyed by a routeable parent surface. The harness
-    // has no `.eth` parent surface, so the registry fact remains normalized
-    // evidence rather than becoming a child row.
-    let child_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM children_current WHERE namehash = $1")
-            .bind(&shadow_node)
-            .fetch_one(&run.db.pool)
-            .await?;
+    // Children are served under a routeable parent surface. The harness has no
+    // `.eth` parent surface, so the registry fact remains normalized evidence
+    // rather than becoming a served child.
+    let child_rows = families::served_child_rows(&run.db.pool, &shadow_node).await?;
     assert_eq!(
         child_rows, 0,
         "unadmitted registration must not invent a child without a parent surface"

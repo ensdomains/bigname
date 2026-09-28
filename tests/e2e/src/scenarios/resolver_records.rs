@@ -5,10 +5,13 @@ use std::time::Duration;
 use alloy_primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
+use sqlx::types::Uuid;
 
 use super::support;
 use crate::harness::responses::{exact_name, pointer, selector_keys};
-use crate::harness::{anvil::Anvil, db::HarnessDb, ens_v1, manifests, pipeline, repo_root};
+use crate::harness::{
+    anvil::Anvil, db::HarnessDb, ens_v1, families, manifests, pipeline, repo_root,
+};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MULTICOIN_TYPE: u64 = 0;
@@ -162,11 +165,7 @@ fn addr60_observation(body: &Value) -> Value {
     })
 }
 
-async fn enable_ens_verified_route(
-    run: &support::PipelineRun,
-    logical_name_id: &str,
-    universal: Address,
-) -> Result<()> {
+async fn enable_ens_verified_route(run: &support::PipelineRun, universal: Address) -> Result<()> {
     // #857 workaround: without this scenario-local execution manifest, verified/auto are unsupported.
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO manifest_versions \
@@ -203,64 +202,6 @@ async fn enable_ens_verified_route(
     .bind(format!("{universal:#x}"))
     .execute(&run.db.pool)
     .await?;
-    // #857 workaround: Project does not publish this executable scenario topology.
-    let topology = sqlx::query(
-        r#"
-        UPDATE name_current name
-        SET declared_summary = jsonb_set(
-            name.declared_summary,
-            '{topology}',
-            jsonb_build_object(
-                'registry_path', jsonb_build_array(jsonb_build_object(
-                    'logical_name_id', name.logical_name_id,
-                    'namespace', name.namespace,
-                    'normalized_name', name.raw_name,
-                    'canonical_display_name', name.raw_name,
-                    'namehash', name.namehash,
-                    'resource_id', name.resource_id,
-                    'binding_kind', name.binding_kind
-                )),
-                'subregistry_path', '[]'::jsonb,
-                'resolver_path', jsonb_build_array(jsonb_build_object(
-                    'logical_name_id', name.logical_name_id,
-                    'namespace', name.namespace,
-                    'normalized_name', name.raw_name,
-                    'canonical_display_name', name.raw_name,
-                    'resource_id', name.resource_id,
-                    'chain_id', name.declared_summary #>> '{resolver,chain_id}',
-                    'address', name.declared_summary #>> '{resolver,address}',
-                    'latest_event_kind',
-                        name.declared_summary #>> '{resolver,latest_event_kind}'
-                )),
-                'wildcard', jsonb_build_object(
-                    'source', NULL, 'matched_labels', '[]'::jsonb
-                ),
-                'alias', jsonb_build_object(
-                    'final_target', NULL, 'hops', '[]'::jsonb
-                ),
-                'version_boundaries', jsonb_build_object(
-                    'topology_version_boundary', inventory.record_version_boundary,
-                    'record_version_boundary', inventory.record_version_boundary
-                ),
-                'transport', jsonb_build_object(
-                    'source_chain_id', NULL, 'target_chain_id', NULL,
-                    'contract_address', NULL, 'latest_event_kind', NULL
-                )
-            ),
-            true
-        )
-        FROM record_inventory_current inventory
-        WHERE name.logical_name_id = $1
-          AND inventory.resource_id = name.resource_id
-        "#,
-    )
-    .bind(logical_name_id)
-    .execute(&run.db.pool)
-    .await?;
-    ensure!(
-        topology.rows_affected() == 1,
-        "install ENS verified topology for {logical_name_id}"
-    );
     Ok(())
 }
 
@@ -286,35 +227,6 @@ async fn divergence_counts(
     .bind(logical_name_id)
     .fetch_one(&run.db.pool)
     .await?)
-}
-
-pub(super) async fn normalize_v2_snapshot_timestamp(
-    run: &support::PipelineRun,
-    logical_name_id: &str,
-) -> Result<()> {
-    if logical_name_id.starts_with("basenames:") {
-        // #857 workaround: without an Ethereum execution position, verified reads are stale.
-        sqlx::query(
-            "UPDATE name_current SET chain_positions = chain_positions || jsonb_build_object( \
-                 'ethereum', (SELECT jsonb_build_object( \
-                     'chain_id', lineage.chain_id, 'block_number', lineage.block_number, \
-                     'block_hash', lineage.block_hash, 'timestamp', \
-                     to_char(lineage.block_timestamp AT TIME ZONE 'UTC', \
-                             'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')) \
-                 FROM chain_lineage lineage \
-                 WHERE lineage.chain_id = 'ethereum-mainnet' \
-                   AND lineage.block_timestamp <= \
-                       (name_current.chain_positions #>> '{base,timestamp}')::timestamptz \
-                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') \
-                 ORDER BY lineage.block_timestamp DESC, lineage.block_number DESC, \
-                          lineage.block_hash DESC LIMIT 1)) \
-             WHERE logical_name_id = $1",
-        )
-        .bind(logical_name_id)
-        .execute(&run.db.pool)
-        .await?;
-    }
-    Ok(())
 }
 
 fn assert_resolver(body: &Value, resolver: Address) {
@@ -822,36 +734,33 @@ async fn pre_surface_record_attribution_is_node_scoped_and_never_materializes_un
         );
     }
 
-    let (surface_count, name_count, child_count, inventory_count, discovery_count): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    ) = sqlx::query_as(
+    let (surface_count, discovery_count, resources): (i64, i64, Vec<Uuid>) = sqlx::query_as(
         "SELECT
            (SELECT count(*) FROM name_surfaces WHERE namehash = $1),
-           (SELECT count(*) FROM name_current WHERE namehash = $1),
-           (SELECT count(*) FROM children_current WHERE namehash = $1),
-           (SELECT count(DISTINCT inventory.resource_id)
-            FROM record_inventory_current inventory
-            JOIN normalized_events event USING (resource_id)
-            WHERE lower(event.after_state->>'node') = lower($1)),
            (SELECT count(*) FROM discovery_edges
-            WHERE lower(provenance::text) LIKE '%' || lower($1) || '%')",
+            WHERE lower(provenance::text) LIKE '%' || lower($1) || '%'),
+           ARRAY(SELECT DISTINCT resource_id FROM normalized_events
+                 WHERE lower(after_state->>'node') = lower($1) AND resource_id IS NOT NULL)",
     )
     .bind(&nodes[2])
     .fetch_one(&run.db.pool)
     .await?;
+    // A published name row is composed from a surface, so no surface means no name row. The
+    // node's events must name no resource with a published record inventory, and no parent may
+    // serve the node as a child.
+    let child_count = families::served_child_rows(&run.db.pool, &nodes[2]).await? as i64;
+    let mut inventory_count = 0;
+    for resource in resources {
+        if families::record_inventory(&run.db.pool, resource)
+            .await?
+            .is_some()
+        {
+            inventory_count += 1;
+        }
+    }
     assert_eq!(
-        (
-            surface_count,
-            name_count,
-            child_count,
-            inventory_count,
-            discovery_count
-        ),
-        (0, 0, 0, 0, 0),
+        (surface_count, child_count, inventory_count, discovery_count),
+        (0, 0, 0, 0),
         "unknown-node history must remain audit-only"
     );
 
@@ -931,19 +840,23 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         );
     }
     let initial_records_boundary = boundary(&records_exact)?;
-    let (classification, provenance): (Value, Value) = sqlx::query_as(
-        "SELECT resolver.declared_summary->'classification', inventory.provenance
-         FROM resolver_current resolver
-         JOIN record_inventory_current inventory
-           ON inventory.provenance->>'resolver_address' = resolver.resolver_address
-         WHERE resolver.chain_id = 'ethereum-mainnet'
-           AND resolver.resolver_address = $1
-         ORDER BY inventory.resource_id
-         LIMIT 1",
+    let classification = families::resolver(
+        &initial.db.pool,
+        "ethereum-mainnet",
+        &format!("{resolver_a:#x}"),
     )
-    .bind(format!("{resolver_a:#x}"))
-    .fetch_one(&initial.db.pool)
-    .await?;
+    .await?
+    .context("published resolver A overview")?
+    .declared_summary["classification"]
+        .clone();
+    // records.eth reads through resolver A; its inventory carries the resolver's read rules.
+    let records_name =
+        families::required_name_by_raw(&initial.db.pool, "ens", "records.eth").await?;
+    let provenance = families::name_record_inventory(&initial.db.pool, &records_name)
+        .await?
+        .context("published records.eth inventory")?
+        .provenance;
+    assert_eq!(provenance["resolver_address"], format!("{resolver_a:#x}"));
     assert_eq!(
         classification["read_features"],
         json!(["ensip19_default_address"])
@@ -1144,13 +1057,11 @@ async fn shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsu
         format!("{resolver:#x}")
     );
 
-    let overview: Value = sqlx::query_scalar(
-        "SELECT declared_summary FROM resolver_current
-         WHERE chain_id = 'ethereum-mainnet' AND resolver_address = $1",
-    )
-    .bind(format!("{resolver:#x}"))
-    .fetch_one(&run.db.pool)
-    .await?;
+    let overview_row =
+        families::resolver(&run.db.pool, "ethereum-mainnet", &format!("{resolver:#x}"))
+            .await?
+            .context("published shared resolver overview")?;
+    let overview = overview_row.declared_summary;
     assert_eq!(
         pointer(&overview, "/bindings/status"),
         "unsupported",
@@ -1161,9 +1072,9 @@ async fn shared_resolver_keeps_per_name_records_and_projection_marks_fan_in_unsu
         "resolver_binding_enumeration_not_projected",
         "schema-v2 should persist the fan-in unsupported reason: {overview}"
     );
-    assert_eq!(pointer(&overview, "/coverage/status"), "projected");
+    assert_eq!(pointer(&overview_row.coverage, "/status"), "projected");
     assert_eq!(
-        pointer(&overview, "/coverage/exhaustiveness"),
+        pointer(&overview_row.coverage, "/exhaustiveness"),
         "not_asserted"
     );
 
@@ -1251,7 +1162,7 @@ async fn exact_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     );
     let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
     super::basenames_lifecycle::assert_default_inventory(&run, &logical_name_id, true).await?;
-    enable_ens_verified_route(&run, &logical_name_id, universal).await?;
+    enable_ens_verified_route(&run, universal).await?;
     let rows: Vec<(String, String, i64, String)> = sqlx::query_as(
         "SELECT after_state->>'source_event', transaction_hash, log_index, after_state->>'value' \
          FROM normalized_events WHERE after_state->>'node' = $1 AND event_kind = 'RecordChanged' \
@@ -1272,7 +1183,6 @@ async fn exact_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
             .all(|row| row.3 == format!("{:#x}", Address::ZERO))
     );
 
-    normalize_v2_snapshot_timestamp(&run, &logical_name_id).await?;
     let api = start_v2_api(&run, &[("ethereum-mainnet", anvil.url.as_str())]).await?;
     let indexed = v2_records(&api, name, "indexed").await?;
     let before = divergence_counts(&run, &logical_name_id).await?;

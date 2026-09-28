@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, perturb, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, perturb, repo_root};
 
 const DURATION_SECS: u64 = 365 * 24 * 60 * 60;
 
@@ -555,14 +555,12 @@ async fn assert_current_migrate_state(
 async fn assert_legacy_2ld_public_state(run: &support::PipelineRun, name: &str) -> Result<()> {
     assert_exact_name_not_minted(run, name).await?;
 
-    let child_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM children_current WHERE namehash = $1")
-            .bind(format!("{:#x}", ens_v1::namehash(name)))
-            .fetch_one(&run.db.pool)
+    let child_rows =
+        families::served_child_rows(&run.db.pool, &format!("{:#x}", ens_v1::namehash(name)))
             .await?;
     assert_eq!(
         child_rows, 0,
-        "legacy-only 2LD {name} should derive SubregistryChanged but no children_current row because eth has no exact parent surface"
+        "legacy-only 2LD {name} should derive SubregistryChanged but no served child row because eth has no exact parent surface"
     );
 
     let (status, body) = run.api.get_json("/v1/names/ens/eth/children").await?;

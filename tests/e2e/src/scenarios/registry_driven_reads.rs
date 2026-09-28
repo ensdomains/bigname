@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
-use crate::harness::{anvil::Anvil, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
 
 fn path_name(name: &str) -> String {
     name.replace('[', "%5B").replace(']', "%5D")
@@ -340,23 +340,14 @@ async fn deep_registry_hierarchy_lists_direct_children_only() -> Result<()> {
     // Enumeration stops at unknown surfaces. Schema-v2 materializes neither
     // an addressable name row nor child rows below the placeholder; v1 input
     // normalization remains API-owned and is not asserted in this lane.
-    let placeholder_names: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM name_current WHERE logical_name_id = $1")
-            .bind(format!("ens:{a_node}"))
-            .fetch_one(&run.db.pool)
-            .await?;
-    assert_eq!(placeholder_names, 0);
-    // children_current materializes rows only under known parent
-    // surfaces (docs/architecture.md § Name → children), so the b-child has
-    // no projected row at all.
-    let b_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM children_current WHERE namehash = $1")
-            .bind(&b_node)
-            .fetch_one(&run.db.pool)
-            .await?;
+    let placeholder_name = families::name(&run.db.pool, &format!("ens:{a_node}")).await?;
+    assert!(placeholder_name.is_none(), "{placeholder_name:?}");
+    // Children are served only under known parent surfaces (docs/architecture.md § Name →
+    // children), so the b-child is served under no parent.
+    let b_rows = families::served_child_rows(&run.db.pool, &b_node).await?;
     assert_eq!(
         b_rows, 0,
-        "children under an unrevealed-label parent must not project into children_current"
+        "children under an unrevealed-label parent must not be served"
     );
 
     run.db.cleanup().await?;

@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
 use alloy_primitives::{Address, U256, keccak256};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
 use super::{resolver_records::V2Api, support};
 use crate::harness::responses::{exact_name, pointer, primary_name, selector_keys};
-use crate::harness::{anvil::Anvil, basenames, ens_v1, repo_root};
+use crate::harness::{anvil::Anvil, basenames, ens_v1, families, repo_root};
 
 const DAY: u64 = 24 * 60 * 60;
 const YEAR: u64 = 365 * DAY;
@@ -77,90 +77,6 @@ fn addr60_observation(body: &Value) -> Value {
             "value": body.pointer("/data/records/addr:60/value"),
         },
     })
-}
-
-async fn enable_basenames_verified_route(
-    run: &support::PipelineRun,
-    logical_name_id: &str,
-    l1_resolver: Address,
-) -> Result<()> {
-    let l1_resolver = format!("{l1_resolver:#x}");
-    // #857 workaround: without scenario topology/provenance, verified/auto are unsupported.
-    let topology = sqlx::query(
-        r#"
-        UPDATE name_current name
-        SET declared_summary = jsonb_set(
-                name.declared_summary,
-                '{topology}',
-                jsonb_build_object(
-                    'registry_path', jsonb_build_array(jsonb_build_object(
-                        'logical_name_id', name.logical_name_id,
-                        'namespace', name.namespace,
-                        'normalized_name', name.raw_name,
-                        'canonical_display_name', name.raw_name,
-                        'namehash', name.namehash,
-                        'resource_id', name.resource_id,
-                        'binding_kind', name.binding_kind
-                    )),
-                    'subregistry_path', '[]'::jsonb,
-                    'resolver_path', jsonb_build_array(jsonb_build_object(
-                        'logical_name_id', name.logical_name_id,
-                        'namespace', name.namespace,
-                        'normalized_name', name.raw_name,
-                        'canonical_display_name', name.raw_name,
-                        'resource_id', name.resource_id,
-                        'chain_id', name.declared_summary #>> '{resolver,chain_id}',
-                        'address', name.declared_summary #>> '{resolver,address}',
-                        'latest_event_kind',
-                            name.declared_summary #>> '{resolver,latest_event_kind}'
-                    )),
-                    'wildcard', jsonb_build_object(
-                        'source', NULL, 'matched_labels', '[]'::jsonb
-                    ),
-                    'alias', jsonb_build_object(
-                        'final_target', NULL, 'hops', '[]'::jsonb
-                    ),
-                    'version_boundaries', jsonb_build_object(
-                        'topology_version_boundary',
-                            inventory.record_version_boundary,
-                        'record_version_boundary',
-                            inventory.record_version_boundary
-                    ),
-                    'transport', jsonb_build_object(
-                        'source_chain_id', 'base-mainnet',
-                        'target_chain_id', 'ethereum-mainnet',
-                        'contract_address', $2,
-                        'latest_event_kind', NULL
-                    )
-                ),
-                true
-            ),
-            provenance = jsonb_set(
-                name.provenance,
-                '{manifest_versions}',
-                COALESCE(name.provenance -> 'manifest_versions', '[]'::jsonb) ||
-                    jsonb_build_array(jsonb_build_object(
-                        'source_family', 'basenames_execution',
-                        'manifest_version', 2,
-                        'chain', 'ethereum-mainnet',
-                        'deployment_epoch', 'basenames_v1'
-                    )),
-                true
-            )
-        FROM record_inventory_current inventory
-        WHERE name.logical_name_id = $1
-          AND inventory.resource_id = name.resource_id
-        "#,
-    )
-    .bind(logical_name_id)
-    .bind(l1_resolver)
-    .execute(&run.db.pool)
-    .await?;
-    ensure!(
-        topology.rows_affected() == 1,
-        "install Basenames verified topology for {logical_name_id}"
-    );
-    Ok(())
 }
 
 fn inventory_reason(body: &Value, section: &str, family: &str, field: &str) -> Option<String> {
@@ -1026,17 +942,11 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
     .await?;
     assert_eq!(reverse_claims, 0);
 
-    let primary_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM primary_names_current \
-         WHERE address = $1 AND namespace = 'basenames' \
-           AND coin_type = '2147492101'",
-    )
-    .bind(&alice_path)
-    .fetch_one(&run.db.pool)
-    .await?;
-    assert_eq!(
-        primary_rows, 0,
-        "helper path must not mint a primary candidate"
+    let primary_row =
+        families::primary_name(&run.db.pool, &alice_path, "basenames", "2147492101").await?;
+    assert!(
+        primary_row.is_none(),
+        "helper path must not mint a primary candidate: {primary_row:?}"
     );
     let primary = primary_name(
         &run.api,
@@ -1051,11 +961,7 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
         "not_found"
     );
 
-    let child_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM children_current WHERE namehash = $1")
-            .bind(&reverse_node)
-            .fetch_one(&run.db.pool)
-            .await?;
+    let child_rows = families::served_child_rows(&run.db.pool, &reverse_node).await?;
     assert_eq!(
         child_rows, 0,
         "REVIEW POINT: the unknown reverse parent has no child projection"
@@ -1318,8 +1224,6 @@ async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     assert!(rows.iter().all(|row| row.3 == zero));
 
     assert_default_inventory(&run, &logical_name_id, false).await?;
-    enable_basenames_verified_route(&run, &logical_name_id, l1_resolver).await?;
-    super::resolver_records::normalize_v2_snapshot_timestamp(&run, &logical_name_id).await?;
     let api = super::resolver_records::start_v2_api(
         &run,
         &[
@@ -1384,13 +1288,22 @@ pub(crate) async fn assert_default_inventory(
     logical_name: &str,
     fallback: bool,
 ) -> Result<()> {
-    let (classification, provenance, entries): (Value, Value, Value) = sqlx::query_as(
-        "SELECT resolver.declared_summary->'classification', inventory.provenance, inventory.entries
-        FROM record_inventory_current inventory JOIN resolver_current resolver
-        ON resolver.chain_id = inventory.provenance->>'chain_id'
-        AND resolver.resolver_address = inventory.provenance->>'resolver_address'
-        WHERE inventory.provenance->>'logical_name_id' = $1",
-    ).bind(logical_name).fetch_one(&run.db.pool).await?;
+    let name = families::required_name(&run.db.pool, logical_name).await?;
+    let inventory = families::name_record_inventory(&run.db.pool, &name)
+        .await?
+        .with_context(|| format!("published record inventory of {logical_name}"))?;
+    let (provenance, entries) = (inventory.provenance, inventory.entries);
+    let chain_id = provenance["chain_id"]
+        .as_str()
+        .context("inventory provenance chain")?;
+    let resolver_address = provenance["resolver_address"]
+        .as_str()
+        .context("inventory provenance resolver")?;
+    let classification = families::resolver(&run.db.pool, chain_id, resolver_address)
+        .await?
+        .with_context(|| format!("published resolver {chain_id}:{resolver_address}"))?
+        .declared_summary["classification"]
+        .clone();
     let features = if fallback {
         vec!["ensip19_default_address"]
     } else {
