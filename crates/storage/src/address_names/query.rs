@@ -31,7 +31,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.relation,
                 anc.namespace,
                 anc.raw_name AS canonical_display_name,
-                anc.raw_name AS normalized_name,
+                anc.normalized_name,
                 anc.namehash,
                 anc.surface_binding_id,
                 anc.resource_id,
@@ -76,7 +76,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push(")");
     }
     if let Some(prefix) = q {
-        builder.push(" AND anc.raw_name LIKE ");
+        builder.push(" AND anc.normalized_name LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
