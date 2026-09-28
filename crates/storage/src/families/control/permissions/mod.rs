@@ -358,6 +358,20 @@ impl ServedApproval {
     }
 }
 
+/// Every F9 approval of the chain.
+pub async fn load_shadow_approvals(pool: &PgPool, chain_id: &str) -> Result<Vec<ServedApproval>> {
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "/* storage:families.control.permissions.approvals */ SELECT to_jsonb(approval)
+         FROM bigname_phase.project_account_approval approval
+         WHERE approval.chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load account approvals")?;
+    Ok(rows.iter().filter_map(ServedApproval::from_row).collect())
+}
+
 /// One registry-operator row the effective-permission reader adds for a resource.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OperatorRow {
