@@ -6,8 +6,8 @@
 //! current resolver (`node_claim`). Each claim event keeps its normalization result and its raw
 //! claim input, stored once (`stage_claim_normalization`). The served stage only
 //! normalizes a name record at a node some ReverseClaimed points to; the family keeps every name
-//! record's result, since a later ReverseClaimed can select it. Hydration results stay with the
-//! served rows until the per-block publication commits them here.
+//! record's result, since a later ReverseClaimed can select it. Follow-block hydration writes
+//! its overlay through the same owned row set after these event reducers run.
 use bigname_domain::normalization::normalize_name;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};

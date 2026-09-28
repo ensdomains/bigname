@@ -1760,6 +1760,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
+ "axum",
  "bigname-adapters",
  "bigname-domain",
  "bigname-lookup",

@@ -158,6 +158,10 @@ impl ProjectPhase {
         let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
             .with_max_blocks_per_run(self.families.max_blocks_per_run)
             .with_rebuild_ranges(self.families.rebuild_ranges);
+        let options = match &self.hydrator {
+            Some(hydrator) => options.with_hydration(hydrator.rpc_urls().clone()),
+            None => options,
+        };
         let (outcome, error) =
             bigname_project::families::run(&self.pool, chain_id, &target, mode, &token, &options)
                 .await;

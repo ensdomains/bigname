@@ -15,6 +15,7 @@ mod classification;
 mod decode;
 mod derived;
 mod driver;
+mod hydrate;
 mod identity;
 mod input;
 mod keys;
@@ -189,6 +190,8 @@ pub enum FamilyMode {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyOptions {
+    /// RPC configuration for mainnet follow-block hydration. Replay and rebuild never call it.
+    pub hydration_rpc_urls: Option<bigname_lookup::ChainRpcUrls>,
     /// The interpreter content hash the marker records for every block.
     pub input_content_hash: String,
     /// Blocks of undo rows kept below the marker at least.
@@ -207,6 +210,7 @@ pub struct FamilyOptions {
 impl FamilyOptions {
     pub fn new(input_content_hash: impl Into<String>) -> Self {
         Self {
+            hydration_rpc_urls: None,
             input_content_hash: input_content_hash.into(),
             retained_undo_depth: RETAINED_UNDO_DEPTH,
             max_blocks_per_run: MAX_BLOCKS_PER_RUN,
@@ -218,6 +222,11 @@ impl FamilyOptions {
 
     pub fn with_rebuild_ranges(mut self, ranges: RebuildRanges) -> Self {
         self.rebuild_ranges = ranges;
+        self
+    }
+
+    pub fn with_hydration(mut self, rpc_urls: bigname_lookup::ChainRpcUrls) -> Self {
+        self.hydration_rpc_urls = Some(rpc_urls);
         self
     }
 
