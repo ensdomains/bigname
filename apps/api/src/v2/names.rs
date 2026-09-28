@@ -123,14 +123,26 @@ pub(crate) async fn get_names(
         expires_after: params.expires_after,
         expires_before: params.expires_before,
     };
-    let storage_page = bigname_storage::load_name_current_expiring_page(
-        &state.pool,
-        &filter,
-        order_to_storage(order),
-        storage_cursor.as_ref(),
-        params.page_size,
-    )
-    .await
+    // Under the publication switch the rows are composed from the owned key families.
+    let storage_page = if bigname_storage::publication_source::serve_from_families() {
+        bigname_storage::families::name::load_family_expiring_page(
+            &state.pool,
+            &filter,
+            order_to_storage(order),
+            storage_cursor.as_ref(),
+            params.page_size,
+        )
+        .await
+    } else {
+        bigname_storage::load_name_current_expiring_page(
+            &state.pool,
+            &filter,
+            order_to_storage(order),
+            storage_cursor.as_ref(),
+            params.page_size,
+        )
+        .await
+    }
     .map_err(|_| V2Error::internal_error(format!("failed to load names for {namespace}")))?;
 
     let next_cursor = storage_page

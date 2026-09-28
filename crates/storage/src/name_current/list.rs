@@ -169,6 +169,30 @@ pub async fn load_name_current_list_page(
     page_size: u64,
     include_total_count: bool,
 ) -> Result<NameCurrentListPage> {
+    list_page_from(
+        pool,
+        filter,
+        (sort, order),
+        cursor,
+        page_size,
+        include_total_count,
+        None,
+    )
+    .await
+}
+
+/// The list page over the served rows, or with `composed` (a JSON array of
+/// [`composed_list_source`] rows) over those rows instead, through the same derived columns,
+/// predicates, order and cursor.
+pub(crate) async fn list_page_from(
+    pool: &PgPool,
+    filter: &NameCurrentListFilter,
+    (sort, order): (NameCurrentListSort, NameCurrentListOrder),
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+    include_total_count: bool,
+    composed: Option<&serde_json::Value>,
+) -> Result<NameCurrentListPage> {
     let page_size = checked_page_size_usize(
         page_size,
         "name_current list page_size must be positive",
@@ -186,7 +210,7 @@ pub async fn load_name_current_list_page(
     };
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, filter);
+    push_filtered_name_list_cte(&mut builder, filter, composed, |_| {});
     builder.push(NAME_CURRENT_LIST_SELECT);
     builder.push(" WHERE TRUE ");
     if let Some(cursor) = cursor {
@@ -344,14 +368,25 @@ fn push_filtered_name_current_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
 ) {
-    push_filtered_name_current_cte_with(builder, filter, |_| {});
+    push_filtered_name_list_cte(builder, filter, None, |_| {});
 }
 
-/// Push the `filtered_names` CTE and let the caller append extra predicates against `nc` after
-/// the standard filter predicates, inside the CTE's `WHERE`, where they can drive an index scan.
-pub(super) fn push_filtered_name_current_cte_with<'a>(
+/// The column list of a composed row set bound as `jsonb_to_recordset` (see
+/// [`composed_list_source`]).
+const COMPOSED_NC_COLUMNS: &str = "nc(logical_name_id text, namespace text, raw_name text,
+    namehash text, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid,
+    token_lineage_id uuid, binding_kind text, declared_summary jsonb, provenance jsonb,
+    support_status text, unsupported_reason text, chain_positions jsonb,
+    canonicality_summary jsonb, manifest_version bigint, last_recomputed_at timestamptz)";
+
+/// Push the `filtered_names` CTE over the served rows, or over `composed` rows, which the
+/// composed reader has already judged readable, and let the caller append extra predicates
+/// against `nc` after the standard filter predicates, inside the CTE's `WHERE`, where they can
+/// drive an index scan.
+pub(super) fn push_filtered_name_list_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
+    composed: Option<&'a serde_json::Value>,
     push_extra_predicates: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
     builder.push("WITH ");
@@ -437,6 +472,30 @@ pub(super) fn push_filtered_name_current_cte_with<'a>(
         r#"
                 ) AS expiry_date,
                 NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
+        "#,
+    );
+    if let Some(composed) = composed {
+        builder.push(" FROM JSONB_TO_RECORDSET(");
+        builder.push_bind(composed);
+        builder.push(") AS ");
+        builder.push(COMPOSED_NC_COLUMNS);
+        builder.push(
+            r#"
+            JOIN bigname_phase.name_surfaces surface
+              ON surface.logical_name_id = nc.logical_name_id
+            JOIN bigname_phase.chain_lineage surface_lineage
+              ON surface_lineage.chain_id = surface.chain_id
+             AND surface_lineage.block_hash = surface.block_hash
+            WHERE TRUE
+            "#,
+        );
+        push_name_current_filter_predicates(builder, filter);
+        push_extra_predicates(builder);
+        builder.push(")");
+        return;
+    }
+    builder.push(
+        r#"
             FROM bigname_phase.name_current nc
             JOIN bigname_phase.name_surfaces surface
               ON surface.logical_name_id = nc.logical_name_id
@@ -464,93 +523,5 @@ pub(super) fn push_filtered_name_current_cte_with<'a>(
     builder.push(")");
 }
 
-fn push_address_membership_cte<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    address_filter: &'a NameCurrentAddressFilter,
-    namespace: Option<&'a str>,
-) {
-    builder.push(
-        r#"
-        address_membership AS (
-            SELECT DISTINCT anc.logical_name_id
-            FROM bigname_phase.address_names_current anc
-        "#,
-    );
-    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS);
-    builder.push(" WHERE ");
-    match address_filter.addresses.as_ref() {
-        Some(addresses) => {
-            builder.push("anc.address = ANY(");
-            builder.push_bind(addresses.as_slice());
-            builder.push(")");
-        }
-        None => {
-            builder.push("anc.address = ");
-            builder.push_bind(&address_filter.address);
-        }
-    }
-    if let Some(namespace) = namespace {
-        builder.push(" AND anc.namespace = ");
-        builder.push_bind(namespace);
-    }
-    if let NameCurrentAddressRelationFilter::Relation(relation) = address_filter.relation {
-        builder.push(" AND anc.relation = ");
-        builder.push_bind(relation.as_str());
-    }
-    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER);
-    builder.push(")");
-}
-
-fn push_name_current_filter_predicates<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    filter: &'a NameCurrentListFilter,
-) {
-    if filter.supported_only {
-        builder.push(" AND nc.support_status = 'supported'");
-    }
-    if let Some(namespaces) = filter
-        .namespaces
-        .as_ref()
-        .filter(|namespaces| !namespaces.is_empty())
-    {
-        builder.push(" AND nc.namespace = ANY(");
-        builder.push_bind(namespaces.as_slice());
-        builder.push(")");
-    } else if let Some(namespace) = filter.namespace.as_deref() {
-        builder.push(" AND nc.namespace = ");
-        builder.push_bind(namespace);
-    }
-    if let Some(name) = filter.name.as_deref() {
-        builder.push(" AND nc.raw_name = ");
-        builder.push_bind(name);
-    }
-    if let Some(prefix) = filter.prefix.as_deref() {
-        builder.push(" AND nc.raw_name LIKE ");
-        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
-        builder.push(" ESCAPE '\\'");
-    }
-    if let Some(contains) = filter.contains.as_deref() {
-        builder.push(" AND nc.raw_name LIKE ");
-        builder.push_bind(format!("%{}%", escape_like_pattern(contains)));
-        builder.push(" ESCAPE '\\'");
-    }
-    if let Some(contains_nocase) = filter.contains_nocase.as_deref() {
-        builder.push(" AND nc.raw_name LIKE ");
-        builder.push_bind(format!(
-            "%{}%",
-            escape_like_pattern(&contains_nocase.to_ascii_lowercase())
-        ));
-        builder.push(" ESCAPE '\\'");
-    }
-    if let Some(resolver) = filter.resolver.as_deref() {
-        builder.push(" AND LOWER(nc.declared_summary #>> '{resolver,address}') = ");
-        builder.push_bind(resolver);
-    }
-    if filter.is_migrated == Some(true) {
-        builder.push(
-            " AND (nc.declared_summary #>> '{registration,authority_kind}') = 'ens_v2_registry'",
-        );
-    }
-}
-
+include!("list_filters.rs");
 include!("list_paging.rs");

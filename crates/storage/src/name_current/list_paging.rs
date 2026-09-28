@@ -273,7 +273,7 @@ pub fn name_current_list_cursor_from_row(
     }
 }
 
-fn escape_like_pattern(value: &str) -> String {
+pub(crate) fn escape_like_pattern(value: &str) -> String {
     value
         .replace('\\', r"\\")
         .replace('%', r"\%")

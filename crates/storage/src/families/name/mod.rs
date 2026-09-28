@@ -26,11 +26,14 @@
 //! (docs/api-v1.md, "Publication switch").
 mod batch;
 mod compose;
+mod list;
 mod loaders;
 pub mod selection;
 pub mod serving;
 
 use sqlx::types::time::OffsetDateTime;
+
+pub use list::{load_family_expiring_page, load_family_search_page};
 
 pub use batch::{
     load_family_name, load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,

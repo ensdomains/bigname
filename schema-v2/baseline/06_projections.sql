@@ -3121,3 +3121,14 @@ COMMENT ON COLUMN project_name_history.has_ens_v2_events IS
     'This value is whether any event naming the name came from the ENSv2 root, registry or registrar families (name_current/build.sql, the corpus lateral).';
 COMMENT ON COLUMN project_name_history.event_arms IS
     'This value is the sorted array of authority arms (ens_v1, ens_v2, basenames) voted by the name''s registration, renewal, release, expiry change, authority transfer, token transfer and authority epoch events (name_authority/build.sql, event_arms), without the ENSv2 root and registry expiry changes, which never vote, and releases, which the reader decides against the binding candidates.';
+
+-- The composed expiring listing's candidate indexes (TYR-36 step 7b).
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx
+    ON project_lifecycle_event (expiry_seconds)
+    WHERE expiry_seconds IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_inexact_expiry_idx
+    ON project_lifecycle_event (chain_id)
+    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
+CREATE INDEX IF NOT EXISTS project_wrapper_state_expiry_idx
+    ON project_wrapper_state (expiry_seconds)
+    WHERE expiry_seconds IS NOT NULL;
