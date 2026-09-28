@@ -1137,9 +1137,11 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
 #[tokio::test]
 async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
     let eth = Anvil::spawn().await?;
-    let l1_resolver =
-        Address::from_slice(&keccak256("bigname-e2e-placeholder:l1_resolver".as_bytes())[12..]);
+    // The admitted Basenames transport resolves through the pinned mainnet L1 resolver
+    // (manifests/mainnet/ethereum/basenames/basenames_execution/v2.toml), so the stub sits at
+    // that address and the generated glue manifest declares it there.
     // Fixed-answer verified transport stub; mine it before either chain advances.
+    let l1_resolver: Address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31".parse()?;
     eth.client()
         .set_code(
             l1_resolver,
@@ -1203,6 +1205,7 @@ async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
         &ens_deployment,
         &base,
         &deployment,
+        &std::collections::HashMap::from([("l1_resolver", (l1_resolver, 0))]),
         Some(&ready_sql),
     )
     .await?;
