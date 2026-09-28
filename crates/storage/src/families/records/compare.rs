@@ -188,7 +188,8 @@ fn inventory_view(row: &RecordInventoryCurrentRow, today: bool) -> Value {
         "unsupported_families": row.unsupported_families,
         "last_change": row.last_change,
         "entries": if today { baseline_entries(&row.entries) } else { row.entries.clone() },
-        "provenance": row.provenance,
+        // Captured ABI admission is an internal snapshot token, not record provenance.
+        "provenance": without(&row.provenance, &["abi_observation_classification"]),
         "coverage": row.coverage,
         "chain_positions": without(&row.chain_positions, &TARGET),
         "canonicality_summary": without(&row.canonicality_summary, &TARGET),
