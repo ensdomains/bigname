@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+build_only=0
+if [[ "${1:-}" == --build-only ]]; then
+  build_only=1
+  shift
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${1:-}" == --serve ]]; then
   database="$2"; address="$3"; metrics="$4"; evidence="$5"
@@ -140,6 +145,10 @@ if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" && -d "$cache_out" ]]; then
   # would grow without bound across runs.
   rm -rf "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
   mv "$cache_out" "$BIGNAME_E2E_SHUTDOWN_BUILD_CACHE"
+fi
+if [[ "$build_only" == 1 ]]; then
+  echo "Image build cache refreshed; no shutdown scenario was run."
+  exit 0
 fi
 export BIGNAME_E2E_SHUTDOWN_MODE=compose
 cd "$ROOT"

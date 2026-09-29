@@ -37,7 +37,25 @@ env:
   FOUNDRY_VERSION: v1.7.1
 
 jobs:
+  validation:
+    name: Select CI validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reuse: ${{ steps.plan.outputs.reuse }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find successful queue validation for this commit
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-check-plan.py
+
   static:
+    needs: [validation]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -55,23 +73,29 @@ jobs:
       # for an older Cargo.lock, and save nothing: their copies were invisible
       # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
+        id: cargo_cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo fmt --check
 
       - name: cargo fmt (e2e workspace)
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo fmt --manifest-path tests/e2e/Cargo.toml -- --check
 
       - name: Test Rust source size classifier
+        if: needs.validation.outputs.reuse != 'true'
         run: scripts/test-rust-file-size
 
       - name: Reference sync selection tests
+        if: needs.validation.outputs.reuse != 'true'
         run: scripts/test-sync-refs
 
       - name: Rust source size ratchet
+        if: needs.validation.outputs.reuse != 'true'
         env:
           # merge_group.base_ref keeps the allowance ratchet enforced at the
           # queue's final gate, where strict up-to-date no longer forces a
@@ -87,6 +111,7 @@ jobs:
           fi
 
       - name: Prometheus rule fixtures parse with promtool
+        if: needs.validation.outputs.reuse != 'true'
         env:
           PROMETHEUS_VERSION: 3.13.2
           PROMETHEUS_SHA256: 0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f
@@ -109,16 +134,19 @@ jobs:
           )
 
       - name: Install ripgrep
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ripgrep
 
       - name: API/storage query ownership
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           ./scripts/check-query-ownership
           (cd scripts && bash test-query-ownership)
 
       - name: Migration version guard
+        if: needs.validation.outputs.reuse != 'true'
         run: ./scripts/check-migration-versions
 
       - name: Install native build dependencies
@@ -128,18 +156,22 @@ jobs:
 
       # Exercise the test helpers without enabling the optional direct Reth reader.
       - name: cargo check
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo check --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support
 
       - name: cargo check (e2e workspace)
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
 
       - name: cargo clippy (strict workspace packages)
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo clippy --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support --exclude bigname-adapters --no-deps -- -D warnings
 
       # The adapter crate still carries pre-existing warning classes. Deny
       # every other warning here so new lint classes cannot silently widen the
       # baseline while those targeted classes are paid down.
       - name: cargo clippy (adapter warning-class baseline)
+        if: needs.validation.outputs.reuse != 'true'
         run: >-
           cargo clippy -p bigname-adapters --all-targets --features test-activation --
           -D warnings
@@ -160,9 +192,23 @@ jobs:
           -A clippy::cloned-ref-to-slice-refs
 
       - name: cargo clippy (e2e workspace)
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
 
+      - name: CI reuse decision tests
+        if: needs.validation.outputs.reuse != 'true'
+        run: |
+          python3 scripts/tests/test-ci-check-plan.py
+          python3 scripts/tests/test-container-shutdown-build.py
+
+      - name: Warm check dependencies
+        if: needs.validation.outputs.reuse == 'true' && steps.cargo_cache.outputs.cache-hit != 'true'
+        run: |
+          cargo check --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support
+          cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
+
   site:
+    needs: [validation]
     # The landing page and API reference are a static site with no build step
     # (site/README.md). Run its static guards and behaviour tests, then keep
     # the exact files as an artifact; hosting is provisioned separately. The
@@ -174,14 +220,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check the site
+        if: needs.validation.outputs.reuse != 'true'
         run: scripts/check-site
 
       # The runner's preinstalled Node; the tests use only node:test and node:assert.
       - name: Site behaviour tests
+        if: needs.validation.outputs.reuse != 'true'
         run: node --test scripts/tests/site.test.mjs
 
       # The OpenAPI edge regression's failure path, with a stub docker.
       - name: OpenAPI edge regression cleanup
+        if: needs.validation.outputs.reuse != 'true'
         run: scripts/tests/openapi-edge-smoke-cleanup
 
       - name: Upload the site
@@ -193,6 +242,8 @@ jobs:
           if-no-files-found: error
 
   schema_v2:
+    needs: [validation]
+    if: needs.validation.outputs.reuse != 'true'
     name: test (schema v2)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -226,6 +277,7 @@ jobs:
         run: ./schema-v2/apply-check.sh
 
   test_shard:
+    needs: [validation]
     name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -277,27 +329,34 @@ jobs:
       # for an older Cargo.lock, and save nothing: their copies were invisible
       # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
+        id: cargo_cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Sync pinned upstream checkouts
-        if: matrix.name == 'core'
+        if: (matrix.name == 'core') && (needs.validation.outputs.reuse != 'true' || steps.cargo_cache.outputs.cache-hit != 'true')
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
 
       - name: cargo test
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
 
+      - name: Warm core test dependencies
+        if: needs.validation.outputs.reuse == 'true' && steps.cargo_cache.outputs.cache-hit != 'true'
+        run: cargo test --no-run ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
   api_shard:
+    needs: [validation]
     name: test (api shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: ${{ fromJSON(needs.validation.outputs.reuse == 'true' && '[1]' || '[1,2]') }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -335,27 +394,35 @@ jobs:
       # for an older Cargo.lock, and save nothing: their copies were invisible
       # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
+        id: cargo_cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
       - name: Install cargo-nextest
+        if: needs.validation.outputs.reuse != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.143
 
       - name: cargo nextest (API partition)
+        if: needs.validation.outputs.reuse != 'true'
         run: >-
           cargo nextest run --locked -p bigname-api
           --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
           --partition hash:${{ matrix.shard }}/2
 
+      - name: Warm API test dependencies
+        if: needs.validation.outputs.reuse == 'true' && steps.cargo_cache.outputs.cache-hit != 'true'
+        run: cargo test --locked --no-run -p bigname-api --features bigname-adapters/test-activation,bigname-storage/test-support
+
   api:
     name: test (api)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - validation
       - api_shard
     if: always()
     steps:
@@ -367,6 +434,8 @@ jobs:
           fi
 
   phase_runner_shard_1:
+    needs: [validation]
+    if: needs.validation.outputs.reuse != 'true'
     name: test (phase-runner shard 1/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -482,6 +551,8 @@ jobs:
           --doc
 
   phase_runner_shard_2:
+    needs: [validation]
+    if: needs.validation.outputs.reuse != 'true'
     name: test (phase-runner shard 2/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -583,6 +654,8 @@ jobs:
           --partition slice:2/3
 
   phase_runner_shard_3:
+    needs: [validation]
+    if: needs.validation.outputs.reuse != 'true'
     name: test (phase-runner shard 3/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -688,10 +761,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - validation
       - phase_runner_shard_1
       - phase_runner_shard_2
       - phase_runner_shard_3
-    if: always()
+    if: always() && needs.validation.result == 'success' && needs.validation.outputs.reuse != 'true'
     steps:
       - name: Check phase-runner shards
         run: |
@@ -705,6 +779,7 @@ jobs:
           fi
 
   e2e_build:
+    needs: [validation]
     name: build (e2e phase-runner)
     runs-on: ubuntu-24.04
     timeout-minutes: 18
@@ -765,11 +840,13 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Sync pinned upstream checkouts
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
 
       - name: Build and package phase-runner
+        if: needs.validation.outputs.reuse != 'true'
         id: package
         run: |
           build_started="$(date +%s)"
@@ -825,6 +902,7 @@ jobs:
           echo "artifact-name=phase-runner-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_OUTPUT"
 
       - name: Upload phase-runner artifact
+        if: needs.validation.outputs.reuse != 'true'
         id: artifact_upload
         uses: actions/upload-artifact@v7
         with:
@@ -835,6 +913,7 @@ jobs:
           if-no-files-found: error
 
       - name: Summarize phase-runner artifact
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           {
             echo "### e2e phase-runner artifact"
@@ -851,6 +930,10 @@ jobs:
             echo "- Action digest: \`${{ steps.artifact_upload.outputs.artifact-digest }}\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Warm phase-runner dependencies
+        if: needs.validation.outputs.reuse == 'true' && steps.phase_runner_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --package phase-runner --bin phase-runner
+
   e2e_shard:
     name: test (e2e shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
@@ -862,9 +945,10 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     needs:
+      - validation
       - e2e_build
     # Start after the artifact and cache build; e2e results remain independently aggregated.
-    if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
+    if: ${{ !cancelled() && needs.e2e_build.result == 'success' && needs.validation.outputs.reuse != 'true' }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -989,6 +1073,7 @@ jobs:
         run: tests/e2e/run-gate
 
   api_container_shutdown:
+    needs: [validation]
     name: test (API container shutdown)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -1018,20 +1103,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        if: needs.validation.outputs.reuse != 'true'
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: foundry-rs/foundry-toolchain@v1
+        if: needs.validation.outputs.reuse != 'true'
         with:
           version: ${{ env.FOUNDRY_VERSION }}
       - name: Install native build dependencies
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
       - name: Sync pinned references
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           scripts/sync-refs
           scripts/sync-refs --check
       - name: Compute phase-runner dependency-cache key
+        if: needs.validation.outputs.reuse != 'true'
         id: phase_runner_cache_key
         run: |
           root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
@@ -1046,6 +1136,7 @@ jobs:
       # Same workspace, lockfiles, and debug profile as `build (e2e phase-runner)`,
       # so a compatible dependency cache from an earlier run can be reused.
       - name: Cache e2e phase-runner Cargo dependencies
+        if: needs.validation.outputs.reuse != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
@@ -1057,6 +1148,7 @@ jobs:
           save-if: false
 
       - name: Build canonical phase-runner prerequisite
+        if: needs.validation.outputs.reuse != 'true'
         env:
           BIGNAME_BUILD_SHA: ${{ github.sha }}
         run: |
@@ -1114,11 +1206,17 @@ jobs:
             v1-shutdown-image-${{ env.RUST_VERSION }}-
 
       - name: Prove exact-image API shutdown
+        if: needs.validation.outputs.reuse != 'true'
         env:
           BIGNAME_E2E_SHUTDOWN_BUILD_CACHE: ${{ runner.temp }}/shutdown-image-cache
         run: scripts/test-container-shutdown
+      - name: Warm exact-image build layers
+        if: needs.validation.outputs.reuse == 'true' && steps.shutdown_image_cache.outputs.cache-hit != 'true'
+        env:
+          BIGNAME_E2E_SHUTDOWN_BUILD_CACHE: ${{ runner.temp }}/shutdown-image-cache
+        run: scripts/test-container-shutdown --build-only
       - name: Retain shutdown evidence
-        if: always()
+        if: (always()) && (needs.validation.outputs.reuse != 'true')
         uses: actions/upload-artifact@v7
         with:
           name: api-container-shutdown
@@ -1136,6 +1234,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - validation
       - e2e_build
       - e2e_shard
       - api_container_shutdown
@@ -1144,7 +1243,7 @@ jobs:
       - name: Check e2e builder and shards
         run: |
           if [ "${{ needs.e2e_build.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard.result }}" != "success" ] ||
+             { [ "${{ needs.validation.outputs.reuse }}" != "true" ] && [ "${{ needs.e2e_shard.result }}" != "success" ]; } ||
              [ "${{ needs.api_container_shutdown.result }}" != "success" ]; then
             echo "API container: ${{ needs.api_container_shutdown.result }}"
             echo "e2e builder:   ${{ needs.e2e_build.result }}"
@@ -1157,6 +1256,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - validation
       - schema_v2
       - test_shard
       - api
@@ -1167,7 +1267,11 @@ jobs:
     steps:
       - name: Check test shards
         run: |
-          if [ "${{ needs.schema_v2.result }}" != "success" ]; then
+          if [ "${{ needs.validation.result }}" != "success" ]; then
+            echo "CI validation selection failed"
+            exit 1
+          fi
+          if [ "${{ needs.validation.outputs.reuse }}" != "true" ] && [ "${{ needs.schema_v2.result }}" != "success" ]; then
             echo "schema v2 finished with result: ${{ needs.schema_v2.result }}"
             exit 1
           fi
@@ -1179,7 +1283,7 @@ jobs:
             echo "API tests finished with result: ${{ needs.api.result }}"
             exit 1
           fi
-          if [ "${{ needs.phase_runner.result }}" != "success" ]; then
+          if [ "${{ needs.validation.outputs.reuse }}" != "true" ] && [ "${{ needs.phase_runner.result }}" != "success" ]; then
             echo "phase-runner finished with result: ${{ needs.phase_runner.result }}"
             exit 1
           fi
@@ -1193,6 +1297,7 @@ jobs:
           fi
 
   artifacts-and-smoke:
+    needs: [validation]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -1226,28 +1331,39 @@ jobs:
       # for an older Cargo.lock, and save nothing: their copies were invisible
       # to every other run and pushed main's entries out of the 10 GB limit.
       - name: Cache cargo artifacts
+        id: cargo_cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Fetch smoke dependencies
+        if: needs.validation.outputs.reuse != 'true'
         run: |
           cargo fetch --locked
           docker pull caddy:2-alpine
 
       - name: Sync upstream refs
+        if: needs.validation.outputs.reuse != 'true'
         run: scripts/sync-refs
 
       - name: Initialize phase schema
+        if: needs.validation.outputs.reuse != 'true'
         run: cargo run --locked -p phase-runner --bin phase-runner -- init-schema
 
       - name: release smoke gate (no network)
+        if: needs.validation.outputs.reuse != 'true'
         run: ./scripts/release-smoke --no-network
 
       - name: rollback smoke gate (no network)
+        if: needs.validation.outputs.reuse != 'true'
         run: ./scripts/rollback-smoke --no-network
 
       # The committed Caddyfile in front of a fixture upstream that already
       # answers /openapi.json, which the API does not until TYR-18.
       - name: OpenAPI edge regression (fixture upstream)
+        if: needs.validation.outputs.reuse != 'true'
         run: ./scripts/tests/openapi-edge-smoke
+
+      - name: Warm smoke build dependencies
+        if: needs.validation.outputs.reuse == 'true' && steps.cargo_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked -p phase-runner --bin phase-runner
