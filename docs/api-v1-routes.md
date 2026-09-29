@@ -3487,10 +3487,17 @@ For a registrar lease first identified by a later readable observation, registra
   `exclude_owner=<address>` keeps every other label, including the ownerless
   ones, which are served with `owner` absent, so a caller can tell a label held
   by someone else from a label nobody holds. The address is an EVM address in
-  any letter case and matches case-insensitively. A label keeps its owner
-  after its expiry until its registration is released (a released label is
-  not a label of the registry), so an expired, unreleased label counts as held
-  by that owner. The two parameters cannot be combined. A blank value, empty or
+  any letter case and matches case-insensitively. The owner of a label is its
+  token's latest holder, which the registry keeps after the label expires:
+  `latestOwnerOf` still returns it, while `ownerOf` answers the zero address
+  once the expiry passes
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L338-L354 @ ens_v2@a971bd64).
+  Bigname serves the latest holder, so an expired label counts as held by that
+  owner until its registration is released. Releasing it (`unregister`, which
+  emits `LabelUnregistered`) burns the token and ends the registration
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64),
+  and a released label is not a label of the registry. The two parameters
+  cannot be combined. A blank value, empty or
   only whitespace, counts as absent, as for the other optional address
   parameters: `owner=&exclude_owner=<address>` is an `exclude_owner` request and
   `owner=` alone is unfiltered. The filter is the
