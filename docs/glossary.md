@@ -1792,7 +1792,9 @@ a string a route puts in a name-typed field for a label
 bigname cannot state as a name. Registry events prove a child node and its
 labelhash without proving the label, so some children have no name to serve;
 rather than omit the row or return null, the read composes a readable stand-in.
-Two exist today, both on `GET /v1/names/{name}/subnames`: the placeholder
+Two exist today, both served on `GET /v1/names/{name}/subnames` and, for an
+ENSv1 registry child listed for its registry owner, on
+`GET /v1/addresses/{address}/names`: the placeholder
 `[<labelhash-without-0x>].<parent-name>` for a label never observed or whose
 observed text fails ENSIP-15 normalization, and, for a
 label observed as bytes that are not valid UTF-8 or that contain a NUL, the

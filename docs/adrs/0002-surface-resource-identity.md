@@ -106,7 +106,7 @@ Resource-centric convenience rule:
 
 ## Consequences
 
-- address collections return surfaces by default
+- address collections return surfaces by default; an ENSv1 registry child with no surface (a standalone registry-owner observation above) is the one row without a surface, listed for its current registry owner on its registry-only resource and named as its parent's child list names it
 - clients may opt into `dedupe_by=resource`, but that is never the default truth model
 - history must support `scope=surface|resource|both`
 - wrapping, migration, token regeneration, and aliasing can be represented without identity distortion

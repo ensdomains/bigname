@@ -473,7 +473,14 @@ compose each candidate's selected name, lifecycle and permission relations in
 the admitted publication snapshot. Relation vocabulary is `registrant`,
 `token_holder`, and `effective_controller`. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
-relations. Raw unbounded diagnostic address history separately includes retained
+relations. For a node an ENSv1 registry `NewOwner` created, the address index
+also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
+the node's registry owner facts and the owner each such `NewOwner` reported,
+whether or not a surface names the node. A candidate with no
+[name surface](glossary.md#surface-name-surface) composes no name row; the read
+lists it only when the child relation below lists it under its parent and
+serves the requested address as its owner, with the child relation's name and
+the node's registry-only resource, and with no surface binding. Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
 in [the audit route contract](api-v1-routes.md).
 
@@ -517,6 +524,13 @@ migration registry. Its `normalized_event_ids`, `event_identities`,
 not positionally aligned tuples; an input contributes only the identifiers it
 actually owns.
 Reachability is per parent relation, not transitive: hiding a parent-to-child relation does not itself hide that child's children.
+An ENSv1 or Basenames registry child's owner is its node's current registry
+owner, from the node's latest owner-setting registry event, not the owner the
+edge's `NewOwner` reported: a later registry `Transfer` moves it. The owner is
+the registry's owner getter view, so an owner the registry reads as zero is
+zero, and an unmasked 2017 registry owner word is no owner. A child with no
+owner, or whose name summary records a zero-owner transfer, publishes a relation
+only while it has a serving resource.
 For registry
 events that expose only a labelhash, The reader composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
@@ -1408,7 +1422,10 @@ row of its own, never pruned. Each row keeps the name the adapter emitted,
 which nothing rewrites, beside the name the ENSv1 registrar and wrapper linking
 gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
-block touched. Resolver classification classifies a resolver at the block that
+block touched. A block that changes an ENSv1 registry node's owner row or one
+of its child edges touches the node's `<namespace>:<node>` name id, with or
+without a surface, so the index rows of a registry child follow its registry
+owner. Resolver classification classifies a resolver at the block that
 changed its candidates, the pointers that name it, its proxy upgrades, a
 discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
