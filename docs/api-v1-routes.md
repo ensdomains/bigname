@@ -889,7 +889,9 @@ its value map:
   list is ascending and always present, empty when the name has no key in that
   category. The value maps use the same keys. A seen key missing from its map
   is not known in this response; a seen key mapped to `null` is set to empty
-  (cleared, or never set on a key the index lists as a gap). An address value
+  (cleared). A key the inventory lists only as an explicit gap, with no
+  entry, is seen without a map value; the current index records no explicit
+  gaps, so this does not occur today. An address value
   is the scalar hex string and a text value the stored string; an empty value
   is served as `null`.
 - `seen_abis` lists the single-bit ABI content types, as ascending decimal
