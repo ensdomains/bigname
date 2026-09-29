@@ -118,6 +118,26 @@ pub(super) async fn migrations(
         .collect()
 }
 
+/// The readable resources among `$1` at the publication `($2, $3)`.
+pub(crate) const RESOURCES_SQL: &str = "/* storage:families.name.resources */
+     SELECT resource.resource_id::text AS resource_id, resource.token_lineage_id,
+            (resource.token_lineage_id IS NULL OR EXISTS (
+                SELECT 1 FROM bigname_phase.token_lineages token
+                JOIN bigname_phase.chain_lineage token_lineage
+                  ON token_lineage.chain_id = token.chain_id
+                 AND token_lineage.block_hash = token.block_hash
+                WHERE token.token_lineage_id = resource.token_lineage_id
+                  AND token.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            )) AS token_readable
+     FROM bigname_phase.resources resource
+     JOIN bigname_phase.chain_lineage lineage
+       ON lineage.chain_id = resource.chain_id AND lineage.block_hash = resource.block_hash
+     WHERE resource.resource_id = ANY($1::uuid[])
+       AND resource.chain_id = $2 AND resource.block_number <= $3
+       AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
+       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')";
+
 /// The readable resources among `resources` at the publication, with their token lineage and
 /// whether that lineage is readable.
 pub(super) async fn resources(
@@ -125,32 +145,13 @@ pub(super) async fn resources(
     publication: &FamilyPublication,
     resources: &[String],
 ) -> Result<BTreeMap<String, (Option<Uuid>, bool)>> {
-    let rows = sqlx::query(
-        "/* storage:families.name.resources */
-         SELECT resource.resource_id::text AS resource_id, resource.token_lineage_id,
-                (resource.token_lineage_id IS NULL OR EXISTS (
-                    SELECT 1 FROM bigname_phase.token_lineages token
-                    JOIN bigname_phase.chain_lineage token_lineage
-                      ON token_lineage.chain_id = token.chain_id
-                     AND token_lineage.block_hash = token.block_hash
-                    WHERE token.token_lineage_id = resource.token_lineage_id
-                      AND token.canonicality_state IN ('canonical', 'safe', 'finalized')
-                      AND token_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                )) AS token_readable
-         FROM bigname_phase.resources resource
-         JOIN bigname_phase.chain_lineage lineage
-           ON lineage.chain_id = resource.chain_id AND lineage.block_hash = resource.block_hash
-         WHERE resource.resource_id::text = ANY($1::text[])
-           AND resource.chain_id = $2 AND resource.block_number <= $3
-           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(resources)
-    .bind(&publication.chain_id)
-    .bind(publication.block_number)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load readable resources")?;
+    let rows = sqlx::query(RESOURCES_SQL)
+        .bind(resources)
+        .bind(&publication.chain_id)
+        .bind(publication.block_number)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load readable resources")?;
     rows.into_iter()
         .map(|row| {
             Ok((
@@ -180,6 +181,35 @@ fn pointer_of(row: &sqlx::postgres::PgRow, position: Option<Value>) -> Result<Op
     }))
 }
 
+/// F5 pointers of the resources `$2` on chain `$1`, and the root-registry pointers naming each
+/// `($3, $4)` pair. Each arm probes its own index under a BitmapOr: the primary key by
+/// resource, and `project_resource_pointer_root_node_idx` by namespace and namehash (the
+/// separate `= ANY` conditions are what that index can use; the pair test keeps the result to
+/// the exact pairs).
+pub(crate) const RESOURCE_POINTERS_SQL: &str = "/* storage:families.name.resource_pointers */
+     SELECT pointer.resource_id::text AS resource_id, pointer.resolver_address,
+            pointer.pointer_position, pointer.source_family, pointer.namespace,
+            pointer.namehash, event.logical_name_id AS event_name,
+            event.normalized_event_id AS event_id
+     FROM bigname_phase.project_resource_pointer pointer
+     LEFT JOIN bigname_phase.normalized_events event
+       ON event.event_identity = pointer.pointer_position ->> 'event_identity'
+     WHERE pointer.chain_id = $1
+       AND (pointer.resource_id = ANY($2)
+            OR (pointer.source_family = 'ens_v2_root_l1'
+                AND pointer.namespace = ANY($3::text[])
+                AND pointer.namehash = ANY($4::text[])
+                AND (pointer.namespace, pointer.namehash) IN (
+                    SELECT * FROM unnest($3::text[], $4::text[]))))";
+
+/// `id` as a uuid when it is in the text form PostgreSQL prints for one, the only form a
+/// `resource_id::text` comparison could match.
+pub(crate) fn canonical_uuid(id: &str) -> Option<Uuid> {
+    Uuid::try_parse(id)
+        .ok()
+        .filter(|uuid| uuid.hyphenated().to_string() == id)
+}
+
 /// F5 pointers by resource, and the root-registry pointers naming each `(namespace, namehash)`.
 pub(super) async fn resource_pointers(
     conn: &mut PgConnection,
@@ -191,28 +221,20 @@ pub(super) async fn resource_pointers(
     BTreeMap<(String, String), Vec<PointerRow>>,
 )> {
     let (namespaces, namehashes): (Vec<String>, Vec<String>) = nodes.iter().cloned().unzip();
-    let rows = sqlx::query(
-        "/* storage:families.name.resource_pointers */
-         SELECT pointer.resource_id::text AS resource_id, pointer.resolver_address,
-                pointer.pointer_position, pointer.source_family, pointer.namespace,
-                pointer.namehash, event.logical_name_id AS event_name,
-                event.normalized_event_id AS event_id
-         FROM bigname_phase.project_resource_pointer pointer
-         LEFT JOIN bigname_phase.normalized_events event
-           ON event.event_identity = pointer.pointer_position ->> 'event_identity'
-         WHERE pointer.chain_id = $1
-           AND (pointer.resource_id::text = ANY($2::text[])
-                OR (pointer.source_family = 'ens_v2_root_l1'
-                    AND (pointer.namespace, pointer.namehash) IN (
-                        SELECT * FROM unnest($3::text[], $4::text[]))))",
-    )
-    .bind(chain_id)
-    .bind(resources)
-    .bind(&namespaces)
-    .bind(&namehashes)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load resource pointers")?;
+    // The ids are bound as a uuid array, never a text array cast in SQL, which a plan that
+    // filters rows would convert again for every row it reads.
+    let resource_ids: Vec<Uuid> = resources
+        .iter()
+        .filter_map(|id| canonical_uuid(id))
+        .collect();
+    let rows = sqlx::query(RESOURCE_POINTERS_SQL)
+        .bind(chain_id)
+        .bind(&resource_ids)
+        .bind(&namespaces)
+        .bind(&namehashes)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load resource pointers")?;
     let mut by_resource = BTreeMap::new();
     let mut roots: BTreeMap<(String, String), Vec<PointerRow>> = BTreeMap::new();
     for row in &rows {
