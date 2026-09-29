@@ -148,8 +148,8 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
         "{released}"
     );
     ensure!(
-        released["expiry"] == json!(EXPIRY)
-            && released["grace_ends_at"] == json!(EXPIRY + 28 * DAY),
+        released["expiry"] == json!(EXPIRY.to_string())
+            && released["grace_ends_at"] == json!((EXPIRY + 28 * DAY).to_string()),
         "{released}"
     );
 

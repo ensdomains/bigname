@@ -248,7 +248,7 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
             let at = at
                 .as_deref()
                 .unwrap_or_else(|| panic!("{name} has no created_at"));
-            bigname_storage::parse_rfc3339_utc_timestamp(at)
+            at.parse::<bigname_storage::UnixSeconds>()
                 .map_err(|error| anyhow::anyhow!("{name}: {error}"))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -698,13 +698,13 @@ async fn v2_address_names_created_at_sort_matches_the_served_first_observation()
                     })
                     .and_then(Value::as_str)
                     .unwrap_or_else(|| panic!("{uri}: {name} has no recorded first observation"));
-                let at = parse_rfc3339_utc_timestamp(at).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let at = at.parse::<bigname_storage::UnixSeconds>()?;
                 let recorded = time::OffsetDateTime::parse(
                     recorded,
                     &time::format_description::well_known::Rfc3339,
                 )
                 .map_err(|e| anyhow::anyhow!("{name}: {recorded}: {e}"))?;
-                assert_eq!(at, recorded, "{uri}: {name}");
+                assert_eq!(at, recorded.into(), "{uri}: {name}");
                 served.push(at);
             }
             let ordered = served.windows(2).all(|pair| match order {

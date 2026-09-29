@@ -14,6 +14,20 @@ use crate::harness::{
     manifests, perturb, pipeline, repo_root,
 };
 
+pub(super) fn decimal_unix_seconds(
+    value: &serde_json::Value,
+) -> Result<bigname_storage::UnixSeconds> {
+    let text = value
+        .as_str()
+        .context("timestamp must be a decimal Unix-seconds string")?;
+    let seconds: bigname_storage::UnixSeconds = text.parse()?;
+    anyhow::ensure!(
+        seconds.nanosecond() == 0 && seconds.to_string() == text,
+        "timestamp must be a canonical whole Unix-seconds string: {value}"
+    );
+    Ok(seconds)
+}
+
 pub struct PipelineRun {
     pub db: HarnessDb,
     pub api: pipeline::ProjectionReader,

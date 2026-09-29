@@ -295,7 +295,7 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     assert_eq!(data["created_block_number"], json!(61));
     assert_eq!(data["created_transaction_hash"], json!("0xtx61"));
     assert_eq!(data["created_basis"], json!("registry_created"));
-    assert_eq!(data["created_at"], json!("2023-11-14T22:14:21Z"));
+    assert_eq!(data["created_at"], json!("1700000061"));
     assert_eq!(data["counts"], json!({ "labels": 2 }));
     assert_eq!(
         data["referenced_by"]["data"],

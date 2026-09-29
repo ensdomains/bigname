@@ -1277,6 +1277,7 @@ async fn zero_api_response(
         .values()
     {
         assert_keys(position, &["block_number", "block_hash", "timestamp"]);
+        support::decimal_unix_seconds(&position["timestamp"])?;
     }
     Ok(body)
 }
@@ -1289,6 +1290,7 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         "registered_at",
         "created_at",
         "expires_at",
+        "grace_ends_at",
         "registration_status",
         "name",
         "display_name",
@@ -1306,6 +1308,10 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         assert_eq!(record["authority"], "ens_v1");
     }
     assert_keys(record, &keys);
+    for field in ["registered_at", "created_at", "expires_at", "grace_ends_at"] {
+        support::decimal_unix_seconds(&record[field])
+            .expect("name timestamp must use Unix seconds");
+    }
     // An active registration serves its registry owner, here the registrant.
     assert_eq!(record["owner"], record["registrant"]);
     assert_eq!(record["status"], "ok");
@@ -1459,6 +1465,7 @@ pub(super) async fn assert_zero_api_shapes(
         &inventory["last_change"]["chain_position"],
         &["chain_id", "block_number", "block_hash", "timestamp"],
     );
+    support::decimal_unix_seconds(&inventory["last_change"]["chain_position"]["timestamp"])?;
     let cache = &data["record_cache"];
     assert_keys(cache, &["entries", "record_version_boundary"]);
     assert_eq!(
@@ -1480,6 +1487,9 @@ pub(super) async fn assert_zero_api_shapes(
         &cache["record_version_boundary"]["chain_position"],
         &["chain_id", "block_number", "block_hash", "timestamp"],
     );
+    support::decimal_unix_seconds(
+        &cache["record_version_boundary"]["chain_position"]["timestamp"],
+    )?;
     let entries = cache["entries"]
         .as_array()
         .context("diagnostic cache entries")?;

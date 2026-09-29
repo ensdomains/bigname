@@ -92,7 +92,7 @@ async fn v2_diagnostics_name_routes_return_declared_state_slices() -> Result<()>
             json!({
                 "block_number": 21_000_003,
                 "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
+                "timestamp": "1776384003"
             }),
             "{uri}"
         );
@@ -388,7 +388,7 @@ async fn v2_diagnostics_name_routes_honor_snapshot_selectors() -> Result<()> {
             json!({
                 "block_number": 21_000_003,
                 "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
+                "timestamp": "1776384003"
             }),
             "{uri}"
         );
@@ -412,7 +412,7 @@ async fn v2_diagnostics_name_routes_infer_basenames_namespace() -> Result<()> {
             json!({
                 "block_number": 84,
                 "block_hash": "0xdiag54",
-                "timestamp": "2026-04-17T00:00:24Z"
+                "timestamp": "1776384024"
             }),
             "{uri}"
         );
@@ -436,7 +436,7 @@ async fn v2_diagnostics_name_routes_honor_namespace_override() -> Result<()> {
             json!({
                 "block_number": 21_000_003,
                 "block_hash": "0xbinding",
-                "timestamp": "2026-04-17T00:00:03Z"
+                "timestamp": "1776384003"
             }),
             "{uri}"
         );

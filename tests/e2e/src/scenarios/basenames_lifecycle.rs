@@ -148,11 +148,12 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         pointer(&grace_body, "/declared_state/registration/status"),
         "active"
     );
-    let grace_expiry = pointer(&grace_body, "/declared_state/registration/expiry")
-        .as_u64()
-        .context("renewed expiry missing")?;
+    let grace_expiry = support::decimal_unix_seconds(&pointer(
+        &grace_body,
+        "/declared_state/registration/expiry",
+    ))?;
     assert!(
-        u128::from(grace_expiry) < rpc.block_timestamp().await?,
+        u128::try_from(grace_expiry.unix_timestamp())? < rpc.block_timestamp().await?,
         "the renewed lease should be expired but still represented inside grace"
     );
     let first_identity = active_registrar_identity(

@@ -69,9 +69,9 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
         json!("0x00000000000000000000000000000000000000a2")
     );
     assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00+00:00"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00+00:00"));
-    assert_eq!(data[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
+    assert_eq!(data[0]["registered_at"], json!("1704153600"));
+    assert_eq!(data[0]["created_at"], json!("1672617600"));
+    assert_eq!(data[0]["expires_at"], json!("1798848000"));
     assert!(data[0].get("relations").is_none());
     assert!(data[0].get("is_primary").is_none());
     assert!(data[0].get("role_summary").is_none());
@@ -1584,11 +1584,9 @@ async fn v2_search_omits_a_name_without_current_authority() -> Result<()> {
     database.cleanup().await
 }
 
-// The Sepolia root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
-// timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown.
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+// Finite registrar expiries past year 9999 stay searchable and retain every digit.
+// Full uint64 grant/renewal behavior is covered by the admitted ENSv2 fixture in
+// v2_unix_timestamps.rs; this existing registrar case stays within its retained signed range.
 #[tokio::test]
 async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -1603,8 +1601,8 @@ async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> R
     for row in rows {
         assert_eq!(
             row.get("expires_at"),
-            None,
-            "an unknown expiry leaves the key out: {row}"
+            Some(&json!("253402300800")),
+            "finite expiry is not clipped by the calendar range: {row}"
         );
     }
     database.cleanup().await?;
@@ -1752,7 +1750,7 @@ async fn seed_v2_search_fixture_with_extreme_expiry(
             "ens_v1_registrar_l1"
         };
         let expiry = if extreme && matches!(spec.name, "alpha.eth" | "alpine.eth") {
-            u64::MAX
+            253_402_300_800
         } else {
             parse_rfc3339_utc_timestamp(spec.expires_at)
                 .map_err(|error| anyhow::anyhow!("{error}"))?

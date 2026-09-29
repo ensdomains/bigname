@@ -49,7 +49,7 @@ async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Res
             "chain_id": "ethereum-mainnet",
             "block_number": 305,
             "block_hash": "0xdiag305",
-            "timestamp": "2023-11-14T22:18:25Z"
+            "timestamp": "1700000305"
         })
     );
     assert_eq!(

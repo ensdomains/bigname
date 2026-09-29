@@ -1391,7 +1391,7 @@ async fn v2_permissions_resource_bound_read_serves_wrapper_restrictions() -> Res
                 "is_dot_eth": true,
                 "can_extend_expiry": false,
             },
-            "wrapper_expires_at": "2027-01-15T08:00:00Z",
+            "wrapper_expires_at": "1800000000",
         })
     );
     assert_eq!(registration["meta"]["completeness"], json!("partial"));

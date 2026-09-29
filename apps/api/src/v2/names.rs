@@ -282,10 +282,7 @@ mod tests {
             payload.filters,
             BTreeMap::from([
                 ("namespace".to_owned(), "ens".to_owned()),
-                (
-                    "expires_after".to_owned(),
-                    "2026-09-01T00:00:00Z".to_owned()
-                ),
+                ("expires_after".to_owned(), "1788220800".to_owned()),
                 ("expires_before".to_owned(), String::new()),
                 ("order".to_owned(), "asc".to_owned()),
             ])

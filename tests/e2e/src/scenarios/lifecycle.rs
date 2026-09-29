@@ -152,12 +152,11 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
         format!("{bob:#x}"),
         "registry owner should follow the reclaim"
     );
-    let expiry = pointer("/declared_state/registration/expiry")
-        .as_u64()
-        .unwrap_or_default();
-    let registered_for = expiry - 2 * YEAR;
+    let expiry = support::decimal_unix_seconds(&pointer("/declared_state/registration/expiry"))?;
+    let registered_for = expiry.unix_timestamp() - i128::from(2 * YEAR);
     assert!(
-        (crate::harness::anvil::GENESIS_TIMESTAMP..crate::harness::anvil::GENESIS_TIMESTAMP + 300)
+        (i128::from(crate::harness::anvil::GENESIS_TIMESTAMP)
+            ..i128::from(crate::harness::anvil::GENESIS_TIMESTAMP + 300))
             .contains(&registered_for),
         "expiry {expiry} should reflect the renewal (two years from genesis)"
     );
@@ -209,13 +208,15 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
         crate::harness::responses::pointer(&body, "/declared_state/registration/released_at"),
         Value::Null
     );
-    let in_grace_expiry = body
-        .pointer("/declared_state/registration/expiry")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
+    let in_grace_expiry = support::decimal_unix_seconds(
+        body.pointer("/declared_state/registration/expiry")
+            .context("in-grace registration expiry missing")?,
+    )?;
     assert!(
-        in_grace_expiry
-            < crate::harness::anvil::GENESIS_TIMESTAMP + MIN_REGISTRATION + 24 * 60 * 60,
+        in_grace_expiry.unix_timestamp()
+            < i128::from(
+                crate::harness::anvil::GENESIS_TIMESTAMP + MIN_REGISTRATION + 24 * 60 * 60
+            ),
         "expiry {in_grace_expiry} should already be in the past at the in-grace read"
     );
     let first_resource = body
@@ -358,9 +359,7 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
         format!("{alice:#x}"),
         "released summary should retain the last registrant"
     );
-    let expiry = pointer("/declared_state/registration/expiry")
-        .as_i64()
-        .context("released registration expiry missing")?;
+    let expiry = support::decimal_unix_seconds(&pointer("/declared_state/registration/expiry"))?;
     let released_at = pointer("/declared_state/registration/released_at")
         .as_i64()
         .context("released_at missing from released registration")?;
@@ -376,7 +375,7 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
         "exact-name released_at should come from the canonical release event"
     );
     assert!(
-        released_at >= expiry + GRACE_PERIOD as i64,
+        i128::from(released_at) >= expiry.unix_timestamp() + i128::from(GRACE_PERIOD),
         "released_at {released_at} should be at or after expiry {expiry} plus grace"
     );
 

@@ -31,3 +31,40 @@ pub fn contract_expiry_reason(
         });
     (wrapper || root).then_some("no_expiry")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximum_is_not_a_global_no_expiry_value() {
+        let maximum = UnixSeconds::from_seconds(i128::from(u64::MAX)).unwrap();
+        let node = "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae";
+        assert_eq!(
+            contract_expiry_reason(maximum, "ens_v2_registry_l1", Some(node)),
+            None
+        );
+        assert_eq!(
+            contract_expiry_reason(maximum, "ens_v2_root_l1", Some(node)),
+            Some("no_expiry")
+        );
+        assert_eq!(
+            contract_expiry_reason(maximum, "ens_v1_wrapper_l1", None),
+            Some("no_expiry")
+        );
+        let finite = UnixSeconds::from_seconds(i128::from(u64::MAX - 1)).unwrap();
+        assert_eq!(
+            contract_expiry_reason(finite, "ens_v1_wrapper_l1", None),
+            None
+        );
+        let zero = UnixSeconds::from_seconds(0).unwrap();
+        assert_eq!(
+            contract_expiry_reason(zero, "ens_v1_wrapper_l1", None),
+            Some("not_set")
+        );
+        assert_eq!(
+            contract_expiry_reason(zero, "ens_v2_registry_l1", Some(node)),
+            None
+        );
+    }
+}

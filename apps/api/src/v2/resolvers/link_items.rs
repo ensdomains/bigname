@@ -42,11 +42,16 @@ pub(super) fn compact_resolver_link_item(item: &Value) -> V2Result<Value> {
         .get("chain_position")
         .and_then(Value::as_object)
         .ok_or_else(mapping_error)?;
+    let timestamp = required_string(position, "timestamp")?
+        .parse::<bigname_storage::UnixSeconds>()
+        .map_err(|_| mapping_error())?
+        .unix_timestamp()
+        .to_string();
     compact.insert(
         "link_event".to_owned(),
         json!({
             "block_number": position.get("block_number").and_then(Value::as_u64).ok_or_else(mapping_error)?,
-            "timestamp": required_string(position, "timestamp")?,
+            "timestamp": timestamp,
             "transaction_hash": required_string(position, "transaction_hash")?,
             "log_index": position.get("log_index").and_then(Value::as_u64).ok_or_else(mapping_error)?,
         }),

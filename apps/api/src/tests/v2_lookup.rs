@@ -333,7 +333,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
         json!({
             "block_number": 38,
             "block_hash": "0xname26",
-            "timestamp": "2026-04-17T00:00:38Z"
+            "timestamp": "1776384038"
         })
     );
     let token = payload["meta"]["as_of_token"]
@@ -627,13 +627,13 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
     let expected_lapsed = json!({
         "registrant": HOLDER,
         "held_through": "registrar",
-        "released_at": "2024-02-12T22:13:20Z",
+        "released_at": "1707776000",
         "release_kind": "expired",
     });
     let lapsed = &payload["data"][0]["record"];
     assert_eq!(lapsed["registration_status"], json!("released"), "{lapsed:?}");
     assert_eq!(lapsed["registration_id"], json!(lease.to_string()));
-    assert_eq!(lapsed["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert_eq!(lapsed["expires_at"], json!("1700000000"));
     assert!(lapsed.get("registrant").is_none(), "{lapsed:?}");
     assert!(lapsed.get("owner").is_none(), "{lapsed:?}");
     assert_eq!(lapsed["lapsed_registration"], expected_lapsed);
@@ -645,7 +645,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
     let record = &detail["data"];
     assert_eq!(record["registration_status"], json!("released"), "{record:?}");
     assert_eq!(record["registration_id"], json!(lease.to_string()));
-    assert_eq!(record["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert_eq!(record["expires_at"], json!("1700000000"));
     assert!(record.get("registrant").is_none(), "{record:?}");
     assert!(record.get("owner").is_none(), "{record:?}");
     assert_eq!(record["lapsed_registration"], expected_lapsed);
@@ -1676,7 +1676,7 @@ async fn v2_lookup_rejects_union_scope_with_missing_phase_head() -> Result<()> {
         json!({
             "block_number": 77,
             "block_hash": "0xlookup-head",
-            "timestamp": "2026-04-17T00:01:17Z"
+            "timestamp": "1776384077"
         })
     );
     assert!(payload["meta"]["as_of"].get("8453").is_none());
@@ -1708,7 +1708,7 @@ async fn v2_lookup_explicit_namespace_invalid_name_keeps_the_selected_chain_in_m
         json!({
             "block_number": 77,
             "block_hash": "0xlookup-invalid-explicit",
-            "timestamp": "2026-04-17T00:00:17Z"
+            "timestamp": "1776384017"
         })
     );
     assert!(payload["meta"].get("as_of_completeness").is_none());
@@ -2459,7 +2459,7 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
         json!({
             "block_number": 77,
             "block_hash": "0xlookup-head",
-            "timestamp": "2026-04-17T00:01:17Z"
+            "timestamp": "1776384077"
         })
     );
 

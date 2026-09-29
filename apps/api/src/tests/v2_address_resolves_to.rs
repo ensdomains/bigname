@@ -172,7 +172,7 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
     assert_eq!(rows[1]["is_primary"], json!(false));
     assert_eq!(rows[0]["owner"], json!(V2_PERMISSION_SUBJECT));
     assert_eq!(rows[0]["registration_status"], json!("active"));
-    assert_eq!(rows[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
+    assert_eq!(rows[0]["expires_at"], json!("1798848000"));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
     assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(105));

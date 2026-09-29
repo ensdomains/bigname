@@ -9,7 +9,7 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         json!({
             "block_number": 21_000_003,
             "block_hash": "0xbinding",
-            "timestamp": "2026-04-17T00:00:03Z"
+            "timestamp": "1776384003"
         })
     );
 
@@ -53,18 +53,9 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         data.get("registrant"),
         Some(&json!("0x00000000000000000000000000000000000000aa"))
     );
-    assert_eq!(
-        parse_rfc3339_utc_timestamp(data["registered_at"].as_str().context("registered_at")?).unwrap(),
-        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z").unwrap(),
-    );
-    assert_eq!(
-        parse_rfc3339_utc_timestamp(data["created_at"].as_str().context("created_at")?).unwrap(),
-        parse_rfc3339_utc_timestamp("2023-01-02T03:04:05Z").unwrap(),
-    );
-    assert_eq!(
-        parse_rfc3339_utc_timestamp(data["expires_at"].as_str().context("expires_at")?).unwrap(),
-        parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z").unwrap(),
-    );
+    assert_eq!(data["registered_at"], json!("1704164645"));
+    assert_eq!(data["created_at"], json!("1672628645"));
+    assert_eq!(data["expires_at"], json!("1798859045"));
     assert_eq!(
         data.get("records"),
         Some(&json!({
@@ -102,7 +93,7 @@ async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_w
     assert!(before["data"].get("unresolvable_reason").is_none(), "{before}");
     assert_eq!(
         before["data"]["grace_ends_at"],
-        json!("2027-04-02T03:04:05Z"),
+        json!("1806635045"),
         "an ENSv1 lease's grace ends 90 days after its expiry"
     );
 
@@ -1243,11 +1234,11 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
             "{field} must be absent for a released name: {payload}"
         );
     }
-    assert_eq!(data.get("expires_at"), Some(&json!("2026-03-11T23:59:54Z")));
+    assert_eq!(data.get("expires_at"), Some(&json!("1773273594")));
     assert_eq!(
         data.get("lapsed_registration"),
         Some(&json!({
-            "registrant":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"2026-06-09T23:59:55Z","release_kind":"expired"
+            "registrant":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"1781049595","release_kind":"expired"
         }))
     );
     assert!(data.get("resolver").is_none(), "{payload}");
@@ -1297,12 +1288,12 @@ async fn v2_get_name_serves_a_transferred_lease_under_the_registry_only_binding(
     );
     assert_eq!(
         data.get("registered_at"),
-        Some(&json!("2026-06-09T23:59:31+00:00")),
+        Some(&json!("1781049571")),
         "{payload}"
     );
     assert_eq!(
         data.get("expires_at"),
-        Some(&json!("2030-03-17T17:46:40Z")),
+        Some(&json!("1900000000")),
         "{payload}"
     );
     assert!(data.get("manager").is_none(), "{payload}");
@@ -1592,7 +1583,7 @@ async fn v2_get_name_uses_sepolia_positioned_at_token_on_mixed_phase_heads() -> 
         json!({
             "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
             "block_hash": V2_SEPOLIA_SNAPSHOT_HASH,
-            "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
+            "timestamp": "1776384610"
         })
     );
     assert!(payload["meta"]["as_of"].get("1").is_none());
@@ -1663,7 +1654,7 @@ async fn v2_get_name_without_at_keeps_mainnet_preference_on_mixed_phase_heads() 
         json!({
             "block_number": V2_MAINNET_SNAPSHOT_BLOCK,
             "block_hash": V2_MAINNET_SNAPSHOT_HASH,
-            "timestamp": V2_MAINNET_SNAPSHOT_TIMESTAMP
+            "timestamp": "1776384011"
         })
     );
     assert!(payload["meta"]["as_of"].get("11155111").is_none());
@@ -1705,7 +1696,7 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
         json!({
             "block_number": V2_SEPOLIA_ONLY_SNAPSHOT_BLOCK,
             "block_hash": V2_SEPOLIA_ONLY_SNAPSHOT_HASH,
-            "timestamp": V2_SEPOLIA_ONLY_SNAPSHOT_TIMESTAMP
+            "timestamp": "1776384620"
         })
     );
     assert!(payload["meta"]["as_of"].get("1").is_none());
@@ -3223,7 +3214,7 @@ async fn v2_get_name_records_uses_envelope_shape() -> Result<()> {
         json!({
             "block_number": 21_000_003,
             "block_hash": "0xbinding",
-            "timestamp": "2026-04-17T00:00:03Z"
+            "timestamp": "1776384003"
         })
     );
 
@@ -3280,23 +3271,9 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
         json!("0x00000000000000000000000000000000000000aa")
     );
     assert_eq!(data[0]["registration_status"], json!("registered"));
-    assert_eq!(
-        parse_rfc3339_utc_timestamp(
-            data[0]["registered_at"]
-                .as_str()
-                .context("registration timestamp")?
-        )?,
-        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z")?
-    );
-    assert_eq!(
-        parse_rfc3339_utc_timestamp(
-            data[0]["created_at"]
-                .as_str()
-                .context("creation timestamp")?
-        )?,
-        parse_rfc3339_utc_timestamp("2024-01-02T03:04:05Z")?
-    );
-    assert_eq!(data[0]["expires_at"], json!("2027-01-02T03:04:05Z"));
+    assert_eq!(data[0]["registered_at"], json!("1704164645"));
+    assert_eq!(data[0]["created_at"], json!("1704164645"));
+    assert_eq!(data[0]["expires_at"], json!("1798859045"));
     assert_eq!(data[1]["registration_status"], json!("unregistered"));
     assert_eq!(data[2]["registration_status"], json!("unregistered"));
     assert!(
@@ -4281,7 +4258,14 @@ fn v2_at_token_from_meta_as_of(
         .and_then(Value::as_str)
         .context("meta.as_of timestamp must be a string")?;
 
-    v2_at_token(slot, chain_id, block_number, block_hash, timestamp)
+    let timestamp = OffsetDateTime::from_unix_timestamp(timestamp.parse()?)?;
+    v2_at_token(
+        slot,
+        chain_id,
+        block_number,
+        block_hash,
+        &bigname_storage::UnixSeconds::from(timestamp).internal_string(),
+    )
 }
 
 fn v2_at_token(
@@ -5170,7 +5154,7 @@ async fn v2_get_subnames_include_expired_false_omits_past_expiry_rows() -> Resul
     );
     assert_eq!(
         payload["data"][2]["expires_at"],
-        json!("2025-01-02T03:04:05Z")
+        json!("1735787045")
     );
 
     let payload = v2_subnames_payload_for_database(
@@ -5815,7 +5799,7 @@ async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() ->
     let payload = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("authority"), Some(&json!("ens_v2")));
-    assert_eq!(data.get("migrated_at"), Some(&json!("2024-01-02T03:04:05Z")));
+    assert_eq!(data.get("migrated_at"), Some(&json!("1704164645")));
 
     let response = v2_lookup_response_for_database(
         &database,
@@ -5827,7 +5811,7 @@ async fn v2_get_name_and_lookup_report_migrated_at_from_the_migration_proof() ->
     let lookup: Value = read_json(response).await?;
     let record = &lookup["data"][0]["record"];
     assert_eq!(record["authority"], json!("ens_v2"));
-    assert_eq!(record["migrated_at"], json!("2024-01-02T03:04:05Z"));
+    assert_eq!(record["migrated_at"], json!("1704164645"));
 
     database.cleanup().await
 }
@@ -6081,7 +6065,10 @@ async fn v2_get_name_include_counts_rejects_same_height_republication() -> Resul
     let position = &baseline["meta"]["as_of"]["1"];
     let block = position["block_number"].as_i64().expect("block number");
     let hash = position["block_hash"].as_str().expect("block hash");
-    let time = position["timestamp"].as_str().expect("timestamp");
+    let time = OffsetDateTime::from_unix_timestamp(
+        position["timestamp"].as_str().expect("timestamp").parse()?,
+    )?;
+    let time = bigname_storage::UnixSeconds::from(time).internal_string();
     let (_guard, control) =
         crate::v2::search_public_namespace_read_test_hooks::install(&database.lookup_pool).await?;
     let state = database.app_state();
@@ -6091,7 +6078,7 @@ async fn v2_get_name_include_counts_rejects_same_height_republication() -> Resul
             .body(Body::empty()).expect("request must build")).await
     });
     control.wait_until_reached().await;
-    seed_schema_v2_ens_lookup_head(&database.pool, block, hash, time).await?;
+    seed_schema_v2_ens_lookup_head(&database.pool, block, hash, &time).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, hash).await?;
     control.resume().await;
     let response = request.await??;
@@ -6113,9 +6100,11 @@ async fn v2_get_name_include_counts_rejects_historical_count_mismatch() -> Resul
     let token = baseline["meta"]["as_of_token"].as_str().expect("snapshot token");
     let position = &baseline["meta"]["as_of"]["1"];
     let block = position["block_number"].as_i64().expect("block number");
-    let time = bigname_storage::parse_rfc3339_utc_timestamp(
-        position["timestamp"].as_str().expect("timestamp"))?;
-    let later = crate::v2::format_timestamp(time + std::time::Duration::from_secs(1));
+    let time = OffsetDateTime::from_unix_timestamp(
+        position["timestamp"].as_str().expect("timestamp").parse()?,
+    )?;
+    let later = bigname_storage::UnixSeconds::from(time + std::time::Duration::from_secs(1))
+        .internal_string();
     seed_schema_v2_ens_lookup_head(&database.pool, block + 1, "0xcounts-new-publication", &later).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", block + 1, "0xcounts-new-publication").await?;
     let response = app_router(database.app_state()).oneshot(Request::builder()

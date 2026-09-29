@@ -233,6 +233,24 @@ async fn v2_unix_timestamps_preserve_large_user_registry_grants_and_renewals() -
         }
     }
 
+    // The same finite word survives each shared public name-record builder and event detail.
+    let name = "maximum.numbers.eth";
+    let search = unix_expiry_response(&database,
+        &format!("/v1/search?q={name}&namespace=ens")).await?;
+    assert_unix_expiry_record(&search["data"][0], name, u64::MAX);
+    let lookup = v2_lookup_json(&database,
+        json!({"profile": "detail", "inputs": [{"name": name}]})).await?;
+    assert_unix_expiry_record(&lookup["data"][0]["record"], name, u64::MAX);
+    let address = unix_expiry_response(&database,
+        &format!("/v1/addresses/{UNIX_EXPIRY_HOLDER}/names?namespace=ens&relation=registrant&sort=expires_at&order=desc&page_size=1")).await?;
+    assert_unix_expiry_record(&address["data"][0], name, u64::MAX);
+    let history = unix_expiry_response(&database,
+        &format!("/v1/names/{name}/history?include=data")).await?;
+    let registration = history["data"].as_array().unwrap().iter()
+        .find(|row| row["data"].get("expires_at").is_some()).expect("registration history");
+    assert_eq!(registration["data"]["expires_at"], json!(u64::MAX.to_string()), "{history:#}");
+    assert_eq!(registration["timestamp"], json!("1700000201"), "{history:#}");
+
     // These keys deliberately span different decimal widths. Each continuation changes the
     // lower bound's spelling while preserving its instant, proving equivalent cursor filters.
     for (order, expected) in [

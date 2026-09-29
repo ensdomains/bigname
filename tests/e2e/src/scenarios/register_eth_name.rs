@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use super::support;
 use crate::harness::{anvil::Anvil, ens_v1, families, repo_root};
@@ -111,12 +111,11 @@ async fn register_eth_name_end_to_end() -> Result<()> {
         format!("{user:#x}"),
         "registrant should be the registering account"
     );
-    let expiry = pointer("/registration/expiry")
-        .as_u64()
-        .context("registration expiry missing")?;
-    let registered_for = expiry - 365 * 24 * 60 * 60;
+    let expiry = support::decimal_unix_seconds(&pointer("/registration/expiry"))?;
+    let registered_for = expiry.unix_timestamp() - 365 * 24 * 60 * 60;
     assert!(
-        (crate::harness::anvil::GENESIS_TIMESTAMP..crate::harness::anvil::GENESIS_TIMESTAMP + 300)
+        (i128::from(crate::harness::anvil::GENESIS_TIMESTAMP)
+            ..i128::from(crate::harness::anvil::GENESIS_TIMESTAMP + 300))
             .contains(&registered_for),
         "expiry {expiry} should be ~duration past the warped genesis timestamp"
     );

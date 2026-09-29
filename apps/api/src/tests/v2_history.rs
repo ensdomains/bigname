@@ -2147,6 +2147,10 @@ async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result
     .await?;
     assert_eq!(history_blocks(&payload), vec![107, 106, 105, 104]);
     assert_eq!(payload["page"]["total_count"], json!(4));
+    let unix = v2_history_payload_for_database(&database,
+        "/v1/names/history.eth/history?from_timestamp=1700000104&to_timestamp=1700000107&page_size=20").await?;
+    assert_eq!(unix["data"], payload["data"]);
+    assert_eq!(unix["page"], payload["page"]);
 
     // A bound between two blocks snaps inward: 22:15:04.5 -> block 105, 22:15:06.5 -> block 106.
     let payload = v2_history_payload_for_database(
@@ -2192,7 +2196,7 @@ async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result
     let continued = v2_history_payload_for_database(
         &database,
         &format!(
-            "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:04Z&page_size=2&cursor={cursor}"
+            "/v1/names/history.eth/history?from_timestamp=1700000104&page_size=2&cursor={cursor}"
         ),
     )
     .await?;
@@ -2201,7 +2205,7 @@ async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result
     for route in [
         "/v1/names/history.eth/history?from_timestamp=yesterday",
         "/v1/names/history.eth/history?from_timestamp=2023-11-14T22:15:07Z&to_timestamp=2023-11-14T22:15:04Z",
-        "/v1/events?name=history.eth&to_timestamp=1700000000",
+        "/v1/events?name=history.eth&to_timestamp=1700000000ms",
     ] {
         let response = v2_history_response_for_database(&database, route).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{route}");

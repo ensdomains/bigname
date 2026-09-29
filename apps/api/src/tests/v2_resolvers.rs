@@ -122,15 +122,15 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
     assert_eq!(bound_names["data"][0]["registrant"], json!(alpha.registrant));
     assert_eq!(
         bound_names["data"][0]["registered_at"],
-        json!("2024-01-02T00:00:00+00:00")
+        json!("1704153600")
     );
     assert_eq!(
         bound_names["data"][0]["created_at"],
-        json!("2023-01-02T00:00:00+00:00")
+        json!("1672617600")
     );
     assert_eq!(
         bound_names["data"][0]["expires_at"],
-        json!("2027-01-02T00:00:00Z")
+        json!("1798848000")
     );
     assert_eq!(
         bound_names["data"][0]["resolver"],

@@ -248,14 +248,11 @@ mod tests {
             json!(true)
         );
         assert_eq!(serialized["wrapper_fuses"]["is_dot_eth"], json!(true));
-        assert_eq!(
-            serialized["wrapper_expires_at"],
-            json!("2027-01-15T08:00:00Z")
-        );
+        assert_eq!(serialized["wrapper_expires_at"], json!("1800000000"));
     }
 
     #[test]
-    fn wrapper_restrictions_omit_an_unrepresentable_expiry() {
+    fn wrapper_restrictions_classify_the_contract_maximum() {
         let mapped = ResourceRestrictions::from_summary(&summary(Some(json!({
             "kind": "ens_v1_wrapper",
             "wrapper_state": "wrapped",
@@ -265,7 +262,8 @@ mod tests {
         .expect("consistent block must map")
         .expect("block must be present");
         let serialized = serde_json::to_value(&mapped).expect("must serialize");
-        assert!(serialized.get("wrapper_expires_at").is_none());
+        assert_eq!(serialized.get("wrapper_expires_at"), Some(&Value::Null));
+        assert_eq!(serialized["wrapper_expires_at_reason"], "no_expiry");
     }
 
     #[test]

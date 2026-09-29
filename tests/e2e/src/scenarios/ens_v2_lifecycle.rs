@@ -513,7 +513,7 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
     assert_eq!(leaf.registrant, Some(format!("{carol:#x}")), "{leaf:?}");
     assert_eq!(leaf.resolver, Some(format!("{resolver_b:#x}")), "{leaf:?}");
     assert_eq!(leaf.records_resolver, leaf.resolver, "{leaf:?}");
-    assert_eq!(leaf.expiry, Some(json!(expiry)), "{leaf:?}");
+    assert_eq!(leaf.expiry, Some(json!(expiry.to_string())), "{leaf:?}");
 
     let orphan = served_subregistry_name(&moved, "orphan.cut.eth").await?;
     assert_eq!(
@@ -545,8 +545,7 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
     let expected = MovedOverHttp {
         leaf_owner: format!("{carol:#x}"),
         leaf_registration_id: leaf_resource_b.to_string(),
-        // Project formats the registry expiry into `control.expiry`; the API serves it as is.
-        leaf_expires_at: control_expiry(&moved.db.pool, &leaf_id).await?,
+        leaf_expires_at: expiry.to_string(),
         leaf_resolver: format!("{resolver_b:#x}"),
     };
     assert_moved_over_http(&mut moved.db, &anvil, &expected, "full derivation").await?;
@@ -626,7 +625,21 @@ async fn assert_moved_over_http(
         orphan["data"]["registration_status"], "released",
         "{path}: {orphan}"
     );
-    for field in ["owner", "registrant", "expires_at", "resolver"] {
+    assert_eq!(
+        orphan["data"].get("expires_at"),
+        Some(&Value::Null),
+        "{path}: {orphan}"
+    );
+    assert_eq!(
+        orphan["data"].get("grace_ends_at"),
+        Some(&Value::Null),
+        "{path}: {orphan}"
+    );
+    assert_eq!(
+        orphan["data"]["expires_at_reason"], "released",
+        "{path}: {orphan}"
+    );
+    for field in ["owner", "registrant", "resolver"] {
         assert_eq!(
             orphan["data"].get(field),
             None,
@@ -711,20 +724,6 @@ async fn served_subregistry_name(
             "/declared_state/record_inventory/record_version_boundary/resource_id",
         ),
     })
-}
-
-/// The control expiry as Project formats it into the published name row, as text.
-async fn control_expiry(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<String> {
-    families::required_name(pool, logical_name_id)
-        .await?
-        .declared_summary
-        .pointer("/control/expiry")
-        .and_then(|expiry| match expiry {
-            Value::Null => None,
-            Value::String(expiry) => Some(expiry.clone()),
-            other => Some(other.to_string()),
-        })
-        .with_context(|| format!("published name row of {logical_name_id} has no control expiry"))
 }
 
 async fn current_name_facts(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Value> {

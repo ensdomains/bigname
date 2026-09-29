@@ -343,7 +343,7 @@ fn timestamp_bounds_parse_canonicalize_and_validate_order() {
             ..RawQueryParams::default()
         },
         RawQueryParams {
-            to_timestamp: Some("1700000000".to_owned()),
+            to_timestamp: Some("1700000000ms".to_owned()),
             ..RawQueryParams::default()
         },
         RawQueryParams {

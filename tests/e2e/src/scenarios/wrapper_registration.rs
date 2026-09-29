@@ -364,7 +364,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        renewed_registrar_expiry
+        renewed_registrar_expiry.to_string()
     );
     assert_eq!(
         pointer(&body, "/declared_state/wrapper_state"),
@@ -640,7 +640,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        rewrapped.expiry,
+        rewrapped.expiry.to_string(),
         "a wrapped subname without a registrar lease serves its NameWrapper entry expiry"
     );
     assert_eq!(

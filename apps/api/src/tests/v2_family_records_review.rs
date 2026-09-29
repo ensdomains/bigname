@@ -36,7 +36,7 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
     }).collect::<Vec<_>>();
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     seed_schema_v2_lookup_head(&database.pool, chain, 240, "0xhistory240",
-        &crate::v2::format_timestamp(OffsetDateTime::from_unix_timestamp(1_700_000_240)?)).await?;
+        &bigname_storage::UnixSeconds::from(OffsetDateTime::from_unix_timestamp(1_700_000_240)?).internal_string()).await?;
     let (name, resource) = seed_family_name_on(database, "alpha.base.eth", 0x5f1_0000,
         "basenames", "basenames", chain).await?;
     let node = name.strip_prefix("basenames:").expect("Basenames id");

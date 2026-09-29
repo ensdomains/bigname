@@ -116,7 +116,7 @@ async fn a_composed_load_reads_one_snapshot_across_a_family_commit() -> Result<(
             block_of(&row),
             row.declared_summary["registration"]["expiry"].clone()
         ),
-        (json!(12), json!(2_000_000_000u64)),
+        (json!(12), json!("2000000000")),
         "the paused load's row is stamped with block 12 and must carry block 12's expiry"
     );
 
@@ -128,7 +128,7 @@ async fn a_composed_load_reads_one_snapshot_across_a_family_commit() -> Result<(
             block_of(&fresh),
             fresh.declared_summary["registration"]["expiry"].clone()
         ),
-        (json!(13), json!(2_100_000_000u64))
+        (json!(13), json!("2100000000"))
     );
     fixture.cleanup().await
 }

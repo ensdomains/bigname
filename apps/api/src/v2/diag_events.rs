@@ -327,7 +327,7 @@ mod tests {
                 "chain_id": "ethereum-mainnet",
                 "block_number": 123,
                 "block_hash": "0xblock",
-                "timestamp": "2023-11-14T22:15:23Z",
+                "timestamp": "1700000123",
             })
         );
         assert_eq!(

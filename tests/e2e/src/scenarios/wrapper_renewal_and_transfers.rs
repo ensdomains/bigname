@@ -162,7 +162,7 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
-        renewal_expiry,
+        renewal_expiry.to_string(),
         "exact-name expiry should track the registrar renewal, not stale wrapper storage; body: {body}"
     );
 

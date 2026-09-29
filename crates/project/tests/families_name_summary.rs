@@ -118,7 +118,9 @@ async fn assert_matches_served(fixture: &Fixture, logical_name_id: &str) -> Resu
         served.declared_summary
     );
     ensure!(
-        expiry.map(Value::from).unwrap_or(Value::Null)
+        expiry
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null)
             == served.declared_summary["registration"]["expiry"],
         "{logical_name_id}: expiry {expiry:?} against {}",
         served.declared_summary

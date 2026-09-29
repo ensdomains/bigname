@@ -218,27 +218,14 @@ fn v2_names_listed(payload: &Value) -> Vec<String> {
         .collect()
 }
 
-// The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
-// timestamp can hold. The listing treats that expiry as unknown and leaves the name out instead
-// of failing.
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+// Finite expiry does not acquire a calendar ceiling. The wider uint64 grant/renewal domain
+// is covered through actual ENSv2 inputs in v2_unix_timestamps.rs.
 #[tokio::test]
-async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()> {
-    for (expiry, listed, alpha_expires_at) in [
-        (u64::MAX, vec!["gamma.eth", "beta.eth"], None),
-        (253_402_300_800_u64, vec!["gamma.eth", "beta.eth"], None),
-        (
-            253_402_300_799_u64,
-            vec!["gamma.eth", "beta.eth", "alpha.eth"],
-            Some("9999-12-31T23:59:59Z"),
-        ),
-        (
-            0_u64,
-            vec!["alpha.eth", "gamma.eth", "beta.eth"],
-            Some("1970-01-01T00:00:00Z"),
-        ),
+async fn v2_get_names_retains_finite_expiry_beyond_the_calendar_range() -> Result<()> {
+    for (expiry, listed) in [
+        (253_402_300_800_u64, vec!["gamma.eth", "beta.eth", "alpha.eth"]),
+        (253_402_300_799_u64, vec!["gamma.eth", "beta.eth", "alpha.eth"]),
+        (0_u64, vec!["alpha.eth", "gamma.eth", "beta.eth"]),
     ] {
         let database = TestDatabase::new_migrated().await?;
         seed_v2_names_with_alpha_expiry(&database, expiry).await?;
@@ -252,12 +239,31 @@ async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()>
             .as_array()
             .expect("names data")
             .iter()
-            .find(|row| row["name"] == "alpha.eth");
-        assert_eq!(
-            alpha.and_then(|row| row.get("expires_at")),
-            alpha_expires_at.map(Value::from).as_ref(),
-            "{expiry}"
-        );
+            .find(|row| row["name"] == "alpha.eth")
+            .expect("finite alpha expiry remains listed");
+        assert_eq!(alpha["expires_at"], json!(expiry.to_string()), "{expiry}");
+        assert!(alpha.get("expires_at_reason").is_none(), "{alpha}");
+        for order in ["asc", "desc"] {
+            let exact = v2_names_payload(
+                &database,
+                &format!(
+                    "/v1/names?namespace=ens&expires_after={expiry}&expires_before={}&order={order}",
+                    expiry + 1,
+                ),
+            )
+            .await?;
+            assert_eq!(v2_names_listed(&exact), vec!["alpha.eth"], "{expiry} {order}");
+            assert_eq!(exact["data"][0]["expires_at"], json!(expiry.to_string()));
+        }
+        let before = v2_names_payload(
+            &database,
+            &format!(
+                "/v1/names?namespace=ens&expires_after={}&expires_before={expiry}",
+                i128::from(expiry) - 1,
+            ),
+        )
+        .await?;
+        assert!(v2_names_listed(&before).is_empty(), "upper bound is exclusive: {before}");
         database.cleanup().await?;
     }
     Ok(())
@@ -280,7 +286,7 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     );
     assert_eq!(
         payload["data"][0]["expires_at"],
-        json!("2025-12-01T00:00:00Z")
+        json!("1764547200")
     );
     assert_eq!(payload["data"][0]["namespace"], json!("ens"));
     assert_eq!(payload["data"][0]["display_name"], json!("gamma.eth"));
@@ -294,7 +300,7 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     );
     assert_eq!(
         payload["data"][0]["registered_at"],
-        json!("2024-03-02T00:00:00+00:00")
+        json!("1709337600")
     );
     assert!(payload["data"][0].get("relations").is_none());
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -469,14 +475,14 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "namespace": "ens",
                 "namehash": "0x648f55586c02f13100041eeef8fa1550dc7dc35f0e5871dc7bea445cfbccce32",
                 "registration_status": "released",
-                "registered_at": "2023-02-02T00:00:00+00:00",
-                "created_at": "2023-02-02T00:00:00+00:00",
-                "expires_at": "2023-11-14T22:13:20Z",
-                "grace_ends_at": "2024-02-12T22:13:20Z",
+                "registered_at": "1675296000",
+                "created_at": "1675296000",
+                "expires_at": "1700000000",
+                "grace_ends_at": "1707776000",
                 "lapsed_registration": {
                     "registrant": HOLDER,
                     "held_through": "registrar",
-                    "released_at": "2024-02-12T22:13:20Z",
+                    "released_at": "1707776000",
                     "release_kind": "expired"
                 }
             },
@@ -488,10 +494,10 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "owner": HOLDER,
                 "registrant": HOLDER,
                 "registration_status": "active",
-                "registered_at": "2024-02-02T00:00:00+00:00",
-                "created_at": "2024-02-02T00:00:00+00:00",
-                "expires_at": "2030-03-17T17:46:40Z",
-                "grace_ends_at": "2030-06-15T17:46:40Z"
+                "registered_at": "1706832000",
+                "created_at": "1706832000",
+                "expires_at": "1900000000",
+                "grace_ends_at": "1907776000"
             }
         ]),
         "the released name keeps its place at its old expiry, with no registrant or owner, and \
@@ -512,7 +518,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     let lapsed = json!({
         "registrant": HOLDER,
         "held_through": "registrar",
-        "released_at": "2024-02-12T22:13:20Z",
+        "released_at": "1707776000",
         "release_kind": "expired",
     });
     assert_eq!(detail["data"]["lapsed_registration"], lapsed);
@@ -528,7 +534,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     assert_eq!(row["relations"], json!(["former_registrant"]));
     assert_eq!(row["registration_status"], json!("released"));
     assert_eq!(row["lapsed_registration"], lapsed);
-    assert_eq!(row["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert_eq!(row["expires_at"], json!("1700000000"));
     assert!(row.get("owner").is_none() && row.get("registrant").is_none(), "{row}");
     let current = v2_names_payload(&database, &format!("/v1/addresses/{HOLDER}/names")).await?;
     assert_eq!(v2_names_listed(&current), vec!["live-listed.eth"], "{current}");

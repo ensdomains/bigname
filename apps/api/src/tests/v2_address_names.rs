@@ -109,9 +109,9 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
         json!(V2_ADDRESS)
     );
     assert_eq!(data[0]["registration_status"], json!("active"));
-    assert_eq!(data[0]["registered_at"], json!("2024-01-02T00:00:00+00:00"));
-    assert_eq!(data[0]["created_at"], json!("2023-01-02T00:00:00+00:00"));
-    assert_eq!(data[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
+    assert_eq!(data[0]["registered_at"], json!("1704153600"));
+    assert_eq!(data[0]["created_at"], json!("1672617600"));
+    assert_eq!(data[0]["expires_at"], json!("1798848000"));
     assert_eq!(data[0]["relations"], json!(["registrant", "owner"]));
     assert_eq!(data[0]["is_primary"], json!(true));
     assert_eq!(data[1]["relations"], json!(["manager"]));
@@ -496,53 +496,27 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     database.cleanup().await
 }
 
-// The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
-// timestamp can hold. A seconds expiry outside 1970..=9999 is unknown: the row has no
-// `expires_at` and sorts with the other unknown expiries (last ascending, first descending).
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+// Finite expiries remain ordered and visible when they cross the calendar formatting limit.
+// The real ENSv2 grant/renewal test covers the wider unsigned domain.
 #[tokio::test]
-async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Result<()> {
+async fn v2_get_address_names_retains_finite_expiry_beyond_the_calendar_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let first_known = Some("1970-01-01T00:00:00Z");
-    let last_known = Some("9999-12-31T23:59:59Z");
-    for (registration, expected) in [
-        (json!(0), first_known),
-        (json!(253_402_300_799_i64), last_known),
-        (json!(253_402_300_800_i64), None),
-        (json!(u64::MAX), None),
-    ] {
-        set_address_name_expiry(&database, "alpha.eth", &registration).await?;
-        let case = format!("registration expiry={registration}");
-        let asc = v2_address_names_payload_for_database(
-            &database,
-            &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
-        )
-        .await?;
-        let desc = v2_address_names_payload_for_database(
-            &database,
-            &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
-        )
-        .await?;
-        let asc = asc["data"].as_array().expect("expires asc data");
-        let desc = desc["data"].as_array().expect("expires desc data");
-        let alpha = asc
-            .iter()
-            .find(|row| row["name"] == "alpha.eth")
-            .expect("alpha.eth stays listed");
-        // An unknown expiry leaves the key out; a known one is an RFC 3339 string.
-        assert_eq!(alpha.get("expires_at"), expected.map(Value::from).as_ref(), "{case}");
-        // Every other row expires in 2026 or later, so an earlier known expiry sorts first.
-        let (asc_position, desc_position) =
-            if expected.is_some_and(|expiry| expiry < "2026-01-02T00:00:00Z") {
-                (0, asc.len() - 1)
-            } else {
-                (asc.len() - 1, 0)
-            };
-        assert_eq!(names(asc)[asc_position], "alpha.eth", "{case}: {:?}", names(asc));
-        assert_eq!(names(desc)[desc_position], "alpha.eth", "{case}: {:?}", names(desc));
+    for expiry in [0_i64, 253_402_300_799, 253_402_300_800] {
+        set_address_name_expiry(&database, "alpha.eth", &json!(expiry)).await?;
+        for order in ["asc", "desc"] {
+            let payload = v2_address_names_payload_for_database(
+                &database,
+                &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order={order}"),
+            ).await?;
+            let rows = payload["data"].as_array().expect("expiry rows");
+            let alpha = rows.iter().find(|row| row["name"] == "alpha.eth").unwrap();
+            assert_eq!(alpha["expires_at"], json!(expiry.to_string()), "{payload}");
+            assert!(alpha.get("expires_at_reason").is_none(), "{payload}");
+            let first = (expiry == 0) == (order == "asc");
+            let position = if first { 0 } else { rows.len() - 1 };
+            assert_eq!(rows[position]["name"], json!("alpha.eth"), "{payload}");
+        }
     }
     database.cleanup().await
 }
@@ -552,7 +526,7 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
 async fn v2_get_address_names_breaks_equal_expiry_ties_by_identity() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
-    let formatted = json!("2025-01-01T00:00:00Z");
+    let formatted = json!("1735689600");
     set_address_name_expiry(&database, "alpha.eth", &json!(1_735_689_600_i64)).await?;
     set_address_name_expiry(&database, "beta.eth", &json!(1_735_689_600_i64)).await?;
     let payload = v2_address_names_payload_for_database(
@@ -568,19 +542,24 @@ async fn v2_get_address_names_breaks_equal_expiry_ties_by_identity() -> Result<(
     database.cleanup().await
 }
 
-// Paging by expiry walks through several unknown expiries without skipping or repeating a row.
+// Paging keeps exact finite expiries and equal-value identity ties across the calendar limit.
 #[tokio::test]
-async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
+async fn v2_get_address_names_pages_through_large_finite_expiries() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     for (name, registration) in [
-        ("alpha.eth", json!(u64::MAX)),
-        ("beta.eth", json!(u64::MAX)),
+        ("alpha.eth", json!(253_402_300_801_i64)),
+        ("beta.eth", json!(253_402_300_801_i64)),
         ("gamma.eth", json!(253_402_300_800_i64)),
     ] {
         set_address_name_expiry(&database, name, &registration).await?;
     }
-    for (order, known_first) in [("asc", true), ("desc", false)] {
+    for (order, expected_names, expected_expiries) in [
+        ("asc", ["shared-one.eth", "shared-two.eth", "gamma.eth", "beta.eth", "alpha.eth"],
+            [1_862_006_400_i64, 1_862_006_400, 253_402_300_800, 253_402_300_801, 253_402_300_801]),
+        ("desc", ["beta.eth", "alpha.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"],
+            [253_402_300_801_i64, 253_402_300_801, 253_402_300_800, 1_862_006_400, 1_862_006_400]),
+    ] {
         let mut listed = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -605,20 +584,11 @@ async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
             }
         }
         assert_eq!(listed.len(), 5, "{order}: {listed:?}");
-        let (known, unknown) = if known_first {
-            listed.split_at(2)
-        } else {
-            let (unknown, known) = listed.split_at(3);
-            (known, unknown)
-        };
-        assert!(known.iter().all(|(_, expiry)| expiry == &Some(json!("2029-01-02T00:00:00Z"))), "{order}: {listed:?}");
-        assert!(unknown.iter().all(|(_, expiry)| expiry.is_none()), "{order}: {listed:?}");
-        let unknown_names: BTreeSet<&str> = unknown.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(
-            unknown_names,
-            BTreeSet::from(["alpha.eth", "beta.eth", "gamma.eth"]),
-            "{order}: {listed:?}"
-        );
+        assert_eq!(listed.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            expected_names, "{order}: {listed:?}");
+        for ((_, expiry), expected) in listed.iter().zip(expected_expiries) {
+            assert_eq!(expiry.as_ref(), Some(&json!(expected.to_string())), "{order}: {listed:?}");
+        }
     }
     database.cleanup().await
 }
@@ -839,7 +809,7 @@ async fn v2_address_role_summary_serves_restrictions_per_row() -> Result<()> {
     );
     assert_eq!(
         with_summary["data"][0]["restrictions"]["wrapper_expires_at"],
-        json!("2030-03-17T17:46:40Z")
+        json!("1900000000")
     );
 
     let without_summary = v2_address_names_payload_for_database(
@@ -1850,7 +1820,7 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
     let rows = all["data"].as_array().expect("data must be an array");
     assert_eq!(rows[0]["name"], json!("alpha.eth"));
     assert_eq!(rows[0]["authority"], json!("ens_v2"));
-    assert_eq!(rows[0]["migrated_at"], json!("2024-05-31T18:26:47Z"));
+    assert_eq!(rows[0]["migrated_at"], json!("1717180007"));
     assert_eq!(rows[1]["name"], json!("beta.eth"));
     assert_eq!(rows[1]["authority"], json!("ens_v1"));
     assert!(rows[1].get("migrated_at").is_none());
