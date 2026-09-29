@@ -96,8 +96,8 @@ pub async fn load_family_record_inventory_for_snapshot(
 }
 
 /// [`load_family_record_inventory_for_snapshot`] with the mainnet-profile lookup key
-/// (`resolution_record_inventory_lookup_key`) the served supported readback uses: name detail's
-/// verified source and the records diagnostic.
+/// (`resolution_record_inventory_lookup_key`) the served supported readback uses: the records
+/// diagnostic.
 pub async fn load_family_supported_record_inventory_for_snapshot(
     pool: &PgPool,
     row: &crate::NameCurrentRow,

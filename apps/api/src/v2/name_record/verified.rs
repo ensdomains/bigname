@@ -104,8 +104,15 @@ async fn build_verified_name_record(
 ) -> V2Result<NameRecord> {
     // Mirror build_name_record's serving guard before deriving requested records: only a
     // current registration or classified ownerless registry read path may steer lookup.
-    let record_inventory = record_inventory.filter(|_| row_has_current_registration(row));
-    let requested_records = profile_verified_requested_records(record_inventory)?;
+    let has_current_registration = row_has_current_registration(row);
+    let record_inventory = record_inventory.filter(|_| has_current_registration);
+    // A name that serves no resolver requests nothing: the lookup below refuses it before any
+    // key is read.
+    let requested_records = if has_current_registration {
+        profile_verified_requested_records(record_inventory)?
+    } else {
+        Vec::new()
+    };
     let verified_lookup = load_verified_record_lookup_for_resource(
         state,
         row,
@@ -164,6 +171,12 @@ async fn build_verified_name_record(
     Ok(record)
 }
 
+/// The record keys verified name detail executes: every key the name's record inventory lists,
+/// plus `addr:60` for `primary_address`; or, when the inventory is missing or lists no key, the
+/// bounded profile set [`PROFILE_FALLBACK_RECORD_KEYS`]. Inventory coverage decides neither: an
+/// unsupported inventory still names its keys, and whether each getter executes is the lookup
+/// engine's answer, reported per key. The set is not an enumeration of every text key or coin
+/// type the resolver may hold.
 fn profile_verified_requested_records(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> V2Result<Vec<ResolutionRecordKey>> {
@@ -173,30 +186,18 @@ fn profile_verified_requested_records(
         .collect::<BTreeMap<_, _>>();
     let requested_records = records.values().cloned().collect::<Vec<_>>();
     ensure_default_record_limit(&requested_records)?;
-    if should_use_profile_fallback_records(record_inventory) {
-        let fallbacks = if records.is_empty() {
-            profile_fallback_requested_records()
-        } else {
-            vec![
-                parse_resolution_record_key("addr:60")
-                    .expect("primary profile address selector must be valid"),
-            ]
-        };
-        for record in fallbacks {
-            records.entry(record.record_key.clone()).or_insert(record);
-        }
-    }
-    let records = records.into_values().collect::<Vec<_>>();
-    Ok(records)
-}
-
-fn should_use_profile_fallback_records(
-    record_inventory: Option<&RecordInventoryCurrentRow>,
-) -> bool {
-    let Some(record_inventory) = record_inventory else {
-        return false;
+    let fallbacks = if records.is_empty() {
+        profile_fallback_requested_records()
+    } else {
+        vec![
+            parse_resolution_record_key("addr:60")
+                .expect("primary profile address selector must be valid"),
+        ]
     };
-    string_field(record_inventory.coverage.get("status")).as_deref() != Some("unsupported")
+    for record in fallbacks {
+        records.entry(record.record_key.clone()).or_insert(record);
+    }
+    Ok(records.into_values().collect())
 }
 
 fn profile_fallback_requested_records() -> Vec<ResolutionRecordKey> {
@@ -381,7 +382,19 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let inventory = RecordInventoryCurrentRow {
+        let inventory = inventory(selectors, json!({"status":"projected"}));
+
+        let records = profile_verified_requested_records(Some(&inventory))
+            .expect("the synthetic primary selector is exempt from the client record limit");
+        assert_eq!(records.len(), MAX_RECORD_KEYS + 1);
+        assert!(records.iter().any(|record| record.record_key == "addr:60"));
+    }
+
+    fn inventory(
+        selectors: Vec<serde_json::Value>,
+        coverage: serde_json::Value,
+    ) -> RecordInventoryCurrentRow {
+        RecordInventoryCurrentRow {
             resource_id: "00000000-0000-0000-0000-000000000606"
                 .parse()
                 .expect("test resource id"),
@@ -393,17 +406,53 @@ mod tests {
             last_change: None,
             entries: json!([]),
             provenance: json!({}),
-            coverage: json!({"status":"projected"}),
+            coverage,
             chain_positions: json!({}),
             canonicality_summary: json!({}),
             manifest_version: 1,
             last_recomputed_at: OffsetDateTime::from_unix_timestamp(1_717_171_719)
                 .expect("test timestamp"),
-        };
+        }
+    }
 
-        let records = profile_verified_requested_records(Some(&inventory))
-            .expect("the synthetic primary selector is exempt from the client record limit");
-        assert_eq!(records.len(), MAX_RECORD_KEYS + 1);
-        assert!(records.iter().any(|record| record.record_key == "addr:60"));
+    fn keys(records: Vec<ResolutionRecordKey>) -> Vec<String> {
+        records
+            .into_iter()
+            .map(|record| record.record_key)
+            .collect()
+    }
+
+    #[test]
+    fn a_name_without_usable_inventory_keys_requests_the_profile_set() {
+        let profile = PROFILE_FALLBACK_RECORD_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let missing = profile_verified_requested_records(None).expect("profile set");
+        assert_eq!(keys(missing), profile);
+        // Unsupported coverage says nothing about whether a getter executes.
+        let unsupported = inventory(
+            Vec::new(),
+            json!({"status":"unsupported","unsupported_reason":"resolver_profile_not_admitted"}),
+        );
+        let unsupported =
+            profile_verified_requested_records(Some(&unsupported)).expect("profile set");
+        assert_eq!(keys(unsupported), profile);
+    }
+
+    #[test]
+    fn a_nonempty_inventory_requests_its_keys_and_the_primary_address() {
+        let listed = inventory(
+            vec![json!({
+                "record_key": "text:com.twitter",
+                "record_family": "text",
+                "selector_key": "com.twitter"
+            })],
+            json!({"status":"unsupported","unsupported_reason":"resolver_profile_not_admitted"}),
+        );
+        let records = profile_verified_requested_records(Some(&listed)).expect("inventory keys");
+        assert_eq!(keys(records), ["addr:60", "text:com.twitter"]);
     }
 }
