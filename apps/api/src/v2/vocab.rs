@@ -11,7 +11,11 @@ pub(crate) use wrapper_state::WrapperState;
 
 #[path = "vocab/authority.rs"]
 mod authority;
-pub(crate) use authority::Authority;
+pub(crate) use authority::{Authority, AuthoritySet};
+#[path = "vocab/sort.rs"]
+mod sort;
+pub(crate) use sort::AddressNamesSort;
+
 #[path = "vocab/unsupported_reason.rs"]
 mod unsupported_reason;
 pub(crate) use unsupported_reason::{
@@ -351,24 +355,6 @@ impl AddressNamesDedupe {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AddressNamesSort {
-    Name,
-    ExpiresAt,
-    RegisteredAt,
-}
-
-impl AddressNamesSort {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::ExpiresAt => "expires_at",
-            Self::RegisteredAt => "registered_at",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Resolver {
     pub(crate) chain_id: u64,
@@ -690,6 +676,7 @@ mod tests {
         assert_wire(AddressNamesSort::Name, "name");
         assert_wire(AddressNamesSort::ExpiresAt, "expires_at");
         assert_wire(AddressNamesSort::RegisteredAt, "registered_at");
+        assert_wire(AddressNamesSort::CreatedAt, "created_at");
     }
 
     #[test]

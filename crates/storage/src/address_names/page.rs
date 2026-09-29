@@ -14,6 +14,7 @@ use super::{
         AddressNameRelation, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
         AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentSort,
         AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
+        NameQuery,
     },
 };
 mod cursor;
@@ -76,8 +77,8 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -99,8 +100,8 @@ pub async fn load_address_names_current_page_filtered(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     is_migrated: Option<bool>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
@@ -134,8 +135,8 @@ pub(crate) async fn load_address_names_page_from(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     is_migrated: Option<bool>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
@@ -274,8 +275,8 @@ fn load_context_parts(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
 ) -> Vec<String> {
     let mut parts = vec![format!("address {address}")];
     if let Some(namespace) = namespace {
@@ -295,7 +296,7 @@ fn load_context_parts(
         parts.push(format!("q {q}"));
     }
     if let Some(authority) = authority {
-        parts.push(format!("authority {authority}"));
+        parts.push(format!("authority {}", authority.join(",")));
     }
     parts.push(format!("dedupe_by {}", dedupe_by.as_str()));
     parts
@@ -309,8 +310,8 @@ async fn load_address_names_current_summary(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     is_migrated: Option<bool>,
 ) -> Result<AddressNamesCurrentSummary> {
     let mut builder = QueryBuilder::<Postgres>::new("");
@@ -478,8 +479,8 @@ async fn ensure_address_names_current_cursor_exists(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     is_migrated: Option<bool>,
     sort: AddressNamesCurrentSort,
     cursor: &AddressNamesCurrentSortedCursor,
