@@ -79,16 +79,6 @@ fn addr60_observation(body: &Value) -> Value {
     })
 }
 
-fn inventory_reason(body: &Value, section: &str, family: &str, field: &str) -> Option<String> {
-    body.pointer(&format!("/declared_state/record_inventory/{section}"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|entry| entry.get("record_family").and_then(Value::as_str) == Some(family))
-        .and_then(|entry| entry.get(field).and_then(Value::as_str))
-        .map(str::to_owned)
-}
-
 async fn active_registrar_identity(
     run: &support::PipelineRun,
     logical_name_id: &str,
@@ -544,15 +534,38 @@ async fn basenames_subnames_list_preimages_placeholders_and_tombstones() -> Resu
     Ok(())
 }
 
-/// The admitted L2Resolver emits text, multicoin, name, and version events;
-/// its composed contenthash setter remains outside the Base event admission.
+/// The admitted L2Resolver emits text, multicoin, name, contenthash, and
+/// version events. A contenthash write is served, an empty-bytes write clears
+/// it, and `clearRecords` resets it with the node's other records.
 /// (upstream: .refs/basenames/src/L2/resolver/TextResolver.sol:L31 @ basenames@1809bbc)
 /// (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57 @ basenames@1809bbc)
 /// (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L28 @ basenames@1809bbc)
 /// (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L35 @ basenames@1809bbc)
 /// (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
 #[tokio::test]
-async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
+async fn l2_resolver_records_and_contenthash_clear_and_reset() -> Result<()> {
+    const LOGICAL: &str =
+        "basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff";
+    const RECORDS_QUERY: &str =
+        "?texts=description&coin_types=0&content_hash=true&mode=declared&meta=full";
+    const REWRITTEN_CONTENTHASH: &[u8] = &[0xe3, 0x01, 0x01, 0x70, 0x12, 0x21];
+    let contenthash_ready = |count: i64| {
+        format!(
+            "SELECT count(*) = {count} FROM normalized_events \
+             WHERE logical_name_id = '{LOGICAL}' \
+               AND event_kind = 'RecordChanged' \
+               AND source_family = 'basenames_base_resolver' \
+               AND after_state->>'record_key' = 'contenthash' \
+               AND canonicality_state = 'canonical'"
+        )
+    };
+    let served_contenthash = |bytes: &[u8]| {
+        json!({
+            "encoding": "hex",
+            "bytes": format!("0x{}", alloy_primitives::hex::encode(bytes)),
+        })
+    };
+
     let base = Anvil::spawn_base_mainnet().await?;
     let rpc = base.client();
     let deployment = basenames::deploy_basenames(&rpc, &repo_root()).await?;
@@ -598,24 +611,25 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     let initial = support::ingest_basenames_and_serve(
         &base,
         &deployment,
-        Some(
-            "SELECT count(DISTINCT after_state->>'record_key') = 3 \
+        Some(&format!(
+            "SELECT count(DISTINCT after_state->>'record_key') = 4 \
              FROM normalized_events \
-             WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
+             WHERE logical_name_id = '{LOGICAL}' \
                AND event_kind = 'RecordChanged' \
-               AND after_state->>'record_key' IN ('text:description', 'addr:0', 'name') \
-               AND canonicality_state = 'canonical'",
-        ),
+               AND after_state->>'record_key' IN ('text:description', 'addr:0', 'name', 'contenthash') \
+               AND canonicality_state = 'canonical'"
+        )),
     )
     .await?;
 
     let derived_keys: BTreeSet<String> = sqlx::query_scalar(
         "SELECT DISTINCT after_state->>'record_key' FROM normalized_events \
-         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
+         WHERE logical_name_id = $1 \
            AND event_kind = 'RecordChanged' \
            AND source_family = 'basenames_base_resolver' \
            AND canonicality_state = 'canonical'",
     )
+    .bind(LOGICAL)
     .fetch_all(&initial.db.pool)
     .await?
     .into_iter()
@@ -624,71 +638,48 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
         derived_keys,
         BTreeSet::from([
             "addr:0".to_owned(),
+            "contenthash".to_owned(),
             "name".to_owned(),
             "text:description".to_owned(),
         ])
     );
     let name_value: String = sqlx::query_scalar(
         "SELECT after_state->>'raw_name' FROM normalized_events \
-         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
+         WHERE logical_name_id = $1 \
            AND event_kind = 'RecordChanged' \
            AND after_state->>'record_key' = 'name' \
            AND canonicality_state = 'canonical'",
     )
+    .bind(LOGICAL)
     .fetch_one(&initial.db.pool)
     .await?;
     assert_eq!(name_value, "records.base.eth");
-
-    let contenthash_topic = format!(
-        "{:#x}",
-        keccak256("ContenthashChanged(bytes32,bytes)".as_bytes())
-    );
-    let raw_contenthash: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM raw_logs \
-         WHERE lower(emitting_address) = $1 AND topics[1] = $2",
-    )
-    .bind(format!("{resolver:#x}"))
-    .bind(&contenthash_topic)
-    .fetch_one(&initial.db.pool)
-    .await?;
-    // Observed asymmetry with the mainnet pubkey pin: on the watched Base
-    // resolver instance the unadmitted contenthash RAW log is retained —
-    // the profile gate rejects it before derivation instead of the scan
-    // dropping it (mainnet's pubkey write persisted no raw log at all).
-    assert_eq!(
-        raw_contenthash, 1,
-        "unadmitted contenthash raw log is retained at the watched instance"
-    );
-    let contenthash_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
+    let contenthash_hex: String = sqlx::query_scalar(
+        "SELECT after_state->>'contenthash_hex' FROM normalized_events \
+         WHERE logical_name_id = $1 \
            AND event_kind = 'RecordChanged' \
-           AND after_state->>'record_key' = 'contenthash'",
+           AND after_state->>'record_key' = 'contenthash' \
+           AND canonicality_state = 'canonical'",
     )
+    .bind(LOGICAL)
     .fetch_one(&initial.db.pool)
     .await?;
-    assert_eq!(contenthash_events, 0);
+    assert_eq!(contenthash_hex, "0xe30101701220");
 
     let initial_exact = exact_name(&initial.api, "basenames", "records.base.eth").await?;
     assert_eq!(
         selector_keys(&initial_exact),
-        BTreeSet::from(["addr:0".to_owned(), "text:description".to_owned()])
-    );
-    assert_eq!(
-        inventory_reason(&initial_exact, "explicit_gaps", "contenthash", "gap_reason"),
-        None,
-        "schema-v2 projections do not synthesize the legacy API's explicit contenthash gap"
+        BTreeSet::from([
+            "addr:0".to_owned(),
+            "contenthash".to_owned(),
+            "text:description".to_owned(),
+        ])
     );
     let initial_boundary = pointer(
         &initial_exact,
         "/declared_state/record_inventory/record_version_boundary",
     );
-    let initial_records = compact_records(
-        &initial,
-        "records.base.eth",
-        "?texts=description&coin_types=0&mode=declared&meta=full",
-    )
-    .await?;
+    let initial_records = compact_records(&initial, "records.base.eth", RECORDS_QUERY).await?;
     assert_eq!(
         pointer(&initial_records, "/data/text_records/description/status"),
         "success"
@@ -705,22 +696,75 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
         pointer(&initial_records, "/data/coin_addresses/0/value"),
         json!("0xdeadbeef")
     );
+    assert_eq!(
+        pointer(&initial_records, "/data/content_hash/status"),
+        "success"
+    );
+    assert_eq!(
+        pointer(&initial_records, "/data/content_hash/value"),
+        served_contenthash(CONTENTHASH_BYTES)
+    );
     initial.db.cleanup().await?;
 
-    basenames::clear_base_records(&rpc, resolver, alice, "records.base.eth").await?;
-    let ready_sql = support::canonical_event_ready_sql(
-        "basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff",
-        "RecordVersionChanged",
-        None,
+    // Clearing: setContenthash with empty bytes emits the same event, and the
+    // value stops being served while the node's other records stay.
+    basenames::set_base_contenthash_record(&rpc, resolver, alice, "records.base.eth", &[]).await?;
+    let cleared =
+        support::ingest_basenames_and_serve(&base, &deployment, Some(&contenthash_ready(2)))
+            .await?;
+    let cleared_records = compact_records(&cleared, "records.base.eth", RECORDS_QUERY).await?;
+    assert_eq!(
+        pointer(&cleared_records, "/data/content_hash/status"),
+        "not_found"
     );
+    assert!(
+        cleared_records
+            .pointer("/data/content_hash/value")
+            .is_none_or(Value::is_null),
+        "{cleared_records}"
+    );
+    assert_eq!(
+        pointer(&cleared_records, "/data/text_records/description/status"),
+        "success"
+    );
+    cleared.db.cleanup().await?;
+
+    // A later write is served again, so the reset below has a live value to drop.
+    basenames::set_base_contenthash_record(
+        &rpc,
+        resolver,
+        alice,
+        "records.base.eth",
+        REWRITTEN_CONTENTHASH,
+    )
+    .await?;
+    let rewritten =
+        support::ingest_basenames_and_serve(&base, &deployment, Some(&contenthash_ready(3)))
+            .await?;
+    let rewritten_records = compact_records(&rewritten, "records.base.eth", RECORDS_QUERY).await?;
+    assert_eq!(
+        pointer(&rewritten_records, "/data/content_hash/status"),
+        "success"
+    );
+    assert_eq!(
+        pointer(&rewritten_records, "/data/content_hash/value"),
+        served_contenthash(REWRITTEN_CONTENTHASH)
+    );
+    rewritten.db.cleanup().await?;
+
+    // Resetting: clearRecords bumps the node version, which drops every earlier
+    // record write, contenthash included.
+    basenames::clear_base_records(&rpc, resolver, alice, "records.base.eth").await?;
+    let ready_sql = support::canonical_event_ready_sql(LOGICAL, "RecordVersionChanged", None);
     let current = support::ingest_basenames_and_serve(&base, &deployment, Some(&ready_sql)).await?;
     let version_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
-         WHERE logical_name_id = 'basenames:0xfcb7e9e91917e0b14a681580be903b6135c4e0d763185f81ce807bdd708d70ff' \
+         WHERE logical_name_id = $1 \
            AND event_kind = 'RecordVersionChanged' \
            AND source_family = 'basenames_base_resolver' \
            AND canonicality_state = 'canonical'",
     )
+    .bind(LOGICAL)
     .fetch_one(&current.db.pool)
     .await?;
     assert_eq!(version_events, 1);
@@ -738,12 +782,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
             .unwrap_or_default()
     };
     assert!(boundary_block(&current_boundary) > boundary_block(&initial_boundary));
-    let current_records = compact_records(
-        &current,
-        "records.base.eth",
-        "?texts=description&coin_types=0&mode=declared&meta=full",
-    )
-    .await?;
+    let current_records = compact_records(&current, "records.base.eth", RECORDS_QUERY).await?;
     assert_ne!(
         pointer(&current_records, "/data/text_records/description/status"),
         "success"
@@ -751,6 +790,10 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     assert_ne!(
         pointer(&current_records, "/data/coin_addresses/0/status"),
         "success"
+    );
+    assert_eq!(
+        pointer(&current_records, "/data/content_hash/status"),
+        "not_found"
     );
 
     current.db.cleanup().await?;

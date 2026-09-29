@@ -163,6 +163,63 @@ fn public_resolver_v2_abi_changed_is_a_record_write_like_its_other_node_events()
     Ok(())
 }
 
+/// ENSv2 has no ABIChanged decoder of its own, only the PublicResolverV2 node path. A declaration
+/// that could select an empty or legacy role would pass selection and then fail to decode, so the
+/// manifest is refused when it is loaded; the shipped role-scoped declaration still interprets.
+#[test]
+fn ensv2_abi_changed_declared_for_a_non_public_role_is_refused() -> anyhow::Result<()> {
+    let (chain, manifests, admissions) =
+        profile("sepolia", &["ens_v1_resolver_l1", "ens_v2_resolver_l1"])?;
+    let public = declared_address(&admissions, "public_resolver_v2");
+    let mirror = declared_address(&admissions, "ensv1_mirror_resolver");
+    let node: B256 = common::namehash(&["abi".to_owned(), "eth".to_owned()]).parse()?;
+    let block = 11_709_100;
+    let mut raw_logs = abi_logs(&chain, &public, node, block);
+    raw_logs.extend(abi_logs(&chain, &mirror, node, block + 1));
+    let batch = |manifests: Vec<ManifestInput>| BatchInput {
+        chain_id: chain.clone(),
+        manifests,
+        discovery_rules: vec![],
+        admissions: admissions.clone(),
+        prior_events: vec![],
+        blocks: vec![],
+        raw_logs: raw_logs.clone(),
+    };
+
+    let output = interpret_test_batch(batch(manifests.clone()))?;
+    assert_eq!(abi_writes(&output, &public), expected("ens_v2_resolver_l1"));
+
+    for roles in [
+        json!([]),
+        json!(["ensv1_mirror_resolver"]),
+        json!(["public_resolver_v2", "ensv1_mirror_resolver"]),
+    ] {
+        let mut manifests = manifests.clone();
+        let v2 = manifests
+            .iter_mut()
+            .find(|manifest| manifest.source_family == "ens_v2_resolver_l1")
+            .unwrap();
+        let mut payload: Value = serde_json::from_str(&v2.payload_json)?;
+        let abi_changed = payload["abi"]["events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|event| event["name"] == "ABIChanged")
+            .unwrap();
+        abi_changed["emitter_roles"] = roles.clone();
+        v2.payload_json = serde_json::to_string(&payload)?;
+        let error = interpret_test_batch(batch(manifests))
+            .expect_err("a non-public ENSv2 ABIChanged declaration must be refused");
+        assert!(
+            format!("{error:#}").contains(
+                "declares ABIChanged for a role other than public_resolver_v2; only the PublicResolverV2 node path decodes it"
+            ),
+            "{roles}: {error:#}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn basenames_abi_changed_is_a_record_write_for_declared_and_custom_resolvers() -> anyhow::Result<()>
 {

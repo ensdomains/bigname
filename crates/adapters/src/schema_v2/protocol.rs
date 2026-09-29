@@ -389,6 +389,22 @@ pub(super) fn validate_manifest(
         {
             bail!("PublicResolverV2 admits only its node record events");
         }
+        // ENSv2 has no ABIChanged decoder of its own: only the PublicResolverV2 node path decodes it
+        // (PermissionedResolver emits ABIUpdated instead). An empty or non-public role would select a
+        // legacy admission and then fail to decode, so refuse that configuration here.
+        if source.source_family == "ens_v2_resolver_l1"
+            && event.name == "ABIChanged"
+            && (event.emitter_roles.is_empty()
+                || event
+                    .emitter_roles
+                    .iter()
+                    .any(|role| role != "public_resolver_v2"))
+        {
+            bail!(
+                "manifest {} source family ens_v2_resolver_l1 declares ABIChanged for a role other than public_resolver_v2; only the PublicResolverV2 node path decodes it",
+                source.manifest_id
+            );
+        }
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
                 "source family {} has no typed schema-v2 adapter for {}",
