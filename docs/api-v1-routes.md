@@ -904,9 +904,13 @@ its value map:
   when bigname observed a write for that record. `contenthash` and `name` are
   the value, `null` when cleared, and omitted when unknown. A singleton in
   `seen_singletons` that is omitted was written with a value not known here.
-  On an inventory whose coverage is authoritative, which is complete for its
-  resolver, a singleton never written (or dropped by a record-version reset)
-  is left out of `seen_singletons` and served as `null`. `contenthash` is the
+  On an inventory whose coverage is authoritative, a singleton never written
+  (or dropped by a record-version reset) is left out of `seen_singletons` and
+  served as `null` only when the resolver has that record's getter; the
+  admitted legacy ENS public resolvers `0x5FfC0143…` and `0x1da02271…` have no
+  contenthash getter, so an unwritten `contenthash` on them, or on a mirror of
+  them, stays omitted.
+  (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121-L147 @ ens_app_v3@7175858) `contenthash` is the
   scalar contenthash string. `name`
   is the forward name record written on the name's own node (ENS
   `NameChanged`, ENSv2 `NameUpdated` on the name's record), the value its
@@ -931,8 +935,11 @@ its value map:
   when the name is eligible for verified reads. It is omitted otherwise,
   including on the `status=unsupported` identity-only object.
 - `primary_address` stays a top-level field: the name's `addr` answer for its
-  primary coin type, including the ENSIP-19 default-address fallback, which
-  `addresses` does not repeat.
+  primary coin type. Indexed `records.addresses` holds only exact observed
+  writes and never synthesizes the ENSIP-19 default-address fallback, while
+  indexed `primary_address` includes it. With `source=verified` both come from
+  the getter's answer for the key read: when that getter returns its fallback,
+  the same value appears in `records.addresses` and `primary_address`.
 
 ### `GET /v1/names/{name}/records`
 
@@ -1173,8 +1180,9 @@ its value map:
   attribution, another coin type, another nonempty byte length, and nonzero addresses retain
   their values. The exact entry remains but omits `value`. Indexed and auto
   retain exact `not_found` even when an authorized nonzero default exists;
-  verified returns the same absence. Name detail's `addresses["60"]` and
-  `primary_address`, and default derivation metadata, remain absent. Empty or missing exact data keeps
+  verified returns the same absence. On name detail and lookup detail the
+  cleared key is listed with `records.addresses["60"] = null`, and
+  `primary_address` and default derivation metadata remain absent. Empty or missing exact data keeps
   permitted fallback. The private observation marker and inventory provenance
   do not appear in product responses or record diagnostics.
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)

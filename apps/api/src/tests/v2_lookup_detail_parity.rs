@@ -318,3 +318,108 @@ async fn lookup_detail_records_follow_the_forward_name_record() -> Result<()> {
     assert!(!name_seen(&detail), "{detail}");
     database.cleanup().await
 }
+
+/// Declare `GROUPED_RESOLVER` under `role` before the name fixture points at it, then drop the
+/// fixture's own record writes with a record-version reset, so no singleton is written.
+async fn seed_grouped_records_name_on(
+    database: &TestDatabase,
+    name: &str,
+    id: u128,
+    role: &str,
+) -> Result<()> {
+    let (manifest, _) = declare_family_fixture_contract(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        role,
+        GROUPED_RESOLVER,
+    )
+    .await?;
+    seed_grouped_records_name(database, name, id).await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    publish_node_record_event(
+        database,
+        "ethereum-mainnet",
+        "ens",
+        "RecordVersionChanged",
+        "ens_v1_resolver_l1",
+        Some(manifest),
+        GROUPED_RESOLVER,
+        (None, None),
+        version_after(&node, GROUPED_RESOLVER, 1),
+    )
+    .await
+}
+
+/// A legacy public resolver generation without `IContentHashResolver` never has a contenthash to
+/// report unset, so an unwritten one is unknown; a current resolver's unwritten singletons are
+/// unset. Name is held by every one of them.
+#[tokio::test]
+async fn lookup_detail_records_default_singletons_only_where_the_resolver_holds_them() -> Result<()> {
+    for (role, contenthash_unset) in [
+        ("public_resolver_5ffc0143", false),
+        ("public_resolver_1da02271", false),
+        ("public_resolver", true),
+    ] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_grouped_records_name_on(&database, "profile.eth", 0x5a0c30, role).await?;
+        let detail = assert_lookup_detail_matches_name_detail(&database, "profile.eth").await?;
+        let records = &detail["records"];
+        assert_eq!(records["seen_singletons"], json!([]), "{role}: {detail}");
+        assert_eq!(
+            records.get("contenthash"),
+            contenthash_unset.then_some(&Value::Null),
+            "{role}: {detail}"
+        );
+        assert_eq!(records.get("name"), Some(&Value::Null), "{role}: {detail}");
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Retained text keys outside the `keys=` request grammar (whitespace, commas) are listed and
+/// served on an authoritative inventory, a clear included, and listed without values on an
+/// unknown resolver.
+#[tokio::test]
+async fn lookup_detail_records_keep_text_keys_with_spaces_and_commas() -> Result<()> {
+    let writes = [
+        family_fixture_record_write("text:display name", Some(json!("Alice"))),
+        family_fixture_record_write("text:a,b", Some(json!("first"))),
+        family_fixture_record_write("text:a,b", Some(json!(""))),
+    ];
+
+    let database = TestDatabase::new_migrated().await?;
+    let name = "spaced.eth";
+    seed_grouped_records_name(&database, name, 0x5a0c40).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        name,
+        GROUPED_RESOLVER,
+        38,
+        "0xname26",
+        &writes,
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 38, "0xname26").await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    let records = &detail["records"];
+    let seen = records["seen_texts"].as_array().expect("seen texts");
+    assert!(
+        seen.contains(&json!("display name")) && seen.contains(&json!("a,b")),
+        "{detail}"
+    );
+    assert_eq!(records["texts"]["display name"], json!("Alice"), "{detail}");
+    assert_eq!(records["texts"].get("a,b"), Some(&Value::Null), "{detail}");
+    database.cleanup().await?;
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_unknown_resolver_inputs(&database, &writes).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, "alice.eth").await?;
+    let records = &detail["records"];
+    assert_eq!(records["seen_texts"], json!(["a,b", "display name"]), "{detail}");
+    assert_eq!(records["texts"], json!({}), "{detail}");
+    database.cleanup().await
+}

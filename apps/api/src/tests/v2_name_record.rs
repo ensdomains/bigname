@@ -4631,6 +4631,17 @@ async fn v2_mirror_records_payload(
     mirror: &str,
     source: MirrorFixtureSource,
 ) -> Result<Value> {
+    v2_mirror_records_payload_on(uri, name, mirror, source, "resolver").await
+}
+
+/// [`v2_mirror_records_payload`] with the mirrored ENSv1 resolver declared under `v1_role`.
+async fn v2_mirror_records_payload_on(
+    uri: &str,
+    name: &str,
+    mirror: &str,
+    source: MirrorFixtureSource,
+    v1_role: &str,
+) -> Result<Value> {
     const CHAIN: &str = "ethereum-sepolia";
     const HASH: &str = "0xmirror";
     const V1_REGISTRY: &str = "0x4444444444444444444444444444444444444401";
@@ -4745,6 +4756,15 @@ async fn v2_mirror_records_payload(
             json!({"node":bigname_lookup::ens_namehash_hex(pointer_name)?,"resolver":V1_RESOLVER});
         pointer.raw_fact_ref = json!({"emitting_address":V1_REGISTRY});
         events.push(pointer);
+        declare_family_fixture_contract(
+            &database.pool,
+            "ens",
+            CHAIN,
+            "ens_v1_resolver_l1",
+            v1_role,
+            V1_RESOLVER,
+        )
+        .await?;
         insert_family_fixture_record_writes(
             &database.pool,
             "ens",
@@ -5839,6 +5859,37 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
         .expect("inventory known keys");
     assert!(known.contains(&json!("addr:60")) && known.contains(&json!("text:description")));
     assert!(payload["data"].get("mirror").is_none());
+    Ok(())
+}
+
+/// A mirror serves the mirrored ENSv1 resolver's getter surface: a legacy public resolver there
+/// has no contenthash to report unset.
+#[tokio::test]
+async fn v2_get_name_mirrored_from_a_legacy_resolver_leaves_contenthash_unknown() -> Result<()> {
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    for (role, contenthash_unset) in [
+        ("public_resolver_5ffc0143", false),
+        ("public_resolver_1da02271", false),
+        ("public_resolver", true),
+    ] {
+        let payload = v2_mirror_records_payload_on(
+            "/v1/names/alice.eth",
+            "alice.eth",
+            MIRROR,
+            MirrorFixtureSource::Exact,
+            role,
+        )
+        .await?;
+        let records = &payload["data"]["records"];
+        assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR), "{payload}");
+        assert_eq!(records["texts"]["description"], json!("Alice profile"), "{role}: {payload}");
+        assert_eq!(
+            records.get("contenthash"),
+            contenthash_unset.then_some(&Value::Null),
+            "{role}: {payload}"
+        );
+        assert_eq!(records.get("name"), Some(&Value::Null), "{role}: {payload}");
+    }
     Ok(())
 }
 

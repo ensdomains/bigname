@@ -23,8 +23,8 @@ use tracing::error;
 
 use super::name_record::{string_field, value_to_string};
 use super::name_records::RecordAnswer;
+use super::name_records_inventory::InventorySections;
 use super::name_records_inventory::load_abi_content_types;
-use super::name_records_inventory::{InventorySections, product_record_from_item};
 use super::support::{ResolutionRecordKey, direct_json_field, record_value_string_from_entry};
 use super::{Status, V2Error, V2Result};
 
@@ -69,21 +69,38 @@ enum Slot {
     Address(String),
     Text(String),
     Contenthash,
+    Name,
 }
 
-fn slot(record: &ResolutionRecordKey) -> Option<Slot> {
-    match (
-        record.record_family.as_str(),
-        record.selector_key.as_deref(),
-    ) {
-        ("addr", Some(coin_type)) => {
+impl Slot {
+    /// The singleton's name in `seen_singletons`.
+    fn singleton(&self) -> Option<&'static str> {
+        match self {
+            Self::Contenthash => Some("contenthash"),
+            Self::Name => Some("name"),
+            Self::Address(_) | Self::Text(_) => None,
+        }
+    }
+}
+
+/// The slot of a record key as the inventory stores it. This is not the `keys=` request grammar
+/// (`parse_resolution_record_key`): a retained text key can hold whitespace or commas
+/// (`text:display name`, `text:a,b`), and it is listed and served like any other.
+fn slot(record_key: &str) -> Option<Slot> {
+    match record_key.split_once(':') {
+        Some(("addr", coin_type)) => {
             bigname_storage::canonical_addr_coin_type(coin_type).map(Slot::Address)
         }
-        ("text", Some(key)) => Some(Slot::Text(key.to_owned())),
-        ("avatar", None) => Some(Slot::Text("avatar".to_owned())),
-        ("contenthash", None) => Some(Slot::Contenthash),
+        Some(("text", key)) if !key.is_empty() => Some(Slot::Text(key.to_owned())),
+        None if record_key == "avatar" => Some(Slot::Text("avatar".to_owned())),
+        None if record_key == "contenthash" => Some(Slot::Contenthash),
+        None if record_key == "name" => Some(Slot::Name),
         _ => None,
     }
+}
+
+fn item_slot(item: &Value) -> Option<Slot> {
+    string_field(item.get("record_key")).and_then(|record_key| slot(&record_key))
 }
 
 fn lists_unsupported_family(unsupported_families: &Value, family: &str) -> bool {
@@ -100,40 +117,42 @@ fn nonempty(value: String) -> Option<String> {
 }
 
 impl RecordGroups {
-    fn list(&mut self, record: &ResolutionRecordKey) {
-        match slot(record) {
-            Some(Slot::Address(coin_type)) => self.seen_addresses.push(coin_type),
-            Some(Slot::Text(key)) => self.seen_texts.push(key),
-            Some(Slot::Contenthash) => self.seen_singletons.push("contenthash".to_owned()),
-            None => {}
+    fn list(&mut self, slot: &Slot) {
+        match slot {
+            Slot::Address(coin_type) => self.seen_addresses.push(coin_type.clone()),
+            Slot::Text(key) => self.seen_texts.push(key.clone()),
+            Slot::Contenthash | Slot::Name => {
+                self.seen_singletons
+                    .extend(slot.singleton().map(str::to_owned));
+            }
         }
     }
 
     /// `Some(value)` is a served value (`None` inside for a clear).
-    fn set(&mut self, record: &ResolutionRecordKey, value: Option<String>) {
-        match slot(record) {
-            Some(Slot::Address(coin_type)) => {
+    fn set(&mut self, slot: Slot, value: Option<String>) {
+        match slot {
+            Slot::Address(coin_type) => {
                 self.addresses.insert(coin_type, value);
             }
-            Some(Slot::Text(key)) => {
+            Slot::Text(key) => {
                 self.texts.insert(key, value);
             }
-            Some(Slot::Contenthash) => self.contenthash = Some(value),
-            None => {}
+            Slot::Contenthash => self.contenthash = Some(value),
+            Slot::Name => self.name = Some(value),
         }
     }
 
-    /// A listed record whose value is not known here.
-    fn forget(&mut self, record: &ResolutionRecordKey) {
-        match slot(record) {
-            Some(Slot::Address(coin_type)) => {
+    /// A seen record whose value is not known here.
+    fn forget(&mut self, slot: Slot) {
+        match slot {
+            Slot::Address(coin_type) => {
                 self.addresses.remove(&coin_type);
             }
-            Some(Slot::Text(key)) => {
+            Slot::Text(key) => {
                 self.texts.remove(&key);
             }
-            Some(Slot::Contenthash) => self.contenthash = None,
-            None => {}
+            Slot::Contenthash => self.contenthash = None,
+            Slot::Name => self.name = None,
         }
     }
 
@@ -162,37 +181,35 @@ impl RecordGroups {
             .into_iter()
             .flat_map(|section| section.as_array().into_iter().flatten())
         {
-            if let Some(record) = product_record_from_item(item) {
-                groups.list(&record);
-            } else if string_field(item.get("record_family")).as_deref() == Some("name") {
-                groups.seen_singletons.push("name".to_owned());
+            if let Some(slot) = item_slot(item) {
+                groups.list(&slot);
             }
         }
         if sections.authoritative {
-            // An authoritative row is complete for its resolver: a singleton it holds no entry
-            // for is unset, unless the row lists that family as unsupported.
+            // An authoritative row is complete for the families its resolver holds: a singleton
+            // it has no entry for is unset, unless the row lists that family as unsupported or
+            // the resolver has no getter for it (a legacy public resolver without contenthash).
             let complete = |family: &str| {
-                (!lists_unsupported_family(sections.unsupported_families, family)).then_some(None)
+                (!lists_unsupported_family(sections.unsupported_families, family)
+                    && bigname_storage::families::records::inventory_resolver_holds_family(
+                        sections.provenance,
+                        family,
+                    ))
+                .then_some(None)
             };
             groups.contenthash = complete("contenthash");
             groups.name = complete("name");
             for entry in sections.entries.as_array().into_iter().flatten() {
-                let status = string_field(entry.get("status"));
-                if string_field(entry.get("record_family")).as_deref() == Some("name") {
-                    groups.name = match status.as_deref() {
-                        Some("success") => entry
-                            .get("value")
-                            .and_then(Value::as_str)
-                            .map(|name| nonempty(name.to_owned())),
-                        Some("not_found") => Some(None),
-                        _ => None,
-                    };
-                    continue;
-                }
-                let Some(record) = product_record_from_item(entry) else {
+                let Some(slot) = item_slot(entry) else {
                     continue;
                 };
-                let value = match status.as_deref() {
+                let value = match string_field(entry.get("status")).as_deref() {
+                    // The forward name is served only as a string; retained non-UTF-8 bytes
+                    // stay unknown.
+                    Some("success") if matches!(slot, Slot::Name) => entry
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .map(|name| nonempty(name.to_owned())),
                     Some("success") => {
                         record_value_string_from_entry(entry, direct_json_field).map(nonempty)
                     }
@@ -200,8 +217,8 @@ impl RecordGroups {
                     _ => None,
                 };
                 match value {
-                    Some(value) => groups.set(&record, value),
-                    None => groups.forget(&record),
+                    Some(value) => groups.set(slot, value),
+                    None => groups.forget(slot),
                 }
             }
         }
@@ -217,17 +234,20 @@ impl RecordGroups {
     ) -> Self {
         let mut groups = Self::default();
         for record in requested {
-            groups.list(record);
+            let Some(slot) = slot(&record.record_key) else {
+                continue;
+            };
+            groups.list(&slot);
             let Some(answer) = answers.get(&record.record_key) else {
                 continue;
             };
             match answer.status {
                 Status::Ok => {
                     if let Some(value) = answer.value.as_ref().and_then(value_to_string) {
-                        groups.set(record, nonempty(value));
+                        groups.set(slot, nonempty(value));
                     }
                 }
-                Status::NotFound => groups.set(record, None),
+                Status::NotFound => groups.set(slot, None),
                 _ => {}
             }
         }
@@ -323,6 +343,12 @@ mod tests {
     use super::*;
     use crate::v2::support::parse_resolution_record_key;
 
+    /// A current public resolver's classification, which holds every singleton family.
+    static MODERN: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+        json!({"abi_observation_classification":
+            {"source_family": "ens_v1_resolver_l1", "role": "public_resolver"}})
+    });
+
     fn sections<'a>(
         authoritative: bool,
         selectors: &'a Value,
@@ -335,6 +361,7 @@ mod tests {
             entries,
             explicit_gaps: empty,
             unsupported_families: empty,
+            provenance: &MODERN,
         }
     }
 
@@ -424,12 +451,76 @@ mod tests {
             entries: &entries,
             explicit_gaps: &empty,
             unsupported_families: &unsupported,
+            provenance: &MODERN,
         });
         let value = serde_json::to_value(&groups).expect("serializes");
         // Written, value unknown; and a family the row cannot speak for.
         assert_eq!(value["seen_singletons"], json!(["contenthash"]), "{value}");
         assert!(value.get("contenthash").is_none(), "{value}");
         assert!(value.get("name").is_none(), "{value}");
+    }
+
+    #[test]
+    fn a_resolver_without_the_contenthash_getter_leaves_it_unknown() {
+        let empty = json!([]);
+        for role in ["public_resolver_5ffc0143", "public_resolver_1da02271"] {
+            let legacy = json!({"abi_observation_classification":
+                {"source_family": "ens_v1_resolver_l1", "role": role}});
+            let groups = RecordGroups::indexed(InventorySections {
+                provenance: &legacy,
+                ..sections(true, &empty, &empty, &empty)
+            });
+            let value = serde_json::to_value(&groups).expect("serializes");
+            assert!(value.get("contenthash").is_none(), "{role}: {value}");
+            assert_eq!(value["name"], Value::Null, "{role}: {value}");
+        }
+        // No captured classification: nothing is claimed unset.
+        let bare = json!({});
+        let groups = RecordGroups::indexed(InventorySections {
+            provenance: &bare,
+            ..sections(true, &empty, &empty, &empty)
+        });
+        let value = serde_json::to_value(&groups).expect("serializes");
+        assert!(
+            value.get("contenthash").is_none() && value.get("name").is_none(),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn retained_text_keys_outside_the_request_grammar_are_listed_and_served() {
+        let selectors = json!([
+            {"record_key": "text:display name", "record_family": "text",
+             "selector_key": "display name"},
+            {"record_key": "text:a,b", "record_family": "text", "selector_key": "a,b"}
+        ]);
+        let entries = json!([
+            {"record_key": "text:display name", "record_family": "text",
+             "selector_key": "display name", "status": "success", "value": "Alice"},
+            {"record_key": "text:a,b", "record_family": "text", "selector_key": "a,b",
+             "status": "not_found"}
+        ]);
+        let empty = json!([]);
+        let groups = RecordGroups::indexed(sections(true, &selectors, &entries, &empty));
+        let value = serde_json::to_value(&groups).expect("serializes");
+        assert_eq!(
+            value["seen_texts"],
+            json!(["a,b", "display name"]),
+            "{value}"
+        );
+        assert_eq!(
+            value["texts"],
+            json!({"a,b": null, "display name": "Alice"}),
+            "{value}"
+        );
+        let unknown = RecordGroups::indexed(sections(false, &selectors, &entries, &empty));
+        let value = serde_json::to_value(&unknown).expect("serializes");
+        assert_eq!(
+            value["seen_texts"],
+            json!(["a,b", "display name"]),
+            "{value}"
+        );
+        assert_eq!(value["texts"], json!({}), "{value}");
     }
 
     #[test]

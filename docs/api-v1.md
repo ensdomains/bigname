@@ -1188,8 +1188,12 @@ change public response fields or grant authority to incomplete inventory.
 On `GET /v1/names/{name}` and `POST /v1/lookup` with `profile=detail`, the
 grouped `records.addresses` map uses the same scalar hex string for each decimal
 coin type, and `records.contenthash` uses the same contenthash scalar string.
-A cleared exact value is `null` there; the ENSIP-19 derived default address is
-served only as `primary_address`, never inside `records.addresses`.
+A cleared exact value, including a zero-address `addr:60` clear, is `null`
+there. Indexed `records.addresses` holds exact observed writes only and never
+synthesizes the ENSIP-19 derived default, which indexed detail serves only as
+`primary_address`. Verified detail serves the getter's answer for each key it
+read, so a getter that returns its fallback puts that answer in both
+`records.addresses` and `primary_address`.
 `GET /v1/names/{name}/records` has no grouped object: its per-key `records`
 answers are its only value shape. Diagnostics and
 Project use the internal status `success` for a retained value; product routes

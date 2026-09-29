@@ -86,14 +86,18 @@ ENSv1 resolver support and PermissionedResolver proxy classification stay intact
 
 ## Resolver address read modes
 
-The records route, exact-name detail, and name results in batch lookup share
-one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
+The records route and the `primary_address` of exact-name detail and of name
+results in batch lookup share one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
 When the selected resolver has the manifest-authorized
 [resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
 coin-type request whose exact entry is empty or missing reads the projected
 default entry instead. The records route identifies per-key derived results in
-`records[key].meta`; the values-only address maps on exact-name detail and
-batch lookup contain the value without adding provenance fields. Derived values use the requested getter's verified decode:
+`records[key].meta`. Exact-name detail and batch lookup do not synthesize it
+into grouped `records.addresses`, which holds exact observed writes only (a
+cleared one as `null`); their indexed `primary_address` carries the derived
+value. Verified exact-name detail serves each getter's own answer, so a getter
+that returns its fallback puts it in both `records.addresses` and
+`primary_address`. Derived values use the requested getter's verified decode:
 coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
 multicoin selectors retain that non-empty byte value. Exact stored records are
 not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the

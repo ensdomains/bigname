@@ -69,6 +69,8 @@ pub(crate) struct InventorySections<'a> {
     pub(crate) entries: &'a Value,
     pub(crate) explicit_gaps: &'a Value,
     pub(crate) unsupported_families: &'a Value,
+    /// Carries the captured resolver classification (`abi_observation_classification`).
+    pub(crate) provenance: &'a Value,
 }
 
 impl<'a> From<&'a RecordInventoryCurrentRow> for InventorySections<'a> {
@@ -79,6 +81,7 @@ impl<'a> From<&'a RecordInventoryCurrentRow> for InventorySections<'a> {
             entries: &row.entries,
             explicit_gaps: &row.explicit_gaps,
             unsupported_families: &row.unsupported_families,
+            provenance: &row.provenance,
         }
     }
 }
@@ -93,6 +96,7 @@ impl<'a> From<&'a bigname_storage::IdentityRecordInventoryRow> for InventorySect
             entries: &row.entries,
             explicit_gaps: &NO_GAPS,
             unsupported_families: &row.unsupported_families,
+            provenance: &row.provenance,
         }
     }
 }
