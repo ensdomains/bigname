@@ -15,9 +15,11 @@
 -- It first takes the family marker table in EXCLUSIVE mode, the lock a family writer takes first
 -- (inserting or locking its chain's marker row), and holds it to commit. So no family run can
 -- create a marker, including one for a chain that has none yet, or write any family row between
--- the reset and the new column: a run that starts meanwhile waits and then sees the column.
--- Plain marker reads (the API's publication fence) are not blocked. A family run already past
--- its marker lock holds its row locks, so the migration waits for that run's transaction.
+-- the reset and the new column: a run that starts meanwhile waits, then rebuilds with the column
+-- or fails its generation check once and the next run rebuilds. Plain marker reads (the API's
+-- publication fence) are not blocked; summary reads and the verified-lookup guard's
+-- FOR SHARE of the marker wait until it commits. A family run already past its marker lock holds
+-- its row locks, so the migration waits for that run's transaction.
 -- The reset list is every journalled and derived family table of
 -- crates/project/src/families/tables.rs plus the marker, undo and repair tables; the test
 -- crates/project/tests/families_summary_owner_migration.rs checks that it stays so.

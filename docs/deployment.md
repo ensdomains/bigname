@@ -1351,9 +1351,14 @@ the name-summary schema-migration above does, so the next family run rebuilds
 them and writes every name's owner; fenced routes answer `409 stale` until that
 rebuild finishes. It takes the marker table in `EXCLUSIVE` mode first and holds
 it to commit, so a family run cannot create or lock a marker, for a chain with
-or without one, between the reset and the new column: a run that starts
-meanwhile waits and then rebuilds with the column. A run already holding its
-marker delays the schema-migration until that run's transaction ends. Apply it before starting the release: the family writer
+or without one, between the reset and the new column. A run that starts
+meanwhile waits; afterwards it either rebuilds with the column or, if it had
+planned against a marker the reset removed, fails its generation check once and
+the next run rebuilds. A run already holding its marker delays the
+schema-migration until that run's transaction ends. While it runs, API requests
+that read the name summary (the subname and label lists) or lock the marker
+(verified lookups) wait for it rather than answer `409 stale`, up to the API's
+statement and request timeouts, so apply it at a quiet moment. Apply it before starting the release: the family writer
 inserts summary rows by column name, so without the column that release's
 summaries silently lose their owner and the filtered label reads fail. The
 composition that fills it lives in hashed storage sources
