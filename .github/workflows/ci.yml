@@ -1051,11 +1051,8 @@ jobs:
     name: test (API container shutdown)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # Ordered after the dependency-cache producer, the same way the e2e shards are.
-    # `!cancelled()` rather than a success guard: a failure over there must not skip
-    # this proof, it only means this job compiles against a cold cache.
-    needs:
-      - e2e_build
+    # Start immediately and use any available dependency cache. A cache miss only
+    # means the prerequisite below compiles locally; it does not require e2e_build.
     if: ${{ !cancelled() }}
     services:
       postgres:
@@ -1106,7 +1103,7 @@ jobs:
           echo "phase-runner dependency-cache primary key: $primary"
 
       # Same workspace, lockfiles, and debug profile as `build (e2e phase-runner)`,
-      # so this restores that job's dependency cache instead of compiling cold.
+      # so a compatible dependency cache from an earlier run can be reused.
       - name: Cache e2e phase-runner Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
