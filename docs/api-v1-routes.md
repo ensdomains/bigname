@@ -2320,8 +2320,8 @@ introduces it rebuilds Project from full history before serving the option; see
   Native ENSv2 registrations do not satisfy `is_migrated=true`. It combines
   with the other filters and is rejected with `relation=resolves_to`.
   The ownership collection always returns an exact `page.total_count` before
-  applying its cursor, with the same relations, prefix, authority, migration
-  predicate and deduplication as the rows. For registration counts use
+  applying its cursor, with the same relations, `q` and `match` predicate,
+  `authority` set, migration predicate and deduplication as the rows. For registration counts use
   `relation=registrant&dedupe=registration`; a name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
@@ -2336,22 +2336,34 @@ introduces it rebuilds Project from full history before serving the option; see
   boundary marker, multiple trailing dots, an empty interior label, or any
   other input rejected by bigname's name validation atop ENSIP-15 returns
   `400 invalid_input`. `match=prefix` (the default) is the prefix rule above.
-  `match=contains` matches `q` anywhere in the stored normalized name, with the
-  normalization and boundary rules `match=contains` has on `GET /v1/search`:
-  `q=cat&match=contains` matches `cat.eth` and `mycat.eth`, one leading dot is
-  accepted and kept as a label boundary (`q=.eth`), and one trailing dot keeps
-  the preceding label boundary as for a prefix. Both modes compare bytes
-  literally: `_`, `%` and `\` are never wildcards, and `%` and `\` are not name
-  characters, so they return `400 invalid_input`. Matching is exact substring
-  matching on the normalized name, with no fuzzy matching. `match` without a
-  nonempty `q` selects nothing and is ignored; any value other than `prefix`
-  or `contains` returns `400 invalid_input`. The match mode applies before
-  grouping, sorting, pagination and `page.total_count`.
+  `match=contains` matches the normalized `q` wherever its bytes occur in the
+  stored normalized name, with the normalization and boundary rules
+  `match=contains` has on `GET /v1/search`: `q=cat&match=contains` matches
+  `cat.eth` and `mycat.eth`, one leading dot is accepted and kept as a label
+  boundary (`q=.eth`), and one trailing dot keeps the preceding label boundary
+  as for a prefix. The fragment is normalized as an ENSIP-15 name in its own
+  right, not as a piece of a longer name, so a substring of a valid name is an
+  admissible query only when it is itself a valid name. A fragment that begins
+  with a combining mark (the `्ते` of `नमस्ते.eth`), a lone zero-width joiner
+  or skin-tone modifier, or a bare `.` returns `400 invalid_input` even though
+  valid indexed names contain it. Conversely, a valid fragment matches inside a
+  longer emoji sequence: `q=👨` matches `👨‍💻.eth`, and `q=👍` matches
+  `👍🏽.eth`. Both modes compare bytes literally: `_`, `%` and `\` are never
+  wildcards, and `%` and `\` are not name characters, so they return
+  `400 invalid_input`. Matching is exact byte matching on the normalized name,
+  with no fuzzy matching. An absent, empty or whitespace-only `match` is
+  `prefix`; a nonblank value other than `prefix` or `contains` returns
+  `400 invalid_input`, with or without `q`. A valid `match` without a nonempty
+  `q` selects nothing and is ignored. The match mode applies before grouping,
+  sorting, pagination and `page.total_count`.
   `sort` defaults to `name`, ordered by the row's served name. `expires_at`,
   `registered_at` and `created_at` order by the row's name timestamps as served
   on the row; `created_at` is the name's first observation, the block time of
-  the first event that named it, and is unrelated to `registered_at`, the
-  registration time. A row with no such timestamp sorts after every dated row
+  the earliest event attributed to the name, including an earlier registrar
+  event that was attributed to the name only once a later event named it, and
+  is unrelated to `registered_at`, the registration time. Every listed row has
+  a recorded first observation, and `sort=created_at` orders by that recorded
+  value, the same instant the row serves as `created_at`. A row with no such timestamp sorts after every dated row
   ascending and before every dated row descending. Equal timestamps, and equal
   names, break ties by name identity and then by the grouped resource, in both
   orders.

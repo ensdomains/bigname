@@ -574,3 +574,156 @@ async fn v2_routes_without_name_list_controls_reject_them() -> Result<()> {
     }
     database.cleanup().await
 }
+
+/// Percent-encodes every byte, so a query value reaches the route exactly as written.
+fn encode_query_value(value: &str) -> String {
+    value.bytes().map(|byte| format!("%{byte:02X}")).collect()
+}
+
+fn unicode_name_spec(name: &'static str, logical: &'static str, seed: u128) -> V2AddressNameSpec {
+    V2AddressNameSpec {
+        logical_name_id: logical,
+        name,
+        resource_id: Uuid::from_u128(seed),
+        token_lineage_id: Uuid::from_u128(seed + 1),
+        surface_binding_id: Uuid::from_u128(seed + 2),
+        block_hash: "0xname349",
+        block_number: 349,
+        owner: "0x0000000000000000000000000000000000000349",
+        registrant: V2_ADDRESS,
+        registered_at: "2024-01-02T00:00:00Z",
+        created_at: "2023-01-02T00:00:00Z",
+        expires_at: "2027-01-02T00:00:00Z",
+        relations: &[bigname_storage::AddressNameRelation::TokenHolder],
+    }
+}
+
+// `match=contains` normalizes its fragment as a name. A fragment that is a valid name on its
+// own matches wherever its bytes occur, even inside a longer emoji sequence; a substring that is
+// not a valid name alone (a leading combining mark, a joiner, a lone skin-tone modifier) is not
+// an admissible query and returns 400, although valid indexed names contain it.
+#[tokio::test]
+async fn v2_address_names_contains_admits_only_fragments_that_are_names() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let specs = [
+        unicode_name_spec("नमस्ते.eth", "ens:नमस्ते.eth", 0x3_4c00),
+        unicode_name_spec("👨\u{200d}💻.eth", "ens:👨\u{200d}💻.eth", 0x3_4d00),
+        unicode_name_spec("👍🏽.eth", "ens:👍🏽.eth", 0x3_4e00),
+    ];
+    seed_v2_address_name_identities(&database, &specs).await?;
+    publish_v2_address_name_inputs(&database, &specs).await?;
+    assert_v2_address_name_relations(&database, &specs).await?;
+    let base = format!("/v1/addresses/{V2_ADDRESS}/names");
+
+    for (fragment, expected) in [
+        ("स\u{94d}", vec!["नमस्ते.eth"]),
+        ("ते", vec!["नमस्ते.eth"]),
+        ("👨", vec!["👨\u{200d}💻.eth"]),
+        ("💻", vec!["👨\u{200d}💻.eth"]),
+        ("👍", vec!["👍🏽.eth"]),
+    ] {
+        let uri = format!("{base}?q={}&match=contains", encode_query_value(fragment));
+        let rows = walk_address_names(&database, &uri, Some(expected.len())).await?;
+        assert_eq!(row_names(&rows), expected, "{fragment:?}");
+    }
+    for fragment in [
+        "\u{94d}ते",
+        "\u{94d}",
+        "\u{200d}",
+        "👨\u{200d}",
+        "\u{200d}💻",
+        "🏽",
+    ] {
+        let uri = format!("{base}?q={}&match=contains", encode_query_value(fragment));
+        let response = v2_address_names_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{fragment:?}");
+        let payload = read_json::<Value>(response).await?;
+        assert!(
+            payload["error"]["message"].as_str().is_some_and(
+                |message| message.starts_with("q must be a valid ENSIP-15 name substring:")
+            ),
+            "{fragment:?}: {payload}"
+        );
+    }
+    database.cleanup().await
+}
+
+/// Every listed row's served `created_at` must come from the name's recorded first observation
+/// (`registration.created_at`), never from the publication-time fallback the name renderer
+/// keeps, so the sort key and the served value are the same instant on every row. Covers
+/// registrar names, a migrated ENSv2 name, and record-serving-only names (a cleared registry
+/// owner with a retained resolver pointer) listed through `relation=resolves_to`.
+#[tokio::test]
+async fn v2_address_names_created_at_sort_matches_the_served_first_observation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_records(&database).await?;
+    bind_address_name_ens_v2(&database, "alpha.eth", 0xa200, true).await?;
+    for (name, seed) in [("serving-one.eth", 0xe500), ("serving-two.eth", 0xf500)] {
+        seed_resolves_to_ownerless_name(&database, name, seed).await?;
+    }
+    let base = format!("/v1/addresses/{V2_ADDRESS}/names");
+    let mut serving_only_seen = BTreeSet::new();
+    for relation in [
+        "",
+        "&relation=resolves_to",
+        "&relation=resolves_to&coin_type=evm",
+    ] {
+        for order in ["asc", "desc"] {
+            let uri = format!("{base}?sort=created_at&order={order}&page_size=2{relation}");
+            let rows = walk_address_names(&database, &uri, None).await?;
+            assert!(!rows.is_empty(), "{uri}");
+            let ids = rows
+                .iter()
+                .map(|row| {
+                    bigname_storage::logical_name_id_for_name(
+                        "ens",
+                        row["name"].as_str().expect("row name"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let composed =
+                bigname_storage::load_name_current_by_logical_name_ids(&database.pool, &ids)
+                    .await?;
+            let mut served = Vec::new();
+            for (row, id) in rows.iter().zip(&ids) {
+                let name = row["name"].as_str().expect("row name");
+                if name.starts_with("serving-") {
+                    serving_only_seen.insert(name.to_owned());
+                }
+                let at = row
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{uri}: {name} has no created_at: {row}"));
+                let recorded = composed
+                    .get(id)
+                    .and_then(|name_row| {
+                        name_row
+                            .declared_summary
+                            .pointer("/registration/created_at")
+                    })
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{uri}: {name} has no recorded first observation"));
+                let at = parse_rfc3339_utc_timestamp(at).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let recorded = time::OffsetDateTime::parse(
+                    recorded,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|e| anyhow::anyhow!("{name}: {recorded}: {e}"))?;
+                assert_eq!(at, recorded, "{uri}: {name}");
+                served.push(at);
+            }
+            let ordered = served.windows(2).all(|pair| match order {
+                "asc" => pair[0] <= pair[1],
+                _ => pair[0] >= pair[1],
+            });
+            assert!(ordered, "{uri}: {:?}", row_names(&rows));
+        }
+    }
+    assert_eq!(
+        serving_only_seen,
+        BTreeSet::from(["serving-one.eth".to_owned(), "serving-two.eth".to_owned()]),
+        "the record-serving-only names are listed"
+    );
+    database.cleanup().await
+}
