@@ -236,9 +236,10 @@ Family indexes serve these concrete readers:
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
 - The composed name reader's resource pointer lookup
-  (`storage:families.name.resource_pointers`) probes `project_resource_pointer_pkey` by
+  (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry
-  pointers only) by namespace and namehash, joined by a BitmapOr.
+  pointers only) by namespace and namehash, joined by a BitmapOr; the planner chooses that
+  path on cost, and the plan test pins it for a selective request.
 
 
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase

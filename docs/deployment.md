@@ -231,12 +231,39 @@ neither binary reads it, so a value left in `.env.server` has no effect.
 
 `20260929180000_project_resource_pointer_root_node_index.sql` adds the partial
 index `project_resource_pointer_root_node_idx` that the composed name reader's
-resource pointer lookup probes for ENSv2 root registry pointers. It builds with a
-plain `CREATE INDEX` inside the migration transaction, so it blocks writes to
-`project_resource_pointer` (the Project family step) while it builds. The build
-reads the table once and indexes only the root registry rows; on a 500,000-row
-table it took about 50 ms with the table cached, so no concurrent prebuild is
-needed.
+resource pointer lookup can probe for ENSv2 root registry pointers. It builds
+with a plain `CREATE INDEX` inside the migration transaction, which takes a
+SHARE lock on the whole of `project_resource_pointer`, every chain and every
+source family, until the migration commits. That blocks every write to the
+table and `VACUUM` and `ANALYZE` on it; reads continue. Before the build starts,
+the migration also waits for any transaction already writing the table. Apply
+it in the same planned window as the 7c removal above, with the phase runner,
+redo processes and API stopped, so nothing waits on it and it waits on nothing.
+It needs no concurrent prebuild in that window.
+
+The build reads the table once and stores only the root registry rows. On a
+500,000-row copy held in cache it took about 50 ms. That is an observation of
+that copy, not a bound on staging or production, whose size, cache state and
+dead rows differ; watch the actual lock wait and duration. To bound them, apply
+the versions before it as usual, then apply this one on its own with a lock and
+statement budget, for example:
+
+```sh
+PGOPTIONS='-c lock_timeout=10s -c statement_timeout=10min' \
+  sqlx migrate run --source migrations --database-url "$BIGNAME_DATABASE_URL" \
+  --target-version 20260929180000
+```
+
+If it fails on either timeout, the migration's transaction rolls back and
+`_sqlx_migrations` does not record it, so it stays pending. On a lock timeout,
+find the session holding a lock on `bigname_phase.project_resource_pointer` in
+`pg_locks` and `pg_stat_activity`, stop the process that owns it, and run the
+same command again. On a statement timeout, check the table's size and rerun
+with a larger budget that still fits the window. Afterwards, confirm that
+`project_resource_pointer_root_node_idx` is `indisvalid` and `indisready` in
+`pg_index` and that `pg_get_indexdef` shows `(chain_id, namespace, namehash)`
+with `WHERE (source_family = 'ens_v2_root_l1'::text)`: `IF NOT EXISTS` skips an
+existing index of the same name without checking its definition.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
