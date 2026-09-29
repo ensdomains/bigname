@@ -421,13 +421,20 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
 // writes of a resolver classified as a manifest-declared `public_resolver_v2`, when the declaring
 // manifest is active in the pointer's namespace at the bound. The writes carry no logical name or
 // resource, so only this arm lists them.
-#[tokio::test]
-async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
-    const NAME: &str = "v2-pointed.eth";
-    const RESOLVER_V2: &str = "0x00000000000000000000000000000000000b0a2c";
-    let database = TestDatabase::new_migrated().await?;
-    seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_7000)
+const V2_POINTED_NAME: &str = "v2-pointed.eth";
+const V2_POINTED_RESOLVER: &str = "0x00000000000000000000000000000000000b0a2c";
+
+/// `v2-pointed.eth` registered in the ENSv2 registry at 205 and pointed at a declared
+/// public_resolver_v2 at 210, which receives a text write for the name at 220 and one for another
+/// node at 225; published at 240. Returns the logical name, its resource and the manifest id.
+async fn seed_public_resolver_v2_pointer(
+    database: &TestDatabase,
+    extra: Vec<NormalizedEvent>,
+) -> Result<(String, Uuid, i64)> {
+    const NAME: &str = V2_POINTED_NAME;
+    const RESOLVER_V2: &str = V2_POINTED_RESOLVER;
+    seed_bounded_membership_blocks(database, 240).await?;
+    let (logical_name_id, resource) = seed_bounded_name(database, NAME, 0xb0a_7000)
     .await?;
     // The ENSv2 registry admitted the resolver, and the resolver manifest declares it as a
     // public_resolver_v2.
@@ -506,10 +513,27 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
             pointer,
             node_write("v2-write-220", 220, NAME)?,
             node_write("v2-write-other-225", 225, "other-v2.eth")?,
-        ],
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect::<Vec<_>>(),
     )
     .await?;
-    publish_test_families(&database, 240).await?;
+    publish_test_families(database, 240).await?;
+    Ok((logical_name_id, resource, manifest_id))
+}
+
+#[tokio::test]
+async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
+    const NAME: &str = V2_POINTED_NAME;
+    const RESOLVER_V2: &str = V2_POINTED_RESOLVER;
+    let database = TestDatabase::new_migrated().await?;
+    let (logical_name_id, resource, manifest_id) =
+        seed_public_resolver_v2_pointer(&database, Vec::new()).await?;
+    let declared = |role: &str| {
+        json!({"contracts":[{"role":role, "address":RESOLVER_V2, "proxy_kind":"none",
+            "start_block":0, "read_features":[]}]})
+    };
     let write = bounded_event_id(&database, "v2-write-220").await?;
 
     let attributed = bigname_storage::load_bounded_record_attribution(
@@ -568,6 +592,69 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
     assert!(attributed.is_empty(), "{attributed:?}");
     assert!(
         bigname_storage::load_positional_record_names(&database.pool, &[write, other])
+            .await?
+            .is_empty()
+    );
+    database.cleanup().await
+}
+
+// A name whose latest pointer is an ENSv1 mirror that cannot be followed has no attributed writes
+// in its history, superseded pointers included; the events feed then gives the earlier write no
+// name either, so a named write is always in the named name's history.
+#[tokio::test]
+async fn positional_names_follow_history_when_a_mirror_cannot_be_followed() -> Result<()> {
+    const MIRROR: &str = "0x00000000000000000000000000000000000b0a2d";
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", V2_POINTED_NAME);
+    let resource = Uuid::from_u128(0xb0a_7000);
+    let mut mirror_pointer = v2_history_event(
+        "v2-mirror-pointer-230",
+        Some(&logical_name_id),
+        Some(resource),
+        "ResolverChanged",
+        230,
+    );
+    mirror_pointer.source_family = "ens_v2_registry_l1".to_owned();
+    mirror_pointer.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    mirror_pointer.after_state = json!({"resolver": MIRROR});
+    let (logical_name_id, resource, manifest_id) =
+        seed_public_resolver_v2_pointer(&database, vec![mirror_pointer]).await?;
+    let write = bounded_event_id(&database, "v2-write-220").await?;
+    // Before the mirror is classified, the 210 pointer's window closes at 230 and still covers the
+    // write, in history and in the feed.
+    assert_eq!(
+        bigname_storage::load_positional_record_names(&database.pool, &[write]).await?,
+        std::collections::BTreeMap::from([(
+            write,
+            std::collections::BTreeSet::from([logical_name_id.clone()])
+        )])
+    );
+    // F3 classifies the new resolver as an ENSv1 mirror it cannot serve.
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_resolver_classification
+            (chain_id, resolver_address, block_number, event_identity, classification,
+             support_status, unsupported_reason, manifest_id)
+         VALUES ($1, $2, 230, 'v2-mirror-classification',
+                 '{\"source_family\": \"ens_v2_resolver_l1\", \"role\": \"ensv1_mirror_resolver\"}',
+                 'unsupported', 'resolver_profile_not_supported', $3)
+         ON CONFLICT (chain_id, resolver_address) DO UPDATE
+         SET classification = EXCLUDED.classification, support_status = 'unsupported',
+             unsupported_reason = EXCLUDED.unsupported_reason, manifest_id = EXCLUDED.manifest_id",
+    )
+    .bind(BOUNDED_CHAIN)
+    .bind(MIRROR)
+    .bind(manifest_id)
+    .execute(&database.pool)
+    .await?;
+    let attributed = bigname_storage::load_bounded_record_attribution(
+        &database.pool,
+        &[resource],
+        Some(&bounded_at(240)),
+    )
+    .await?;
+    assert!(attributed.is_empty(), "{attributed:?}");
+    assert!(
+        bigname_storage::load_positional_record_names(&database.pool, &[write])
             .await?
             .is_empty()
     );

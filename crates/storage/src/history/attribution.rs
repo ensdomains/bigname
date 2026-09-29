@@ -13,6 +13,8 @@
 mod mirror;
 mod sql;
 
+pub(in crate::history) use sql::ENS_V1_POINTER_FAMILIES;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -206,10 +208,13 @@ pub(crate) async fn load_attribution_map(
 /// `RecordVersionChanged` with no logical name) are considered. A write is written for a name when
 /// that name's resolver pointer selected the write's resolver at the write's position and, on a
 /// record-ID resolver, the name's exact link selected the written record there (see
-/// `sql::push_positional_names`). The arms are the producer's attribution arms restricted to
-/// pointers and links recorded before the write, so a name returned here also attributes the write
-/// in its own history, while a pointer or link recorded after the write never names it. Callers
-/// name a write only when exactly one name is returned.
+/// `sql::push_positional_names`). A pointer's window ends at the name's next pointer on that
+/// registry, whichever resource carries it, so a pointer on a successor resource (after wrapping)
+/// closes the predecessor's. The arms are the producer's attribution arms restricted to pointers
+/// and links recorded before the write, and a name is dropped for a resource whose latest pointer
+/// is an unfollowable mirror, which name history attributes nothing to; so a name returned here
+/// also attributes the write in its own history, while a pointer or link recorded after the write
+/// never names it. Callers name a write only when exactly one name is returned.
 pub async fn load_positional_record_names(
     pool: &sqlx::PgPool,
     event_ids: &[i64],
@@ -219,9 +224,6 @@ pub async fn load_positional_record_names(
         return Ok(names);
     }
     let mut snapshot = super::paging::begin_history_snapshot(pool, "record names").await?;
-    // The resources whose pointers can name a write: for a node-keyed write, the resources of the
-    // name whose namehash is the node; for a record-ID write, every resource that pointed at its
-    // resolver. Pointers after the write are loaded too, since they close earlier windows.
     let mut candidates = QueryBuilder::<Postgres>::new("");
     sql::push_positional_candidate_resources(&mut candidates, event_ids);
     let resource_ids: Vec<Uuid> = candidates
@@ -231,6 +233,8 @@ pub async fn load_positional_record_names(
         .context("failed to load the resources whose pointers can name record writes")?;
     if !resource_ids.is_empty() {
         ensure_classification_publications(&mut snapshot, &resource_ids, None).await?;
+        let unfollowable =
+            mirror::load_unfollowable_mirror_resources(&mut snapshot, &resource_ids, None).await?;
         let mut builder = QueryBuilder::<Postgres>::new("");
         sql::push_positional_names(&mut builder, &resource_ids, event_ids);
         for row in builder
@@ -239,6 +243,9 @@ pub async fn load_positional_record_names(
             .await
             .context("failed to load the names record writes were made for")?
         {
+            if unfollowable.contains(&row.try_get::<Uuid, _>("resource_id")?) {
+                continue;
+            }
             names
                 .entry(row.try_get("normalized_event_id")?)
                 .or_default()

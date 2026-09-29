@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::history::filters::push_publication_bound;
 
 const READABLE: &str = "('canonical', 'safe', 'finalized')";
-pub(super) const ENS_V1_POINTER_FAMILIES: &str =
+pub(in crate::history) const ENS_V1_POINTER_FAMILIES: &str =
     "('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')";
 pub(super) const ENS_V2_POINTER_FAMILIES: &str = "('ens_v2_registry_l1', 'ens_v2_root_l1')";
 pub(super) const CLEARED: &str = "('0x0000000000000000000000000000000000000000', '')";
@@ -110,11 +110,43 @@ pub(super) fn position(alias: &str) -> String {
 /// `WITH pointer_rows, pointer_windows, pointers`: every readable `ResolverChanged` of the
 /// resources whose name surface is readable, each with the position of the pointer after it
 /// (`end_position`, null on the latest), and the subset that selects a resolver. Clears take part
-/// in the windows, so a clear closes the window before it and opens none.
+/// in the windows, so a clear closes the window before it and opens none. A pointer's window runs
+/// to the next pointer of its resource: the producer's attribution, where each resource keeps the
+/// writes its own pointers selected.
 pub(super) fn push_pointer_ctes<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
+) {
+    push_pointer_ctes_in(builder, resource_ids, published, "chain_id, resource_id");
+}
+
+/// The pointer CTEs with each window running to the next pointer of the same name on the same
+/// registry, whichever resource carries it. An ENSv1 or Basenames registry keeps one resolver per
+/// node, and a pointer recorded on a successor resource (after wrapping, or on the registry-read
+/// anchor) replaces the resolver the predecessor resource's pointer selected. ENSv2 pointers are a
+/// separate stream, since an ENSv2 registry entry does not replace the ENSv1 registry's resolver.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f)
+fn push_name_pointer_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, resource_ids: &'a [Uuid]) {
+    push_pointer_ctes_in(
+        builder,
+        resource_ids,
+        None,
+        &format!(
+            "chain_id, logical_name_id,
+                       CASE WHEN pointer_source_family IN {ENS_V1_POINTER_FAMILIES} THEN 'ens_v1'
+                            WHEN pointer_source_family IN {ENS_V2_POINTER_FAMILIES} THEN 'ens_v2'
+                            ELSE pointer_source_family END"
+        ),
+    );
+}
+
+fn push_pointer_ctes_in<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource_ids: &'a [Uuid],
+    published: Option<&BTreeMap<String, i64>>,
+    partition: &str,
 ) {
     builder.push(format!(
         "WITH pointer_rows AS (
@@ -151,7 +183,7 @@ pub(super) fn push_pointer_ctes<'a>(
         pointer_windows AS (
             SELECT pointer_rows.*,
                    lead(event_position) OVER (
-                       PARTITION BY chain_id, resource_id ORDER BY event_position
+                       PARTITION BY {partition} ORDER BY event_position
                    ) AS end_position
             FROM pointer_rows
         ),
@@ -186,9 +218,9 @@ impl<'a> Arm<'a> {
     fn select(self, window: &str) -> String {
         match self {
             Self::Attribution => format!("SELECT {window}.resource_id, record.normalized_event_id"),
-            Self::Positional(_) => {
-                format!("SELECT record.normalized_event_id, {window}.logical_name_id")
-            }
+            Self::Positional(_) => format!(
+                "SELECT record.normalized_event_id, {window}.logical_name_id, {window}.resource_id"
+            ),
         }
     }
 
@@ -232,28 +264,29 @@ pub(super) fn push_pointer_window_attribution<'a>(
     push_arms(builder, published, Arm::Attribution);
 }
 
-/// `SELECT normalized_event_id, logical_name_id` for each of `event_ids` and each name whose
-/// pointer, among the pointers of `resource_ids`, selected it at the write's position: the write
-/// lies after the pointer and before the pointer after it, and on a record-ID resolver after the
-/// exact link that selected the record and before the next link change. A write to a record the
-/// resolver's zero-node default link also selected at that position is shared with every name
-/// without its own link, so no exact link names it. Mirror substitution takes no part: it serves
-/// ENSv1 writes to an ENSv2 name whose ENSv1 pointer already covers them by node.
+/// `SELECT normalized_event_id, logical_name_id, resource_id` for each of `event_ids` and each
+/// name whose pointer, among the pointers of `resource_ids`, selected it at the write's position:
+/// the write lies after the pointer and before the name's next pointer on that registry, whichever
+/// resource carries it, and on a record-ID resolver after the exact link that selected the record
+/// and before the next link change. A write to a record the resolver's zero-node default link also
+/// selected at that position is shared with every name without its own link, so no exact link
+/// names it. Mirror substitution adds no name: it serves ENSv1 writes to an ENSv2 name whose ENSv1
+/// pointer already covers them by node.
 pub(super) fn push_positional_names<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     resource_ids: &'a [Uuid],
     event_ids: &'a [i64],
 ) {
-    push_pointer_ctes(builder, resource_ids, None);
+    push_name_pointer_ctes(builder, resource_ids);
     push_record_link_ctes(builder, None);
     push_arms(builder, None, Arm::Positional(event_ids));
 }
 
 /// `SELECT resource_id` of every resource whose pointers can name one of `event_ids`: for a
 /// node-keyed write, the resources the name whose namehash is the node pointed with; for a
-/// record-ID write, every resource that pointed at its resolver. All of a resource's pointers are
-/// then read, since a later pointer closes an earlier window. The two arms read the name and the
-/// resolver pointer indexes.
+/// record-ID write, every resource of every name that pointed at its resolver. All pointers of
+/// those names are then read, since a later pointer, on any of the name's resources, closes an
+/// earlier window. The arms read the name and the resolver pointer indexes.
 pub(super) fn push_positional_candidate_resources<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     event_ids: &'a [i64],
@@ -275,7 +308,7 @@ pub(super) fn push_positional_candidate_resources<'a>(
            AND record.event_kind IN ('RecordChanged', 'RecordVersionChanged')
            AND record.after_state ->> 'storage_model' IS DISTINCT FROM 'resolver_record_id'
          UNION
-         SELECT pointer.resource_id
+         SELECT sibling.resource_id
          FROM bigname_phase.normalized_events record
          JOIN bigname_phase.normalized_events pointer
            ON pointer.chain_id = record.chain_id
@@ -285,6 +318,12 @@ pub(super) fn push_positional_candidate_resources<'a>(
           AND pointer.resource_id IS NOT NULL
           AND pointer.after_state ->> 'resolver' IS NOT NULL
           AND pointer.after_state ->> 'resolver' <> ''
+         JOIN bigname_phase.normalized_events sibling
+           ON sibling.logical_name_id = pointer.logical_name_id
+          AND sibling.chain_id = pointer.chain_id
+          AND sibling.event_kind = 'ResolverChanged'
+          AND sibling.resource_id IS NOT NULL
+          AND sibling.canonicality_state IN ('canonical', 'safe', 'finalized')
          WHERE record.normalized_event_id = ANY(",
     );
     builder.push_bind(event_ids);

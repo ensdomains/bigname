@@ -78,6 +78,21 @@ pub(super) async fn load_mirror_attribution(
     Ok(attribution)
 }
 
+/// The resources among `resource_ids` whose latest pointer is an ENSv1 mirror that cannot be
+/// followed. Name history attributes no write to them, superseded pointers included.
+pub(super) async fn load_unfollowable_mirror_resources(
+    connection: &mut PgConnection,
+    resource_ids: &[Uuid],
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<BTreeSet<Uuid>> {
+    Ok(load_mirror_pointers(connection, resource_ids, published)
+        .await?
+        .into_iter()
+        .filter(|mirror| !mirror.followable)
+        .map(|mirror| mirror.resource_id)
+        .collect())
+}
+
 async fn load_mirror_pointers(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
