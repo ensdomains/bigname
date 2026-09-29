@@ -13,6 +13,9 @@ use super::{
 };
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+/// The `owner_getter_reason` the registry adapter records for a registry owner write naming the
+/// admitted Graveyard.
+pub const GRAVEYARD_OWNER_REASON: &str = "graveyard";
 /// The ENSv1 and Basenames registry families, whose transfers the ownerless profile reads.
 const V1_REGISTRIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
 
@@ -75,13 +78,35 @@ impl OwnerEvent {
         })
     }
 
-    /// The owner this event reports to the served control block: null when
-    /// its owner word is unmasked, else its registry_owner, else its owner.
+    /// Whether this event names no owner the served reads report: its owner word is unmasked,
+    /// or the owner is the admitted Graveyard (`owner_getter_reason = graveyard`), which holds
+    /// the records it claims or clears as burned.
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+    pub fn names_no_owner(&self) -> bool {
+        self.owner_word_unmasked == Some(true) || self.graveyard_held()
+    }
+
+    /// Whether this write makes the admitted Graveyard the node's registry owner
+    /// (`owner_getter_reason = graveyard`).
+    pub fn graveyard_held(&self) -> bool {
+        self.owner_getter_reason.as_deref() == Some(GRAVEYARD_OWNER_REASON)
+    }
+
+    /// The owner this event reports to the served control block, the registry getter's view of
+    /// it (`owner(node)`): none when it names no owner (`names_no_owner`); else the owner getter the
+    /// adapter recorded, which is the owner for an ordinary word and zero for a literal zero or,
+    /// on a registry whose getter maps its own address to zero, for that address
+    /// (`owner_getter_reason = registry_self`); else, for a payload written before the getter
+    /// was recorded, its registry_owner, else its owner.
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
     pub fn reported_owner(&self) -> Option<String> {
-        if self.owner_word_unmasked == Some(true) {
+        if self.names_no_owner() {
             None
         } else {
-            self.registry_owner.clone().or_else(|| self.owner.clone())
+            self.owner_getter
+                .clone()
+                .or_else(|| self.registry_owner.clone())
+                .or_else(|| self.owner.clone())
         }
     }
 }

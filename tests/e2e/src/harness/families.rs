@@ -252,6 +252,7 @@ pub async fn address_names(
             AddressNamesCurrentSort::Name,
             AddressNamesCurrentOrder::Asc,
             cursor.as_ref(),
+            None,
             PAGE,
         )
         .await?;

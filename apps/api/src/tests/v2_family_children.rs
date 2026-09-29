@@ -39,9 +39,9 @@ fn child_registry_event(
 
 /// alpha.eth, bound at 200, holds two ENSv1 registry edges (carol, dave: no surface, labels by
 /// preimage) and, through its ENSv2 subregistry `b1`, two registrations (one, two: surfaced).
-/// dave's node is later transferred to the zero owner; dave has no surface, and the override is
-/// keyed by name, so dave stays listed. one.alpha.eth holds an ENSv1 edge of its own (erin), so
-/// its subname count is one. Published at 240.
+/// dave's node is later transferred to the zero owner, which is its node's current registry owner,
+/// so dave has no owner and is not listed. one.alpha.eth holds an ENSv1 edge of its own (erin),
+/// so its subname count is one. Published at 240.
 async fn seed_family_children_fixture(database: &TestDatabase) -> Result<()> {
     seed_family_children_fixture_expiring(database, 1_900_000_000, 1_900_000_000).await
 }
@@ -185,13 +185,12 @@ async fn v2_subnames_from_families() -> Result<()> {
         names,
         [
             &json!("carol.alpha.eth"),
-            &json!("dave.alpha.eth"),
             &json!("one.alpha.eth"),
             &json!("two.alpha.eth")
         ],
         "{pages:#?}"
     );
-    assert_eq!(pages[0]["total_count"], json!(4), "{pages:#?}");
+    assert_eq!(pages[0]["total_count"], json!(3), "{pages:#?}");
     let counted = read_family_pages(
         &database,
         "/v1/names/alpha.eth/subnames?include=counts&page_size=5",
@@ -207,7 +206,6 @@ async fn v2_subnames_from_families() -> Result<()> {
         counts,
         [
             (&json!("carol.alpha.eth"), &json!(0)),
-            (&json!("dave.alpha.eth"), &json!(0)),
             (&json!("one.alpha.eth"), &json!(1)),
             (&json!("two.alpha.eth"), &json!(0))
         ],
@@ -230,6 +228,59 @@ async fn v2_subnames_from_families() -> Result<()> {
         read_family_response(&database, "/v1/names/missing.eth/subnames?page_size=1")
             .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    database.cleanup().await
+}
+
+/// A 2017 registry `NewOwner` whose owner word was unmasked (#361) serves the word's low 20
+/// bytes as the child's display owner, as the fallback registry's typed read returns it
+/// (docs/architecture.md), though it names no control owner.
+#[tokio::test]
+async fn v2_subnames_serve_an_unmasked_new_owner_word_as_its_low_20_bytes() -> Result<()> {
+    const RAW_WORD: &str = "0x6630353636393265383962390000000000000000000000000000000000000f11";
+    const LOW_20: &str = "0x0000000000000000000000000000000000000f11";
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_children_fixture(&database).await?;
+    insert_family_label_preimage(&database.pool, b"frank").await?;
+    let node = bigname_lookup::ens_namehash_hex("alpha.eth")?;
+    let labelhash = child_labelhash("frank");
+    let child = format!(
+        "{:#x}",
+        alloy_primitives::keccak256(
+            [
+                alloy_primitives::hex::decode(&node)?,
+                alloy_primitives::hex::decode(&labelhash)?
+            ]
+            .concat()
+        )
+    );
+    // The adapter emits both kinds from the one log with the same body.
+    let body = json!({"source_event": "NewOwner", "node": node, "child_node": child,
+                      "labelhash": labelhash, "owner": LOW_20,
+                      "owner_word_unmasked": true, "owner_word_raw": RAW_WORD});
+    let unmasked = |identity: &str, kind: &str| {
+        family_event(identity, None, None, kind, "ens_v1_registry_l1", 241, 0, body.clone())
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            unmasked("children-frank-edge", "SubregistryChanged"),
+            unmasked("children-frank-authority", "AuthorityTransferred"),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 241).await?;
+
+    let pages = read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?;
+    let owners: Vec<(&Value, &Value)> = pages
+        .iter()
+        .flat_map(|page| page["data"].as_array().into_iter().flatten())
+        .map(|row| (&row["name"], &row["owner"]))
+        .collect();
+    assert!(
+        owners.contains(&(&json!("frank.alpha.eth"), &json!(LOW_20))),
+        "{pages:#?}"
+    );
 
     database.cleanup().await
 }

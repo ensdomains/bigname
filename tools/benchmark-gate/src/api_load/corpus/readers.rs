@@ -159,6 +159,7 @@ pub(super) async fn addresses(pool: &PgPool, limit: usize) -> Result<(u64, Vec<A
                         AddressNamesCurrentSort::Name,
                         AddressNamesCurrentOrder::Asc,
                         cursor.as_ref(),
+                        None,
                         BATCH as u64,
                     )
                     .await?;

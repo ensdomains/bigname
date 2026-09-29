@@ -38,12 +38,13 @@ pub use types::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
     AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
     AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary, NameQuery, NameQueryMatch,
+    AddressNamesCurrentSummary, AddressNamesRegistryChildrenChanged, NameQuery, NameQueryMatch,
 };
 
-// Project owns the selected binding. Interpret can close it before the next publication,
-// so read eligibility checks canonicality, not its mutable active_to field.
-pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
+/// The publication half of the read filter: the row's target block is on readable lineage.
+macro_rules! publication_read_filter {
+    () => {
+        r#"
   AND anc.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
       SELECT 1
@@ -56,7 +57,19 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
             'finalized'::bigname_phase.canonicality_state
         )
   )
-  AND surface.canonicality_state IN (
+"#
+    };
+}
+
+/// The read filter of a row with no surface, binding or token lineage to check: a surface-less
+/// registry child's (`families::records::registry_children`).
+pub(crate) const ADDRESS_NAMES_PUBLICATION_READ_FILTER: &str = publication_read_filter!();
+
+// Project owns the selected binding. Interpret can close it before the next publication,
+// so read eligibility checks canonicality, not its mutable active_to field.
+pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = concat!(
+    publication_read_filter!(),
+    r#"  AND surface.canonicality_state IN (
       'canonical'::bigname_phase.canonicality_state,
       'safe'::bigname_phase.canonicality_state,
       'finalized'::bigname_phase.canonicality_state
@@ -101,7 +114,8 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
           )
       )
   )
-"#;
+"#
+);
 
 pub const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
   JOIN bigname_phase.name_surfaces surface

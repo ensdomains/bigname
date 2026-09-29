@@ -35,6 +35,7 @@ use super::{
     rows::{self, BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
+pub use control::RequiredOwnerMissing;
 #[cfg(test)]
 pub(crate) use load::LEASE_CANDIDATES_SQL;
 pub use load::{load_name_facts, load_name_facts_on, namespace_of};

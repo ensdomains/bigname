@@ -28,6 +28,7 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
+pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 pub(super) mod surface;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -42,6 +43,7 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    graveyard: Option<alloy_primitives::Address>,
 ) -> anyhow::Result<Interpreted> {
     // Only ENSv1 admits the LLL-era unmasked-word tolerance (#361).
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
@@ -135,23 +137,24 @@ pub(super) fn interpret(
                 .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
-    if let Some(view) = owner_view.as_ref() {
+    // The registry getter's view of the owner word, `owner(node)`, and why it differs from it.
+    let getter_view = owner_view.as_ref().and_then(|view| match view {
+        RegistryOwnerView::Authentic { owner } => {
+            Some((owner.clone(), graveyard::owner_reason(graveyard, owner)))
+        }
+        RegistryOwnerView::ZeroEquivalent { reason } => {
+            Some((ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned())))
+        }
+        RegistryOwnerView::UnavailableUnmasked => None,
+    });
+    if let Some((getter, reason)) = getter_view.as_ref() {
         let object = after.as_object_mut().expect("registry state is an object");
-        match view {
-            RegistryOwnerView::Authentic { owner } => {
-                object.insert("owner_getter".to_owned(), Value::String(owner.clone()));
-            }
-            RegistryOwnerView::ZeroEquivalent { reason } => {
-                object.insert(
-                    "owner_getter".to_owned(),
-                    Value::String(ZERO_ADDRESS.to_owned()),
-                );
-                object.insert(
-                    "owner_getter_reason".to_owned(),
-                    Value::String(reason.as_str().to_owned()),
-                );
-            }
-            RegistryOwnerView::UnavailableUnmasked => {}
+        object.insert("owner_getter".to_owned(), Value::String(getter.clone()));
+        if let Some(reason) = reason {
+            object.insert(
+                "owner_getter_reason".to_owned(),
+                Value::String(reason.clone()),
+            );
         }
     }
     let previous_registry_owner_word = owner
@@ -205,14 +208,7 @@ pub(super) fn interpret(
             previous.as_ref(),
         )
     } else {
-        if let (Some(owner), Some(view)) = (owner.as_ref(), owner_view.as_ref()) {
-            let (owner_getter, reason) = match view {
-                RegistryOwnerView::Authentic { owner } => (owner.clone(), None),
-                RegistryOwnerView::ZeroEquivalent { reason } => {
-                    (ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned()))
-                }
-                RegistryOwnerView::UnavailableUnmasked => unreachable!(),
-            };
+        if let (Some(owner), Some((owner_getter, reason))) = (owner.as_ref(), getter_view) {
             let owner_view_changed = previous_registry_owner_getter
                 .as_deref()
                 .is_none_or(|previous| !previous.eq_ignore_ascii_case(&owner_getter))

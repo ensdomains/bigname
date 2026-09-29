@@ -270,12 +270,14 @@ pub(super) fn authority_context(
 }
 
 /// One admitted AuthorityEpochChanged: its position, and the authority kind, key and control
-/// owner its after-state carries.
+/// owner its after-state carries. `owner` is `None` when the epoch states no owner at all (F1
+/// records none for a registrar token transfer or grant, which leave the registry owner as it
+/// was), and `Some(None)` for an explicit clear such as a release.
 pub(super) struct Epoch {
     pub(super) position: Position,
     pub(super) kind: Value,
     pub(super) key: Value,
-    pub(super) owner: Option<String>,
+    pub(super) owner: Option<Option<String>>,
 }
 
 /// The name's AuthorityEpochChanged events the admission holds, from F1's latest per arm
@@ -318,8 +320,7 @@ pub(super) fn admitted_epochs(
                 key: member("authority_key"),
                 owner: start
                     .get("owner")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                    .map(|owner| owner.as_str().map(str::to_owned)),
                 position,
             });
         }

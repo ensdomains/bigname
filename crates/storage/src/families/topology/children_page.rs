@@ -280,7 +280,7 @@ pub(crate) async fn page(
 /// The selected children CTEs and the `children` relation (left open, closed by the caller)
 /// after the read filter, the prefix, the expiry fence and, for a registry's labels, the registry
 /// and owner filters, with each child's served fields and `sort_timestamp`.
-fn push_children<'a>(
+pub(super) fn push_children<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     filter: &ChildrenCurrentPageFilter<'a>,

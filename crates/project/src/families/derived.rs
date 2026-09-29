@@ -38,7 +38,8 @@ pub(crate) async fn touched(
              WHERE chain_id = $1 AND block_number = $2
                AND family IN ('project_address_name_fold', 'project_address_controller_candidate',
                               'project_lifecycle_event', 'project_node_record_value',
-                              'project_node_record_partition', 'project_record_id_value')
+                              'project_node_record_partition', 'project_record_id_value',
+                              'project_registry_node_state', 'project_child_edge_candidate')
          )
          SELECT DISTINCT kind, first, second FROM (
              SELECT 'name' AS kind, key ->> 1 AS first, '' AS second
@@ -55,6 +56,17 @@ pub(crate) async fn touched(
               AND event.state_key = journal.key ->> 2
               AND event.event_identity = journal.key ->> 3
              WHERE journal.family = 'project_lifecycle_event'
+             UNION ALL
+             -- An ENSv1 registry node's owner and its child edges touch the node's name id,
+             -- `<namespace>:<node>`, whether or not a surface carries it (NAME_INSERT,
+             -- `registry_children`).
+             SELECT 'name', (key ->> 1) || ':' || (key ->> 2), ''
+             FROM journal
+             WHERE family = 'project_registry_node_state' AND key ->> 1 <> 'basenames'
+             UNION ALL
+             SELECT 'name', (key ->> 1) || ':' || (key ->> 3), ''
+             FROM journal
+             WHERE family = 'project_child_edge_candidate' AND key ->> 4 = 'ens_v1'
              UNION ALL
              SELECT 'node', key ->> 1, before_image ->> 'node'
              FROM journal
@@ -173,8 +185,25 @@ const NAME_DELETE: &str = "/* project:families.derived.name_delete */
 /// retained F2a rows of the name (a grant's or reservation's registrant, a release's prior
 /// registrant, a transfer's recipient), the token holder through those and the fold's token
 /// holder, and the effective controller through every controller candidate's subject besides.
+///
+/// A node an ENSv1 registry NewOwner created (an `ens_v1_registry_l1` SubregistryChanged, which
+/// also writes the node's child edge) is listed for its current registry owner even when no name
+/// surface carries it (crates/storage/src/families/records/registry_children.rs): its
+/// `<namespace>:<node>` id indexes, as `effective_controller`, the owner facts of the node's F2c
+/// row and the owner and getter every such NewOwner reported, which are the edge's.
 const NAME_INSERT: &str = "/* project:families.derived.name_insert */
-    WITH holders AS (
+    WITH registry_children AS (
+        SELECT touched.logical_name_id, created.namespace, created.node,
+               created.owner, created.owner_getter
+        FROM unnest($2::text[]) touched (logical_name_id)
+        JOIN project_registry_owner_event created
+          ON created.chain_id = $1
+         AND created.namespace = split_part(touched.logical_name_id, ':', 1)
+         AND created.node = lower(split_part(touched.logical_name_id, ':', 2))
+        WHERE created.source_family = 'ens_v1_registry_l1'
+          AND created.event_kind = 'SubregistryChanged'
+    ),
+    holders AS (
         SELECT event.decoded_logical_name_id AS logical_name_id, address.address
         FROM project_lifecycle_event event
         CROSS JOIN LATERAL (VALUES (event.registrant), (event.before_registrant),
@@ -195,6 +224,17 @@ const NAME_INSERT: &str = "/* project:families.derived.name_insert */
         FROM project_address_controller_candidate candidate
         WHERE candidate.chain_id = $1 AND candidate.logical_name_id = ANY($2::text[])
           AND candidate.action = 'set'
+        UNION ALL
+        SELECT address.address, child.logical_name_id, 'effective_controller'
+        FROM registry_children child
+        CROSS JOIN LATERAL (VALUES (child.owner), (child.owner_getter)) address (address)
+        UNION ALL
+        SELECT address.address, child.logical_name_id, 'effective_controller'
+        FROM (SELECT DISTINCT logical_name_id, namespace, node FROM registry_children) child
+        JOIN project_registry_node_state state
+          ON state.chain_id = $1 AND state.namespace = child.namespace AND state.node = child.node
+        CROSS JOIN LATERAL (VALUES (state.registry_owner), (state.owner_getter), (state.owner))
+            address (address)
     )
     INSERT INTO project_address_name_index (address, logical_name_id, relation, chain_id)
     SELECT DISTINCT lower(relation.address), relation.logical_name_id, relation.relation, $1

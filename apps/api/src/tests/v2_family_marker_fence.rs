@@ -162,7 +162,7 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
     let mut uri = filtered.to_owned();
     loop {
         let payload = v2_subnames_payload_for_database(&database, &uri).await?;
-        assert_eq!(payload["page"]["total_count"], json!(3), "{uri}");
+        assert_eq!(payload["page"]["total_count"], json!(2), "{uri}");
         let page = v2_subname_names(&payload);
         assert!(!page.iter().any(|name| name == "one.alpha.eth"));
         names.extend(page);
@@ -173,7 +173,8 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
     }
     assert_eq!(
         names,
-        vec!["carol.alpha.eth", "dave.alpha.eth", "two.alpha.eth"]
+        // dave's node is owned by the zero address (seed_family_children_fixture).
+        vec!["carol.alpha.eth", "two.alpha.eth"]
     );
     let unfiltered = v2_subnames_payload_for_database(
         &database,

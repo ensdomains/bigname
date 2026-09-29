@@ -5,12 +5,19 @@
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 
-/// The columns of a composed address-name row set.
+use super::{
+    ADDRESS_NAMES_PUBLICATION_READ_FILTER, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
+    DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
+};
+
+/// The columns of a composed address-name row set. `registry_child` marks a surface-less ENSv1
+/// registry child's row (`families::records::registry_children`), which has no surface binding
+/// and carries its `served_owner`; other rows leave both null.
 const ADDRESS_NAMES_COLUMNS: &str = "anc(address text, logical_name_id text, relation text,
     namespace text, raw_name text, normalized_name text, namehash text, surface_binding_id uuid, resource_id uuid,
     token_lineage_id uuid, binding_kind text, support_status text, unsupported_reason text,
     provenance jsonb, chain_positions jsonb, canonicality_summary jsonb, manifest_version bigint,
-    last_recomputed_at timestamptz)";
+    last_recomputed_at timestamptz, registry_child boolean, served_owner text)";
 
 /// The columns of a composed address-record row set.
 const ADDRESS_RECORDS_COLUMNS: &str = "arc(address text, coin_type text, logical_name_id text,
@@ -52,6 +59,22 @@ impl<'a> RowSource<'a> {
     /// The address-name relation rows, aliased `anc`.
     pub(super) fn push_address_names(self, builder: &mut QueryBuilder<'a, Postgres>) {
         self.push_rows(builder, ADDRESS_NAMES_COLUMNS);
+    }
+
+    /// The `served_rows` CTE definition, followed by a comma: the address-name rows the read
+    /// filter admits, a row with a surface binding through its identity rows and a surface-less
+    /// registry child's through its publication alone.
+    pub(super) fn push_served_address_names(self, builder: &mut QueryBuilder<'a, Postgres>) {
+        builder.push("served_rows AS (SELECT anc.* FROM ");
+        self.push_address_names(builder);
+        builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
+        builder.push(" WHERE anc.registry_child IS NOT TRUE");
+        builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
+        builder.push(" UNION ALL SELECT anc.* FROM ");
+        self.push_address_names(builder);
+        builder.push(" WHERE anc.registry_child");
+        builder.push(ADDRESS_NAMES_PUBLICATION_READ_FILTER);
+        builder.push("),\n        ");
     }
 
     /// The address-record rows, aliased `arc`.
