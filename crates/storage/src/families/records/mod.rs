@@ -20,6 +20,7 @@ mod payload;
 mod pointer;
 mod primary;
 mod profiles;
+mod registry_children;
 mod resolves_to;
 mod resolves_to_serving;
 mod reverse;

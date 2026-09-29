@@ -1903,7 +1903,7 @@ impl ProjectionReader {
                     "namehash": entry.namehash,
                     "resource_id": entry.resource_id.to_string(),
                     "token_lineage_id": entry.token_lineage_id.map(|id| id.to_string()),
-                    "binding_kind": entry.binding_kind.as_str(),
+                    "binding_kind": entry.binding_kind.map(|kind| kind.as_str()),
                     "relation": entry_relation,
                     "relation_facets": [entry_relation],
                     "provenance": entry.provenance,

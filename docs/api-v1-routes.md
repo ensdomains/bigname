@@ -1498,7 +1498,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
-  `created_at`, and `expires_at`. Registry events prove the child node and its
+  `created_at`, and `expires_at`. An ENSv1 or Basenames registry child with no
+  current name row serves its node's current registry owner, `owner(node)`: the
+  owner of its latest `NewOwner` or `Transfer`, so a transfer after the
+  `NewOwner` moves it. A child whose registry owner is the zero address, one
+  the registry reads as zero, or one the admitted Graveyard holds has no
+  owner and is listed only while it has a serving resource. An unmasked 2017
+  registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
   never been observed carries `[<labelhash-without-0x>].<parent-name>` in
@@ -2821,8 +2827,8 @@ introduces it rebuilds Project from full history before serving the option; see
   carries its `unsupported_reason`, and a `current_authority_not_projected`
   row is served `status=ok` and `registration_status=unregistered`.
   A name bigname has never materialized as a
-  [name surface](glossary.md#surface-name-surface) is likewise absent even
-  when its registry owner is proven. On the ENSv1 arm a surface comes from a
+  [name surface](glossary.md#surface-name-surface) has no current name row.
+  On the ENSv1 arm a surface comes from a
   label-bearing registrar or NameWrapper event; a node known only from registry
   owner events — a subname written with `setSubnodeOwner` or
   `setSubnodeRecord`, which emit the labelhash and not the label, and never
@@ -2832,12 +2838,39 @@ introduces it rebuilds Project from full history before serving the option; see
   rules)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L83 @ ens_v1@91c966f).
-  Such a name has no current name row for any relation or `is_migrated` value
-  to list, and this route never serves a
-  [non-name form](glossary.md#non-name-form) for it. Its only listing is the
-  row on its parent's `GET /v1/names/{name}/subnames`, named from a proven
-  preimage or by the placeholder. The same rule applies to reverse inputs of
-  `POST /v1/lookup`.
+  Such an ENSv1 registry child is listed for its current registry owner — the
+  node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
+  `relations: ["manager"]`, exactly while its parent's
+  `GET /v1/names/{name}/subnames` lists it, and as that route serves it:
+  `name` and `display_name` carry the proven, normalization-verified label
+  preimage under the parent, else a [non-name form](glossary.md#non-name-form);
+  `namehash` is the child node, `owner` the registry owner, and
+  `permission_resource_id` the node's registry-only resource. The registry
+  records no lease for it, so `registrant`, `registered_at`, `created_at`,
+  `expires_at`, `authority`, and `migrated_at` are absent,
+  `registration_status` is the value the subnames route serves for a child with
+  no name row, and `is_primary` is `false`. `relation=owner` and
+  `relation=registrant` never list it; any `authority` value and
+  `is_migrated=true` omit it and `is_migrated=false` keeps it; `q` matches its
+  served text; the timestamp sorts place it among the rows without that
+  timestamp; `dedupe=registration` keys it by its registry-only resource. A
+  registry `Transfer` moves the row to the new owner. Once a surface names the
+  child, only its ordinary row is listed; the surface counts from the family
+  publication that includes its block, so a surface Interpret commits after the
+  served publication leaves the child listed here until Project publishes it.
+  A label preimage can arrive without a new publication and rename such a row,
+  which can move it across a `sort=name` cursor, so every continuation cursor
+  is bound to the served renderings of the address's registry children: when
+  any changed since the cursor was issued, the continuation fails as `stale`
+  (409) and the read restarts without a cursor. That holds when the renamed
+  child is the cursor's own anchor too: the renderings are compared before the
+  anchor is checked. A malformed cursor, or one issued before this binding,
+  stays `invalid_input` (400), even when the publication that issued it has
+  since changed: the cursor's shape and binding are checked before its
+  publication. The listing covers the ENSv1 arm: a
+  Basenames registry child with no surface is listed only on its parent's
+  subnames page. Reverse inputs of `POST /v1/lookup` still list only names
+  with a current name row.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 
@@ -3655,7 +3688,7 @@ For a registrar lease first identified by a later readable observation, registra
   omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
   profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
   declaration is supported while the admitted ENSv1 registrar declaration is
-  shadow because registrar-controller label coverage is absent.
+  shadow because registrar-controller registration label coverage is absent.
 - Capabilities from manifest flags: `subnames`, `name_profile`, and
   `name_history` aggregate the active manifests' capability flags (`full` when
   every declaring manifest is supported, `partial` when some are, otherwise

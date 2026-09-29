@@ -382,8 +382,8 @@ async fn registry_migration_legacy_to_current_semantics() -> Result<()> {
             .pointer("/declared_state/control/registry_owner")
             .cloned()
             .unwrap_or(Value::Null),
-        Value::Null,
-        "the exact-name summary does not synthesize registry ownership; the canonical authority event above proves that the current-registry owner stands after the later legacy write: {migrate_body}"
+        migrate_current_owner_hex,
+        "current-registry owner should stand after the later legacy owner write: {migrate_body}"
     );
 
     run.db.cleanup().await?;

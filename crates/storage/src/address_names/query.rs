@@ -5,14 +5,11 @@ mod tests;
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{Postgres, QueryBuilder};
 
+use super::source::RowSource;
 use super::types::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
     NameQuery,
-};
-use super::{
-    DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
-    source::RowSource,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -28,6 +25,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     is_migrated: Option<bool>,
 ) {
     source.push_with(builder);
+    source.push_served_address_names(builder);
     builder.push(
         r#"filtered AS (
             SELECT
@@ -53,16 +51,15 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.canonicality_summary,
                 anc.manifest_version,
                 anc.last_recomputed_at,
+                anc.served_owner,
                 CASE anc.relation
                     WHEN 'registrant' THEN 0
                     WHEN 'token_holder' THEN 1
                     WHEN 'effective_controller' THEN 2
                     ELSE 99
                 END AS relation_rank
-            FROM "#,
+            FROM served_rows anc"#,
     );
-    source.push_address_names(builder);
-    builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
     builder.push(" WHERE anc.address =");
     builder.push(" ");
     builder.push_bind(address);
@@ -118,7 +115,6 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push_bind(crate::MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND);
         builder.push(")");
     }
-    builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
     match dedupe_by {
         AddressNamesCurrentDedupe::Surface => builder.push(
             r#"
@@ -140,7 +136,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 chain_positions,
                 canonicality_summary,
                 manifest_version,
-                last_recomputed_at
+                last_recomputed_at,
+                served_owner
             FROM filtered
             ORDER BY
                 address ASC,
@@ -183,7 +180,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.chain_positions,
                 representatives.canonicality_summary,
                 representatives.manifest_version,
-                representatives.last_recomputed_at
+                representatives.last_recomputed_at,
+                representatives.served_owner
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address
@@ -211,7 +209,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 chain_positions,
                 canonicality_summary,
                 manifest_version,
-                last_recomputed_at
+                last_recomputed_at,
+                served_owner
             FROM filtered
             ORDER BY
                 address ASC,
@@ -255,7 +254,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.chain_positions,
                 representatives.canonicality_summary,
                 representatives.manifest_version,
-                representatives.last_recomputed_at
+                representatives.last_recomputed_at,
+                representatives.served_owner
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address

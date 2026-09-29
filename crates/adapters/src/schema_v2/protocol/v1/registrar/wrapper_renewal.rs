@@ -11,6 +11,16 @@ use crate::schema_v2::{
 
 const ENS_GRACE_PERIOD_SECS: u64 = 90 * 24 * 60 * 60;
 
+/// Roles of the wrapped registrar controllers a manifest may admit. Each renews through
+/// `NameWrapper.renew`, so each renewal carries the wrapper expiry. Sepolia declares a second
+/// NameWrapper-enabled controller beside the first under its own role, because a contract role is
+/// a singleton declaration name within a manifest version.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
+const WRAPPED_REGISTRAR_CONTROLLER_ROLES: [&str; 2] = [
+    "wrapped_registrar_controller",
+    "wrapped_registrar_controller_4477cac",
+];
+
 pub(super) fn event(
     selected: &Selected,
     state: &mut State,
@@ -19,8 +29,14 @@ pub(super) fn event(
     raw: &RawLogInput,
     registration: bool,
 ) -> anyhow::Result<Option<EventDraft>> {
+    let Some(emitter_role) = selected
+        .emitter_role
+        .as_deref()
+        .filter(|role| WRAPPED_REGISTRAR_CONTROLLER_ROLES.contains(role))
+    else {
+        return Ok(None);
+    };
     if registration
-        || selected.emitter_role.as_deref() != Some("wrapped_registrar_controller")
         || previous_active
             .is_none_or(|active| active.authority_source_family != "ens_v1_wrapper_l1")
     {
@@ -54,7 +70,7 @@ pub(super) fn event(
             "expiry":wrapper_expiry,
             "registrar_expiry":registrar_expiry,
             "authority_kind":"wrapper",
-            "emitter_role":"wrapped_registrar_controller",
+            "emitter_role":emitter_role,
             "token_lineage_id":wrapper.token_lineage_id.map(|id| id.to_string()),
         }),
         state_scope: String::new(),

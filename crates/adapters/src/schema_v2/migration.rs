@@ -33,6 +33,7 @@ pub(super) struct RegistrarContext {
     pub(super) migration_enabled: bool,
     pub(super) graveyard_cleanup: bool,
     pub(super) transaction_has_registry_setup: bool,
+    pub(super) registry_graveyard: Option<alloy_primitives::Address>,
 }
 
 pub(super) fn registrar_context(
@@ -68,7 +69,7 @@ pub(super) fn registrar_context(
         graveyard_cleanup: super::protocol::migration::is_graveyard_cleanup(
             selected, raw, &graveyard,
         )?,
-        transaction_has_registry_setup: false,
+        ..RegistrarContext::default()
     })
 }
 

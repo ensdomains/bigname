@@ -194,22 +194,19 @@ pub(crate) async fn get_address_names(
         sort: params.sort,
         order,
     };
+    // The cursor's shape and binding come before its publication, so a malformed or legacy
+    // cursor is invalid input (400) even when the publication that issued it is gone (409).
+    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor_payload
+        .as_ref()
+        .map(|payload| address_names_storage_cursor(payload, &cursor_binding))
+        .transpose()?;
     let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),
         params.namespace.as_deref(),
     )
     .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = address_names_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
 
     let storage_page = bigname_storage::load_address_names_current_page_filtered(
         &state.pool,
@@ -225,10 +222,21 @@ pub(crate) async fn get_address_names(
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
+        cursor_payload
+            .as_ref()
+            .and_then(self::cursor::registry_children_digest),
         params.page_size,
     )
     .await
     .map_err(|error| {
+        // A changed registry-child rendering restarts the read, even when the renamed child is
+        // the cursor's anchor, which the page's anchor check would otherwise reject.
+        if error
+            .downcast_ref::<bigname_storage::AddressNamesRegistryChildrenChanged>()
+            .is_some()
+        {
+            return super::collection_snapshot::restart_required();
+        }
         if storage_cursor.is_some()
             && error
                 .to_string()
@@ -368,7 +376,11 @@ pub(crate) async fn get_address_names(
     };
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(address_names_cursor_payload(cursor, &cursor_binding)))
+        encode(&snapshot.bind_cursor(address_names_cursor_payload(
+            cursor,
+            &cursor_binding,
+            &storage_page.registry_children_digest,
+        )))
     });
     let has_more = next_cursor.is_some();
     let data = storage_page
@@ -480,13 +492,16 @@ pub(crate) fn build_address_name(
 ) -> AddressName {
     let registration = name_registration_fields(name_row, &entry.namespace);
 
+    // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
+    // route serves for it (`subnames::build_subname` with no name row), its registry owner and
+    // the registration fields of no name row, on its registry-only resource.
     AddressName {
         name: entry.normalized_name.clone(),
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
         permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
-        owner: registration.owner,
+        owner: registration.owner.or_else(|| entry.served_owner.clone()),
         registrant: registration.registrant,
         registration_status: registration.registration_status,
         registered_at: registration.registered_at,
@@ -500,7 +515,8 @@ pub(crate) fn build_address_name(
             .copied()
             .map(relation_from_storage)
             .collect(),
-        is_primary: primary_name == Some(entry.normalized_name.as_str()),
+        is_primary: !entry.is_registry_child()
+            && primary_name == Some(entry.normalized_name.as_str()),
         resolution: None,
         resolutions: None,
         subname_count,

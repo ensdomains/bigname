@@ -193,8 +193,8 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     );
     assert_eq!(
         pointer(&alice_body, "/declared_state/control/registry_owner"),
-        Value::Null,
-        "first-ownership setup is not a later control transfer"
+        alice_path,
+        "an active registration serves its current registry owner"
     );
     assert_eq!(
         pointer(&alice_body, "/declared_state/control/latest_event_kind"),

@@ -42,8 +42,8 @@ async fn register_without_resolver_keeps_declared_resolver_empty() -> Result<()>
     );
     assert_eq!(
         pointer("/declared_state/control/registry_owner"),
-        Value::Null,
-        "first-ownership setup is not projected as a later control transfer"
+        format!("{alice:#x}"),
+        "an active registration serves its current registry owner"
     );
     assert_eq!(
         pointer("/declared_state/resolver/address"),

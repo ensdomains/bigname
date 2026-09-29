@@ -366,6 +366,21 @@ for was released; or a resource the name was never bound to), stay outside the w
 and is selected the way any re-registration is.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
 
+A registry-only binding can follow another registry-only binding of the same name and arm: a
+registry `Transfer` opens one, a `reclaim` closes it without opening a lease binding, and a later
+registry `Transfer` opens the next. A registry owner change writes no registrar state, so the
+later binding stands for the same lease as the one it replaced. When a binding's predecessor is
+a registry-only binding that stands for a lease, the binding takes that predecessor's whole
+handoff (the binding it replaced and its position, the wrapped registrar lease and node that
+binding recorded, and the lease with its position) instead of taking the registry-only
+predecessor itself as its lease. The registration then keeps the lease's `resource_id`,
+`registered_at`, expiry and registrant through any number of such bindings. A registrar grant
+that moves a registry-only binding's lease (the successor lease above) moves it for every later
+binding that carried that handoff over, including one opened later in the grant's own block,
+which Project builds before it reaches the block's grants.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+
 The release of the retained lease releases the name like any other lapse. On chain the registry
 keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
 name available again is the registrar, whose `ownerOf` reverts once the lease is past its expiry
@@ -461,7 +476,14 @@ compose each candidate's selected name, lifecycle and permission relations in
 the admitted publication snapshot. Relation vocabulary is `registrant`,
 `token_holder`, and `effective_controller`. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
-relations. Raw unbounded diagnostic address history separately includes retained
+relations. For a node an ENSv1 registry `NewOwner` created, the address index
+also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
+the node's registry owner facts and the owner each such `NewOwner` reported,
+whether or not a surface names the node. A candidate with no
+[name surface](glossary.md#surface-name-surface) composes no name row; the read
+lists it only when the child relation below lists it under its parent and
+serves the requested address as its owner, with the child relation's name and
+the node's registry-only resource, and with no surface binding. Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
 in [the audit route contract](api-v1-routes.md).
 
@@ -505,6 +527,15 @@ migration registry. Its `normalized_event_ids`, `event_identities`,
 not positionally aligned tuples; an input contributes only the identifiers it
 actually owns.
 Reachability is per parent relation, not transitive: hiding a parent-to-child relation does not itself hide that child's children.
+An ENSv1 or Basenames registry child's owner is its node's current registry
+owner, from the node's latest owner-setting registry event, not the owner the
+edge's `NewOwner` reported: a later registry `Transfer` moves it. The owner is
+the registry's owner getter view, so an owner the registry reads as zero is
+zero. An unmasked 2017 registry owner word serves its low 20 bytes as the
+child's display owner, as the fallback registry's typed read returns it
+([architecture](architecture.md)); it still names no control owner. A child with no
+owner, or whose name summary records a zero-owner transfer, publishes a relation
+only while it has a serving resource.
 For registry
 events that expose only a labelhash, The reader composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
@@ -726,6 +757,97 @@ interpreter content hash. Existing events need full-history Interpret redo,
 then stamped Project redo, before deploying the matching API as required by
 [the deployment contract](deployment.md). A Project-only rebuild cannot supply
 the missing event value.
+
+The owner fold reads an epoch's owner only when the epoch states one. An
+`AuthorityEpochChanged` whose after-state carries no `owner`, `registry_owner` or
+`owner_word_unmasked` field, as a registrar grant's or token transfer's, says nothing about the
+registry owner and leaves the fold as the earlier facts set it; an explicit null owner, as a
+release's, still clears. A registrar-authority `SurfaceBound` records as its bound owner the
+registry owner the registrar adapter read from retained registry state (`owner_getter`), and the
+fold reads that bound owner for every admitted, non-state-derived registrar binding of the
+selected resource. So a registry `Transfer` that opened a registry-only binding, whose
+`AuthorityTransferred` sits on the registry-only resource and is no longer admitted once a
+registrar token transfer binds the lease again, still decides the owner served.
+
+For an ENSv1 or Basenames name whose selected binding is not a NameWrapper authority, one rule
+decides the served registry owner: the node's newest registry `NewOwner` or `Transfer` in
+canonical order, from `project_registry_owner_event` and whatever resource the adapter anchored
+it on, wins over every older owner fact. Only a registry write sets `owner(node)`. Every other
+owner fact of such a name either restates one (a binding's bound owner, a registrar transfer's
+retained registry owner, a registry-only or boundary epoch's owner, `NameUnwrapped`'s raw
+controller argument) or clears it (a release's explicit null owner), so a newer fact overrides
+the newest write only when it is such a clear. This covers a zero-equivalent write while the
+lease stays selected, which the adapter anchors on the registry's read-anchor resource and the
+admission does not hold, whatever came between it and the older fact. A NameWrapper-selected
+name keeps the fold, because the owner it serves is the wrapped token's holder while the
+registry names the NameWrapper: its NameWrapper epochs and every admitted NameWrapper
+`TokenControlTransferred` (a `TransferSingle` or `TransferBatch` of the wrapped token) set it,
+and a registrar ERC721 transfer does not, since the NameWrapper holds that token while the name
+is wrapped. Past its NameWrapper expiry, a wrapped name whose `PARENT_CANNOT_CONTROL` fuse is
+burned (an emancipated or locked name, such as an emancipated subname) has no owner in the
+NameWrapper, so `control.registry_owner` is `null` there, like `control.registrant`. A wrapped name
+whose expiry passes without that fuse keeps its token holder as the owner. ENSv2 names keep their
+own fold.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+
+A registry owner write is read as the registry getter's view, `owner(node)`: the event's
+`owner_getter`, which is zero for a literal zero and, on a registry whose getter maps its own
+address to zero, for that address (`owner_getter_reason` `registry_self`), such as a `reclaim` or
+an `unwrapETH2LD` to the registry itself; none when the owner word is unmasked; and the reported
+`registry_owner` or `owner` only for a payload written before the getter was recorded. The raw
+owner an epoch restates never decides the owner of a name the rule above covers.
+
+A registry record the admitted Graveyard holds is burned and names no owner. The Graveyard
+claims a lapsed `.eth` name and clears a subname of a name it holds by making itself the node's
+registry owner, so the registry adapter marks a current-registry `NewOwner` or `Transfer` naming
+the Graveyard of the migration manifest (same chain and namespace, at or after its declared
+start block) with `owner_getter_reason` `graveyard`. Its owner word and getter stay as the chain
+wrote them. Every served read then gives that node no owner: the control owner is none, as
+for an unmasked word; the `owner_required` fallback serves none instead of failing; and the
+subnames route serves no owner, unlike an unmasked word, whose low 20 bytes stay the display
+owner, so a cleared subname with no name row is not listed. The record
+decides even when the name is NameWrapper-selected: a subname wrapped without
+`PARENT_CANNOT_CONTROL` keeps a live, transferable NameWrapper token after the Graveyard clears its
+record, and the owner fold lets the Graveyard-held write win over every later NameWrapper token
+transfer, single or batch, so no owner is served again until a newer registry write. The address
+relations read the same write as naming no controller: the `AuthorityTransferred`, and the
+`resource_control` grant or registry-only binding its own log restates it with, set the zero
+controller, which is never listed, so a cleared subname or claimed name with a surface is not
+listed under the Graveyard in `GET /v1/addresses/{address}/names`. The Graveyard's address is not
+masked: its other relations, such as a live token sent to it, are unchanged. This is
+not the zero owner of `registry_self`, and it does not make the registry ownerless. Known gap
+(TYR-100): any other registry write that moves a wrapped subname away from the NameWrapper, such
+as its unwrapped parent's owner calling `setSubnodeOwner`, keeps the NameWrapper binding
+selected, so the stale token's holder is still served as owner; only the Graveyard's write is
+handled here. The same gap has a Graveyard variant: after the Graveyard clears the record of a
+subname wrapped without `PARENT_CANNOT_CONTROL`, a holder who sends the surviving NameWrapper
+token to the Graveyard makes it the holder of that still-selected binding, and its holder grant
+lists the Graveyard as the subname's `manager` in `GET /v1/addresses/{address}/names`, although
+the served owner stays null. Only the
+admitted Graveyard counts; the Graveyards of superseded Sepolia deployments are not declared
+and their records are served as the chain holds them. A registrant that sends a live `.eth`
+token to the Graveyard keeps the lease running, since the name cannot be registered again
+before its expiry and grace period, so that registration is served as the chain holds it, the
+Graveyard as registrant, until it lapses.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
+
+An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
+registry record always serves a registry owner, because the registry answers `owner(node)` for
+every node. The test is the registration's status and authority kind; it does not look at a
+wrapper, so a wrapped name whose registration authority is the registrar is included. When the fold finds no owner fact, or its latest fact cleared the owner, the
+served owner is the node's latest registry `AuthorityTransferred` kept in
+`project_registry_owner_event` (none when its owner word is unmasked or the admitted Graveyard
+holds the record), or the zero address when
+the registry holds no record of the node. A node with a registry record but no owner the
+families kept is a data-integrity failure: Project does not publish the block, like any other
+integrity failure. A rebuild range composes its names at the range's last block, so there the
+check applies to what that block serves, not to each block inside the range.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary
@@ -1373,7 +1495,10 @@ row of its own, never pruned. Each row keeps the name the adapter emitted,
 which nothing rewrites, beside the name the ENSv1 registrar and wrapper linking
 gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
-block touched. Resolver classification classifies a resolver at the block that
+block touched. A block that changes an ENSv1 registry node's owner row or one
+of its child edges touches the node's `<namespace>:<node>` name id, with or
+without a surface, so the index rows of a registry child follow its registry
+owner. Resolver classification classifies a resolver at the block that
 changed its candidates, the pointers that name it, its proxy upgrades, a
 discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the

@@ -23,6 +23,9 @@ pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
 const LOGICAL_NAME_ID_CURSOR_KEY: &str = "logical_name_id";
 const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
+/// The digest of the address's registry-child renderings the page was read with
+/// (`AddressNamesCurrentSortedPage::registry_children_digest`).
+pub(crate) const REGISTRY_CHILDREN_KEY: &str = "registry_children";
 pub(crate) const SORT_KIND_NAME: &str = "name";
 pub(crate) const SORT_KIND_TIMESTAMP_NULL: &str = "timestamp_null";
 pub(crate) const SORT_KIND_TIMESTAMP_VALUE: &str = "timestamp_value";
@@ -82,10 +85,18 @@ fn cursor_filters(binding: &AddressNamesCursorBinding<'_>) -> BTreeMap<String, S
 pub(crate) fn address_names_cursor_payload(
     cursor: &AddressNamesCurrentSortedCursor,
     binding: &AddressNamesCursorBinding<'_>,
+    registry_children_digest: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         binding.sort.as_str(),
-        cursor_filters(binding),
+        {
+            let mut filters = cursor_filters(binding);
+            filters.insert(
+                REGISTRY_CHILDREN_KEY.to_owned(),
+                registry_children_digest.to_owned(),
+            );
+            filters
+        },
         cursor_last_item(cursor),
         None,
     )
@@ -95,7 +106,13 @@ pub(crate) fn address_names_storage_cursor(
     payload: &CursorPayload,
     binding: &AddressNamesCursorBinding<'_>,
 ) -> V2Result<AddressNamesCurrentSortedCursor> {
-    if payload.sort != binding.sort.as_str() || payload.filters != cursor_filters(binding) {
+    // The storage read checks the registry-children digest (`registry_children_digest`); every
+    // other filter must be the request's own.
+    let mut filters = payload.filters.clone();
+    if payload.sort != binding.sort.as_str()
+        || filters.remove(REGISTRY_CHILDREN_KEY).is_none()
+        || filters != cursor_filters(binding)
+    {
         return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 4 {
@@ -211,4 +228,15 @@ fn relation_filter_value(value: Option<&RelationSet>) -> String {
     value
         .map(RelationSet::canonical_value)
         .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned())
+}
+
+/// The registry-child digest a continuation's cursor was issued with, which the storage read
+/// compares with the page's before it validates the cursor's anchor: a label preimage that arrived
+/// for one of the children (or one appearing or leaving) can move it across the cursor in a
+/// name-sorted page, so the read must restart.
+pub(crate) fn registry_children_digest(payload: &CursorPayload) -> Option<&str> {
+    payload
+        .filters
+        .get(REGISTRY_CHILDREN_KEY)
+        .map(String::as_str)
 }

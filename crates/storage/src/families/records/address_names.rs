@@ -11,6 +11,9 @@
 //! block in `chain_positions`, `manifest_version`) or the effective-controller support status
 //! from the permission resource summary; no route reads them.
 //!
+//! The page adds the ENSv1 registry children with no name surface that the address owns
+//! (`registry_children.rs`), which no name row composes for.
+//!
 //! A page is read in one snapshot (`read_snapshot`).
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,11 +53,26 @@ pub async fn load_family_address_names_page(
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
+    expected_registry_children_digest: Option<&str>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
-    let (rows, names) = compose_address_name_rows(&mut snapshot, address, namespace, false).await?;
-    let page = load_address_names_page_from(
+    let (mut rows, names) =
+        compose_address_name_rows(&mut snapshot, address, namespace, false).await?;
+    // The surface-less ENSv1 registry children the address owns, which compose no name row.
+    let (children, registry_children_digest) =
+        super::registry_children::compose_registry_child_rows(&mut snapshot, address, namespace)
+            .await?;
+    // Before the page validates the cursor's anchor, which a renamed child no longer matches.
+    if expected_registry_children_digest
+        .is_some_and(|expected| expected != registry_children_digest)
+    {
+        return Err(crate::AddressNamesRegistryChildrenChanged.into());
+    }
+    if let Value::Array(rows) = &mut rows {
+        rows.extend(children);
+    }
+    let mut page = load_address_names_page_from(
         &mut snapshot,
         RowSource::Composed {
             rows: &rows,
@@ -73,6 +91,7 @@ pub async fn load_family_address_names_page(
         page_size,
     )
     .await?;
+    page.registry_children_digest = registry_children_digest;
     snapshot.commit().await?;
     Ok(page)
 }

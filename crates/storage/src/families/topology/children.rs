@@ -162,18 +162,34 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
         ), v1_edges AS (
             -- The latest edge for the child across parents and arms (ranked_v1), so a child is
             -- never served under a parent it has left.
-            -- A zero current owner overrides the edge's owner; any other owner does not, as
-            -- project_latest_registry_owner keeps zero owners only. The child's name summary
-            -- carries whether its node's latest registry transfer names the zero owner.
+            -- The owner is the child node's current registry owner, `owner(node)`: the node's
+            -- latest owner-setting registry event (F2c, `project_registry_node_state`), so a
+            -- Transfer after the NewOwner moves it. That is the registry's owner getter view
+            -- (zero for an owner the registry reads as zero), else the reported owner. An
+            -- unmasked LLL owner word serves its low 20 bytes as the display owner, as the
+            -- fallback registry's typed read returns it (docs/architecture.md, the 2017
+            -- registry); the admitted Graveyard holding a record it claimed or cleared names
+            -- no owner. The edge's own owner serves only a node
+            -- with no F2c row, which the NewOwner that writes the edge always writes. A zero
+            -- owner in the child's name summary (its node's latest registry transfer names the
+            -- zero owner) still overrides.
             SELECT edge.*, parent.logical_name_id AS edge_parent_logical_name_id,
                    parent.namespace || ':' || edge.child_node AS child_logical_name_id,
                    CASE WHEN {zero_owner} THEN {ZERO_ADDRESS}
-                        ELSE lower(COALESCE(edge.owner_getter, edge.owner))
+                        WHEN node_state.node IS NULL
+                            THEN lower(COALESCE(edge.owner_getter, edge.owner))
+                        WHEN node_state.owner_word_unmasked THEN lower(node_state.owner)
+                        WHEN node_state.owner_getter_reason = 'graveyard' THEN NULL
+                        ELSE lower(COALESCE(node_state.owner_getter, node_state.registry_owner,
+                                            node_state.owner))
                    END AS served_owner
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_child_edge_candidate edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
              AND edge.parent_node = parent.node
+            LEFT JOIN bigname_phase.project_registry_node_state node_state
+              ON node_state.chain_id = edge.chain_id AND node_state.namespace = edge.namespace
+             AND node_state.node = edge.child_node
             WHERE NOT EXISTS (
                 SELECT 1 FROM bigname_phase.project_child_edge_candidate other
                 WHERE other.chain_id = edge.chain_id AND other.namespace = edge.namespace

@@ -973,8 +973,10 @@ fn transaction_hash(number: i64) -> String {
 /// [deployment profile](../../../docs/glossary.md#deployment-profile) now makes that requirement
 /// satisfiable: one active
 /// `ens_v1_registrar_l1` declaration owns the BaseRegistrar address that the ENSv1→ENSv2
-/// migration family names for correlation, while registrar-controller contracts remain
-/// unadmitted. (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+/// migration family names for correlation. The wrapped registrar controller admitted for its
+/// renewals is declared in the same family under its own role; its observations are not
+/// `registrar` observations, so it is never a predecessor source.
+/// (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
 #[tokio::test]
 async fn sepolia_manifest_set_admits_exactly_one_ens_v1_registrar_predecessor_source() -> Result<()>
 {
@@ -1001,13 +1003,28 @@ async fn sepolia_manifest_set_admits_exactly_one_ens_v1_registrar_predecessor_so
     .fetch_all(scratch.pool())
     .await?;
     assert_eq!(
-        registrar_sources.len(),
-        1,
-        "an activated `.eth` second-level boundary must have one registrar source"
+        registrar_sources
+            .iter()
+            .map(|(_, address, role)| (role.as_str(), address.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("registrar", BASE_REGISTRAR),
+            (
+                "wrapped_registrar_controller",
+                "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72"
+            ),
+            (
+                "wrapped_registrar_controller_4477cac",
+                "0x4477cac137f3353ca35060e01e5aeb777a1ca01b"
+            ),
+        ],
+        "an activated `.eth` second-level boundary must have one registrar source, beside the \
+         renewal-only wrapped controllers"
     );
-    let (_, registrar_address, role) = &registrar_sources[0];
-    assert_eq!(registrar_address, BASE_REGISTRAR);
-    assert_eq!(role, "registrar");
+    let (_, registrar_address, _) = registrar_sources
+        .iter()
+        .find(|(_, _, role)| role == "registrar")
+        .expect("the registrar source");
 
     let migration_registrar: String = sqlx::query_scalar(
         "SELECT lower(manifest_payload #>> '{correlation_addresses,ens_v1_base_registrar}')

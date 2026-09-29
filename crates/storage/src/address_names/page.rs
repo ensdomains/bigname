@@ -86,13 +86,15 @@ pub async fn load_address_names_current_page_sorted_for_relations(
 ) -> Result<AddressNamesCurrentSortedPage> {
     load_address_names_current_page_filtered(
         pool, address, namespace, relations, dedupe_by, q, authority, None, sort, order, cursor,
-        page_size,
+        None, page_size,
     )
     .await
 }
 
 /// The page is read from the owned key families
-/// (`families::records::load_family_address_names_page`).
+/// (`families::records::load_family_address_names_page`). `expected_registry_children_digest`
+/// is the digest a continuation's cursor was issued with; when the page's differs, the read fails
+/// with [`crate::AddressNamesRegistryChildrenChanged`] before validating the cursor's anchor.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_names_current_page_filtered(
     pool: &PgPool,
@@ -106,6 +108,7 @@ pub async fn load_address_names_current_page_filtered(
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
+    expected_registry_children_digest: Option<&str>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     crate::families::records::load_family_address_names_page(
@@ -120,6 +123,7 @@ pub async fn load_address_names_current_page_filtered(
         sort,
         order,
         cursor,
+        expected_registry_children_digest,
         page_size,
     )
     .await
@@ -218,6 +222,7 @@ pub(crate) async fn load_address_names_page_from(
             canonicality_summary,
             manifest_version,
             last_recomputed_at,
+            served_owner,
         "#,
     );
     if sort.is_timestamp() {
@@ -267,6 +272,7 @@ pub(crate) async fn load_address_names_page_from(
         entries,
         next_cursor,
         summary,
+        registry_children_digest: String::new(),
     })
 }
 

@@ -102,8 +102,8 @@ async fn registry_driven_reads() -> Result<()> {
     );
     assert_eq!(
         pointer("/declared_state/control/registry_owner"),
-        Value::Null,
-        "first-ownership setup is not projected as a later control transfer"
+        format!("{alice:#x}"),
+        "an active registration serves its current registry owner"
     );
     let selectors = pointer("/declared_state/record_inventory/selectors");
     let record_keys: Vec<&str> = selectors
