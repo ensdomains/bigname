@@ -36,12 +36,17 @@ pub(super) fn control_owner(
     // release's (`newest_registry_write`).
     let mut owners: Vec<(Position, Option<String>, bool)> = Vec::new();
     let mut kinds: Vec<(Position, &str)> = Vec::new();
+    // A NameWrapper-selected name serves the wrapped token's holder, which a NameWrapper token
+    // transfer moves; a registrar ERC721 transfer does not, since the NameWrapper holds that
+    // token while the name is wrapped.
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+    let wrapper_selected = wrapper_selected(authority);
     for tagged in in_scope {
         let event = tagged.event;
         let masked = event.owner_word_unmasked == Some(true);
         if event.event_kind == "TokenControlTransferred" {
             kinds.push((event.position.clone(), "TokenControlTransferred"));
-            if is_v2 {
+            if is_v2 || (wrapper_selected && event.source_family == "ens_v1_wrapper_l1") {
                 let owner = if masked {
                     None
                 } else {
@@ -150,16 +155,19 @@ fn newest_registry_write<'a>(
     authority: &Authority<'_>,
     is_v2: bool,
 ) -> Option<&'a OwnerEvent> {
-    // The selected binding's authority kind, not the family that bound it: a `NameUnwrapped`
-    // binds the reactivated lease through the NameWrapper's events, as a registrar authority.
-    if is_v2
-        || authority
-            .binding
-            .is_some_and(|binding| binding.authority_kind.as_deref() == Some("wrapper"))
-    {
+    if is_v2 || wrapper_selected(authority) {
         return None;
     }
     facts.registry_node.as_ref()?.latest_transfer()
+}
+
+/// Whether the selected binding is a NameWrapper authority. The binding's authority kind, not
+/// the family that bound it: a `NameUnwrapped` binds the reactivated lease through the
+/// NameWrapper's events, as a registrar authority.
+fn wrapper_selected(authority: &Authority<'_>) -> bool {
+    authority
+        .binding
+        .is_some_and(|binding| binding.authority_kind.as_deref() == Some("wrapper"))
 }
 
 /// What the owner fold found: the owner its latest owner fact reports (none for a clear or an

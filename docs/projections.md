@@ -778,7 +778,10 @@ the newest write only when it is such a clear. This covers a zero-equivalent wri
 lease stays selected, which the adapter anchors on the registry's read-anchor resource and the
 admission does not hold, whatever came between it and the older fact. A NameWrapper-selected
 name keeps the fold, because the owner it serves is the wrapped token's holder while the
-registry names the NameWrapper; ENSv2 names keep theirs.
+registry names the NameWrapper: its NameWrapper epochs and every admitted NameWrapper
+`TokenControlTransferred` (a `TransferSingle` or `TransferBatch` of the wrapped token) set it,
+and a registrar ERC721 transfer does not, since the NameWrapper holds that token while the name
+is wrapped. ENSv2 names keep their own fold.
 
 A registry owner write is read as the registry getter's view, `owner(node)`: the event's
 `owner_getter`, which is zero for a literal zero and, on a registry whose getter maps its own

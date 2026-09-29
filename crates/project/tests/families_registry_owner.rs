@@ -766,3 +766,82 @@ async fn an_unwrap_to_the_registry_itself_serves_the_zero_owner() -> Result<()> 
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+/// A wrapped name serves the wrapped token's holder, so an ordinary NameWrapper `TransferSingle`
+/// moves the served owner with the registrant; a registrar ERC721 transfer does not, since the
+/// registrar token is the NameWrapper's while the name is wrapped.
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_wrapped_token_transfer_moves_the_served_owner() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_wrapped_transfer", 20).await?;
+    let wrapper = uuid(5);
+    registered(&fixture, 10, ALICE, Some(11)).await?;
+    // wrapETH2LD: the registrar reclaims the node for the NameWrapper, which binds its token.
+    write(
+        &fixture,
+        11,
+        1,
+        "AuthorityTransferred",
+        V1_REGISTRY,
+        &lease(),
+        json!({"source_event": "NewOwner", "node": ETH_NODE, "child_node": node(),
+               "owner": NAME_WRAPPER, "owner_getter": NAME_WRAPPER, "emitter_role": "registry"}),
+    )
+    .await?;
+    write(
+        &fixture,
+        11,
+        2,
+        "TokenControlTransferred",
+        V1_REGISTRAR,
+        &lease(),
+        json!({"from": ALICE, "to": NAME_WRAPPER, "namehash": node(),
+               "source_event": "Transfer"}),
+    )
+    .await?;
+    fixture
+        .binding(&uuid(110), &name(), &wrapper, "ens_v1", 11, 3, None)
+        .await?;
+    let wrapped = json!({"source_event": "NameWrapped", "node": node(), "owner": BOB,
+                         "fuses": 0, "wrapper_state": "wrapped", "expiry": EXPIRY,
+                         "authority_kind": "wrapper", "authority_key": "wrapper:key",
+                         "surface_known": true, "binding_kind": "declared_registry_path"});
+    for kind in ["SurfaceBound", "AuthorityEpochChanged"] {
+        write(&fixture, 11, 3, kind, V1_WRAPPER, &wrapper, wrapped.clone()).await?;
+    }
+    write(
+        &fixture,
+        11,
+        3,
+        "TokenControlTransferred",
+        V1_WRAPPER,
+        &wrapper,
+        json!({"source_event": "NameWrapped", "node": node(), "to": BOB, "fuses": 0,
+               "expiry": EXPIRY, "authority_kind": "wrapper", "authority_key": "wrapper:key"}),
+    )
+    .await?;
+    // BOB sends the wrapped token to CAROL.
+    write(
+        &fixture,
+        12,
+        1,
+        "TokenControlTransferred",
+        V1_WRAPPER,
+        &wrapper,
+        json!({"source_event": "TransferSingle", "operator": BOB, "to": CAROL, "id": node(),
+               "namehash": node(), "value": "1"}),
+    )
+    .await?;
+    let mut owners = Vec::new();
+    for block in [11, 12] {
+        fixture.apply(block, FamilyMode::Normal).await?;
+        owners.push(served(&fixture).await?["owner"].clone());
+    }
+    ensure!(
+        owners == [json!(BOB), json!(CAROL)],
+        "the wrapped holder's transfer moves the served owner: {owners:?}"
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
