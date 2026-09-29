@@ -350,8 +350,9 @@ pub(super) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
               AND registry_event.resource_id IS NOT NULL
               AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
         ) registry
-        -- One probe of each resource's events: OFFSET 0 keeps the lookup a parameterized
-        -- subquery, so no plan can read every event of the chain to join them.
+        -- One lookup of each resource's events: OFFSET 0 keeps the subquery from being pulled
+        -- up, so the planner cannot hash-join the new blocks' resources to every event of the
+        -- chain; the lookup stays parameterized by the resource.
         CROSS JOIN LATERAL (
             SELECT carried_event.logical_name_id
             FROM normalized_events carried_event

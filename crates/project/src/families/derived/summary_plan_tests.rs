@@ -12,6 +12,11 @@
 //! share of the chain and may hash-join it to a scan of every event, which is why the lookup is
 //! a parameterized subquery.
 //!
+//! The test pins access paths, not the cost of the whole statement. It checks three scans (the
+//! block's registry events, its surfaces and the per-resource lookup) and makes no row or
+//! buffer assertions. It does not cover the other CTEs' plans, the `clocked` lookup against a
+//! populated `project_name_summary`, or how long a resource with a long history takes to probe.
+//!
 //! The rows are those of the statement before the fix, which joined the marker row for the
 //! lower bound, for a one-block follow, a multi-block rebuild range, and a rebuild from a reset
 //! family marker.
