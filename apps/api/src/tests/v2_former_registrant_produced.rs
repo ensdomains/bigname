@@ -150,7 +150,7 @@ async fn publish_release(database: &TestDatabase, unregister: bool) -> Result<()
     database
         .seed_snapshot_selector_chain_positions(&json!({CHAIN: {
             "chain_id": CHAIN, "block_number": 123, "block_hash": "0xhistory123",
-            "timestamp": "1700000123"
+            "timestamp": "2023-11-14T22:15:23Z"
         }}))
         .await?;
     publish_test_families_on(&database.pool, CHAIN, 123).await
