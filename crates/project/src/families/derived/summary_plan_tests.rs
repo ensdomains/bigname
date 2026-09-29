@@ -7,7 +7,10 @@
 //! indexes of `normalized_events` and `name_surfaces`, and looks up the other registry events of
 //! each resource it finds by the resource index. The fixture holds 200,000 registry events and
 //! 40,000 name surfaces across 20,000 blocks with sequential scans enabled, so a statement that
-//! could not bound the range from below reads the chain's whole history instead.
+//! could not bound the range from below reads the chain's whole history instead. A plain join
+//! to the resource's events is not enough: a generic plan estimates the bound range at a fixed
+//! share of the chain and may hash-join it to a scan of every event, which is why the lookup is
+//! a parameterized subquery.
 //!
 //! The rows are those of the statement before the fix, which joined the marker row for the
 //! lower bound, for a one-block follow, a multi-block rebuild range, and a rebuild from a reset
@@ -91,7 +94,7 @@ async fn check_plans(connection: &mut PgConnection) -> Result<()> {
             ),
             (
                 "normalized_events",
-                "carried",
+                "carried_event",
                 &["normalized_events_resource_history_idx"],
                 &["(resource_id = registry_event.resource_id)"],
             ),
@@ -185,37 +188,55 @@ async fn check_rows(connection: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// The statement before the fix: the lower bound of `linked` and `surfaced` came from a join to
-/// the family marker row.
+/// The statement before the fix: `linked` joined every registry event up to `$2` to the other
+/// events of its resource, and it and `surfaced` took their lower bound from a join to the family
+/// marker row. The rest of the statement is unchanged.
 fn before_fix() -> Result<String> {
+    const LINKED: &str = "    linked AS (
+        SELECT DISTINCT carried.logical_name_id
+        FROM normalized_events registry_event
+        LEFT JOIN project_family_marker marker ON marker.chain_id = registry_event.chain_id
+        JOIN normalized_events carried
+          ON carried.resource_id = registry_event.resource_id
+         AND carried.chain_id = $1
+         AND carried.source_family = registry_event.source_family
+         AND carried.logical_name_id IS NOT NULL
+         AND carried.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE registry_event.chain_id = $1 AND registry_event.block_number <= $2
+          AND registry_event.block_number > COALESCE(marker.current_block_number, -1)
+          AND registry_event.resource_id IS NOT NULL
+          AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+    ),
+";
+    const SURFACED: &str = "    surfaced AS (
+        SELECT surface.logical_name_id
+        FROM name_surfaces surface
+        LEFT JOIN project_family_marker marker ON marker.chain_id = surface.chain_id
+        WHERE surface.chain_id = $1 AND surface.block_number <= $2
+          AND surface.block_number > COALESCE(marker.current_block_number, -1)
+    )
+";
     let mut sql = WORK_LIST.to_owned();
-    for (now, before) in [
+    for (from, to, before) in [
         (
-            "FROM normalized_events registry_event\n",
-            "FROM normalized_events registry_event
-        LEFT JOIN project_family_marker marker ON marker.chain_id = registry_event.chain_id\n",
+            "    linked AS (\n",
+            "    -- A name whose composition the clock changes",
+            LINKED,
         ),
         (
-            "registry_event.block_number > $4 AND registry_event.block_number <= $2",
-            "registry_event.block_number <= $2
-          AND registry_event.block_number > COALESCE(marker.current_block_number, -1)",
-        ),
-        (
-            "FROM name_surfaces surface\n",
-            "FROM name_surfaces surface
-        LEFT JOIN project_family_marker marker ON marker.chain_id = surface.chain_id\n",
-        ),
-        (
-            "surface.block_number > $4 AND surface.block_number <= $2",
-            "surface.block_number <= $2
-          AND surface.block_number > COALESCE(marker.current_block_number, -1)",
+            "    surfaced AS (\n",
+            "    SELECT logical_name_id FROM (",
+            SURFACED,
         ),
     ] {
         ensure!(
-            sql.matches(now).count() == 1,
-            "the work list no longer holds {now:?}"
+            sql.matches(from).count() == 1 && sql.matches(to).count() == 1,
+            "the work list no longer holds {from:?} before {to:?}"
         );
-        sql = sql.replace(now, before);
+        let start = sql.find(from).expect("counted above");
+        let end = sql.find(to).expect("counted above");
+        ensure!(start < end, "{from:?} follows {to:?}");
+        sql.replace_range(start..end, before);
     }
     ensure!(!sql.contains("$4"), "the work list binds $4 elsewhere");
     Ok(sql)

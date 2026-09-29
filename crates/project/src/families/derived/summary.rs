@@ -333,17 +333,26 @@ pub(super) const WORK_LIST: &str = r#"/* project:families.derived.summary_names 
     -- last block, for all of its blocks.
     linked AS (
         SELECT DISTINCT carried.logical_name_id
-        FROM normalized_events registry_event
-        JOIN normalized_events carried
-          ON carried.resource_id = registry_event.resource_id
-         AND carried.chain_id = $1
-         AND carried.source_family = registry_event.source_family
-         AND carried.logical_name_id IS NOT NULL
-         AND carried.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE registry_event.chain_id = $1
-          AND registry_event.block_number > $4 AND registry_event.block_number <= $2
-          AND registry_event.resource_id IS NOT NULL
-          AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        FROM (
+            SELECT DISTINCT registry_event.resource_id, registry_event.source_family
+            FROM normalized_events registry_event
+            WHERE registry_event.chain_id = $1
+              AND registry_event.block_number > $4 AND registry_event.block_number <= $2
+              AND registry_event.resource_id IS NOT NULL
+              AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        ) registry
+        -- One probe of each resource's events: OFFSET 0 keeps the lookup a parameterized
+        -- subquery, so no plan can read every event of the chain to join them.
+        CROSS JOIN LATERAL (
+            SELECT carried_event.logical_name_id
+            FROM normalized_events carried_event
+            WHERE carried_event.resource_id = registry.resource_id
+              AND carried_event.chain_id = $1
+              AND carried_event.source_family = registry.source_family
+              AND carried_event.logical_name_id IS NOT NULL
+              AND carried_event.canonicality_state IN ('canonical', 'safe', 'finalized')
+            OFFSET 0
+        ) carried
     ),
     -- A name whose composition the clock changes by this block's time.
     clocked AS (
