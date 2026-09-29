@@ -1817,7 +1817,7 @@ Per friendly `type`, `data` may contain:
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
 | `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
-| `permission` | `address` (the subject), `grant_scope` (as on permission rows), `powers`, `added_powers` and `removed_powers` (product power vocabulary; see [permission change values](#permission-change-values)), `fuses` (uint32 word for NameWrapper fuse changes) |
+| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes); see [permission change values](#permission-change-values) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
@@ -1969,7 +1969,7 @@ directly on the reverse node's resolver without a claim is a `record` row
 
 #### Permission change values
 
-A `permission` row records one change to one grant: the subject `address`
+For a grant with a power set, a `permission` row records one change to the subject `address`
 under one `grant_scope`, in the shape `GET /v1/permissions` rows use. `powers` is the subject's whole set under that
 grant right after the change, including the powers the change left untouched;
 an empty list means the change left the subject nothing under that grant. It
@@ -1995,6 +1995,18 @@ revocation. A NameWrapper fuse change carries `fuses` only. A role change on
 an ENSv2 registry's root resource is stored as `RootPermissionChanged`, which
 is not a `permission` row and carries none of these fields, even though its
 log states the previous roles too.
+
+Admitted BaseRegistrar `ControllerAdded` and `ControllerRemoved` events are
+also `permission` rows. They record registrar-wide controller authorization,
+not a grant on an individual name. Their history-only scope is
+`{"kind":"registrar_controller","detail":{"registrar":{"chain_id":11155111,"address":"0x…"}}}`:
+`chain_id` is the numeric chain ID and `address` is the lowercase emitting
+registrar. The subject `address` is the controller, and `approved` is `true`
+for addition or `false` for removal. These events have no role bitmap or
+power set, so `powers`, `added_powers`, and `removed_powers` are omitted.
+This history scope is not a new current-permission scope and does not make
+the controller a name's `manager` or `role_holder`.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L78-L88 @ ens_v1@91c966f)
 
 ### `GET /v1/names/{name}/history`
 
@@ -2669,9 +2681,14 @@ introduces it rebuilds Project from full history before serving the option; see
   registrant -> `registrant`, and role-holder -> `role_holder`. `role_holder`
   matches an address that holds an ENSv2 registry role on the name's current
   registration, as served by `GET /v1/permissions` with `grant_scope.kind`
-  `registry`: any role, not only the ones that change the name's resolver or
-  subregistry, while the `was_reserved` marker alone is not a role. It does
-  not make the address the `manager`, and it combines with the other
+  `registry`: bigname counts any served role, not only the ones that change
+  the name's resolver or subregistry.
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L23-L45 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L155 @ ens_v2@a971bd64)
+  The `was_reserved` marker alone does not count; it tags a registration's
+  origin rather than authorizing an operation.
+  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
+  Holding a role does not make the address the `manager`, and it combines with the other
   relations: an owner that also holds a role matches both. Roles held on the
   registry root and ENSv2 registry operators add no `role_holder` rows (see
   [address collections](projections.md#address-and-child-collections)), so a

@@ -18,7 +18,8 @@
 //!
 //! The grants are read at request time, so the relation follows the published grant rows with
 //! no Project index of its own. Only the requested address's grants are read
-//! ([`RoleHolderLoad`]), so other holders on the same registration add no work. The candidate names come from the grant's resource through the
+//! ([`RoleHolderLoad`]), without processing other holders' grants on the same registration.
+//! The candidate names come from the grant's resource through the
 //! F1 binding candidates; the composed name keeps a holder only while that resource is its
 //! selected resource.
 use std::collections::BTreeMap;
@@ -50,6 +51,7 @@ pub(super) async fn role_name_candidates(
     address: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<(String, String)>> {
+    super::seams::note_role_read("candidates");
     sqlx::query_as(
         "/* storage:families.records.address_role_candidates */
          SELECT DISTINCT grant_row.chain_id, candidate.logical_name_id
@@ -75,8 +77,8 @@ pub(crate) enum RoleHolderLoad<'a> {
     /// address, so the grants of every other subject on the same resources are never read: an
     /// untrusted subregistry can grant roles to any number of accounts on one registration.
     Subject(&'a str),
-    /// No grants. Identity composition serves reverse lookup, which does not serve
-    /// `role_holder`, so it composes no role holders.
+    /// No grants. Used when an explicit relation set excludes `role_holder`, and by identity
+    /// composition for reverse lookup, which does not serve that relation.
     Skip,
 }
 
@@ -105,6 +107,7 @@ pub(super) async fn role_holders(
     if resources.is_empty() {
         return Ok(BTreeMap::new());
     }
+    super::seams::note_role_read("grants");
     let grants: Vec<Value> = sqlx::query_scalar(ROLE_GRANTS_SQL)
         .bind(chain_id)
         .bind(resources)
