@@ -14,8 +14,7 @@ use uuid::Uuid;
 
 use super::{
     query::{
-        escape_like_pattern, push_address_names_current_cursor_after,
-        push_address_names_current_cursor_identity_match,
+        push_address_names_current_cursor_after, push_address_names_current_cursor_identity_match,
         push_address_names_current_cursor_sort_value_match, push_address_names_current_order,
         push_address_names_current_sortable_entries_cte,
     },
@@ -27,7 +26,7 @@ use super::{
     source::RowSource,
     types::{
         AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
-        AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+        AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue, NameQuery,
     },
 };
 use crate::{
@@ -120,7 +119,9 @@ pub(super) async fn load_sorted_entries(
                 AddressNamesCurrentSort::Name => AddressNamesCurrentSortedCursorValue::Name(
                     row.entry.canonical_display_name.clone(),
                 ),
-                AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+                AddressNamesCurrentSort::ExpiresAt
+                | AddressNamesCurrentSort::RegisteredAt
+                | AddressNamesCurrentSort::CreatedAt => {
                     AddressNamesCurrentSortedCursorValue::Timestamp(row.sort_timestamp)
                 }
             },
@@ -212,8 +213,8 @@ pub(super) struct AddressRecordsFilter<'a> {
     pub(super) coins: AddressRecordsCoinSelector<'a>,
     pub(super) namespaces: Option<&'a [String]>,
     pub(super) dedupe_by: AddressNamesCurrentDedupe,
-    pub(super) q: Option<&'a str>,
-    pub(super) authority: Option<&'a str>,
+    pub(super) q: Option<NameQuery<'a>>,
+    pub(super) authority: Option<&'a [&'a str]>,
     pub(super) source: RowSource<'a>,
 }
 
@@ -230,7 +231,7 @@ impl AddressRecordsFilter<'_> {
             parts.push(format!("q {q}"));
         }
         if let Some(authority) = self.authority {
-            parts.push(format!("authority {authority}"));
+            parts.push(format!("authority {}", authority.join(",")));
         }
         parts.push(format!("dedupe_by {}", self.dedupe_by.as_str()));
         parts.join(" ")
@@ -351,17 +352,20 @@ fn push_entries_cte<'a>(
         // Applied while reading `evm_address_rows`.
         AddressRecordsCoinSelector::Evm => {}
     }
-    if let Some(prefix) = filter.q {
+    if let Some(q) = filter.q {
         builder.push(" AND arc.normalized_name LIKE ");
-        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push_bind(q.like_pattern());
         builder.push(" ESCAPE '\\'");
     }
-    if let Some(authority) = filter.authority {
+    if let Some(authorities) = filter
+        .authority
+        .filter(|authorities| !authorities.is_empty())
+    {
         crate::name_current::push_public_authority_filter_in(
             builder,
             filter.source.names(),
             "arc.logical_name_id",
-            authority,
+            authorities,
         );
     }
     builder.push(ADDRESS_RECORDS_CURRENT_READ_FILTER);
@@ -464,7 +468,9 @@ fn ensure_cursor_matches_sort(
     match (sort, &cursor.sort_value) {
         (AddressNamesCurrentSort::Name, AddressNamesCurrentSortedCursorValue::Name(_))
         | (
-            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt,
+            AddressNamesCurrentSort::ExpiresAt
+            | AddressNamesCurrentSort::RegisteredAt
+            | AddressNamesCurrentSort::CreatedAt,
             AddressNamesCurrentSortedCursorValue::Timestamp(_),
         ) => Ok(()),
         _ => bail!(

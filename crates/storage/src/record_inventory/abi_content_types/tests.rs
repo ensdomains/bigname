@@ -163,15 +163,20 @@ fn observation_paths_follow_the_selected_storage_classification() {
         Some("permissioned_resolver")
     ));
     assert!(admits_abi_observations("ens_v2_resolver_l1", None));
-    assert!(!admits_abi_observations(
+    // PublicResolverV2 and the Basenames resolver emit the ordinary ENSv1 `ABIChanged`.
+    assert!(admits_abi_observations(
         "ens_v2_resolver_l1",
         Some("public_resolver_v2")
+    ));
+    assert!(admits_abi_observations("basenames_base_resolver", None));
+    assert!(admits_abi_observations(
+        "basenames_base_resolver",
+        Some("resolver")
     ));
     assert!(!admits_abi_observations(
         "ens_v2_resolver_l1",
         Some("ensv1_mirror_resolver")
     ));
-    assert!(!admits_abi_observations("basenames_base_resolver", None));
     assert!(!admits_abi_observations("ens_v1_registry_l1", None));
 }
 
@@ -377,10 +382,10 @@ fn observation_paths_agree_with_the_checked_in_manifests() {
         ("ens_v1_resolver_l1", Some("public_resolver"), true),
         ("ens_v2_resolver_l1", None, true),
         ("ens_v2_resolver_l1", Some("permissioned_resolver"), true),
-        ("ens_v2_resolver_l1", Some("public_resolver_v2"), false),
+        ("ens_v2_resolver_l1", Some("public_resolver_v2"), true),
         ("ens_v2_resolver_l1", Some("ensv1_mirror_resolver"), false),
-        ("basenames_base_resolver", None, false),
-        ("basenames_base_resolver", Some("resolver"), false),
+        ("basenames_base_resolver", None, true),
+        ("basenames_base_resolver", Some("resolver"), true),
     ] {
         let key = (family.to_owned(), role.map(str::to_owned));
         assert_eq!(

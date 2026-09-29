@@ -648,8 +648,12 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         "forward relation context must not synthesize the flat manager field"
     );
     assert!(profile["data"].get("unsupported_fields").is_none());
-    assert_eq!(profile["data"]["addresses"], json!({}));
-    assert_eq!(profile["data"]["text_records"], json!({}));
+    // Known-empty categories serve empty key lists and maps.
+    let records = &profile["data"]["records"];
+    assert_eq!(records["seen_addresses"], json!([]), "{profile}");
+    assert_eq!(records["addresses"], json!({}), "{profile}");
+    assert_eq!(records["seen_texts"], json!([]), "{profile}");
+    assert_eq!(records["texts"], json!({}), "{profile}");
     let search = v2_conformance_get_json(&database, "/v1/search?q=alice&namespace=ens").await?;
     assert_shared_record_subset(
         &profile["data"],
@@ -695,8 +699,7 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
         &unbacked_profile["data"],
         &unbacked_lookup["data"][0]["record"],
     ] {
-        assert!(record.get("addresses").is_none());
-        assert!(record.get("text_records").is_none());
+        assert!(record.get("records").is_none(), "{record}");
     }
     database.cleanup().await?;
 

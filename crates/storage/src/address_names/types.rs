@@ -74,6 +74,8 @@ pub enum AddressNamesCurrentSort {
     Name,
     ExpiresAt,
     RegisteredAt,
+    /// The name's first observation (`registration.created_at`), not its registration time.
+    CreatedAt,
 }
 
 impl AddressNamesCurrentSort {
@@ -82,11 +84,67 @@ impl AddressNamesCurrentSort {
             Self::Name => "name",
             Self::ExpiresAt => "expires_at",
             Self::RegisteredAt => "registered_at",
+            Self::CreatedAt => "created_at",
         }
     }
 
     pub(super) const fn is_timestamp(self) -> bool {
-        matches!(self, Self::ExpiresAt | Self::RegisteredAt)
+        matches!(self, Self::ExpiresAt | Self::RegisteredAt | Self::CreatedAt)
+    }
+}
+
+/// How a name-list text filter compares its already-normalized text with the stored normalized
+/// name: as a leading prefix or as a substring anywhere in the name. Both are literal byte
+/// comparisons; `%`, `_` and `\` in the text match themselves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NameQueryMatch {
+    #[default]
+    Prefix,
+    Contains,
+}
+
+/// A name-list text filter: normalized text and how it matches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NameQuery<'a> {
+    pub text: &'a str,
+    pub mode: NameQueryMatch,
+}
+
+impl<'a> NameQuery<'a> {
+    pub const fn prefix(text: &'a str) -> Self {
+        Self {
+            text,
+            mode: NameQueryMatch::Prefix,
+        }
+    }
+
+    pub const fn contains(text: &'a str) -> Self {
+        Self {
+            text,
+            mode: NameQueryMatch::Contains,
+        }
+    }
+
+    /// The `LIKE ... ESCAPE '\'` pattern that matches the text literally in this mode.
+    pub fn like_pattern(&self) -> String {
+        let escaped = self
+            .text
+            .replace('\\', r"\\")
+            .replace('%', r"\%")
+            .replace('_', r"\_");
+        match self.mode {
+            NameQueryMatch::Prefix => format!("{escaped}%"),
+            NameQueryMatch::Contains => format!("%{escaped}%"),
+        }
+    }
+}
+
+impl std::fmt::Display for NameQuery<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.mode {
+            NameQueryMatch::Prefix => write!(formatter, "prefix {}", self.text),
+            NameQueryMatch::Contains => write!(formatter, "contains {}", self.text),
+        }
     }
 }
 

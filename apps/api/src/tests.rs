@@ -413,6 +413,8 @@ include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
 include!("tests/v2_address_resolves_to_evm_plan.rs");
+#[path = "tests/v2_address_name_queries.rs"]
+mod v2_address_name_queries;
 #[path = "tests/v2_authority_ens_v0.rs"]
 mod v2_authority_ens_v0;
 #[path = "tests/v2_authority_ens_v0_produced.rs"]
@@ -434,6 +436,7 @@ include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
 include!("tests/v2_record_inventory_abi.rs");
+include!("tests/v2_node_record_events.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_query_params.rs");

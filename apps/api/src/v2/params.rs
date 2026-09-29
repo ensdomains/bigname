@@ -1,11 +1,12 @@
 use serde::Deserialize;
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
+use super::name_filter::NameMatch;
 use super::support::parse_evm_address;
 use super::{
     error::{V2Error, V2Result},
     vocab::{
-        AddressNamesDedupe, AddressNamesSort, Authority, Finality, HistoryEventType,
+        AddressNamesDedupe, AddressNamesSort, Authority, AuthoritySet, Finality, HistoryEventType,
         HistoryEventTypeSet, HistoryScope, Relation, RelationSet,
     },
 };
@@ -40,6 +41,8 @@ pub(crate) struct RawQueryParams {
     pub(crate) expires_after: Option<String>,
     pub(crate) expires_before: Option<String>,
     pub(crate) q: Option<String>,
+    #[serde(rename = "match")]
+    pub(crate) name_match: Option<String>,
     pub(crate) dedupe: Option<String>,
     pub(crate) sort: Option<String>,
     pub(crate) order: Option<String>,
@@ -65,7 +68,7 @@ pub(crate) struct QueryParams {
     pub(crate) resolver: Option<ResolverSelector>,
     pub(crate) contract_address: Option<String>,
     pub(crate) relation: Option<RelationSet>,
-    pub(crate) authority: Option<Authority>,
+    pub(crate) authority: Option<AuthoritySet>,
     pub(crate) is_migrated: Option<bool>,
     pub(crate) from_block: Option<i64>,
     pub(crate) to_block: Option<i64>,
@@ -74,6 +77,9 @@ pub(crate) struct QueryParams {
     pub(crate) expires_after: Option<OffsetDateTime>,
     pub(crate) expires_before: Option<OffsetDateTime>,
     pub(crate) q: Option<String>,
+    /// How a list route's `q` matches; routes that do not allowlist `match` never see
+    /// anything but the default.
+    pub(crate) name_match: NameMatch,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) sort: AddressNamesSort,
     /// The trimmed `sort` value as sent, for routes whose default sort is not `name` and that
@@ -158,6 +164,7 @@ impl TryFrom<RawQueryParams> for QueryParams {
             expires_after: parse_expiry_bound(raw.expires_after, "expires_after")?,
             expires_before: parse_expiry_bound(raw.expires_before, "expires_before")?,
             q: trim_to_option(raw.q),
+            name_match: NameMatch::parse(raw.name_match.as_deref())?,
             dedupe: parse_dedupe(raw.dedupe.as_deref())?,
             sort: parse_sort(raw.sort.as_deref())?,
             sort_wire: trim_to_option(raw.sort),
@@ -343,13 +350,21 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
         .ok_or_else(|| invalid_parameter("relation"))
 }
 
-fn parse_authority(value: Option<&str>) -> V2Result<Option<Authority>> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(None),
-        Some(value) => Authority::from_wire(value)
-            .map(Some)
-            .ok_or_else(|| invalid_parameter("authority")),
-    }
+/// A comma-separated set of `ens_v0`, `ens_v1` and `ens_v2`, matched as OR. Blank segments are
+/// skipped and repeats collapse, as for `relation`; a value with no segment left is invalid.
+fn parse_authority(value: Option<&str>) -> V2Result<Option<AuthoritySet>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let authorities = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| Authority::from_wire(part).ok_or_else(|| invalid_parameter("authority")))
+        .collect::<V2Result<Vec<_>>>()?;
+    AuthoritySet::from_authorities(authorities)
+        .map(Some)
+        .ok_or_else(|| invalid_parameter("authority"))
 }
 
 fn parse_registration_id(value: Option<String>) -> V2Result<Option<String>> {
@@ -442,6 +457,7 @@ fn parse_sort(value: Option<&str>) -> V2Result<AddressNamesSort> {
         None | Some("name") => Ok(AddressNamesSort::Name),
         Some("expires_at") => Ok(AddressNamesSort::ExpiresAt),
         Some("registered_at") => Ok(AddressNamesSort::RegisteredAt),
+        Some("created_at") => Ok(AddressNamesSort::CreatedAt),
         Some(_) => Err(invalid_parameter("sort")),
     }
 }

@@ -2,8 +2,8 @@
 //! routes resolve every container they serve through one batched storage read.
 
 use bigname_storage::{
-    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable, IdentityRecordInventoryRow,
-    RecordInventoryCurrentRow, record_version_boundary_storage_key,
+    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable, RecordInventoryCurrentRow,
+    record_version_boundary_storage_key,
 };
 use sqlx::PgPool;
 use tracing::error;
@@ -30,20 +30,6 @@ pub(crate) fn abi_input_for_row<'a>(
         authoritative: serving_record_inventory(Some(row)).is_some(),
         resource_id: row.resource_id,
         record_version_boundary_key: boundary_key,
-        provenance: &row.provenance,
-        chain_positions: &row.chain_positions,
-        last_recomputed_at: row.last_recomputed_at,
-    }
-}
-
-/// The lookup route's identity-facade row; authority follows `InventorySections`.
-pub(crate) fn abi_input_for_identity_row(
-    row: &IdentityRecordInventoryRow,
-) -> AbiContentTypesInput<'_> {
-    AbiContentTypesInput {
-        authoritative: row.support_status == "supported",
-        resource_id: row.resource_id,
-        record_version_boundary_key: &row.record_version_boundary_key,
         provenance: &row.provenance,
         chain_positions: &row.chain_positions,
         last_recomputed_at: row.last_recomputed_at,

@@ -41,7 +41,9 @@ pub(super) fn address_names_current_sorted_cursor_from_entry(
             AddressNamesCurrentSort::Name => {
                 AddressNamesCurrentSortedCursorValue::Name(row.entry.canonical_display_name.clone())
             }
-            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+            AddressNamesCurrentSort::ExpiresAt
+            | AddressNamesCurrentSort::RegisteredAt
+            | AddressNamesCurrentSort::CreatedAt => {
                 AddressNamesCurrentSortedCursorValue::Timestamp(row.sort_timestamp)
             }
         },
@@ -84,7 +86,9 @@ pub(super) fn ensure_address_names_current_cursor_matches_sort(
     match (sort, &cursor.sort_value) {
         (AddressNamesCurrentSort::Name, AddressNamesCurrentSortedCursorValue::Name(_))
         | (
-            AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt,
+            AddressNamesCurrentSort::ExpiresAt
+            | AddressNamesCurrentSort::RegisteredAt
+            | AddressNamesCurrentSort::CreatedAt,
             AddressNamesCurrentSortedCursorValue::Timestamp(_),
         ) => Ok(()),
         _ => bail!(

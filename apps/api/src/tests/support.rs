@@ -1418,7 +1418,7 @@ async fn family_record_fixture_inputs_reach_indexed_api_on_both_namespaces() -> 
             body["data"]["resolver"]["address"],
             json!("0x1000000000000000000000000000000000000001")
         );
-        assert_eq!(body["data"]["addresses"]["60"], json!(address));
+        assert_eq!(body["data"]["records"]["addresses"]["60"], json!(address));
         database.cleanup().await?;
     }
     Ok(())

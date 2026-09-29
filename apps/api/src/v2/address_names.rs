@@ -12,15 +12,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
-use super::name_filter::normalize_name_prefix;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_support_for_resources,
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    Authority, Envelope, GrantRelation, Page, QueryParamAllowlist, RegistrationStatus, Relation,
-    RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
-    effective_permission_scope_value, encode,
+    Authority, AuthoritySet, Envelope, GrantRelation, Page, QueryParamAllowlist,
+    RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, decode, effective_permission_scope_value, encode,
     name_record::{load_migrated_at, name_registration_fields, registration_id},
     permission_powers_value,
     restrictions::ResourceRestrictions,
@@ -67,6 +66,7 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "authority",
         "is_migrated",
         "q",
+        "match",
         "sort",
         "order",
         "dedupe",
@@ -175,7 +175,12 @@ pub(crate) async fn get_address_names(
     let storage_sort = sort_to_storage(params.sort);
     let order = params.order.unwrap_or(SortOrder::Asc);
     let storage_order = order_to_storage(order);
-    let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
+    let normalized_q = params
+        .q
+        .as_deref()
+        .map(|q| params.name_match.normalize(q))
+        .transpose()?;
+    let authorities = params.authority.as_ref().map(AuthoritySet::wire_values);
 
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
@@ -183,7 +188,8 @@ pub(crate) async fn get_address_names(
         relation: params.relation.as_ref(),
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
-        authority: params.authority,
+        name_match: params.name_match,
+        authority: params.authority.as_ref(),
         is_migrated: params.is_migrated,
         sort: params.sort,
         order,
@@ -208,8 +214,10 @@ pub(crate) async fn get_address_names(
         namespace_filter.as_deref(),
         storage_relations,
         storage_dedupe,
-        normalized_q.as_deref(),
-        params.authority.map(Authority::as_str),
+        normalized_q
+            .as_deref()
+            .map(|q| params.name_match.to_storage(q)),
+        authorities.as_deref(),
         params.is_migrated,
         storage_sort,
         storage_order,

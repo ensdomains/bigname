@@ -442,6 +442,23 @@ fn repository_loader_rejects_role_free_role_sensitive_event() -> Result<()> {
 }
 
 #[test]
+fn ensv2_abi_changed_needs_its_public_resolver_v2_role() {
+    // Only the PublicResolverV2 node path decodes ENSv2 ABIChanged, so it cannot be role-free.
+    assert!(!event_allows_empty_emitter_roles(
+        "ens_v2_resolver_l1",
+        "ABIChanged",
+        false
+    ));
+    for event in ["AddressChanged", "NameChanged", "ContenthashChanged"] {
+        assert!(event_allows_empty_emitter_roles(
+            "ens_v2_resolver_l1",
+            event,
+            false
+        ));
+    }
+}
+
+#[test]
 fn repository_loader_rejects_chain_directory_mismatch() -> Result<()> {
     let test_dir = TestDir::new()?;
     test_dir.write_manifest_for_chain_combo(

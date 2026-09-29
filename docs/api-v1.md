@@ -67,11 +67,12 @@ step-3-gate vocabulary needed by the route schemas:
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
-| `addresses` | coin-type-to-address map, string keys | `coin_addresses`, `coin_type_addresses` |
+| `records` | on name detail and lookup `profile=detail`: the grouped resolver records `{seen_addresses, addresses, seen_texts, texts, seen_abis, abis, seen_singletons, contenthash, name}`, each `seen_*` key list beside its value map ([grouped records](api-v1-routes.md#grouped-name-profile-records)); on `GET /v1/names/{name}/records`, the route-local per-key answers | flat `addresses`, `text_records`, `content_hash`, and the lookup `inventory` container |
+| `addresses` | inside grouped `records`: coin-type-to-address map, string keys | `coin_addresses`, `coin_type_addresses` |
 | `address` | EVM address used as a subject, filter, or single-address answer | `account`, `subject`, single-address fields named `address` |
 | `coin_type` | ENS/SLIP-44 coin type number. As a request parameter of `GET /v1/addresses/{address}/names?relation=resolves_to` it also accepts the literal `evm`, which selects every EVM coin type | `coin_type` (unchanged; now used consistently for reverse and record lookups) |
-| `text_records` | text-key-to-value map | `text_records` (unchanged) |
-| `content_hash` | contenthash value | `content_hash` (unchanged) |
+| `texts` | inside grouped `records`: text-key-to-value map | `text_records` |
+| `contenthash` | inside grouped `records`: contenthash value | `content_hash` |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
 | `subregistry` | `{chain_id, address}` of the ENSv2 registry a name's current subregistry pointer targets; omitted when there is none | `SubregistryChanged` after-state `subregistry` |
 | `parent_registry` | `{chain_id, address}` of the registry that emitted the pointer to a registry; `null` for the root registry | `SubregistryChanged` emitter |
@@ -667,9 +668,9 @@ lookup pagination semantics: `cursor`, `page_size`, `next_cursor`, and
 
 Flat record optional fields are omitted when there is no backed value. Routes
 do not serialize permanently-null placeholders for optionals such as `manager`.
-Known-empty maps on detail records, such as `addresses` and `text_records`,
-serialize as `{}`; omission means the field is outside the requested field
-budget or unsupported by the served source.
+Known-empty key lists and maps inside a detail record's grouped `records`
+serialize as `[]` and `{}`; omission of `records` means the name serves no
+resolver records from the served source.
 Rows classified as `registration_status=unregistered`, including ownerless
 ENSv2 reservations, have no current registration, so product name detail and
 batch lookup always omit `registration_id`. Resolver and record fields are also
@@ -873,7 +874,7 @@ whole. The records and address routes read their own rows from the families
 too: the record inventory of `GET /v1/names/{name}/records` (default keys,
 indexed answers and `include=inventory`, read at the publication only, so an
 `at` below it answers `409 stale`), the same inventory for name detail's
-record fields (`GET /v1/names/{name}`, both sources) and for
+grouped `records` (`GET /v1/names/{name}`, both sources) and for
 `GET /v1/diagnostics/names/{name}/records`, the address-name relations of
 `GET /v1/addresses/{address}/names`, recomputed at read from the address index
 and the composed names, its `relation=resolves_to` pages (both the exact coin
@@ -1185,12 +1186,16 @@ change public response fields or grant authority to incomplete inventory.
 (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L57-L62 @ basenames@1809bbc)
 
 On `GET /v1/names/{name}` and `POST /v1/lookup` with `profile=detail`, the
-`addresses` convenience map uses the same scalar hex string for each decimal
-coin type, and `content_hash` uses the same contenthash scalar string. Cleared
-exact values are omitted from both convenience fields unless a documented
-derived-record rule supplies a replacement answer. `GET /v1/names/{name}/records`
-has no convenience maps: its per-key `records` answers are its only value
-shape. Diagnostics and
+grouped `records.addresses` map uses the same scalar hex string for each decimal
+coin type, and `records.contenthash` uses the same contenthash scalar string.
+A cleared exact value, including a zero-address `addr:60` clear, is `null`
+there. Indexed `records.addresses` holds exact observed writes only and never
+synthesizes the ENSIP-19 derived default, which indexed detail serves only as
+`primary_address`. Verified detail serves the getter's answer for each key it
+read, so a getter that returns its fallback puts that answer in both
+`records.addresses` and `primary_address`.
+`GET /v1/names/{name}/records` has no grouped object: its per-key `records`
+answers are its only value shape. Diagnostics and
 Project use the internal status `success` for a retained value; product routes
 publish that status as `ok`.
 

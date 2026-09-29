@@ -516,23 +516,27 @@ The declaration must preserve its deployment address, applicable `start_block`,
 namespace, and local deployment provenance. The [official Sepolia deployment](sepolia-deployment.md) uses this same exact direct role. Source
 availability alone does not admit any public-chain address or replace
 `PermissionedResolver` implementation metadata. The source
-contract composes the node-keyed address, text, and contenthash profiles.
+contract composes the node-keyed ABI, address, name, text, and contenthash profiles.
 (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260903@5da83f6)
 
-Only these five exact event signatures are admitted for that direct role:
+Only these seven exact event signatures are admitted for that direct role:
 
 | Signature | Indexed fields |
 | --- | --- |
+| `ABIChanged(bytes32,uint256)` | node, content type |
 | `AddrChanged(bytes32,address)` | node |
 | `AddressChanged(bytes32,uint256,bytes)` | node |
 | `TextChanged(bytes32,string,string,string)` | node, indexed key |
 | `ContenthashChanged(bytes32,bytes)` | node |
+| `NameChanged(bytes32,string)` | node |
 | `VersionChanged(bytes32,uint64)` | node |
 
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/IABIResolver.sol:L5 @ ens_v1_publicresolver_5141a2a@5141a2a)
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/IAddrResolver.sol:L6 @ ens_v1_publicresolver_5141a2a@5141a2a)
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/IAddressResolver.sol:L6-L10 @ ens_v1_publicresolver_5141a2a@5141a2a)
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/ITextResolver.sol:L5-L10 @ ens_v1_publicresolver_5141a2a@5141a2a)
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/IContentHashResolver.sol:L5 @ ens_v1_publicresolver_5141a2a@5141a2a)
+(upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/INameResolver.sol:L5 @ ens_v1_publicresolver_5141a2a@5141a2a)
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1_publicresolver_5141a2a@5141a2a)
 
 Interpret reuses the existing node-event decoder without attaching an ENSv1
@@ -1091,18 +1095,19 @@ otherwise preserves each declaration's role except for the shared-event legacy c
 - `ens_v1_resolver_l1`: `ABIChanged`, `AddrChanged`, `AddressChanged`, `ContentChanged`,
   `ContenthashChanged`, `DNSRecordChanged`, `DNSRecordDeleted`, `DNSZonehashChanged`, `DataChanged`,
   `InterfaceChanged`, `NameChanged`, `TextChanged`, and `VersionChanged`;
-- `basenames_base_resolver`: `AddrChanged`, `AddressChanged`, `NameChanged`, `TextChanged`, and
-  `VersionChanged`;
-- `ens_v2_resolver_l1`: `AliasChanged`, `EACRolesChanged`, `NameChanged`, `NamedAddrResource`,
+- `basenames_base_resolver`: `ABIChanged`, `AddrChanged`, `AddressChanged`, `ContenthashChanged`,
+  `NameChanged`, `TextChanged`, and `VersionChanged`;
+- `ens_v2_resolver_l1`: `AliasChanged`, `EACRolesChanged`, `NamedAddrResource`,
   `NamedResource`, `NamedTextResource`, `ResolverCreated`, `Upgraded`, and the record-ID generation's
   `Linked`, `AddressUpdated`, `ContenthashUpdated`, `ABIUpdated`, `InterfaceUpdated`,
   `TextUpdated`, `DataUpdated`, `NameUpdated`, and `ResourceArgument`.
 
 The canonical typed table is `bigname_manifests::ROLE_INSENSITIVE_EVENTS`; every entry carries a
 justification and the adapter file it describes. A manifest that omits `emitter_roles` for any
-other event is rejected except for `RegistryCreated` as above and the four shared
-`ens_v2_resolver_l1` events `AddressChanged`, `ContenthashChanged`, `TextChanged`, and `VersionChanged`.
-Those four retain only the explicit `public_resolver_v2` role for node decoding, even with empty
+other event is rejected except for `RegistryCreated` as above and the six shared
+`ens_v2_resolver_l1` node events `ABIChanged`, `AddressChanged`, `ContenthashChanged`,
+`NameChanged`, `TextChanged`, and `VersionChanged`.
+Those six retain only the explicit `public_resolver_v2` role for node decoding, even with empty
 `emitter_roles`; other roles become `None`, preserving discovered PermissionedResolver selection
 and collapsing equivalent legacy aliases. The local `AddrChanged` ABI entry uses the explicit public role.
 

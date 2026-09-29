@@ -5,6 +5,7 @@ fn default_binding<'a>() -> SubnamesCursorBinding<'a> {
         namespace: "ens",
         parent_logical_name_id: "ens:parent.eth",
         q: None,
+        name_match: NameMatch::Prefix,
         include_expired: DEFAULT_INCLUDE_EXPIRED,
         sort: AddressNamesSort::Name,
         order: SortOrder::Asc,
@@ -150,6 +151,46 @@ fn subname_cursor_rejects_wrong_sort_or_filter() {
             "{other:?} must reject a cursor bound to {binding:?}"
         );
     }
+}
+
+#[test]
+fn subname_cursor_binds_contains_match_only_with_q() {
+    let cursor = name_cursor();
+    let prefix = SubnamesCursorBinding {
+        q: Some("al"),
+        ..default_binding()
+    };
+    let contains = SubnamesCursorBinding {
+        name_match: NameMatch::Contains,
+        ..prefix
+    };
+    let prefix_payload = subname_cursor_payload(&cursor, &prefix);
+    assert!(!prefix_payload.filters.contains_key("match"));
+    let contains_payload = subname_cursor_payload(&cursor, &contains);
+    assert_eq!(contains_payload.filters["match"], "contains");
+    assert!(subname_storage_cursor(&prefix_payload, &contains).is_err());
+    assert!(subname_storage_cursor(&contains_payload, &prefix).is_err());
+    assert_eq!(
+        subname_storage_cursor(&contains_payload, &contains).expect("same match decodes"),
+        cursor
+    );
+    let no_q = SubnamesCursorBinding {
+        name_match: NameMatch::Contains,
+        ..default_binding()
+    };
+    assert_eq!(
+        subname_cursor_payload(&cursor, &no_q),
+        subname_cursor_payload(&cursor, &default_binding())
+    );
+}
+
+#[test]
+fn subnames_refuse_the_created_at_sort() {
+    assert!(sort_to_storage(AddressNamesSort::CreatedAt).is_err());
+    assert_eq!(
+        sort_to_storage(AddressNamesSort::RegisteredAt).expect("children sort"),
+        ChildrenCurrentSort::RegisteredAt
+    );
 }
 
 #[test]

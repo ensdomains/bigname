@@ -4,10 +4,11 @@ use bigname_storage::{AddressNamesCurrentSortedCursor, AddressNamesCurrentSorted
 use sqlx::types::Uuid;
 
 use crate::v2::{
-    AddressNamesDedupe, AddressNamesSort, Authority, CursorPayload, RelationSet, SortOrder,
+    AddressNamesDedupe, AddressNamesSort, AuthoritySet, CursorPayload, RelationSet, SortOrder,
     V2Result,
     cursor::{cursor_value, invalid_cursor_error},
     format_timestamp,
+    name_filter::NameMatch,
 };
 
 pub(crate) const ADDRESS_FILTER_KEY: &str = "address";
@@ -16,6 +17,7 @@ const RELATION_FILTER_KEY: &str = "relation";
 const DEDUPE_FILTER_KEY: &str = "dedupe";
 const Q_FILTER_KEY: &str = "q";
 const AUTHORITY_FILTER_KEY: &str = "authority";
+const MATCH_FILTER_KEY: &str = "match";
 pub(crate) const ORDER_FILTER_KEY: &str = "order";
 pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
@@ -36,10 +38,48 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
     pub(crate) relation: Option<&'a RelationSet>,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) q: Option<&'a str>,
-    pub(crate) authority: Option<Authority>,
+    pub(crate) name_match: NameMatch,
+    pub(crate) authority: Option<&'a AuthoritySet>,
     pub(crate) is_migrated: Option<bool>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
+}
+
+/// Every filter an ownership-relation cursor binds.
+fn cursor_filters(binding: &AddressNamesCursorBinding<'_>) -> BTreeMap<String, String> {
+    let mut filters = BTreeMap::from([
+        (ADDRESS_FILTER_KEY.to_owned(), binding.address.to_owned()),
+        (
+            NAMESPACE_FILTER_KEY.to_owned(),
+            option_filter(binding.namespace),
+        ),
+        (
+            RELATION_FILTER_KEY.to_owned(),
+            relation_filter_value(binding.relation),
+        ),
+        (
+            DEDUPE_FILTER_KEY.to_owned(),
+            binding.dedupe.as_str().to_owned(),
+        ),
+        (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
+        (
+            "is_migrated".to_owned(),
+            binding
+                .is_migrated
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            AUTHORITY_FILTER_KEY.to_owned(),
+            authority_filter_value(binding.authority),
+        ),
+        (
+            ORDER_FILTER_KEY.to_owned(),
+            binding.order.as_str().to_owned(),
+        ),
+    ]);
+    insert_match_filter(&mut filters, binding.q, binding.name_match);
+    filters
 }
 
 pub(crate) fn address_names_cursor_payload(
@@ -49,41 +89,14 @@ pub(crate) fn address_names_cursor_payload(
 ) -> CursorPayload {
     CursorPayload::new(
         binding.sort.as_str(),
-        BTreeMap::from([
-            (ADDRESS_FILTER_KEY.to_owned(), binding.address.to_owned()),
-            (
-                NAMESPACE_FILTER_KEY.to_owned(),
-                option_filter(binding.namespace),
-            ),
-            (
-                RELATION_FILTER_KEY.to_owned(),
-                relation_filter_value(binding.relation),
-            ),
-            (
-                DEDUPE_FILTER_KEY.to_owned(),
-                binding.dedupe.as_str().to_owned(),
-            ),
-            (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
-            (
-                "is_migrated".to_owned(),
-                binding
-                    .is_migrated
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-            ),
-            (
-                AUTHORITY_FILTER_KEY.to_owned(),
-                option_filter(binding.authority.map(Authority::as_str)),
-            ),
-            (
-                ORDER_FILTER_KEY.to_owned(),
-                binding.order.as_str().to_owned(),
-            ),
-            (
+        {
+            let mut filters = cursor_filters(binding);
+            filters.insert(
                 REGISTRY_CHILDREN_KEY.to_owned(),
                 registry_children_digest.to_owned(),
-            ),
-        ]),
+            );
+            filters
+        },
         cursor_last_item(cursor),
         None,
     )
@@ -93,37 +106,12 @@ pub(crate) fn address_names_storage_cursor(
     payload: &CursorPayload,
     binding: &AddressNamesCursorBinding<'_>,
 ) -> V2Result<AddressNamesCurrentSortedCursor> {
-    if payload.sort != binding.sort.as_str() {
-        return Err(invalid_cursor_error());
-    }
-    // The storage read checks the registry-children digest (`registry_children_digest`).
-    if payload.filters.len() != 9
-        || !payload.filters.contains_key(REGISTRY_CHILDREN_KEY)
-        || payload.filters.get("is_migrated")
-            != Some(
-                &binding
-                    .is_migrated
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-            )
-        || payload.filters.get(ADDRESS_FILTER_KEY).map(String::as_str) != Some(binding.address)
-        || payload
-            .filters
-            .get(NAMESPACE_FILTER_KEY)
-            .map(String::as_str)
-            != Some(option_filter(binding.namespace).as_str())
-        || payload.filters.get(RELATION_FILTER_KEY).map(String::as_str)
-            != Some(relation_filter_value(binding.relation).as_str())
-        || payload.filters.get(DEDUPE_FILTER_KEY).map(String::as_str)
-            != Some(binding.dedupe.as_str())
-        || payload.filters.get(Q_FILTER_KEY).map(String::as_str)
-            != Some(option_filter(binding.q).as_str())
-        || payload
-            .filters
-            .get(AUTHORITY_FILTER_KEY)
-            .map(String::as_str)
-            != Some(option_filter(binding.authority.map(Authority::as_str)).as_str())
-        || payload.filters.get(ORDER_FILTER_KEY).map(String::as_str) != Some(binding.order.as_str())
+    // The storage read checks the registry-children digest (`registry_children_digest`); every
+    // other filter must be the request's own.
+    let mut filters = payload.filters.clone();
+    if payload.sort != binding.sort.as_str()
+        || filters.remove(REGISTRY_CHILDREN_KEY).is_none()
+        || filters != cursor_filters(binding)
     {
         return Err(invalid_cursor_error());
     }
@@ -193,11 +181,15 @@ pub(super) fn cursor_sort_value(
             Ok(AddressNamesCurrentSortedCursorValue::Name(sort_value))
         }
         (
-            AddressNamesSort::ExpiresAt | AddressNamesSort::RegisteredAt,
+            AddressNamesSort::ExpiresAt
+            | AddressNamesSort::RegisteredAt
+            | AddressNamesSort::CreatedAt,
             SORT_KIND_TIMESTAMP_NULL,
         ) if sort_value.is_empty() => Ok(AddressNamesCurrentSortedCursorValue::Timestamp(None)),
         (
-            AddressNamesSort::ExpiresAt | AddressNamesSort::RegisteredAt,
+            AddressNamesSort::ExpiresAt
+            | AddressNamesSort::RegisteredAt
+            | AddressNamesSort::CreatedAt,
             SORT_KIND_TIMESTAMP_VALUE,
         ) if !sort_value.trim().is_empty() => {
             let value = bigname_storage::parse_rfc3339_utc_timestamp(&sort_value)
@@ -210,6 +202,26 @@ pub(super) fn cursor_sort_value(
 
 pub(super) fn option_filter(value: Option<&str>) -> String {
     value.unwrap_or(NONE_FILTER_VALUE).to_owned()
+}
+
+/// The bound `authority`: the set's comma-joined wire values, so a one-value set binds exactly
+/// what a single `authority` cursor bound before sets existed.
+pub(super) fn authority_filter_value(value: Option<&AuthoritySet>) -> String {
+    value
+        .map(AuthoritySet::canonical_value)
+        .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned())
+}
+
+/// Binds `match=contains` only when it narrows a present `q`; a prefix match, the default,
+/// adds no key, so prefix and unfiltered cursors keep the shape they had before `match`.
+pub(super) fn insert_match_filter(
+    filters: &mut BTreeMap<String, String>,
+    q: Option<&str>,
+    name_match: NameMatch,
+) {
+    if q.is_some() && name_match == NameMatch::Contains {
+        filters.insert(MATCH_FILTER_KEY.to_owned(), name_match.as_str().to_owned());
+    }
 }
 
 fn relation_filter_value(value: Option<&RelationSet>) -> String {

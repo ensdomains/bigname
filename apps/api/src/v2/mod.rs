@@ -30,6 +30,7 @@ mod permission_support;
 mod permission_values;
 mod permissions;
 mod primary_name;
+pub(crate) mod record_groups;
 mod registries;
 mod resolvers;
 mod restrictions;
@@ -131,9 +132,10 @@ pub(crate) use subnames::get_subnames;
 #[allow(unused_imports)]
 pub(crate) use vocab::matched_boundary_vocabulary_terms;
 pub(crate) use vocab::{
-    AddressNamesDedupe, AddressNamesSort, Authority, Completeness, Finality, HistoryEventType,
-    HistoryScope, OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus, Relation, RelationSet,
-    Resolver, Source, Status, contains_boundary_vocabulary, shared_product_reason,
+    AddressNamesDedupe, AddressNamesSort, Authority, AuthoritySet, Completeness, Finality,
+    HistoryEventType, HistoryScope, OpsStatus, PRODUCT_PIPELINE_TERMS, RegistrationStatus,
+    Relation, RelationSet, Resolver, Source, Status, contains_boundary_vocabulary,
+    shared_product_reason,
 };
 
 use axum::Router;

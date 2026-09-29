@@ -27,11 +27,11 @@ to the routes and selectors documented in [`api-v1-routes.md`](api-v1-routes.md)
 
 | Capability | Route owner | Notes |
 | --- | --- | --- |
-| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, and with `include=inventory` each name result carries the records route's `inventory` container (known, unset, and unsupported product keys, plus the observed ABI content types, read against the same published inventory row and reported as `abi_observations_stale` if Project replaced that row mid-request), so a caller holding many names reads their key inventories in one request instead of one records read per name. |
-| [Resolver profile](glossary.md#resolver-profile) replay for the [ENSv1→ENSv2 migration](glossary.md#ensv1ensv2-migration) | `POST /v1/lookup` with `profile=detail` and `include=inventory` | Serves the resolver-profile key read that the ENS manager's ENSv1→ENSv2 migration flow needs before it replays a name's resolver profile: text keys and coin types in `known_keys`, the content hash key, and the ABI content types in `abi_content_types`, for up to 1,000 names per request. The ABI list names content types whose writes the index observed on the selected resolver storage; the caller still reads each ABI's bytes on chain and drops an empty answer, because a removal emits the same event as a set (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f). A `null` list with `abi_unsupported_reason` means the index cannot list them for that name, and the caller must not treat it as a resolver profile without ABI records. ABI records remain outside the record-key grammar, and ABI bytes are not served. |
+| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, including the [grouped `records`](api-v1-routes.md#grouped-name-profile-records) of name detail (each category's key list beside its value map, plus the observed ABI content types, read against the same published inventory row and reported as `abi_observations_stale` if Project replaced that row mid-request), so a caller holding many names reads their record keys and values in one request instead of one records read per name. |
+| [Resolver profile](glossary.md#resolver-profile) replay for the [ENSv1→ENSv2 migration](glossary.md#ensv1ensv2-migration) | `POST /v1/lookup` with `profile=detail` | Serves the resolver-profile key read that the ENS manager's ENSv1→ENSv2 migration flow needs before it replays a name's resolver profile: coin types in `records.seen_addresses`, text keys in `records.seen_texts`, whether a content hash or forward name was written in `records.seen_singletons` (with their values in `records.contenthash` and `records.name` when known), and the ABI content types in `records.seen_abis`, for up to 1,000 names per request. The ABI list names content types whose writes the index observed on the selected resolver storage; the caller still reads each ABI's bytes on chain and drops an empty answer, because a removal emits the same event as a set (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f). An omitted `seen_abis` with `abi_unsupported_reason` means the index cannot list them for that name, and the caller must not treat it as a resolver profile without ABI records. ABI records remain outside the record-key grammar, and ABI bytes are not served. |
 | Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
 | Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
-| Resolver records | `GET /v1/names/{name}/records` | Per-key record answers for the requested `keys` or, when `keys` is omitted, for the inventory-derived default key set (at most 200 keys), plus inventory metadata. The flat `addresses`, `text_records`, and `content_hash` maps are on name detail and `profile=detail` lookup, not this route. |
+| Resolver records | `GET /v1/names/{name}/records` | Per-key record answers for the requested `keys` or, when `keys` is omitted, for the inventory-derived default key set (at most 200 keys), plus inventory metadata. The grouped `records` object is on name detail and `profile=detail` lookup, not this route. |
 | Direct subnames | `GET /v1/names/{name}/subnames` | Latest-state direct-subname collection. |
 | Name history | `GET /v1/names/{name}/history` | Name, registration, or combined history scope. With `include=child_registrations` the same paged collection also holds the registrations of the name's direct children, in one order under one cursor, each row marked with `subject`; see [direct child registrations](glossary.md#direct-child-registration). This serves a portal timeline that lists child registrations inside the parent's history, which today merges a second, unpaged indexer query for the parent's subdomains client side. The option lists every grant row of every direct child, released children and registries the parent has since unlinked included; it refuses `eth` and `base.eth`, and it does not list ENSv1 or Basenames registry subnames, which have no registration row. |
 | Names by address | `GET /v1/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. Inline role summaries allow 1,000 total grant rows; overflow returns 422. Each row exposes `permission_resource_id` for existing cursor-paginated permissions reads, including when the include is omitted. It is the handle `GET /v1/permissions?registration_id=` resolves to the row's permission resource: the same value as name detail's `registration_id` while the name retains a current registration identity, including unsupported name coverage, so for a wrapped `.eth` name it is the BaseRegistrar lease and not the NameWrapper resource; otherwise it is the resource itself. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L414 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f) |
@@ -58,8 +58,13 @@ source pin or successful decode alone is not replacement evidence.
 For an owned local chain or the [official Sepolia deployment](sepolia-deployment.md), the exact `public_resolver_v2` declaration described in
 [`manifests.md`](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
 permits the existing record reads to use canonical address, text, and contenthash
-observations plus node record-version boundaries. Attribution requires the
-current ENSv2 pointer, matching namespace, node, and exact resolver emitter.
+observations plus node record-version boundaries, and the ABI content-type
+inventory to use its `ABIChanged` observations. Attribution for those record and
+inventory reads requires the current ENSv2 pointer, matching namespace, node, and
+exact resolver emitter. Separately, a reverse claim uses the declared resolver's
+`NameChanged` observations when it is the reverse node's current registry
+resolver: the claim is matched by namespace, chain, reverse node, and that exact
+resolver, and does not depend on the record-inventory classification.
 A supported record classification does not prove exhaustive selector history,
 resolver binding enumeration, aliases, or permission-holder enumeration;
 coverage remains limited to the retained observations and admitted capabilities.
@@ -84,14 +89,18 @@ ENSv1 resolver support and PermissionedResolver proxy classification stay intact
 
 ## Resolver address read modes
 
-The records route, exact-name detail, and name results in batch lookup share
-one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
+The records route and the `primary_address` of exact-name detail and of name
+results in batch lookup share one indexed ENSIP-19 behavior. Projected exact entries remain event-derived.
 When the selected resolver has the manifest-authorized
 [resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
 coin-type request whose exact entry is empty or missing reads the projected
 default entry instead. The records route identifies per-key derived results in
-`records[key].meta`; the values-only address maps on exact-name detail and
-batch lookup contain the value without adding provenance fields. Derived values use the requested getter's verified decode:
+`records[key].meta`. Exact-name detail and batch lookup do not synthesize it
+into grouped `records.addresses`, which holds exact observed writes only (a
+cleared one as `null`); their indexed `primary_address` carries the derived
+value. Verified exact-name detail serves each getter's own answer, so a getter
+that returns its fallback puts it in both `records.addresses` and
+`primary_address`. Derived values use the requested getter's verified decode:
 coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
 multicoin selectors retain that non-empty byte value. Exact stored records are
 not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the

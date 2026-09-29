@@ -53,39 +53,6 @@ pub(crate) fn record_addresses_from_entries(
         .collect()
 }
 
-pub(crate) fn record_text_records_from_entries(
-    entries: Option<&JsonValue>,
-    field: JsonFieldAccessor,
-) -> BTreeMap<String, String> {
-    let mut records = BTreeMap::new();
-    for entry in successful_record_entries(entries, "text", field) {
-        let Some(key) = string_field(field(entry, "selector_key")).or_else(|| {
-            field(entry, "value")
-                .and_then(|value| field(value, "key"))
-                .and_then(value_to_string)
-        }) else {
-            continue;
-        };
-        if let Some(value) = record_value_string_from_entry(entry, field) {
-            records.insert(key, value);
-        }
-    }
-    for entry in successful_record_entries(entries, "avatar", field) {
-        if let Some(value) = record_value_string_from_entry(entry, field) {
-            records.insert("avatar".to_owned(), value);
-        }
-    }
-    records
-}
-
-pub(crate) fn record_content_hash_from_entries(
-    entries: Option<&JsonValue>,
-    field: JsonFieldAccessor,
-) -> Option<String> {
-    successful_record_entries(entries, "contenthash", field)
-        .find_map(|entry| record_value_string_from_entry(entry, field))
-}
-
 pub(crate) fn record_value_string_from_entry(
     entry: &JsonValue,
     field: JsonFieldAccessor,

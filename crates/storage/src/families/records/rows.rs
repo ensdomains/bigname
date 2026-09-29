@@ -106,6 +106,12 @@ impl RecordCandidate {
                 payload.insert(column.to_owned(), json!(text));
             }
         }
+        // The forward name record's value (payload.rs, `name_record`).
+        if let Some(raw_name) = row.try_get::<Option<Value>, _>("raw_name")?
+            && !raw_name.is_null()
+        {
+            payload.insert("raw_name".to_owned(), raw_name);
+        }
         let sibling_position = if with_sibling {
             row.try_get::<Option<Value>, _>("sibling_position")?
                 .as_ref()
@@ -138,7 +144,7 @@ impl RecordCandidate {
 const VALUE_COLUMNS: &str =
     "record_key, block_number, transaction_index, log_index, event_identity,
     normalized_event_id, source_family, status, value, record_family, selector_key,
-    contenthash_hex, address_bytes_hex, source_event";
+    contenthash_hex, address_bytes_hex, source_event, raw_name";
 
 /// One admitted F6 partition of a resolver: (resolver address, arm, arm identity).
 pub(crate) type PartitionKey = (String, &'static str, String);

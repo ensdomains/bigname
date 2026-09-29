@@ -32,3 +32,53 @@ pub(crate) fn normalize_name_contains(
     }
     Ok(normalized_fragment)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_name_contains;
+
+    // A contains fragment is normalized as a name, so it must be valid on its own. Some
+    // substrings of valid names are therefore not admissible queries, while a valid fragment
+    // matches wherever its bytes occur, including inside a longer emoji sequence.
+    #[test]
+    fn contains_fragments_must_be_valid_names_on_their_own() {
+        for name in ["नमस्ते.eth", "👨\u{200d}💻.eth", "👍🏽.eth"] {
+            let normalized = bigname_domain::normalization::normalize_name(name)
+                .expect("the indexed name is valid")
+                .normalized_name;
+            assert_eq!(normalized, name, "{name} is stored as written");
+        }
+        for (fragment, inside) in [
+            // Ends with the virama combining mark; the mark stays attached to its base.
+            ("स\u{94d}", "नमस्ते.eth"),
+            ("ते", "नमस्ते.eth"),
+            // Each emoji of a ZWJ sequence, and the base of a skin-tone sequence.
+            ("👨", "👨\u{200d}💻.eth"),
+            ("💻", "👨\u{200d}💻.eth"),
+            ("👍", "👍🏽.eth"),
+        ] {
+            let normalized = normalize_name_contains(fragment).expect("admissible fragment");
+            assert_eq!(normalized, fragment);
+            assert!(inside.contains(&normalized), "{fragment} inside {inside}");
+        }
+        for (fragment, inside) in [
+            // A leading combining mark cannot start a name.
+            ("\u{94d}ते", "नमस्ते.eth"),
+            ("\u{94d}", "नमस्ते.eth"),
+            // A joiner or a lone skin-tone modifier is not a valid name.
+            ("\u{200d}", "👨\u{200d}💻.eth"),
+            ("👨\u{200d}", "👨\u{200d}💻.eth"),
+            ("\u{200d}💻", "👨\u{200d}💻.eth"),
+            ("🏽", "👍🏽.eth"),
+        ] {
+            assert!(
+                inside.contains(fragment),
+                "{fragment:?} is a substring of {inside}"
+            );
+            assert!(
+                normalize_name_contains(fragment).is_err(),
+                "{fragment:?} is not an admissible fragment"
+            );
+        }
+    }
+}

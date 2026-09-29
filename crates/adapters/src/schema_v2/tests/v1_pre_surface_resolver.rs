@@ -2347,6 +2347,8 @@ mod public_v2_records {
     }
     fn manifest() -> ManifestInput {
         let events = [
+            "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)",
+            "event NameChanged(bytes32 indexed node, string name)",
             "event AddrChanged(bytes32 indexed node, address a)",
             "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)",
             "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
@@ -2463,18 +2465,12 @@ mod public_v2_records {
         discovered.discovery_edge_kind = Some("resolver".to_owned());
         let batch = input(vec![manifest()], vec![discovered], Vec::new(), vec![event]);
         assert!(interpret_test_batch(batch).is_err());
-        for (name, fragment, signature) in [
-            (
-                "NameChanged",
-                "event NameChanged(bytes32 indexed node, string name)",
-                "NameChanged(bytes32,string)",
-            ),
-            (
-                "AliasChanged",
-                "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-                "AliasChanged(bytes,bytes,bytes,bytes)",
-            ),
-        ] {
+        // An event outside PublicResolverV2's node set is refused for the public role.
+        for (name, fragment, signature) in [(
+            "AliasChanged",
+            "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
+            "AliasChanged(bytes,bytes,bytes,bytes)",
+        )] {
             let shared = manifest_with_events(
                 6191,
                 "ens",
@@ -2538,7 +2534,8 @@ mod public_v2_records {
         let mut source = manifest();
         let mut payload: serde_json::Value = serde_json::from_str(&source.payload_json)?;
         let events = payload["abi"]["events"].as_array_mut().unwrap();
-        events.retain(|event| event["name"] != "AddrChanged");
+        // AddrChanged and ABIChanged must name their role, so only the others can be role-free.
+        events.retain(|event| event["name"] != "AddrChanged" && event["name"] != "ABIChanged");
         for event in events.iter_mut() {
             event["emitter_roles"] = json!([]);
         }

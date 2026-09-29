@@ -16,6 +16,23 @@ async fn record_id_resolver_inventory_serves_explicit_empty_values() -> Result<(
     database.cleanup().await
 }
 
+// The PermissionedResolver classification keeps admitting its `ABIUpdated` writes after the
+// node-keyed resolvers' `ABIChanged` joined the same rule.
+#[tokio::test]
+async fn record_id_resolver_inventory_lists_abi_content_types() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_record_id_resolver_inputs(&database, &[
+        family_fixture_record_write("text:url", Some(json!("https://example.test"))),
+        json!({"record_key":"abi:16", "record_family":"abi", "selector_key":"16",
+            "source_event":"ABIUpdated", "value":"16"}),
+    ], false).await?;
+    let payload = v2_name_record_payload_for_database(&database,
+        "/v1/names/alice.eth/records?include=inventory").await?;
+    assert_eq!(payload["data"]["inventory"]["abi_content_types"], json!(["16"]), "{payload:#}");
+    assert!(payload["data"]["inventory"].get("abi_unsupported_reason").is_none(), "{payload:#}");
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn record_id_resolver_permissions_preserve_generation_specific_powers() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

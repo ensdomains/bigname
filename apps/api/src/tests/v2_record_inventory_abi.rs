@@ -1,10 +1,14 @@
-// ABI content types on `include=inventory` (docs/api-v1-routes.md, records route). Selection
-// through Project is covered in crates/project/tests/record_inventory_abi.rs and
-// record_id_resolver.rs; these cases pin the public shape, availability, and batch cost.
+// ABI content types on the records route's `include=inventory` and the grouped `records.seen_abis`
+// of name detail and lookup (docs/api-v1-routes.md). Decoding
+// `ABIChanged` per resolver family is covered in
+// crates/adapters/src/schema_v2/tests/abi_changed.rs; these cases pin the public shape,
+// availability, selection through the family reducers, and batch cost.
 
 /// The declared ENSv1 resolver `seed_identity_name` points each name at.
 const ABI_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
 const ABI_CHAIN: &str = "ethereum-mainnet";
+/// The manifest-declared direct PublicResolverV2 of the ENSv2 fixtures.
+const PUBLIC_RESOLVER_V2: &str = "0x00000000000000000000000000000000000a0b2c";
 
 struct AbiWrite<'a> {
     identity: &'a str,
@@ -38,6 +42,19 @@ fn abi_write_events(
     block: (i64, &str),
     writes: &[AbiWrite<'_>],
 ) -> Result<Vec<NormalizedEvent>> {
+    abi_family_write_events(ABI_CHAIN, "ens_v1_resolver_l1", name, resolver, manifest, block, writes)
+}
+
+/// [`abi_write_events`] on `chain` under the resolver `family` that decoded them.
+fn abi_family_write_events(
+    chain: &str,
+    family: &str,
+    name: &str,
+    resolver: &str,
+    manifest: i64,
+    block: (i64, &str),
+    writes: &[AbiWrite<'_>],
+) -> Result<Vec<NormalizedEvent>> {
     let node = bigname_lookup::ens_namehash_hex(name)?;
     writes
         .iter()
@@ -47,7 +64,7 @@ fn abi_write_events(
                 &format!("abi-fixture:{name}:{}", write.identity),
                 None,
                 None,
-                Some(ABI_CHAIN),
+                Some(chain),
                 Some(block.0),
                 Some(block.1),
                 Some(&format!("0x{:064x}", 0xab1_u64)),
@@ -55,7 +72,8 @@ fn abi_write_events(
                 CanonicalityState::Canonical,
             );
             event.event_kind = "RecordChanged".into();
-            event.source_family = "ens_v1_resolver_l1".into();
+            event.namespace = if family.starts_with("basenames_") { "basenames" } else { "ens" }.into();
+            event.source_family = family.into();
             event.derivation_kind = "ens_v1_unwrapped_authority".into();
             event.manifest_version = 1;
             event.source_manifest_id = Some(manifest);
@@ -128,9 +146,13 @@ async fn seed_abi_name(database: &TestDatabase, name: &str, id: u128) -> Result<
 }
 
 /// An ENSv2 name whose registry points at a manifest-declared PublicResolverV2 holding one text
-/// record: a supported inventory on resolver storage with no admitted ABI event.
-async fn seed_abi_public_resolver_v2_name(database: &TestDatabase, name: &str) -> Result<()> {
-    const RESOLVER_V2: &str = "0x00000000000000000000000000000000000a0b2c";
+/// record and one `ABIChanged` write per entry of `abi`, as the node-event decoder stores them.
+async fn seed_abi_public_resolver_v2_name(
+    database: &TestDatabase,
+    name: &str,
+    abi: &[&str],
+) -> Result<()> {
+    const RESOLVER_V2: &str = PUBLIC_RESOLVER_V2;
     let (hash, number) = abi_head(database).await?;
     let resource = Uuid::from_u128(0x5ab900);
     let logical = seed_family_identity_inputs(
@@ -216,7 +238,17 @@ async fn seed_abi_public_resolver_v2_name(database: &TestDatabase, name: &str) -
     write.after_state = json!({"source_event":"TextChanged", "node":node, "resolver":RESOLVER_V2,
         "record_key":"text:url", "record_family":"text", "selector_key":"url",
         "value_retained":true, "value":"https://example.test"});
-    let events = [
+    let abi_writes = abi.iter().enumerate().map(|(index, content_type)| {
+        let mut abi_write = write.clone();
+        abi_write.event_identity = format!("abi-v2-abi-{index}");
+        abi_write.log_index = Some(5 + index as i64);
+        abi_write.after_state = json!({"source_event":"ABIChanged", "node":node,
+            "resolver":RESOLVER_V2, "record_key":format!("abi:{content_type}"),
+            "record_family":"abi", "selector_key":content_type, "value_retained":true,
+            "value":content_type});
+        abi_write
+    }).collect::<Vec<_>>();
+    let mut events = vec![
         registry_event("grant", "RegistrationGranted", 0,
             json!({"authority_kind":"ens_v2_registry", "status":"registered",
                 "registrant":ABI_RESOLVER, "expiry":1_900_000_000_i64})),
@@ -226,21 +258,38 @@ async fn seed_abi_public_resolver_v2_name(database: &TestDatabase, name: &str) -
         registry_event("pointer", "ResolverChanged", 3, json!({"node":node, "resolver":RESOLVER_V2})),
         write,
     ];
+    events.extend(abi_writes);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     rebuild_fixture_families(&database.pool, ABI_CHAIN, number, &hash).await
 }
 
-/// The lookup container and the records route container for one name, asserted equal.
+/// The ABI answer of lookup `profile=detail` for one name in the records route's terms,
+/// `{abi_content_types, abi_unsupported_reason?}`. Lookup's `records` is asserted equal to name
+/// detail's, and its ABI answer to the records route container's wherever that route lists the
+/// content types (the grouped view also lists them for a row that is not authoritative).
 async fn abi_inventory_on_both_routes(database: &TestDatabase, name: &str) -> Result<Value> {
     let payload = v2_lookup_json(
         database,
-        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": name}]}),
+        json!({"profile": "detail", "inputs": [{"name": name}]}),
     )
     .await?;
-    let lookup = payload["data"][0]["record"]["inventory"].clone();
+    let grouped = payload["data"][0]["record"]["records"].clone();
+    let detail = v2_get_json(database, &format!("/v1/names/{name}")).await?;
+    assert_eq!(detail["data"]["records"], grouped, "{detail:#}");
+    let mut abi = json!({
+        "abi_content_types": grouped.get("seen_abis").cloned().unwrap_or(Value::Null)
+    });
+    if let Some(reason) = grouped.get("abi_unsupported_reason") {
+        abi["abi_unsupported_reason"] = reason.clone();
+    }
     let records = v2_get_json(database, &format!("/v1/names/{name}/records?include=inventory")).await?;
-    assert_eq!(records["data"]["inventory"], lookup, "{records:#}");
-    Ok(lookup)
+    let inventory = &records["data"]["inventory"];
+    if inventory["abi_unsupported_reason"] != json!("inventory_not_authoritative") {
+        for field in ["abi_content_types", "abi_unsupported_reason"] {
+            assert_eq!(inventory.get(field), abi.get(field), "{field}: {records:#}");
+        }
+    }
+    Ok(abi)
 }
 
 #[tokio::test]
@@ -272,12 +321,13 @@ async fn abi_content_types_are_served_identically_on_lookup_and_records() -> Res
     assert_eq!(inventory["abi_content_types"], json!(["1", "4", wide]), "{inventory}");
     assert!(inventory.get("abi_unsupported_reason").is_none(), "{inventory}");
     // The ordinary keys are unchanged: ABI stays outside the grammar and the counts.
+    let after = v2_get_json(&database, "/v1/names/abi-types.eth/records?include=inventory").await?;
     for field in ["known_keys", "unset_keys", "unsupported_keys"] {
-        assert_eq!(inventory[field], before["data"]["inventory"][field], "{field}");
+        assert_eq!(after["data"]["inventory"][field], before["data"]["inventory"][field], "{field}");
     }
     assert!(
-        !inventory["known_keys"].to_string().contains("abi"),
-        "{inventory}"
+        !after["data"]["inventory"]["known_keys"].to_string().contains("abi"),
+        "{after}"
     );
     let response = v2_get_response(&database, "/v1/names/abi-types.eth/records?keys=abi:1").await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -301,20 +351,234 @@ async fn abi_content_types_distinguish_unavailable_from_observed_empty() -> Resu
     assert_eq!(inventory["abi_content_types"], json!([]), "{inventory}");
     assert!(inventory.get("abi_unsupported_reason").is_none());
 
-    // A supported inventory behind the direct PublicResolverV2 classification (role
-    // public_resolver_v2) has no admitted ABI event: unavailable, not empty.
-    seed_abi_public_resolver_v2_name(&database, "abi-v2.eth").await?;
+    // The direct PublicResolverV2 classification (role public_resolver_v2) admits the ordinary
+    // `ABIChanged` like its other node events, so no selected ABI write is observed empty too.
+    seed_abi_public_resolver_v2_name(&database, "abi-v2.eth", &[]).await?;
     let inventory = abi_inventory_on_both_routes(&database, "abi-v2.eth").await?;
-    assert_eq!(inventory["abi_content_types"], Value::Null, "{inventory}");
+    assert_eq!(inventory["abi_content_types"], json!([]), "{inventory}");
+    assert!(inventory.get("abi_unsupported_reason").is_none());
+    database.cleanup().await
+}
+
+/// The head of `chain` as the fixture chain rows record it.
+async fn abi_chain_head(database: &TestDatabase, chain: &str) -> Result<(String, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT latest_block_hash, latest_block_number FROM chain_heads WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(&database.lookup_pool)
+    .await?)
+}
+
+// PublicResolverV2 and the Basenames resolver emit the ordinary ENSv1 `ABIChanged`; their writes
+// count exactly as an ENSv1 resolver's do, content types beyond the four ENSIP-4 names included.
+#[tokio::test]
+async fn abi_content_types_list_public_resolver_v2_and_basenames_writes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
+    let wide = (alloy_primitives::U256::from(1_u8) << 255_usize).to_string();
+    seed_abi_public_resolver_v2_name(&database, "abi-v2-types.eth", &["32", "1", &wide]).await?;
+    let inventory = abi_inventory_on_both_routes(&database, "abi-v2-types.eth").await?;
+    assert_eq!(inventory["abi_content_types"], json!(["1", "32", wide]), "{inventory}");
+    assert!(inventory.get("abi_unsupported_reason").is_none(), "{inventory}");
+
+    const BASENAMES_RESOLVER: &str = "0x00000000000000000000000000000000000ba5e0";
+    const BASE: &str = "base-mainnet";
+    seed_identity_name(
+        &database,
+        "basenames:abi.base.eth",
+        "abi.base.eth",
+        "abi.base.eth",
+        "namehash:abi.base.eth",
+        Uuid::from_u128(0x5ab400),
+        Uuid::from_u128(0x5ab401),
+        Uuid::from_u128(0x5ab402),
+        BASENAMES_RESOLVER,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        39,
+    )
+    .await?;
+    let (hash, number) = abi_chain_head(&database, BASE).await?;
+    let manifest = declare_family_fixture_resolver(
+        &database.pool,
+        "basenames",
+        BASE,
+        "basenames_base_resolver",
+        BASENAMES_RESOLVER,
+    )
+    .await?;
+    let events = abi_family_write_events(
+        BASE,
+        "basenames_base_resolver",
+        "abi.base.eth",
+        BASENAMES_RESOLVER,
+        manifest,
+        (number, &hash),
+        &[abi_write("json", "1"), abi_write("custom", "256")],
+    )?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, BASE, number, &hash).await?;
+    let records = v2_get_json(&database, "/v1/names/abi.base.eth/records?include=inventory").await?;
+    let inventory = &records["data"]["inventory"];
+    assert_eq!(inventory["abi_content_types"], json!(["1", "256"]), "{records:#}");
+    assert!(inventory.get("abi_unsupported_reason").is_none(), "{records:#}");
+    database.cleanup().await
+}
+
+/// One resolver-side event on `name` at the ABI head: a version reset of `resolver`'s storage for
+/// the name's node, or the registry pointing the name at `resolver`.
+async fn seed_abi_boundary(
+    database: &TestDatabase,
+    name: &str,
+    resource: Uuid,
+    kind: &str,
+    resolver: &str,
+) -> Result<()> {
+    let (hash, number) = abi_head(database).await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let logical = bigname_storage::logical_name_id_for_name("ens", name);
+    let (logical, resource, family, after) = match kind {
+        "RecordVersionChanged" => (
+            None,
+            None,
+            "ens_v1_resolver_l1",
+            json!({"source_event":"VersionChanged", "resolver":resolver, "node":node,
+                "record_version":ordinal}),
+        ),
+        _ => (
+            Some(logical.as_str()),
+            Some(resource),
+            "ens_v1_registry_l1",
+            json!({"source_event":"NewResolver", "node":node, "resolver":resolver}),
+        ),
+    };
+    let mut event = history_event(
+        &format!("abi-boundary:{name}:{ordinal}"),
+        logical,
+        resource,
+        Some(ABI_CHAIN),
+        Some(number),
+        Some(&hash),
+        Some(&format!("0x{:064x}", 0xab1_u64)),
+        Some(ordinal),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = kind.into();
+    event.source_family = family.into();
+    event.raw_fact_ref = json!({"kind":"raw_log", "emitting_address":resolver, "transaction_index":0});
+    event.before_state = json!({});
+    event.after_state = after;
+    if kind == "RecordVersionChanged" {
+        event.source_manifest_id = Some(
+            declare_family_fixture_resolver(&database.pool, "ens", ABI_CHAIN, family, resolver)
+                .await?,
+        );
+        event.manifest_version = 1;
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    rebuild_fixture_families(&database.pool, ABI_CHAIN, number, &hash).await
+}
+
+async fn abi_types(database: &TestDatabase, name: &str) -> Result<Value> {
+    let inventory = abi_inventory_on_both_routes(database, name).await?;
+    assert!(inventory.get("abi_unsupported_reason").is_none(), "{inventory}");
+    Ok(inventory["abi_content_types"].clone())
+}
+
+// Writes, clears, record-version resets and resolver switches decide the listed content types
+// the same way they decide the other record keys.
+#[tokio::test]
+async fn abi_content_types_follow_clears_resets_and_resolver_switches() -> Result<()> {
+    const OTHER_RESOLVER: &str = "0x0000000000000000000000000000000000000def";
+    let database = TestDatabase::new_migrated().await?;
+    let name = "abi-history.eth";
+    let resource = Uuid::from_u128(0x5ab500);
+    seed_abi_name(&database, name, 0x5ab500).await?;
+    let wide = (alloy_primitives::U256::from(1_u8) << 200_usize).to_string();
+    seed_abi_writes(
+        &database,
+        name,
+        &[abi_write("json", "1"), abi_write("wide", &wide), abi_write("custom", "64")],
+    )
+    .await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["1", "64", wide]));
+
+    // ENS clears an ABI by storing empty bytes and emits the same event: the type stays listed,
+    // since a listed type means an observed write, not a stored value.
+    seed_abi_writes(&database, name, &[abi_write("clear", "64")]).await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["1", "64", wide]));
+
+    // A record-version reset drops every earlier write; later writes count again.
+    seed_abi_boundary(&database, name, resource, "RecordVersionChanged", ABI_RESOLVER).await?;
+    assert_eq!(abi_types(&database, name).await?, json!([]));
+    seed_abi_writes(&database, name, &[abi_write("after-reset", "128")]).await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["128"]));
+
+    // Another declared resolver's writes count only while the name points at it; switching
+    // back restores the first resolver's writes since its reset.
+    let other = declare_family_fixture_resolver(
+        &database.pool,
+        "ens",
+        ABI_CHAIN,
+        "ens_v1_resolver_l1",
+        OTHER_RESOLVER,
+    )
+    .await?;
+    let (hash, number) = abi_head(&database).await?;
+    let events = abi_write_events(
+        name,
+        OTHER_RESOLVER,
+        other,
+        (number, &hash),
+        &[abi_write("other", "2")],
+    )?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, ABI_CHAIN, number, &hash).await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["128"]));
+    seed_abi_boundary(&database, name, resource, "ResolverChanged", OTHER_RESOLVER).await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["2"]));
+    seed_abi_boundary(&database, name, resource, "ResolverChanged", ABI_RESOLVER).await?;
+    assert_eq!(abi_types(&database, name).await?, json!(["128"]));
+
+    // A custom resolver's `ABIChanged` goes through the ENSv1 all-emitter record events like its
+    // other writes. Its undeclared storage makes the whole inventory unsupported, so the ABI
+    // list is withheld for the same reason as every other key, not an ABI-specific one.
+    const CUSTOM_RESOLVER: &str = "0x00000000000000000000000000000000000c0570";
+    let family_manifest = declare_family_fixture_resolver(
+        &database.pool,
+        "ens",
+        ABI_CHAIN,
+        "ens_v1_resolver_l1",
+        ABI_RESOLVER,
+    )
+    .await?;
+    let events = abi_write_events(
+        name,
+        CUSTOM_RESOLVER,
+        family_manifest,
+        (number, &hash),
+        &[abi_write("custom-resolver", "512")],
+    )?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    seed_abi_boundary(&database, name, resource, "ResolverChanged", CUSTOM_RESOLVER).await?;
+    // The grouped view lists the content type the resolver was seen writing, as it lists every
+    // other observed key; the records route's container cannot speak for the row.
+    let inventory = abi_inventory_on_both_routes(&database, name).await?;
+    assert_eq!(inventory, json!({"abi_content_types": ["512"]}), "{inventory}");
+    let records = v2_get_json(&database, &format!("/v1/names/{name}/records?include=inventory")).await?;
+    let container = &records["data"]["inventory"];
+    assert_eq!(container["abi_content_types"], Value::Null, "{records}");
     assert_eq!(
-        inventory["abi_unsupported_reason"],
-        json!("abi_observations_not_supported")
+        container["abi_unsupported_reason"],
+        json!("inventory_not_authoritative"),
+        "{records}"
     );
     database.cleanup().await
 }
 
-// Without an inventory row the records route keeps its container and says why; the lookup route
-// omits the container. An unsupported inventory is covered with the default key set.
+// Without an inventory row the records route keeps its container and says why; lookup omits
+// `records`. An unsupported inventory is covered with the default key set.
 #[tokio::test]
 async fn abi_content_types_are_withheld_without_an_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -359,10 +623,10 @@ async fn abi_content_types_are_withheld_without_an_inventory() -> Result<()> {
     assert_eq!(inventory["abi_unsupported_reason"], json!("inventory_not_available"));
     let lookup = v2_lookup_json(
         &database,
-        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": "abi-missing.eth"}]}),
+        json!({"profile": "detail", "inputs": [{"name": "abi-missing.eth"}]}),
     )
     .await?;
-    assert!(lookup["data"][0]["record"].get("inventory").is_none(), "{lookup:#}");
+    assert!(lookup["data"][0]["record"].get("records").is_none(), "{lookup:#}");
     database.cleanup().await
 }
 
@@ -488,14 +752,14 @@ async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
     // The detail profile adds one more read for the batch, with the attributed events.
     let (payload, reads) = lookup_inventory_reads(
         &database,
-        json!({"profile": "detail", "include": "inventory", "inputs": inputs}),
+        json!({"profile": "detail", "inputs": inputs}),
     )
     .await?;
     let results = payload["data"].as_array().context("lookup results")?;
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["inventory"]["abi_content_types"],
+            result["record"]["records"]["seen_abis"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );
@@ -518,7 +782,6 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
         &database,
         json!({
             "profile": "detail",
-            "include": "inventory",
             "inputs": names.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()
         }),
     )
@@ -527,7 +790,7 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["inventory"]["abi_content_types"],
+            result["record"]["records"]["seen_abis"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );

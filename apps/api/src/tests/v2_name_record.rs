@@ -66,19 +66,23 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
         parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z").unwrap(),
     );
     assert_eq!(
-        data.get("addresses"),
+        data.get("records"),
         Some(&json!({
-            "60": "0x0000000000000000000000000000000000000def"
-        }))
+            "seen_addresses": ["60"],
+            "addresses": {"60": "0x0000000000000000000000000000000000000def"},
+            "seen_texts": ["avatar", "description"],
+            "texts": {
+                "avatar": "https://example.test/avatar.png",
+                "description": "Alice profile"
+            },
+            "seen_abis": [],
+            "abis": {},
+            "seen_singletons": ["contenthash"],
+            "contenthash": "ipfs://alice",
+            "name": null
+        })),
+        "{payload}"
     );
-    assert_eq!(
-        data.get("text_records"),
-        Some(&json!({
-            "avatar": "https://example.test/avatar.png",
-            "description": "Alice profile"
-        }))
-    );
-    assert_eq!(data.get("content_hash"), Some(&json!("ipfs://alice")));
     assert!(data.get("primary_name").is_none());
     assert_eq!(
         data.get("primary_address"),
@@ -239,7 +243,7 @@ async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority(
     assert!(data.get("owner").is_none_or(Value::is_null), "{payload}");
     assert!(data.get("authority").is_none_or(Value::is_null), "{payload}");
     assert_eq!(
-        data["addresses"]["60"],
+        data["records"]["addresses"]["60"],
         json!("0x0000000000000000000000000000000000000def"),
         "records come from the serving resource's inventory: {payload}"
     );
@@ -371,25 +375,16 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
         payload["data"]["failure_reason"],
         json!("verified_answer_stale_for_snapshot")
     );
-    assert_eq!(
-        payload["data"]["unsupported_fields"],
-        json!([
-            "addresses",
-            "content_hash",
-            "primary_address",
-            "text_records"
-        ])
-    );
-    assert!(payload["data"].get("addresses").is_none());
-    assert!(payload["data"].get("text_records").is_none());
-    assert!(payload["data"].get("content_hash").is_none());
+    assert_eq!(payload["data"]["unsupported_fields"], json!(["primary_address"]));
+    // Every read key stays listed; a stale answer maps none of them, so the indexed value is
+    // not substituted.
+    let records = &payload["data"]["records"];
+    assert!(records["seen_addresses"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{payload}");
+    assert_eq!(records["addresses"], json!({}), "{payload}");
+    assert_eq!(records["texts"], json!({}), "{payload}");
+    assert_eq!(records["seen_singletons"], json!([]), "{payload}");
+    assert!(records.get("contenthash").is_none(), "{payload}");
     assert!(payload["data"].get("primary_address").is_none());
-    assert_ne!(
-        payload["data"].get("addresses"),
-        Some(&json!({
-            "60": "0x0000000000000000000000000000000000000def"
-        }))
-    );
 
     database.cleanup().await
 }
@@ -406,11 +401,9 @@ async fn v2_get_name_verified_source_reports_unsupported_without_verified_bounda
     );
     assert_eq!(
         payload["data"]["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
+        json!(["primary_address"])
     );
-    assert!(payload["data"].get("addresses").is_none());
-    assert!(payload["data"].get("text_records").is_none());
-    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("records").is_none());
     assert!(payload["data"].get("primary_address").is_none());
 
     Ok(())
@@ -564,7 +557,7 @@ async fn v2_get_name_verified_source_accepts_event_linked_ownerless_registry_ser
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(payload["data"]["status"], json!("ok"));
-    assert_eq!(payload["data"]["addresses"]["60"], json!(executed_address));
+    assert_eq!(payload["data"]["records"]["addresses"]["60"], json!(executed_address));
     assert_eq!(
         join_primary_name_mock_rpc_requests(rpc_handle).await?.len(),
         2
@@ -629,19 +622,20 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     assert_v2_name_snapshot_meta(&payload);
     assert_eq!(payload["data"]["status"], json!("ok"));
     assert_eq!(
-        payload["data"]["addresses"],
+        payload["data"]["records"]["addresses"],
         json!({
             "2147483648": executed_address,
             "60": executed_address
         })
     );
+    assert_eq!(payload["data"]["records"]["seen_addresses"], json!(["60", "2147483648"]));
+    assert_eq!(payload["data"]["records"]["seen_texts"], json!([]));
+    assert_eq!(payload["data"]["records"]["seen_singletons"], json!([]));
+    assert!(payload["data"]["records"].get("name").is_none());
     assert_eq!(payload["data"]["primary_address"], json!(executed_address));
-    assert_eq!(
-        payload["data"]["unsupported_fields"],
-        json!(["content_hash", "text_records"])
-    );
+    assert!(payload["data"].get("unsupported_fields").is_none(), "{payload}");
     assert_ne!(
-        payload["data"]["addresses"]["60"],
+        payload["data"]["records"]["addresses"]["60"],
         json!("0x0000000000000000000000000000000000000def")
     );
 
@@ -657,7 +651,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
     assert_eq!(repeated_response.status(), StatusCode::OK);
     let repeated_payload: Value = read_json(repeated_response).await?;
     assert_eq!(
-        repeated_payload["data"]["addresses"]["60"],
+        repeated_payload["data"]["records"]["addresses"]["60"],
         json!(executed_address)
     );
 
@@ -1048,11 +1042,9 @@ async fn v2_get_name_omits_record_maps_when_inventory_is_absent() -> Result<()> 
 
     assert_eq!(
         payload["data"]["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
+        json!(["primary_address"])
     );
-    assert!(payload["data"].get("addresses").is_none());
-    assert!(payload["data"].get("text_records").is_none());
-    assert!(payload["data"].get("content_hash").is_none());
+    assert!(payload["data"].get("records").is_none());
     assert!(payload["data"].get("primary_address").is_none());
 
     Ok(())
@@ -1177,18 +1169,11 @@ async fn v2_get_name_withholds_retained_inventory_for_released_tombstone() -> Re
     assert_eq!(data.get("status"), Some(&json!("ok")));
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
-    assert!(data.get("addresses").is_none());
-    assert!(data.get("text_records").is_none());
-    assert!(data.get("content_hash").is_none());
+    assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
     assert_eq!(
         data.get("unsupported_fields"),
-        Some(&json!([
-            "addresses",
-            "content_hash",
-            "primary_address",
-            "text_records"
-        ]))
+        Some(&json!(["primary_address"]))
     );
     Ok(())
 }
@@ -1217,9 +1202,7 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
         }))
     );
     assert!(data.get("resolver").is_none(), "{payload}");
-    assert!(data.get("addresses").is_none(), "{payload}");
-    assert!(data.get("text_records").is_none(), "{payload}");
-    assert!(data.get("content_hash").is_none(), "{payload}");
+    assert!(data.get("records").is_none(), "{payload}");
     assert!(data.get("primary_address").is_none(), "{payload}");
     database.cleanup().await
 }
@@ -1294,9 +1277,7 @@ async fn v2_get_name_withholds_old_record_observations_after_release() -> Result
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
     assert!(data.get("resolver").is_none());
-    assert!(data.get("addresses").is_none());
-    assert!(data.get("text_records").is_none());
-    assert!(data.get("content_hash").is_none());
+    assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
 
     database.cleanup().await?;
@@ -1314,9 +1295,7 @@ async fn v2_get_name_withholds_expired_resource_identity_and_inventory_for_reser
     assert_eq!(data.get("registration_status"), Some(&json!("unregistered")));
     assert!(data.get("registration_id").is_none());
     assert!(data.get("resolver").is_none());
-    assert!(data.get("addresses").is_none());
-    assert!(data.get("text_records").is_none());
-    assert!(data.get("content_hash").is_none());
+    assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
     Ok(())
 }
@@ -1442,17 +1421,10 @@ async fn v2_get_name_verified_source_withholds_retained_inventory_for_released_t
     assert_eq!(data.get("registration_status"), Some(&json!("released")));
     assert_eq!(
         data.get("unsupported_fields"),
-        Some(&json!([
-            "addresses",
-            "content_hash",
-            "primary_address",
-            "text_records"
-        ]))
+        Some(&json!(["primary_address"]))
     );
     assert!(data.get("resolver").is_none());
-    assert!(data.get("addresses").is_none());
-    assert!(data.get("text_records").is_none());
-    assert!(data.get("content_hash").is_none());
+    assert!(data.get("records").is_none());
     assert!(data.get("primary_address").is_none());
 
     // The mock queue still holds its one response: any dispatch would have
@@ -1822,9 +1794,11 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
         )
         .await?;
     let payload: Value = read_json(response).await?;
+    // The derived default answers `primary_address`; `records` holds the written keys only.
     assert_eq!(
-        payload["data"]["addresses"]["60"],
-        "0x0000000000000000000000000000000000000def"
+        payload["data"]["records"]["addresses"],
+        json!({"2147483648": "0x0000000000000000000000000000000000000DeF", "2147483649": null}),
+        "{payload}"
     );
     assert_eq!(
         payload["data"]["primary_address"],
@@ -1837,8 +1811,9 @@ async fn v2_records_and_name_detail_derive_ensip19_default_addresses() -> Result
     )
     .await?;
     assert_eq!(
-        lookup["data"][0]["record"]["addresses"]["60"],
-        "0x0000000000000000000000000000000000000def"
+        lookup["data"][0]["record"]["records"],
+        payload["data"]["records"],
+        "{lookup}"
     );
     assert_eq!(
         lookup["data"][0]["record"]["primary_address"],
@@ -1909,7 +1884,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
         )
         .await?;
     let payload: Value = read_json(response).await?;
-    assert!(payload["data"]["addresses"].get("60").is_none());
+    assert!(payload["data"]["records"]["addresses"].get("60").is_none());
     assert!(payload["data"].get("primary_address").is_none());
 
     let lookup = v2_lookup_json(
@@ -1917,7 +1892,7 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
         json!({"profile": "detail", "inputs": [{"id": "alice", "name": "Alice.eth"}]}),
     )
     .await?;
-    assert!(lookup["data"][0]["record"]["addresses"]
+    assert!(lookup["data"][0]["record"]["records"]["addresses"]
         .get("60")
         .is_none());
     assert!(lookup["data"][0]["record"]
@@ -2005,7 +1980,7 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
 
     assert_eq!(payloads[0]["meta"]["source"], json!("indexed"));
     assert_eq!(
-        payloads[0]["data"]["text_records"]["pre-surface"],
+        payloads[0]["data"]["records"]["texts"]["pre-surface"],
         json!("recovered before the name surface")
     );
     assert!(payloads[0]["data"].get("unsupported_fields").is_none());
@@ -2082,7 +2057,7 @@ async fn v2_ownerless_event_linked_resolver_serves_indexed_records() -> Result<(
                 "ownerless exact-name payload must not imply token control: {payload}"
             );
             assert_eq!(
-                payload["data"]["text_records"]["description"],
+                payload["data"]["records"]["texts"]["description"],
                 json!("Alice profile"),
                 "ownerless exact-name payload: {payload}"
             );
@@ -2117,8 +2092,7 @@ async fn v2_unclassified_serving_resource_does_not_expose_retained_records() -> 
         json!("unregistered")
     );
     assert!(payload["data"].get("resolver").is_none());
-    assert!(payload["data"].get("addresses").is_none());
-    assert!(payload["data"].get("text_records").is_none());
+    assert!(payload["data"].get("records").is_none());
 
     Ok(())
 }
@@ -3143,19 +3117,14 @@ async fn v2_get_name_withholds_indexed_record_fields_from_unsupported_inventory(
             "address": "0x0000000000000000000000000000000000000abc"
         })
     );
-    assert!(payload["data"].get("addresses").is_none());
-    assert!(payload["data"].get("text_records").is_none());
-    assert!(payload["data"].get("content_hash").is_none());
+    // The keys the resolver was seen writing stay listed; none of their values is known.
+    let records = &payload["data"]["records"];
+    assert_eq!(records["seen_addresses"], json!(["60"]), "{payload}");
+    assert_eq!(records["addresses"], json!({}), "{payload}");
+    assert_eq!(records["seen_texts"], json!(["description"]), "{payload}");
+    assert_eq!(records["texts"], json!({}), "{payload}");
     assert!(payload["data"].get("primary_address").is_none());
-    assert_eq!(
-        payload["data"]["unsupported_fields"],
-        json!([
-            "addresses",
-            "content_hash",
-            "primary_address",
-            "text_records"
-        ])
-    );
+    assert_eq!(payload["data"]["unsupported_fields"], json!(["primary_address"]));
 
     database.cleanup().await?;
     Ok(())
@@ -3287,9 +3256,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     );
     assert!(data[0].get("subname_count").is_none());
     assert!(data[0].get("resolver").is_none());
-    assert!(data[0].get("addresses").is_none());
-    assert!(data[0].get("text_records").is_none());
-    assert!(data[0].get("content_hash").is_none());
+    assert!(data[0].get("records").is_none());
     assert_no_banned_v1_spellings(&payload);
 
     database.cleanup().await?;
@@ -3964,11 +3931,11 @@ async fn v2_sepolia_indexed_inventory_serves_name_and_records_at_snapshot() -> R
     .await?;
     assert_eq!(name["data"]["chain_id"], json!(11155111));
     assert_eq!(
-        name["data"]["addresses"]["60"],
+        name["data"]["records"]["addresses"]["60"],
         json!("0x0000000000000000000000000000000000000abc")
     );
     assert_eq!(
-        name["data"]["text_records"]["com.twitter"],
+        name["data"]["records"]["texts"]["com.twitter"],
         json!("sepolia-record")
     );
     let at = name["meta"]["as_of_token"]
@@ -4035,13 +4002,8 @@ async fn v2_sepolia_indexed_unclassified_or_historical_inventory_is_not_served()
         &format!("/v1/names/{V2_SEPOLIA_ONLY_SNAPSHOT_NAME}?source=indexed"),
     )
     .await?;
-    assert!(missing_name["data"].get("addresses").is_none());
-    assert!(
-        missing_name["data"]["unsupported_fields"]
-            .as_array()
-            .expect("unsupported fields")
-            .contains(&json!("addresses"))
-    );
+    assert!(missing_name["data"]["records"]["addresses"].get("60").is_none(), "{missing_name}");
+    assert_eq!(missing_name["data"]["unsupported_fields"], json!(["primary_address"]));
     insert_v2_sepolia_indexed_inventory(&database).await?;
     let current = v2_name_record_payload_for_database(&database, &records_uri).await?;
     let token = current["meta"]["as_of_token"]
@@ -4669,6 +4631,17 @@ async fn v2_mirror_records_payload(
     mirror: &str,
     source: MirrorFixtureSource,
 ) -> Result<Value> {
+    v2_mirror_records_payload_on(uri, name, mirror, source, "resolver").await
+}
+
+/// [`v2_mirror_records_payload`] with the mirrored ENSv1 resolver declared under `v1_role`.
+async fn v2_mirror_records_payload_on(
+    uri: &str,
+    name: &str,
+    mirror: &str,
+    source: MirrorFixtureSource,
+    v1_role: &str,
+) -> Result<Value> {
     const CHAIN: &str = "ethereum-sepolia";
     const HASH: &str = "0xmirror";
     const V1_REGISTRY: &str = "0x4444444444444444444444444444444444444401";
@@ -4783,6 +4756,15 @@ async fn v2_mirror_records_payload(
             json!({"node":bigname_lookup::ens_namehash_hex(pointer_name)?,"resolver":V1_RESOLVER});
         pointer.raw_fact_ref = json!({"emitting_address":V1_REGISTRY});
         events.push(pointer);
+        declare_family_fixture_contract(
+            &database.pool,
+            "ens",
+            CHAIN,
+            "ens_v1_resolver_l1",
+            v1_role,
+            V1_RESOLVER,
+        )
+        .await?;
         insert_family_fixture_record_writes(
             &database.pool,
             "ens",
@@ -5877,6 +5859,53 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
         .expect("inventory known keys");
     assert!(known.contains(&json!("addr:60")) && known.contains(&json!("text:description")));
     assert!(payload["data"].get("mirror").is_none());
+    Ok(())
+}
+
+/// A mirror serves the mirrored ENSv1 resolver's getter surface: a legacy public resolver there
+/// has no contenthash to report unset.
+#[tokio::test]
+async fn v2_get_name_and_records_mirrored_from_a_legacy_resolver_leave_contenthash_unknown() -> Result<()> {
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    for (role, contenthash_unset) in [
+        ("public_resolver_5ffc0143", false),
+        ("public_resolver_1da02271", false),
+        ("public_resolver", true),
+    ] {
+        let payload = v2_mirror_records_payload_on(
+            "/v1/names/alice.eth",
+            "alice.eth",
+            MIRROR,
+            MirrorFixtureSource::Exact,
+            role,
+        )
+        .await?;
+        let records = &payload["data"]["records"];
+        assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR), "{payload}");
+        assert_eq!(records["texts"]["description"], json!("Alice profile"), "{role}: {payload}");
+        assert_eq!(
+            records.get("contenthash"),
+            contenthash_unset.then_some(&Value::Null),
+            "{role}: {payload}"
+        );
+        assert_eq!(records.get("name"), Some(&Value::Null), "{role}: {payload}");
+        // The records route agrees through the mirror.
+        let route = v2_mirror_records_payload_on(
+            "/v1/names/alice.eth/records?keys=contenthash",
+            "alice.eth",
+            MIRROR,
+            MirrorFixtureSource::Exact,
+            role,
+        )
+        .await?;
+        let expected = if contenthash_unset {
+            json!({"status": "not_found"})
+        } else {
+            json!({"status": "unsupported",
+                "unsupported_reason": "record_family_not_supported_by_resolver"})
+        };
+        assert_eq!(route["data"]["records"]["contenthash"], expected, "{role}: {route}");
+    }
     Ok(())
 }
 

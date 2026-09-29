@@ -13,9 +13,7 @@ pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,
 };
-pub(crate) use query::{
-    escape_like_pattern, push_expires_at_timestamp_expr, push_registered_at_timestamp_expr,
-};
+pub(crate) use query::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 pub(crate) use read::load_address_names_current_at_bound;
 #[cfg(test)]
 pub(crate) use read::push_address_names_current_query;
@@ -40,7 +38,7 @@ pub use types::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
     AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
     AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary, AddressNamesRegistryChildrenChanged,
+    AddressNamesCurrentSummary, AddressNamesRegistryChildrenChanged, NameQuery, NameQueryMatch,
 };
 
 /// The publication half of the read filter: the row's target block is on readable lineage.

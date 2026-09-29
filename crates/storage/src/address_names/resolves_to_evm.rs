@@ -24,7 +24,7 @@ use super::{
     source::RowSource,
     types::{
         AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
-        AddressNamesCurrentSortedCursor,
+        AddressNamesCurrentSortedCursor, NameQuery,
     },
 };
 
@@ -76,8 +76,8 @@ pub async fn load_address_records_current_evm_page(
     address: &str,
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -97,8 +97,8 @@ pub(crate) async fn load_address_records_evm_page_from(
     address: &str,
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
