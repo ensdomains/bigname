@@ -258,6 +258,10 @@ async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()>
             alpha_expires_at.map(Value::from).as_ref(),
             "{expiry}"
         );
+        if expiry == 253_402_300_799 {
+            assert!(alpha.expect("representable expiry remains listed").get("grace_ends_at").is_none(),
+                "the grace deadline lies outside RFC3339, while expiry is representable: {payload}");
+        }
         database.cleanup().await?;
     }
     Ok(())

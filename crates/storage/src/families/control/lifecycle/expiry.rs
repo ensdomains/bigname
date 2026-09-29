@@ -147,7 +147,26 @@ pub(super) fn choose(
 /// when the expiry is not an integral second or the sum passes the largest signed 64-bit second.
 pub(super) fn grace_ends_at(expiry: Option<&Value>, grace: Grace) -> Value {
     expiry
-        .and_then(Value::as_i64)
+        .and_then(|expiry| expiry.as_i64().or_else(|| expiry.as_str()?.parse().ok()))
         .and_then(|expiry| expiry.checked_add(grace.seconds()))
         .map_or(Value::Null, |seconds| json!(seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grace_accepts_the_same_quoted_seconds_as_the_served_expiry() {
+        for expiry in [json!(2_000_000_000_i64), json!("2000000000")] {
+            assert_eq!(
+                grace_ends_at(Some(&expiry), Grace::EnsV2),
+                json!(2_002_419_200_i64)
+            );
+        }
+        assert_eq!(
+            grace_ends_at(Some(&json!(i64::MAX)), Grace::EnsV2),
+            Value::Null
+        );
+    }
 }

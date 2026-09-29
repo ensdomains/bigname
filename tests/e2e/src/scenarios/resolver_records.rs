@@ -1289,6 +1289,7 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         "registered_at",
         "created_at",
         "expires_at",
+        "grace_ends_at",
         "registration_status",
         "name",
         "display_name",
@@ -1390,6 +1391,22 @@ pub(super) async fn assert_zero_api_shapes(
         )
         .await?;
         assert_zero_name_shape(&body["data"], namespace, name);
+        let grace_seconds: i64 = sqlx::query_scalar(
+            "SELECT extract(epoch FROM ($1::text::timestamptz - $2::text::timestamptz))::bigint",
+        )
+        .bind(
+            body["data"]["grace_ends_at"]
+                .as_str()
+                .context("grace deadline")?,
+        )
+        .bind(body["data"]["expires_at"].as_str().context("expiry")?)
+        .fetch_one(&run.db.pool)
+        .await?;
+        assert_eq!(
+            grace_seconds,
+            90 * 86_400,
+            "ENSv1 and Basenames registrations have 90 days of renewal grace"
+        );
     }
     let batch = zero_api_response(
         api.client
