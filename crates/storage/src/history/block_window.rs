@@ -109,7 +109,14 @@ async fn last_readable_block_at_or_before(
 // implicit truncation would admit an earlier block at a precise inclusive lower bound.
 // Round only the SQL parameter inward; request and cursor identities keep the original instant.
 fn microsecond_bound(at: OffsetDateTime, round_up: bool) -> Option<OffsetDateTime> {
+    // PostgreSQL's finite minimum is later than the time crate's minimum. An upper
+    // bound before it is empty; a lower bound must still admit every finite SQL instant.
+    const POSTGRES_MIN_NANOS: i128 = -210_866_803_200_000_000_000;
     let nanos = at.unix_timestamp_nanos();
+    if nanos < POSTGRES_MIN_NANOS && !round_up {
+        return None;
+    }
+    let nanos = nanos.max(POSTGRES_MIN_NANOS);
     let floor = nanos.checked_sub(nanos.rem_euclid(1_000))?;
     let rounded = if round_up && floor != nanos {
         floor.checked_add(1_000)?
@@ -139,8 +146,21 @@ mod tests {
     #[test]
     fn microsecond_bounds_handle_supported_clock_endpoints_without_overflow() {
         let first = PrimitiveDateTime::MIN.assume_utc();
-        assert_eq!(microsecond_bound(first, true), Some(first));
-        assert_eq!(microsecond_bound(first, false), Some(first));
+        let database_first = OffsetDateTime::from_unix_timestamp(-210_866_803_200).unwrap();
+        assert_eq!(microsecond_bound(first, true), Some(database_first));
+        assert_eq!(microsecond_bound(first, false), None);
+        let minimum = database_first.unix_timestamp_nanos();
+        for delta in [-1, 0, 1] {
+            let at = OffsetDateTime::from_unix_timestamp_nanos(minimum + delta).unwrap();
+            assert_eq!(
+                microsecond_bound(at, true).map(|value| value.unix_timestamp_nanos()),
+                Some(minimum + if delta > 0 { 1_000 } else { 0 }),
+            );
+            assert_eq!(
+                microsecond_bound(at, false).map(|value| value.unix_timestamp_nanos()),
+                (delta >= 0).then_some(minimum),
+            );
+        }
         let last = PrimitiveDateTime::MAX.assume_utc();
         assert_eq!(microsecond_bound(last, true), None);
         let last_microsecond = microsecond_bound(last, false).unwrap();

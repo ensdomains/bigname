@@ -234,6 +234,7 @@ async fn v2_unix_timestamps_preserve_large_user_registry_grants_and_renewals() -
     }
 
     assert_history_submicrosecond_bounds(&database).await?;
+    assert_history_database_minimum_bounds(&database).await?;
 
     // The same finite word survives each shared public name-record builder and event detail.
     let name = "maximum.numbers.eth";
@@ -365,6 +366,69 @@ async fn assert_history_submicrosecond_bounds(database: &TestDatabase) -> Result
     .await?;
     assert_eq!(lower.len(), 1);
     assert_eq!(lower[0].from_block, Some(202));
+    Ok(())
+}
+
+// Accepted ancient input bounds still select the ordinary modern chain correctly.
+async fn assert_history_database_minimum_bounds(database: &TestDatabase) -> Result<()> {
+    let route = "/v1/names/ordinary.numbers.eth/history";
+    let expected = unix_expiry_response(database, &format!("{route}?include=data")).await?;
+    let events = expected["data"].as_array().expect("ordinary history");
+    for timestamp in ["1700000201", "1700000210"] {
+        assert!(events.iter().any(|event| event["timestamp"] == timestamp));
+    }
+    let epoch = OffsetDateTime::from_unix_timestamp(0)?;
+    let expected_ranges = bigname_storage::resolve_chain_block_ranges(
+        &database.pool,
+        &[FAMILY_CHAIN],
+        Some(epoch),
+        None,
+    )
+    .await?;
+    assert_eq!(expected_ranges.len(), 1);
+    // Below PostgreSQL's finite minimum, exactly on it, and one nanosecond above it.
+    for bound in [
+        "-210866803200.000000001",
+        "-300000000000",
+        "-210866803200",
+        "-210866803199.999999999",
+    ] {
+        let at = bound
+            .parse::<bigname_storage::UnixSeconds>()?
+            .to_datetime()
+            .unwrap();
+        let upper = unix_expiry_response(
+            database,
+            &format!("{route}?to_timestamp={bound}&include=data"),
+        )
+        .await?;
+        assert_eq!(upper["data"], json!([]), "upper {bound}");
+        assert!(
+            bigname_storage::resolve_chain_block_ranges(
+                &database.pool,
+                &[FAMILY_CHAIN],
+                None,
+                Some(at),
+            )
+            .await?
+            .is_empty(),
+            "upper {bound}"
+        );
+        let lower = unix_expiry_response(
+            database,
+            &format!("{route}?from_timestamp={bound}&include=data"),
+        )
+        .await?;
+        assert_eq!(lower["data"], expected["data"], "lower {bound}");
+        let ranges = bigname_storage::resolve_chain_block_ranges(
+            &database.pool,
+            &[FAMILY_CHAIN],
+            Some(at),
+            None,
+        )
+        .await?;
+        assert_eq!(ranges, expected_ranges, "lower {bound}");
+    }
     Ok(())
 }
 
