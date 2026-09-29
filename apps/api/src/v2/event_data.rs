@@ -9,13 +9,13 @@
 //! documented pipeline term the product tier exposes, and only behind the
 //! separate `include=raw` opt-in, as `kind`.
 
-use bigname_storage::HistoryEvent as StorageHistoryEvent;
+use bigname_storage::{HistoryEvent as StorageHistoryEvent, PermissionScope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::history_context::HistoryRowContext;
 use super::slug_to_numeric;
-use super::{HistoryEventType, V2Error, V2Result, permission_powers_value};
+use super::{HistoryEventType, V2Error, V2Result, permission_powers_value, permission_scope_value};
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -184,13 +184,23 @@ fn build_event_data(
         }
         HistoryEventType::Permission => {
             insert(&mut data, "address", address_field(after, "subject"));
-            insert(
-                &mut data,
-                "powers",
-                present(after.get("effective_powers"))
-                    .or_else(|| present(after.get("powers")))
-                    .and_then(|powers| permission_powers_value(powers).ok()),
-            );
+            insert(&mut data, "grant_scope", grant_scope(row));
+            if after["scope"]["kind"].as_str() == Some("registrar_controller") {
+                insert(
+                    &mut data,
+                    "approved",
+                    after
+                        .get("approved")
+                        .filter(|value| value.is_boolean())
+                        .cloned(),
+                );
+            }
+            let powers = permission_powers(after);
+            if let (Some(powers), Some(previous)) = (&powers, logged_previous_powers(before)) {
+                data.insert("added_powers".to_owned(), difference(powers, &previous));
+                data.insert("removed_powers".to_owned(), difference(&previous, powers));
+            }
+            insert(&mut data, "powers", powers);
             insert(&mut data, "fuses", unsigned_field(after, "fuses"));
         }
         HistoryEventType::Subregistry => {
@@ -264,6 +274,66 @@ fn registration_action(row: &StorageHistoryEvent) -> Option<(String, &'static st
         )
     };
     Some((hex::encode(Sha256::digest(key.as_bytes())), role))
+}
+
+/// The subject's powers under the event's grant after the change: the whole set of that grant,
+/// in the product vocabulary.
+fn permission_powers(after: &Value) -> Option<Value> {
+    present(after.get("effective_powers"))
+        .or_else(|| present(after.get("powers")))
+        .and_then(|powers| permission_powers_value(powers).ok())
+}
+
+/// The subject's powers under the grant before the change, only when the log itself stated
+/// them. An ENSv2 `EACRolesChanged` carries the account's old role bitmap beside the new one,
+/// and the adapter keeps it as `role_bitmap` with its decoded powers.
+/// (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2@a971bd64)
+/// Every other permission event's before state is the adapter's template for the grant it
+/// records, not an observation, so no previous set is derived from it.
+fn logged_previous_powers(before: &Value) -> Option<Value> {
+    before.get("role_bitmap").and_then(Value::as_str)?;
+    permission_powers_value(before.get("effective_powers")?).ok()
+}
+
+/// The powers in `left` that `right` lacks, in `left`'s order.
+fn difference(left: &Value, right: &Value) -> Value {
+    let right = right.as_array().map_or(&[][..], Vec::as_slice);
+    Value::Array(
+        left.as_array()
+            .into_iter()
+            .flatten()
+            .filter(|power| !right.contains(power))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The scope of the grant a permission event changed, in the `grant_scope` shape of permission
+/// rows, plus the history-only registrar-controller scope. Omitted for events without a
+/// modeled scope, such as a NameWrapper fuse change.
+fn grant_scope(row: &StorageHistoryEvent) -> Option<Value> {
+    let scope = row.after_state.get("scope")?;
+    let scope = match string_field(scope, "kind")?.as_str() {
+        "root" | "registry_root" => PermissionScope::Root,
+        "registry" => PermissionScope::Registry,
+        "resource" => PermissionScope::Resource,
+        "registrar_controller" => {
+            return Some(json!({
+                "kind": "registrar_controller",
+                "detail": {"registrar": contract_ref(row, &row.raw_fact_ref, "emitting_address")?},
+            }));
+        }
+        "resolver" => PermissionScope::Resolver {
+            chain_id: string_field(scope, "chain_id")?,
+            resolver_address: string_field(scope, "resolver_address")?,
+        },
+        "record_manager" => PermissionScope::RecordManager {
+            chain_id: string_field(scope, "chain_id")?,
+            manager_address: string_field(scope, "manager_address")?,
+        },
+        _ => return None,
+    };
+    permission_scope_value(&scope).ok()
 }
 
 /// The name a primary-name event recorded and whether it set, cleared or recorded no name. An

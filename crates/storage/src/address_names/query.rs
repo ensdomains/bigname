@@ -56,6 +56,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                     WHEN 'registrant' THEN 0
                     WHEN 'token_holder' THEN 1
                     WHEN 'effective_controller' THEN 2
+                    WHEN 'role_holder' THEN 3
                     ELSE 99
                 END AS relation_rank
             FROM served_rows anc"#,

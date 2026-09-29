@@ -112,6 +112,8 @@ pub(crate) enum Relation {
     Owner,
     Manager,
     Registrant,
+    /// The address holds an ENSv2 registry role on the name; not exclusive, and not the manager.
+    RoleHolder,
     /// The address is the value of the name's current `addr:<coin_type>` resolver record. A
     /// resolver-record relation, not an authority relation: it is coin-type scoped, never part
     /// of `any`, and never combined with the authority relations in one set.
@@ -120,13 +122,22 @@ pub(crate) enum Relation {
 
 impl Relation {
     /// The authority relations `any` expands to. `resolves_to` is deliberately outside this set.
-    pub(crate) const ALL: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Owner,
+        Self::Manager,
+        Self::Registrant,
+        Self::RoleHolder,
+    ];
+
+    /// The relations reverse lookup serves, and what `any` expands to there.
+    pub(crate) const LOOKUP: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Owner => "owner",
             Self::Manager => "manager",
             Self::Registrant => "registrant",
+            Self::RoleHolder => "role_holder",
             Self::ResolvesTo => "resolves_to",
         }
     }
@@ -136,6 +147,7 @@ impl Relation {
             "owner" => Some(Self::Owner),
             "manager" => Some(Self::Manager),
             "registrant" => Some(Self::Registrant),
+            "role_holder" => Some(Self::RoleHolder),
             "resolves_to" => Some(Self::ResolvesTo),
             _ => None,
         }
@@ -175,6 +187,13 @@ impl RelationSet {
         (!normalized.is_empty()).then_some(Self {
             relations: normalized,
         })
+    }
+
+    /// The reverse lookup form of `any`: the three relations reverse lookup serves.
+    pub(crate) fn lookup_all() -> Self {
+        Self {
+            relations: Relation::LOOKUP.to_vec(),
+        }
     }
 
     pub(crate) fn as_slice(&self) -> &[Relation] {
@@ -536,6 +555,7 @@ mod tests {
     fn relation_variants_use_exact_wire_spelling() {
         assert_wire(Relation::Owner, "owner");
         assert_wire(Relation::Manager, "manager");
+        assert_wire(Relation::RoleHolder, "role_holder");
         assert_wire(Relation::Registrant, "registrant");
         assert_wire(Relation::ResolvesTo, "resolves_to");
     }

@@ -15,6 +15,8 @@
 //!   readers then withhold the token-holder relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder or
 //!   registrant, where the mask allows.
+//! - The role holders are the holders of an ENSv2 registry role on the name's selected resource
+//!   (`address_roles.rs`). Holding a role does not make an address the effective controller.
 //!
 //! The mask reads the NameWrapper row of the name's resource: whether a PermissionScopeChanged
 //! ever set it (`scope_modifiers`), the composed `wrapper_state`, and the grace test at the
@@ -23,7 +25,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::FamilyPosition;
+use super::{FamilyPosition, address_roles::RoleHolder};
 use crate::{
     NameCurrentRow,
     families::control::{
@@ -51,18 +53,21 @@ pub(super) struct ControllerCandidate {
 /// What one name's relations are computed from.
 pub(super) struct NameRelationsInput<'a> {
     pub(super) row: &'a NameCurrentRow,
-    pub(super) candidates: &'a [&'a ControllerCandidate],
+    pub(super) candidates: &'a [ControllerCandidate],
     /// The selected binding's F1 candidate row.
     pub(super) binding: Option<&'a BindingCandidate>,
     /// The NameWrapper row of the name's resource.
     pub(super) wrapper: Option<&'a WrapperRow>,
     pub(super) clock_seconds: i64,
+    /// The ENSv2 registry role holders of the name's selected resource.
+    pub(super) role_holders: &'a [RoleHolder],
 }
 
 /// The relation names, in the served relation rank order.
 pub(super) const REGISTRANT: &str = "registrant";
 pub(super) const TOKEN_HOLDER: &str = "token_holder";
 pub(super) const EFFECTIVE_CONTROLLER: &str = "effective_controller";
+pub(super) const ROLE_HOLDER: &str = "role_holder";
 
 /// The (address, relation) pairs of one name; empty for a name without a bound, registered row.
 pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static str)> {
@@ -105,6 +110,9 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
             controller
         };
         out.push((effective, EFFECTIVE_CONTROLLER));
+    }
+    for holder in input.role_holders {
+        out.push((Some(holder.subject.clone()), ROLE_HOLDER));
     }
     out.into_iter()
         .filter_map(|(address, relation)| {
@@ -170,7 +178,6 @@ fn controller(
     let mut events: Vec<&ControllerCandidate> = input
         .candidates
         .iter()
-        .copied()
         .filter(|candidate| admitted(candidate) || in_window(candidate))
         .filter(|candidate| seen.insert(candidate.position.event_identity.clone()))
         .collect();
@@ -237,11 +244,12 @@ fn registry_only_window(
 #[path = "address_relations_tests.rs"]
 mod tests;
 
-/// The actual event that supplied a current relation, for bounded history attribution.
-/// Reuses the controller fold and the registration fold's selected event; it does not infer
-/// an acquisition time from the publication time.
+/// The actual event that supplied `address`'s current relation, for bounded history
+/// attribution. Reuses the controller fold, the role holder's grant row and the registration
+/// fold's selected event; it does not infer an acquisition time from the publication time.
 pub(super) fn relation_position(
     input: &NameRelationsInput<'_>,
+    address: &str,
     relation: &str,
 ) -> Option<FamilyPosition> {
     if relation == EFFECTIVE_CONTROLLER {
@@ -258,6 +266,13 @@ pub(super) fn relation_position(
         if let Some((_, position)) = controller(input, open) {
             return Some(position);
         }
+    }
+    if relation == ROLE_HOLDER {
+        return input
+            .role_holders
+            .iter()
+            .find(|holder| holder.subject.eq_ignore_ascii_case(address))
+            .map(|holder| holder.position.clone());
     }
     FamilyPosition::from_json(input.row.provenance.get("registrant_position")?)
 }

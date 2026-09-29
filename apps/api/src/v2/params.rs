@@ -345,7 +345,7 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
                 .any(|relation| *relation != Relation::ResolvesTo));
     if mixes_resolves_to {
         return Err(V2Error::invalid_input(
-            "relation=resolves_to cannot be combined with owner, manager, registrant, or any",
+            "relation=resolves_to cannot be combined with owner, manager, registrant, role_holder, or any",
         ));
     }
     if has_any {

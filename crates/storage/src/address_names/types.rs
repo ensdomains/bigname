@@ -32,6 +32,8 @@ pub enum AddressNameRelation {
     Registrant,
     TokenHolder,
     EffectiveController,
+    /// The address holds an ENSv2 registry role on the name's current registration.
+    RoleHolder,
 }
 
 impl AddressNameRelation {
@@ -40,6 +42,7 @@ impl AddressNameRelation {
             Self::Registrant => "registrant",
             Self::TokenHolder => "token_holder",
             Self::EffectiveController => "effective_controller",
+            Self::RoleHolder => "role_holder",
         }
     }
 
@@ -48,6 +51,7 @@ impl AddressNameRelation {
             "registrant" => Ok(Self::Registrant),
             "token_holder" => Ok(Self::TokenHolder),
             "effective_controller" => Ok(Self::EffectiveController),
+            "role_holder" => Ok(Self::RoleHolder),
             _ => bail!("unknown address_names_current relation {value}"),
         }
     }

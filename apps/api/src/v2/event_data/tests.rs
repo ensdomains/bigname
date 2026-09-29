@@ -432,3 +432,54 @@ fn transfer_authority_record_primary_name_and_permission_payloads() {
     );
     assert_eq!(Value::Object(fuses.data), json!({ "fuses": 196609 }));
 }
+
+/// An ENSv2 role change states the account's old roles on the log, so the row separates what was
+/// granted and revoked from the resulting set; an ENSv1 grant's before state is the adapter's
+/// template and yields neither list.
+#[test]
+fn permission_rows_derive_changes_only_from_a_logged_previous_set() {
+    let subject = "0x00000000000000000000000000000000000000DD";
+    let scope = json!({
+        "kind": "resolver",
+        "chain_id": "ethereum-mainnet",
+        "resolver_address": "0x00000000000000000000000000000000000000EE",
+    });
+    let changed = row_detail(
+        &row(
+            "PermissionChanged",
+            json!({"subject": subject, "role_bitmap": "0x10", "effective_powers": ["set_text"]}),
+            json!({"subject": subject, "scope": scope, "role_bitmap": "0x11",
+                "effective_powers": ["set_addr", "set_text"]}),
+        ),
+        HistoryEventType::Permission,
+    );
+    assert_eq!(
+        Value::Object(changed.data),
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "grant_scope": {"kind": "resolver", "detail": {"resolver": {
+                "chain_id": 1, "address": "0x00000000000000000000000000000000000000ee"}}},
+            "powers": ["set_addr", "set_text"],
+            "added_powers": ["set_addr"],
+            "removed_powers": [],
+        })
+    );
+
+    let template = row_detail(
+        &row(
+            "PermissionChanged",
+            json!({"subject": subject, "effective_powers": []}),
+            json!({"subject": subject, "scope": {"kind": "resource"},
+                "effective_powers": ["resource_control"]}),
+        ),
+        HistoryEventType::Permission,
+    );
+    assert_eq!(
+        Value::Object(template.data),
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "grant_scope": {"kind": "registration", "detail": {}},
+            "powers": ["registration_control"],
+        })
+    );
+}
