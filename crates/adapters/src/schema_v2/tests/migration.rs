@@ -5906,6 +5906,30 @@ fn incomplete_unwrapped_cleanup_keeps_ordinary_authority_effects() -> anyhow::Re
                 .collect::<Vec<_>>()
         };
         let mut expected_events = v1_events(&ordinary);
+        // Only the migration manifest admits the Graveyard, so only its batch marks a registry
+        // owner write naming it, wherever that registry state (owner word and getter) is carried
+        // (`protocol::v1::registry::graveyard`).
+        fn mark_graveyard_getter(value: &mut Value, graveyard: &Value) {
+            match value {
+                Value::Object(object) => {
+                    if object.get("owner") == Some(graveyard)
+                        && object.get("owner_getter") == Some(graveyard)
+                    {
+                        object.insert("owner_getter_reason".to_owned(), "graveyard".into());
+                    }
+                    object
+                        .values_mut()
+                        .for_each(|value| mark_graveyard_getter(value, graveyard));
+                }
+                Value::Array(items) => items
+                    .iter_mut()
+                    .for_each(|value| mark_graveyard_getter(value, graveyard)),
+                _ => {}
+            }
+        }
+        for event in &mut expected_events {
+            mark_graveyard_getter(&mut event.after_state, &fixture["addresses"]["graveyard"]);
+        }
         let mut retirement_events = 0;
         for event in &mut expected_events {
             if event.source_family != "ens_v1_registrar_l1"
