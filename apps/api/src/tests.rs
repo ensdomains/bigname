@@ -454,6 +454,7 @@ include!("tests/v2_family_history_publication.rs");
 include!("tests/v2_family_records_review.rs");
 include!("tests/v2_list_cursor.rs");
 include!("tests/v2_family_children.rs");
+include!("tests/v2_family_registry_children.rs");
 include!("tests/v2_family_name_publication_changes.rs");
 include!("tests/v2_family_name_recompute.rs");
 include!("tests/v2_family_resolver_history.rs");

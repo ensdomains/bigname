@@ -59,6 +59,7 @@ pub(super) fn decode_address_name_current_entry(row: PgRow) -> Result<AddressNam
         canonicality_summary: crate::sql_row::get(&row, "canonicality_summary")?,
         manifest_version: crate::sql_row::get(&row, "manifest_version")?,
         last_recomputed_at: crate::sql_row::get(&row, "last_recomputed_at")?,
+        served_owner: crate::sql_row::get(&row, "served_owner")?,
     })
 }
 

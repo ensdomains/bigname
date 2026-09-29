@@ -217,6 +217,7 @@ pub(crate) async fn load_address_names_page_from(
             canonicality_summary,
             manifest_version,
             last_recomputed_at,
+            served_owner,
         "#,
     );
     if sort.is_timestamp() {

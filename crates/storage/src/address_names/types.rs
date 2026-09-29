@@ -110,6 +110,12 @@ impl AddressNamesCurrentOrder {
 /// Non-relation fields come from the stable representative row chosen by the default collection
 /// sort order. This helper exists for storage-side dedupe only; it does not define public API
 /// representative-selection semantics.
+///
+/// An ENSv1 registry child with no name surface (`families::records::registry_children`) has no
+/// surface binding or binding kind; its `canonical_display_name` and `normalized_name` are the
+/// name its parent's subnames route serves, its `resource_id` is the node's registry-only
+/// resource and `served_owner` is its current registry owner. Every other entry has a surface
+/// binding and binding kind and no `served_owner`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressNameCurrentEntry {
     pub address: String,
@@ -118,10 +124,10 @@ pub struct AddressNameCurrentEntry {
     pub canonical_display_name: String,
     pub normalized_name: String,
     pub namehash: String,
-    pub surface_binding_id: Uuid,
+    pub surface_binding_id: Option<Uuid>,
     pub resource_id: Uuid,
     pub token_lineage_id: Option<Uuid>,
-    pub binding_kind: SurfaceBindingKind,
+    pub binding_kind: Option<SurfaceBindingKind>,
     pub relations: Vec<AddressNameRelation>,
     pub provenance: Value,
     pub coverage: Value,
@@ -129,6 +135,14 @@ pub struct AddressNameCurrentEntry {
     pub canonicality_summary: Value,
     pub manifest_version: i64,
     pub last_recomputed_at: OffsetDateTime,
+    pub served_owner: Option<String>,
+}
+
+impl AddressNameCurrentEntry {
+    /// True for a surface-less ENSv1 registry child's entry.
+    pub fn is_registry_child(&self) -> bool {
+        self.surface_binding_id.is_none()
+    }
 }
 
 /// Keyset cursor fields for storage-side address-name collection pagination.

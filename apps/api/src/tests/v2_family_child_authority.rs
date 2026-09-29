@@ -71,7 +71,8 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
     let uri = "/v1/names/alpha.eth/subnames";
     let (status, before) = read_family_response(&database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
-    assert_eq!(before["data"].as_array().map(Vec::len), Some(4));
+    // carol, one and two; dave's node is owned by the zero address.
+    assert_eq!(before["data"].as_array().map(Vec::len), Some(3));
 
     // The old token observation is no longer produced. Use the actual Interpret redo writer,
     // including its stable-identity reanchoring, rather than manually orphaning the token.

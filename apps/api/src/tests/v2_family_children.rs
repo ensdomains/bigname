@@ -39,9 +39,9 @@ fn child_registry_event(
 
 /// alpha.eth, bound at 200, holds two ENSv1 registry edges (carol, dave: no surface, labels by
 /// preimage) and, through its ENSv2 subregistry `b1`, two registrations (one, two: surfaced).
-/// dave's node is later transferred to the zero owner; dave has no surface, and the override is
-/// keyed by name, so dave stays listed. one.alpha.eth holds an ENSv1 edge of its own (erin), so
-/// its subname count is one. Published at 240.
+/// dave's node is later transferred to the zero owner, which is its node's current registry owner,
+/// so dave has no owner and is not listed. one.alpha.eth holds an ENSv1 edge of its own (erin),
+/// so its subname count is one. Published at 240.
 async fn seed_family_children_fixture(database: &TestDatabase) -> Result<()> {
     seed_family_children_fixture_expiring(database, 1_900_000_000, 1_900_000_000).await
 }
@@ -185,13 +185,12 @@ async fn v2_subnames_from_families() -> Result<()> {
         names,
         [
             &json!("carol.alpha.eth"),
-            &json!("dave.alpha.eth"),
             &json!("one.alpha.eth"),
             &json!("two.alpha.eth")
         ],
         "{pages:#?}"
     );
-    assert_eq!(pages[0]["total_count"], json!(4), "{pages:#?}");
+    assert_eq!(pages[0]["total_count"], json!(3), "{pages:#?}");
     let counted = read_family_pages(
         &database,
         "/v1/names/alpha.eth/subnames?include=counts&page_size=5",
@@ -207,7 +206,6 @@ async fn v2_subnames_from_families() -> Result<()> {
         counts,
         [
             (&json!("carol.alpha.eth"), &json!(0)),
-            (&json!("dave.alpha.eth"), &json!(0)),
             (&json!("one.alpha.eth"), &json!(1)),
             (&json!("two.alpha.eth"), &json!(0))
         ],

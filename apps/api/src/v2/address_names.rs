@@ -472,13 +472,16 @@ pub(crate) fn build_address_name(
 ) -> AddressName {
     let registration = name_registration_fields(name_row, &entry.namespace);
 
+    // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
+    // route serves for it (`subnames::build_subname` with no name row), its registry owner and
+    // the registration fields of no name row, on its registry-only resource.
     AddressName {
         name: entry.normalized_name.clone(),
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
         permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
-        owner: registration.owner,
+        owner: registration.owner.or_else(|| entry.served_owner.clone()),
         registrant: registration.registrant,
         registration_status: registration.registration_status,
         registered_at: registration.registered_at,
@@ -492,7 +495,8 @@ pub(crate) fn build_address_name(
             .copied()
             .map(relation_from_storage)
             .collect(),
-        is_primary: primary_name == Some(entry.normalized_name.as_str()),
+        is_primary: !entry.is_registry_child()
+            && primary_name == Some(entry.normalized_name.as_str()),
         resolution: None,
         resolutions: None,
         subname_count,

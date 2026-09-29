@@ -12,6 +12,7 @@ mod name_summary;
 mod name_topology;
 mod overview;
 mod pointers;
+mod registry_children;
 mod shims;
 
 pub use children_page::{
@@ -36,3 +37,4 @@ pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
+pub(crate) use registry_children::{RegistryChildRow, load_owned_registry_children};
