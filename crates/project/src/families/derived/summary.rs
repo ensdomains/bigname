@@ -72,11 +72,12 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
-    // A Universal Resolver change moves reserved expiry and can retire direct disagreements.
-    let cutover =
-        super::super::universal_resolver::cutover_names(transaction, chain_id, number).await?;
-    if !cutover.is_empty() {
-        names.extend(cutover);
+    // Proxy changes and later parent releases can retire direct disagreements.
+    let affected =
+        super::super::universal_resolver::cutover_names(transaction, chain_id, number, &names)
+            .await?;
+    if !affected.is_empty() {
+        names.extend(affected);
         names.sort_unstable();
         names.dedup();
     }

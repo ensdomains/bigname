@@ -238,7 +238,11 @@ Family indexes serve these concrete readers:
   blocks per chain. Project also reclassifies retained proxy rows when its captured
   manifest set changes or a current proxy declaration starts. These changes use the
   same undo journal and summary recomposition; retired addresses keep their latest
-  upgrade without retaining the current client-facing role.
+  upgrade without retaining the current client-facing role. The same statement also
+  checks the release journal by primary key, then matches only the chain's active
+  divergence names to affected second-level parents from the normal summary work
+  list. It uses the existing active-ledger and surface identity indexes; ordinary
+  blocks with neither change do not scan reservation or active-evidence candidates.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
@@ -2008,7 +2012,12 @@ publication's chain in the same transaction. A Universal Resolver proxy change
 adds names with active disagreements on that chain to the reserved-name summary
 refresh candidates, so cutover also retires observations for names without a live
 ENSv2 entry and their descendants. Candidates are bounded by active evidence rather
-than every name; previously retired observations and other chains are unchanged.
+than every name. When a later ENSv2 entry release removes the path below a
+second-level name, the same publication refreshes its descendants with active
+evidence. The release journal gates this work; the normal summary work list
+supplies affected parent names, including resource-only releases, and label hashes
+match their descendants. Previously retired observations, other parents with live
+entries and other chains are unchanged.
 [Universal Resolver ancestor discovery](glossary.md#universal-resolver-ancestor-discovery)
 revalidates the exact composed name, Ethereum head, family publication, canonical
 positions and Universal Resolver manifest authority. It does not write, compare
