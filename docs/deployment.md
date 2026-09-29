@@ -661,8 +661,11 @@ adoption requires: from the first ingested block to the Ingest handoff or
 Project's own recorded head, whichever is higher. That is the Interpret range
 unless a crash between the two phases' live-cycle advances left Project one
 block behind, in which case it ends at Project's head; when Project stood below
-the handoff it still reaches the handoff. Run or resume
-the stamped Project range exactly as recorded. Project hash adoption uses its
+the handoff it still reaches the handoff. While upstream discovery repair has
+installed required Ingest work, completed Ingest bounds are unavailable and the
+stamp falls back to Project's head; the runner refuses Project until the repair
+and the Interpret replay after it complete, and that replay widens the stamp.
+Run or resume the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
 an interrupted attempt keeps the live-extended range. When that interruption
 belongs to an attested Interpret redo from the prior interpreter content hash,

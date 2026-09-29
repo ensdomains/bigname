@@ -1189,27 +1189,37 @@ in the same step.
    the new interpreter content hash supersedes it: that Project redo's progress
    was written under the prior hash and is invalid. (A stamped Project redo that
    never started, or whose stop the runner recorded, already lets Interpret run
-   and is widened when Interpret completes.) In the transaction that starts
-   the Interpret redo, the runner restores the Project row the way a finished
-   redo restores it and logs a warning naming the superseded hash and range;
-   the Interpret redo's completion then stamps the Project redo again under the
-   new hash. The Interpret redo refuses with a lock error while any runner still
+   and is widened when Interpret completes.) The runner restores the Project
+   row the way a finished redo restores it, inside the transaction that starts
+   the Interpret redo. Once that transaction has committed it logs a warning
+   naming the superseded hash and range; the warning is best effort and can be
+   missing if the process stops right after the commit, so check the Project
+   row rather than the log. The Interpret redo's completion then stamps the
+   Project redo again under the new hash. The Interpret redo refuses with a lock error while any runner still
    holds the Project lock; stop that runner and rerun. A Project redo whose row
    records the running binary's hash is never superseded: it still blocks the
    Interpret redo until it is completed by rerunning its reported command. While
    Project records the prior hash, the stamp reaches from the first ingested
    block to the Ingest handoff or Project's recorded head, whichever is higher,
    which is the range Project needs to adopt the new hash, even when Project
-   stood below the handoff. Do not edit `chain_phase_state` by hand;
+   stood below the handoff. If the Interpret redo first had to install required
+   Ingest work for newly discovered coverage, that intermediate stamp can be
+   shorter; it is widened when Interpret is replayed after the Ingest repair,
+   and the runner refuses Project until then. Do not edit `chain_phase_state`
+   by hand;
 8. complete the matching full-history Project redo while the supervisor remains
    stopped. If it stops part-way, rerun the same command. The rerun resumes the
    owned-key family rebuild from the family marker instead of starting again at
-   the first block when all of these hold: the range and binary are the same,
-   the rebuild was left by the attempt immediately before the rerun (a process
-   killed after starting the redo but before its first family batch uses up an
-   attempt), no Interpret redo or flag recomputation changed Project's input in
-   between, and the family marker is still on the readable chain. Otherwise it
-   rebuilds from the first block;
+   the first block when all of these hold: the range is the same; the Project
+   row still records the running binary's interpreter content hash, so neither
+   a binary with another hash nor a manifest or authority invalidation (which
+   writes an invalidation marker in place of the hash) intervened; the rebuild
+   was left by the attempt immediately before the rerun (a process killed after
+   starting the redo but before its first family batch uses up an attempt);
+   Project's input has not changed in between by any route, such as an
+   Interpret redo, a flag recomputation or a required replay; and the family
+   marker is still on the readable chain. Otherwise it rebuilds from the first
+   block, which is always safe;
 9. start the long-running phase runner only after those one-shot redos succeed.
    When the release also carries a versioned schema-migration or required
    replays, complete them before the Sepolia reset and full

@@ -1764,7 +1764,9 @@ redo covers what Project's hash adoption requires: from the first ingested
 block to the Ingest handoff or Project's own recorded head, whichever is
 higher. That matches the Interpret range unless a crash between the two
 phases' live-cycle advances left Project one block behind, and it still
-reaches the handoff when Project stood below it. Project adopts the new hash
+reaches the handoff when Project stood below it; while upstream discovery
+repair holds required Ingest work, the stamp is clipped to Project's head until
+the Interpret replay after that repair widens it. Project adopts the new hash
 only when the redo covers that range. An
 interrupted redo retains that same effective range; recovery cannot narrow back
 to the finite ingest handoff. If an interrupted attested Interpret redo spans
