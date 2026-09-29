@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=49
+expected_predecessor_shape_proof_count=50
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -592,6 +592,11 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20260929160000_remove_served_projections.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260929160000_remove_served_projections.sql" baseline-first
+            # The summary owner column: added to the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
@@ -705,6 +710,7 @@ for migration_file in \
     "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929160000_remove_served_projections.sql" \
+    "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1030,6 +1036,8 @@ for migration_file in \
     "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
+    "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
+    "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql"
 do

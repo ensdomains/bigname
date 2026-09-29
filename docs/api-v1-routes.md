@@ -3693,8 +3693,29 @@ For a registrar lease first identified by a later readable observation, registra
 - Tier: product read.
 - Purpose: the labels one ENSv2 registry currently holds.
 - Request parameters: path `chain_id`, `address`; query `include=counts`,
-  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
-  `finality` values are rejected by the shared latest-state collection rule.
+  `owner`, `exclude_owner`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule.
+- Owner filters: `owner=<address>` keeps the labels served with that `owner`.
+  `exclude_owner=<address>` keeps every other label, including the ownerless
+  ones, which are served with `owner` absent, so a caller can tell a label held
+  by someone else from a label nobody holds. The address is an EVM address in
+  any letter case and matches case-insensitively. The owner of a label is its
+  token's latest holder, which the registry keeps after the label expires:
+  `latestOwnerOf` still returns it, while `ownerOf` answers the zero address
+  once the expiry passes
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L338-L354 @ ens_v2@a971bd64).
+  Bigname serves the latest holder, so an expired label counts as held by that
+  owner until its registration is released. Releasing it (`unregister`, which
+  emits `LabelUnregistered`) burns the token and ends the registration
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64),
+  and a released label is not a label of the registry. The two parameters
+  cannot be combined. A blank value, empty or
+  only whitespace, counts as absent, as for the other optional address
+  parameters: `owner=&exclude_owner=<address>` is an `exclude_owner` request and
+  `owner=` alone is unfiltered. The filter is the
+  row's own `owner`: for each address, the `owner` and `exclude_owner` results
+  partition the unfiltered labels.
 - Response shape: `data` is an array of rows using the `GET
   /v1/names/{name}/subnames` shape, including `subregistry` and the
   `include=counts` `subname_count`, plus `role_holder_count` with `include=counts`.
@@ -3714,17 +3735,24 @@ For a registrar lease first identified by a later readable observation, registra
   page: the child collection is projected under a parent name, and the root
   name has no child projection.
 - Pagination behavior: standard collection pagination by `display_name`
-  ascending. `page.total_count` is the exact label count, the same number as
-  `counts.labels` on the registry route. The cursor binds the chain and
-  registry.
+  ascending. `page.total_count` is the exact number of labels the owner filter
+  admits, counted before paging; unfiltered, it is the same number as
+  `counts.labels` on the registry route. So `exclude_owner=<address>&page_size=1`
+  answers whether the registry holds any label that address does not own from
+  `total_count` alone. The cursor binds the chain, the registry and the owner
+  filter.
 - Snapshot behavior: rows and totals come from one revalidated current
   publication, reported in `meta.as_of`. Cursors bind that publication; if it
   changes, return `409 stale` and restart pagination without the cursor. A first
   page whose publication changes during the read returns `409 stale` too and can
   simply be retried.
 - Status semantics: an unknown registry returns `404 not_found`; a known
-  registry with no labels returns `200` with empty `data`. Malformed
-  `chain_id`, `address`, `include`, or cursor values return `400 invalid_input`.
+  registry with no labels, or none the owner filter admits, returns `200` with
+  empty `data` and `total_count` `0`, a complete answer for the reported
+  publication. A publication that cannot be served returns `409 stale`, filtered
+  or not, never an empty page. Malformed `chain_id`, `address`, `include`,
+  `owner`, `exclude_owner` or cursor values, and nonblank `owner` together
+  with nonblank `exclude_owner`, return `400 invalid_input`.
 - Replaces (v1): none; new in F1.
 
 ### `GET /v1/namespaces/{namespace}`
