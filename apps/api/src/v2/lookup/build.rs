@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use serde_json::{Value, json};
 
-use super::{cursor::reverse_identity_is_primary, dto::LookupRecord, parse::LookupInclude};
-use crate::v2::name_records_inventory::inventory_summary_of;
+use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
+use crate::v2::record_groups::{AbiSource, RecordGroups};
 use crate::v2::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, record_addresses_from_entries,
-    record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
+    record_unsupported_fields,
 };
 use crate::v2::{
     Authority, RegistrationStatus, Relation, Status, V2Result,
@@ -22,19 +22,8 @@ use crate::v2::{
 
 pub(super) fn build_forward_detail_record(
     record: &bigname_storage::IdentityNameRecordRow,
-    include: LookupInclude,
 ) -> V2Result<LookupRecord> {
-    let mut built = build_detail_record(record, "60", None, Vec::new())?;
-    // The container is served with the inventory the value fields come from, so it is absent on
-    // a record that serves none: unsupported, unregistered, a reservation (docs/api-v1-routes.md).
-    if include.inventory && built.status != Status::Unsupported {
-        built.inventory = record
-            .record_inventory_current
-            .as_ref()
-            .filter(|_| name_record::identity_row_has_current_registration(&record.row))
-            .map(|inventory| inventory_summary_of(Some(inventory.into()), None));
-    }
-    Ok(built)
+    build_detail_record(record, "60", None, Vec::new())
 }
 
 pub(super) fn build_forward_feed_record(
@@ -62,10 +51,8 @@ pub(super) fn build_forward_feed_record(
         lapsed_registration: None,
         resolver: None,
         subregistry: None,
-        addresses: None,
-        text_records: None,
-        content_hash: None,
-        inventory: None,
+        records: None,
+        abi_source: None,
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.row.chain_positions),
@@ -124,10 +111,8 @@ pub(super) fn build_reverse_feed_record(
         lapsed_registration: None,
         resolver: None,
         subregistry: None,
-        addresses: None,
-        text_records: None,
-        content_hash: None,
-        inventory: None,
+        records: None,
+        abi_source: None,
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.name_record.row.chain_positions),
@@ -184,20 +169,15 @@ fn build_detail_record(
         .record_inventory_current
         .as_ref()
         .filter(|_| has_current_registration);
-    let addresses = identity_addresses(record_inventory, primary_coin_type);
-    let text_records = identity_text_records(record_inventory);
-    let content_hash = identity_content_hash(record_inventory);
     let unsupported_fields = identity_unsupported_fields(record_inventory);
     let token_id = name_record::identity_declared_token_id(&record.row);
-    let addresses = (!unsupported_fields.contains("addresses")).then_some(addresses);
-    let text_records = (!unsupported_fields.contains("text_records")).then_some(text_records);
-    let content_hash = (!unsupported_fields.contains("content_hash"))
-        .then_some(content_hash)
-        .flatten();
-    let primary_address = addresses
-        .as_ref()
-        .filter(|_| !unsupported_fields.contains("primary_address"))
+    // `primary_address` keeps the flat answer for the row's coin type, including the
+    // default-address derivation; the record categories live under `records`.
+    let primary_address = (!unsupported_fields.contains("primary_address"))
+        .then(|| identity_addresses(record_inventory, primary_coin_type))
         .and_then(|addresses| addresses.get(primary_coin_type).cloned());
+    let records = record_inventory.map(|inventory| RecordGroups::indexed(inventory.into()));
+    let abi_source = record_inventory.map(AbiSource::of_identity_row);
     let resolver = name_record::identity_row_serves_resolver(&record.row)
         .then(|| name_record::resolver(&record.row.declared_summary))
         .flatten();
@@ -224,10 +204,8 @@ fn build_detail_record(
         resolver,
         subregistry: None,
         primary_address,
-        addresses,
-        text_records,
-        content_hash,
-        inventory: None,
+        records,
+        abi_source,
         primary_name: json_string_at_paths(
             &record.row.declared_summary,
             &[
@@ -249,7 +227,10 @@ fn build_detail_record(
         status,
         unsupported_reason,
         failure_reason: identity_record_failure_reason(&record.row.coverage, status)?,
-        unsupported_fields: unsupported_fields.into_iter().collect(),
+        unsupported_fields: unsupported_fields
+            .into_iter()
+            .filter(|field| field == "primary_address")
+            .collect(),
     })
 }
 
@@ -278,10 +259,8 @@ fn authority_unsupported_record(
         lapsed_registration: None,
         resolver: None,
         subregistry: None,
-        addresses: None,
-        text_records: None,
-        content_hash: None,
-        inventory: None,
+        records: None,
+        abi_source: None,
         primary_name: None,
         primary_address: None,
         chain_id: None,
@@ -337,24 +316,6 @@ fn identity_addresses(
         addresses.insert(primary_coin_type.to_owned(), value);
     }
     addresses
-}
-
-fn identity_text_records(
-    inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
-) -> std::collections::BTreeMap<String, String> {
-    record_text_records_from_entries(
-        inventory.map(|inventory| &inventory.entries),
-        direct_json_field,
-    )
-}
-
-fn identity_content_hash(
-    inventory: Option<&bigname_storage::IdentityRecordInventoryRow>,
-) -> Option<String> {
-    record_content_hash_from_entries(
-        inventory.map(|inventory| &inventory.entries),
-        direct_json_field,
-    )
 }
 
 fn identity_unsupported_fields(

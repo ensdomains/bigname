@@ -1281,7 +1281,7 @@ async fn zero_api_response(
     Ok(body)
 }
 
-fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str, verified: bool) {
+fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
     let mut keys = vec![
         "registration_id",
         "registrant",
@@ -1294,7 +1294,7 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str, verified:
         "namespace",
         "namehash",
         "resolver",
-        "addresses",
+        "records",
         "chain_id",
         "network",
         "status",
@@ -1304,21 +1304,18 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str, verified:
         keys.push("authority");
         assert_eq!(record["authority"], "ens_v1");
     }
-    if verified {
-        keys.push("unsupported_fields");
-        assert_eq!(
-            record["unsupported_fields"],
-            json!(["content_hash", "text_records"])
-        );
-    } else {
-        keys.push("text_records");
-    }
     assert_keys(record, &keys);
     assert_eq!(record["status"], "ok");
     assert_eq!(record["name"], name);
     assert_eq!(record["namespace"], namespace);
     assert_keys(&record["resolver"], &["chain_id", "address"]);
-    assert!(record.pointer("/addresses/60").is_none());
+    // A zero address is not an answer: `60` is unset (`null`) or absent, never a value.
+    assert!(
+        record
+            .pointer("/records/addresses/60")
+            .is_none_or(Value::is_null),
+        "{record}"
+    );
     assert!(record.get("primary_address").is_none());
     assert!(record.get("value").is_none());
 }
@@ -1389,7 +1386,7 @@ pub(super) async fn assert_zero_api_shapes(
             Some(source),
         )
         .await?;
-        assert_zero_name_shape(&body["data"], namespace, name, source == "verified");
+        assert_zero_name_shape(&body["data"], namespace, name);
     }
     let batch = zero_api_response(
         api.client
@@ -1404,7 +1401,7 @@ pub(super) async fn assert_zero_api_shapes(
     assert_eq!(results[0]["input"], json!({"id":"zero","name":name}));
     assert_eq!(results[0]["kind"], "name");
     assert_eq!(results[0]["status"], "ok");
-    assert_zero_name_shape(&results[0]["record"], namespace, name, false);
+    assert_zero_name_shape(&results[0]["record"], namespace, name);
 
     let diagnostic = zero_api_response(
         api.client.get(format!(

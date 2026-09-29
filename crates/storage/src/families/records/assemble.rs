@@ -11,7 +11,7 @@ use super::{
     FamilyPosition, LinkSelection,
     facts::{BlockStamp, ResolverClassification, block_stamps, chain_position, collation_order},
     mirror::MirrorSelection,
-    payload,
+    payload, profiles,
     rows::RecordCandidate,
     serving::ServingPointer,
 };
@@ -322,6 +322,19 @@ pub(crate) fn assemble(
                    "unsupported_reason": "record_family_not_supported_in_phase6_projection"})
         })
         .collect();
+    // A family the resolver has no getter for is never unset there: list it, so no route reads
+    // the absence of a write as `not_found` (profiles.rs).
+    for family in classification.map_or(&[][..], |classification| {
+        profiles::families_without_getter(
+            classification.field("source_family"),
+            classification.field("role"),
+        )
+    }) {
+        if !families.contains(*family) {
+            unsupported_families.push(json!({"record_family": family,
+                "unsupported_reason": profiles::FAMILY_WITHOUT_GETTER_REASON}));
+        }
+    }
     if !supported {
         unsupported_families.push(json!({"record_family": "resolver_classification",
                                          "unsupported_reason": reason}));

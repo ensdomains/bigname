@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::collection_snapshot::CollectionSnapshot;
+use super::record_groups::{AbiSource, RecordGroups, fill_abi_content_types};
 use crate::AppState;
 
 use super::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, load_name_current_for_selected_snapshot,
     map_internal_api_error, normalize_inferred_route_name, record_addresses_from_entries,
-    record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
-    serving_record_inventory, snapshot_selection_api_error,
+    record_unsupported_fields, serving_record_inventory, snapshot_selection_api_error,
 };
 use super::{
     Envelope, QueryParamAllowlist, RegistryRef, RequestSource, SnapshotReadResource,
@@ -99,12 +99,10 @@ pub(crate) struct NameRecord {
     pub(crate) resolver: Option<Resolver>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
+    /// Present when the name may serve resolver records and has a record inventory, or on a
+    /// verified read that requested keys (`record_groups.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) addresses: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) text_records: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) content_hash: Option<String>,
+    pub(crate) records: Option<RecordGroups>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,6 +203,13 @@ pub(crate) async fn get_name_record(
         route_source,
     )
     .await?;
+    if let Some(groups) = record.records.as_mut() {
+        let source = record_inventory
+            .as_ref()
+            .map(AbiSource::of_row)
+            .transpose()?;
+        fill_abi_content_types(&state.pool, vec![(groups, source.as_ref())]).await?;
+    }
     let as_of_block = name_chain_id(&row)
         .and_then(|chain_id| snapshot_block_for_chain(&selected_snapshot, &chain_id));
     if record.status != Status::Unsupported {
@@ -273,6 +278,7 @@ pub(crate) fn build_name_record(
             .iter()
             .any(|unsupported| unsupported == field)
     };
+    // `primary_address` keeps the flat coin-60 answer, including the default-address derivation.
     let addresses = field_supported("addresses").then(|| {
         let mut addresses = record_addresses(record_inventory);
         if !addresses.contains_key("60")
@@ -296,11 +302,6 @@ pub(crate) fn build_name_record(
         }
         addresses
     });
-    let text_records =
-        field_supported("text_records").then(|| record_text_records(record_inventory));
-    let content_hash = field_supported("content_hash")
-        .then(|| record_content_hash(record_inventory))
-        .flatten();
     let primary_address = field_supported("primary_address")
         .then(|| {
             addresses
@@ -341,9 +342,7 @@ pub(crate) fn build_name_record(
         namehash: row.namehash.clone(),
         resolver,
         subregistry: None,
-        addresses,
-        text_records,
-        content_hash,
+        records: record_inventory.map(|inventory| RecordGroups::indexed(inventory.into())),
         primary_name: json_string_at_paths(
             &row.declared_summary,
             &[
@@ -360,7 +359,12 @@ pub(crate) fn build_name_record(
         status,
         unsupported_reason: None,
         failure_reason: None,
-        unsupported_fields,
+        // The record categories carry their own unknown values; only the flat
+        // `primary_address` still reports that it could not be served.
+        unsupported_fields: unsupported_fields
+            .into_iter()
+            .filter(|field| field == "primary_address")
+            .collect(),
     })
 }
 
@@ -494,24 +498,6 @@ pub(super) fn record_addresses(
     record_inventory: Option<&RecordInventoryCurrentRow>,
 ) -> BTreeMap<String, String> {
     record_addresses_from_entries(
-        record_inventory.map(|inventory| &inventory.entries),
-        direct_json_field,
-    )
-}
-
-pub(super) fn record_text_records(
-    record_inventory: Option<&RecordInventoryCurrentRow>,
-) -> BTreeMap<String, String> {
-    record_text_records_from_entries(
-        record_inventory.map(|inventory| &inventory.entries),
-        direct_json_field,
-    )
-}
-
-pub(super) fn record_content_hash(
-    record_inventory: Option<&RecordInventoryCurrentRow>,
-) -> Option<String> {
-    record_content_hash_from_entries(
         record_inventory.map(|inventory| &inventory.entries),
         direct_json_field,
     )

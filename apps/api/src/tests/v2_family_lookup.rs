@@ -129,7 +129,7 @@ async fn family_lookup_batch_reads_names_inventory_and_relations() -> Result<()>
         assert_eq!(family["data"][0]["status"], "ok", "{family:#}");
         if profile == "detail" {
             assert_eq!(
-                family["data"][0]["record"]["addresses"]["60"], FAMILY_ALICE,
+                family["data"][0]["record"]["records"]["addresses"]["60"], FAMILY_ALICE,
                 "{family:#}"
             );
         }

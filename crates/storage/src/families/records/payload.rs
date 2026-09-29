@@ -132,6 +132,32 @@ pub(crate) fn coin60_zero_address_is_absent(
         && address.is_some_and(|address| address.to_ascii_lowercase() == ZERO_ADDRESS)
 }
 
+/// Whether the record is the forward `name` record (`NameChanged` on a node-keyed resolver,
+/// `NameUpdated` on an ENSv2 record ID). Its value is the event's `raw_name`, retained on the
+/// value row for reverse claims.
+fn is_name_record(payload: &Value) -> bool {
+    text(payload, "record_family").as_deref() == Some("name")
+        && text(payload, "record_key").as_deref() == Some("name")
+}
+
+/// The forward name record's status and value from its retained `raw_name`: a nonempty name is a
+/// success, an empty one a clear (`not_found`), and a write whose name was not retained is
+/// unsupported. A name that is not valid UTF-8 keeps the event's `{encoding, bytes}` form.
+/// `setName` stores the string per record version and `name` reads it back, so an empty string
+/// reads as unset and a `VersionChanged` reset hides it like any other record.
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L29 @ ens_v1@91c966f)
+fn name_record(payload: &Value) -> (&'static str, Value) {
+    match payload.get("raw_name") {
+        Some(Value::String(name)) if name.is_empty() => ("not_found", Value::Null),
+        Some(Value::String(name)) => ("success", json!(name)),
+        Some(value @ Value::Object(_)) => match blank(text(value, "bytes").as_deref()) {
+            Some(false) => ("success", value.clone()),
+            _ => ("not_found", Value::Null),
+        },
+        _ => ("unsupported", Value::Null),
+    }
+}
+
 /// The inventory entry of a served record, nulls stripped: `None` for a family the inventory
 /// does not list. `stored_status` is the status the family row keeps, used in place of the one
 /// derived from a payload rebuilt from its columns.
@@ -141,6 +167,21 @@ pub(crate) fn entry(
     zero_absent: bool,
 ) -> Option<Value> {
     let family = text(payload, "record_family")?;
+    if is_name_record(payload) {
+        let (status, value) = name_record(payload);
+        let mut entry = Map::new();
+        entry.insert("record_key".into(), json!("name"));
+        entry.insert("record_family".into(), json!("name"));
+        entry.insert("status".into(), json!(status));
+        entry.insert("value".into(), value);
+        if status == "unsupported" {
+            entry.insert(
+                "unsupported_reason".into(),
+                json!("value_not_retained_in_normalized_events"),
+            );
+        }
+        return Some(strip_nulls(Value::Object(entry)));
+    }
     if !matches!(family.as_str(), "text" | "addr" | "contenthash") {
         return None;
     }
@@ -208,6 +249,9 @@ pub(crate) fn selector(payload: &Value) -> Option<Value> {
 
 /// The record family a served record lists as unsupported, if any.
 pub(crate) fn unsupported_family(payload: &Value) -> Option<String> {
+    if is_name_record(payload) {
+        return None;
+    }
     text(payload, "record_family")
         .filter(|family| !matches!(family.as_str(), "text" | "addr" | "contenthash"))
 }
@@ -274,6 +318,40 @@ mod tests {
             entry(&rebuilt, Some("success"), false),
             Some(json!({"record_key": "text:url", "record_family": "text",
                         "selector_key": "url", "status": "success"}))
+        );
+    }
+
+    #[test]
+    fn the_forward_name_record_serves_its_retained_name() {
+        let set = json!({"record_key": "name", "record_family": "name", "raw_name": "alice.eth"});
+        assert_eq!(
+            entry(&set, Some("unsupported"), false),
+            Some(json!({"record_key": "name", "record_family": "name",
+                        "status": "success", "value": "alice.eth"}))
+        );
+        assert_eq!(unsupported_family(&set), None);
+        assert_eq!(selector(&set), None);
+        let cleared = json!({"record_key": "name", "record_family": "name", "raw_name": ""});
+        assert_eq!(
+            entry(&cleared, Some("unsupported"), false),
+            Some(json!({"record_key": "name", "record_family": "name", "status": "not_found"}))
+        );
+        let hex = json!({"record_key": "name", "record_family": "name",
+                         "raw_name": {"encoding": "hex", "bytes": "0xff"}});
+        assert_eq!(
+            entry(&hex, None, false),
+            Some(
+                json!({"record_key": "name", "record_family": "name", "status": "success",
+                        "value": {"encoding": "hex", "bytes": "0xff"}})
+            )
+        );
+        let lost = json!({"record_key": "name", "record_family": "name"});
+        assert_eq!(
+            entry(&lost, None, false),
+            Some(
+                json!({"record_key": "name", "record_family": "name", "status": "unsupported",
+                        "unsupported_reason": "value_not_retained_in_normalized_events"})
+            )
         );
     }
 

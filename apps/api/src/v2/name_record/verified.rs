@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow, SelectedSnapshot};
 
@@ -18,10 +18,7 @@ use super::super::{
     },
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
-
-#[path = "verified/record_values.rs"]
-mod record_values;
-use record_values::VerifiedRecordValues;
+use crate::v2::record_groups::RecordGroups;
 
 pub(super) async fn build_name_record_for_source(
     state: &AppState,
@@ -79,9 +76,7 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver: None,
-        addresses: None,
-        text_records: None,
-        content_hash: None,
+        records: None,
         primary_name: None,
         primary_address: None,
         chain_id: None,
@@ -132,42 +127,25 @@ async fn build_verified_name_record(
     let answers = &verified_records.records;
 
     let mut record = build_name_record(row, record_inventory, chain_id, Status::Ok)?;
-    // The flat fields reflect the verified answers, never indexed values.
-    let VerifiedRecordValues {
-        addresses,
-        text_records,
-        content_hash,
-    } = VerifiedRecordValues::from_answers(&requested_records, answers);
-    let primary_address = addresses.get("60").cloned();
-    let addresses_unserved = field_could_not_serve(&requested_records, answers, is_address_record);
-    let text_records_unserved = field_could_not_serve(&requested_records, answers, is_text_record);
-    let content_hash_unserved =
-        field_could_not_serve(&requested_records, answers, is_content_hash_record);
+    // The record categories and `primary_address` reflect the verified answers, never indexed
+    // values; the ABI content types are filled from the inventory with the indexed ones.
+    let groups = RecordGroups::verified(&requested_records, answers);
     let primary_address_unserved =
         field_could_not_serve(&requested_records, answers, is_primary_address_record);
+    let status = verified_profile_status(answers);
 
-    let unsupported_fields = verified_unsupported_fields(
-        addresses_unserved,
-        text_records_unserved,
-        content_hash_unserved,
-        primary_address_unserved,
-    );
-    let status = verified_profile_status(answers, &unsupported_fields);
-
-    record.addresses = (!addresses_unserved)
-        .then(|| dictionary_field(addresses, &requested_records, answers, is_address_record))
-        .flatten();
-    record.text_records = (!text_records_unserved)
-        .then(|| dictionary_field(text_records, &requested_records, answers, is_text_record))
-        .flatten();
-    record.content_hash = (!content_hash_unserved).then_some(content_hash).flatten();
     record.primary_address = (!primary_address_unserved)
-        .then_some(primary_address)
+        .then(|| groups.addresses.get("60").cloned().flatten())
         .flatten();
+    record.records = has_current_registration.then_some(groups);
     record.status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
-    record.unsupported_fields = unsupported_fields;
+    record.unsupported_fields = if primary_address_unserved {
+        vec!["primary_address".to_owned()]
+    } else {
+        Vec::new()
+    };
     Ok(record)
 }
 
@@ -210,43 +188,6 @@ fn profile_fallback_requested_records() -> Vec<ResolutionRecordKey> {
         .collect()
 }
 
-fn dictionary_field(
-    values: BTreeMap<String, String>,
-    requested_records: &[ResolutionRecordKey],
-    answers: &BTreeMap<String, RecordAnswer>,
-    predicate: fn(&ResolutionRecordKey) -> bool,
-) -> Option<BTreeMap<String, String>> {
-    if !values.is_empty() || field_has_served_answer(requested_records, answers, predicate) {
-        Some(values)
-    } else {
-        None
-    }
-}
-
-fn verified_unsupported_fields(
-    addresses_unserved: bool,
-    text_records_unserved: bool,
-    content_hash_unserved: bool,
-    primary_address_unserved: bool,
-) -> Vec<String> {
-    let mut fields = BTreeSet::new();
-
-    if addresses_unserved {
-        fields.insert("addresses".to_owned());
-    }
-    if content_hash_unserved {
-        fields.insert("content_hash".to_owned());
-    }
-    if primary_address_unserved {
-        fields.insert("primary_address".to_owned());
-    }
-    if text_records_unserved {
-        fields.insert("text_records".to_owned());
-    }
-
-    fields.into_iter().collect()
-}
-
 fn field_could_not_serve(
     requested_records: &[ResolutionRecordKey],
     answers: &BTreeMap<String, RecordAnswer>,
@@ -266,22 +207,9 @@ fn field_could_not_serve(
     !has_relevant_record || has_problem_answer
 }
 
-fn field_has_served_answer(
-    requested_records: &[ResolutionRecordKey],
-    answers: &BTreeMap<String, RecordAnswer>,
-    predicate: fn(&ResolutionRecordKey) -> bool,
-) -> bool {
-    requested_records
-        .iter()
-        .filter(|record| predicate(record))
-        .filter_map(|record| answers.get(&record.record_key))
-        .any(answer_is_served)
-}
-
-fn verified_profile_status(
-    answers: &BTreeMap<String, RecordAnswer>,
-    unsupported_fields: &[String],
-) -> Status {
+/// `stale` if any key is stale, else `failed` if any failed, else `unsupported` when nothing was
+/// answered or any key is unsupported, else `ok`.
+fn verified_profile_status(answers: &BTreeMap<String, RecordAnswer>) -> Status {
     if answers
         .values()
         .any(|answer| answer.status == Status::Stale)
@@ -292,11 +220,10 @@ fn verified_profile_status(
         .any(|answer| answer.status == Status::Failed)
     {
         Status::Failed
-    } else if !unsupported_fields.is_empty()
-        && (answers.is_empty()
-            || answers
-                .values()
-                .any(|answer| answer.status == Status::Unsupported))
+    } else if answers.is_empty()
+        || answers
+            .values()
+            .any(|answer| answer.status == Status::Unsupported)
     {
         Status::Unsupported
     } else {
@@ -334,10 +261,6 @@ fn verified_profile_unsupported_reason(
     )
 }
 
-fn answer_is_served(answer: &RecordAnswer) -> bool {
-    matches!(answer.status, Status::Ok | Status::NotFound)
-}
-
 fn answer_is_problem(answer: &RecordAnswer) -> bool {
     matches!(
         answer.status,
@@ -345,20 +268,8 @@ fn answer_is_problem(answer: &RecordAnswer) -> bool {
     )
 }
 
-fn is_address_record(record: &ResolutionRecordKey) -> bool {
-    record.record_family == "addr"
-}
-
 fn is_primary_address_record(record: &ResolutionRecordKey) -> bool {
     record.record_key == "addr:60"
-}
-
-fn is_text_record(record: &ResolutionRecordKey) -> bool {
-    matches!(record.record_family.as_str(), "text" | "avatar")
-}
-
-fn is_content_hash_record(record: &ResolutionRecordKey) -> bool {
-    record.record_key == "contenthash"
 }
 
 #[cfg(test)]
