@@ -781,7 +781,12 @@ name keeps the fold, because the owner it serves is the wrapped token's holder w
 registry names the NameWrapper: its NameWrapper epochs and every admitted NameWrapper
 `TokenControlTransferred` (a `TransferSingle` or `TransferBatch` of the wrapped token) set it,
 and a registrar ERC721 transfer does not, since the NameWrapper holds that token while the name
-is wrapped. ENSv2 names keep their own fold.
+is wrapped. Past its NameWrapper expiry, a wrapped name whose `PARENT_CANNOT_CONTROL` fuse is
+burned (an emancipated or locked name, such as an emancipated subname) has no owner in the
+NameWrapper, so `control.registry_owner` is `null` there, like `control.registrant`. A wrapped name
+whose expiry passes without that fuse keeps its token holder as the owner. ENSv2 names keep their
+own fold.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
 
 A registry owner write is read as the registry getter's view, `owner(node)`: the event's
 `owner_getter`, which is zero for a literal zero and, on a registry whose getter maps its own

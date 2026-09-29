@@ -449,7 +449,17 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 opt_text(registrant.as_deref())
             },
         );
-        control.insert("registry_owner".into(), opt_text(owner.as_deref()));
+        // An expired NameWrapper entry with PARENT_CANNOT_CONTROL burned has no owner
+        // (`owner_lapsed`), as it has no registrant.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+        control.insert(
+            "registry_owner".into(),
+            if owner_lapsed {
+                Value::Null
+            } else {
+                opt_text(owner.as_deref())
+            },
+        );
         control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control
     };

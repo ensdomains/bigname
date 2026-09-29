@@ -845,3 +845,83 @@ async fn a_wrapped_token_transfer_moves_the_served_owner() -> Result<()> {
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+/// A wrapped subname with no registrar lease, wrapped to BOB with `fuses` until `expiry`, served
+/// at blocks 11 and 14 (the expiry falls between them).
+async fn wrapped_subname_owner_across_expiry(
+    prefix: &str,
+    fuses: u64,
+    state: &str,
+) -> Result<Vec<Value>> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let wrapper = uuid(5);
+    // Past block 12's time (1_800_000_000 + 12 * 12), before block 14's.
+    let expiry = 1_800_000_000_i64 + 12 * 12 + 6;
+    write(
+        &fixture,
+        10,
+        1,
+        "AuthorityTransferred",
+        V1_REGISTRY,
+        &wrapper,
+        json!({"source_event": "NewOwner", "node": format!("0x{:064x}", 0x60_u64),
+               "child_node": node(), "owner": NAME_WRAPPER, "owner_getter": NAME_WRAPPER,
+               "emitter_role": "registry"}),
+    )
+    .await?;
+    fixture
+        .binding(&uuid(110), &name(), &wrapper, "ens_v1", 10, 2, None)
+        .await?;
+    let wrapped = json!({"source_event": "NameWrapped", "node": node(), "owner": BOB, "to": BOB,
+                         "fuses": fuses, "wrapper_state": state, "expiry": expiry,
+                         "authority_kind": "wrapper", "authority_key": "wrapper:key",
+                         "surface_known": true, "binding_kind": "declared_registry_path"});
+    for kind in [
+        "SurfaceBound",
+        "AuthorityEpochChanged",
+        "TokenControlTransferred",
+        "PermissionScopeChanged",
+        "ExpiryChanged",
+    ] {
+        write(&fixture, 10, 2, kind, V1_WRAPPER, &wrapper, wrapped.clone()).await?;
+    }
+    let mut served_rows = Vec::new();
+    for block in [11, 14] {
+        fixture.apply(block, FamilyMode::Normal).await?;
+        let row = load_family_name(&fixture.pool, &name())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no composed row"))?;
+        served_rows.push(row.declared_summary["control"].clone());
+    }
+    fixture.assert_rebuild_equal(14).await?;
+    fixture.cleanup().await?;
+    Ok(served_rows)
+}
+
+/// An expired wrapped name with PARENT_CANNOT_CONTROL burned has no owner: the NameWrapper
+/// reports the zero owner for it, so the served owner clears with the registrant. Without that
+/// fuse, expiry does not clear the holder.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+#[tokio::test]
+async fn an_expired_emancipated_wrapped_subname_serves_no_owner() -> Result<()> {
+    let emancipated = wrapped_subname_owner_across_expiry(
+        "families_registry_owner_emancipated_expiry",
+        65_536,
+        "emancipated",
+    )
+    .await?;
+    ensure!(
+        emancipated[0]["registry_owner"] == json!(BOB)
+            && emancipated[1]["registry_owner"].is_null()
+            && emancipated[1]["registrant"].is_null(),
+        "an expired emancipated name keeps its owner: {emancipated:?}"
+    );
+    let wrapped =
+        wrapped_subname_owner_across_expiry("families_registry_owner_wrapped_expiry", 0, "wrapped")
+            .await?;
+    ensure!(
+        wrapped[0]["registry_owner"] == json!(BOB) && wrapped[1]["registry_owner"] == json!(BOB),
+        "an expired name without PARENT_CANNOT_CONTROL loses its owner: {wrapped:?}"
+    );
+    Ok(())
+}
