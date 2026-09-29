@@ -216,10 +216,21 @@ pub(crate) async fn get_address_names(
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
+        cursor_payload
+            .as_ref()
+            .and_then(self::cursor::registry_children_digest),
         params.page_size,
     )
     .await
     .map_err(|error| {
+        // A changed registry-child rendering restarts the read, even when the renamed child is
+        // the cursor's anchor, which the page's anchor check would otherwise reject.
+        if error
+            .downcast_ref::<bigname_storage::AddressNamesRegistryChildrenChanged>()
+            .is_some()
+        {
+            return super::collection_snapshot::restart_required();
+        }
         if storage_cursor.is_some()
             && error
                 .to_string()
@@ -234,12 +245,6 @@ pub(crate) async fn get_address_names(
             ))
         })(error)
     })?;
-
-    if cursor_payload.as_ref().is_some_and(|payload| {
-        self::cursor::registry_children_moved(payload, &storage_page.registry_children_digest)
-    }) {
-        return Err(super::collection_snapshot::restart_required());
-    }
 
     let logical_name_ids = storage_page
         .entries

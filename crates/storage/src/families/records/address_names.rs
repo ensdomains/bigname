@@ -53,6 +53,7 @@ pub async fn load_family_address_names_page(
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
+    expected_registry_children_digest: Option<&str>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
@@ -62,6 +63,12 @@ pub async fn load_family_address_names_page(
     let (children, registry_children_digest) =
         super::registry_children::compose_registry_child_rows(&mut snapshot, address, namespace)
             .await?;
+    // Before the page validates the cursor's anchor, which a renamed child no longer matches.
+    if expected_registry_children_digest
+        .is_some_and(|expected| expected != registry_children_digest)
+    {
+        return Err(crate::AddressNamesRegistryChildrenChanged.into());
+    }
     if let Value::Array(rows) = &mut rows {
         rows.extend(children);
     }

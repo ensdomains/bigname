@@ -40,7 +40,7 @@ pub use types::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
     AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
     AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary,
+    AddressNamesCurrentSummary, AddressNamesRegistryChildrenChanged,
 };
 
 /// The publication half of the read filter: the row's target block is on readable lineage.

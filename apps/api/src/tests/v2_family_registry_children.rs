@@ -465,3 +465,37 @@ async fn v2_registry_child_rename_restarts_a_name_sorted_read() -> Result<()> {
 
     database.cleanup().await
 }
+
+/// When the renamed registry child is the continuation's anchor itself, the cursor's saved sort
+/// value no longer matches the child. The read still answers the restart (409 stale) that a
+/// rendering change calls for, not an invalid cursor; a cursor that is malformed stays invalid.
+#[tokio::test]
+async fn v2_registry_child_rename_of_the_cursor_anchor_restarts_the_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=1");
+    let (status, first) = read_family_response(&database, &uri).await?;
+    assert_eq!(status, StatusCode::OK, "{first:#}");
+    // The placeholder sorts first, so it is the first page's only row and the cursor's anchor.
+    assert_eq!(
+        first["data"][0]["name"],
+        json!(placeholder("unknown", "alpha.eth")),
+        "{first:#}"
+    );
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("a second page")
+        .to_owned();
+
+    insert_family_label_preimage(&database.pool, b"unknown").await?;
+    let (status, error) =
+        read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
+    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+
+    let (status, error) =
+        read_family_response(&database, &format!("{uri}&cursor=not-a-cursor")).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error:#}");
+
+    database.cleanup().await
+}

@@ -96,7 +96,7 @@ pub(crate) fn address_names_storage_cursor(
     if payload.sort != binding.sort.as_str() {
         return Err(invalid_cursor_error());
     }
-    // The registry-children digest is checked once the page is read (`registry_children_moved`).
+    // The storage read checks the registry-children digest (`registry_children_digest`).
     if payload.filters.len() != 9
         || !payload.filters.contains_key(REGISTRY_CHILDREN_KEY)
         || payload.filters.get("is_migrated")
@@ -218,13 +218,13 @@ fn relation_filter_value(value: Option<&RelationSet>) -> String {
         .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned())
 }
 
-/// Whether a continuation's registry children render differently from when its cursor was
-/// issued: a label preimage arrived for one of them (or one appeared or left), which can move it
-/// across the cursor in a name-sorted page, so the read must restart.
-pub(crate) fn registry_children_moved(payload: &CursorPayload, digest: &str) -> bool {
+/// The registry-child digest a continuation's cursor was issued with, which the storage read
+/// compares with the page's before it validates the cursor's anchor: a label preimage that arrived
+/// for one of the children (or one appearing or leaving) can move it across the cursor in a
+/// name-sorted page, so the read must restart.
+pub(crate) fn registry_children_digest(payload: &CursorPayload) -> Option<&str> {
     payload
         .filters
         .get(REGISTRY_CHILDREN_KEY)
         .map(String::as_str)
-        != Some(digest)
 }
