@@ -144,10 +144,14 @@ pub(crate) async fn get_address_history(
     } else {
         history_total_count(storage_page.summary.as_ref())
     };
+    let context =
+        super::history_context::load_history_row_context(&state.pool, &storage_page.rows, include)
+            .await?;
     let logical_name_ids = storage_page
         .rows
         .iter()
         .filter_map(|row| row.logical_name_id.clone())
+        .chain(context.record_logical_name_ids().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -174,10 +178,11 @@ pub(crate) async fn get_address_history(
         .filter_map(|row| {
             let name = row
                 .logical_name_id
-                .as_ref()
+                .as_deref()
+                .or_else(|| context.record_name(row))
                 .and_then(|logical_name_id| names.get(logical_name_id))
                 .map(|row| row.normalized_name.as_str());
-            build_event(row, name, include)
+            build_event(row, name, include, &context)
         })
         .collect();
     Ok(Json(Envelope {

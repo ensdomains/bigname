@@ -16,11 +16,6 @@ loc = 792
 justification = "Namespace overview grew the per-chain verified-read capability report (F12) beside the existing overview assembly; split the capability report into a sibling module on the next substantive touch."
 
 [[files]]
-path = "apps/api/src/v2/vocab.rs"
-loc = 714
-justification = "Product vocabulary gained HistoryEventTypeSet canonicalization (history ergonomics), Authority (name-list ergonomics), and the resolves_to relation in parallel branches; split history vocabulary into a submodule now that the branches have landed. Authority moved to vocab/authority.rs when it gained ens_v0, ratcheting this file down from 747 lines."
-
-[[files]]
 path = "crates/adapters/src/schema_v2/identity.rs"
 loc = 604
 justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."

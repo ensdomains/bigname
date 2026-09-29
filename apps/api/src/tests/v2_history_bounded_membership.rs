@@ -537,6 +537,15 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
             "{route}: {payload}"
         );
     }
+    // The same arm names the write in the events feed: it was made after the pointer.
+    let other = bounded_event_id(&database, "v2-write-other-225").await?;
+    assert_eq!(
+        bigname_storage::load_positional_record_names(&database.pool, &[write, other]).await?,
+        std::collections::BTreeMap::from([(
+            write,
+            std::collections::BTreeSet::from([logical_name_id.clone()])
+        )])
+    );
 
     // A resolver that is not a declared public_resolver_v2 attributes nothing through this arm:
     // the manifest later declares the address in another role.
@@ -557,5 +566,10 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
     )
     .await?;
     assert!(attributed.is_empty(), "{attributed:?}");
+    assert!(
+        bigname_storage::load_positional_record_names(&database.pool, &[write, other])
+            .await?
+            .is_empty()
+    );
     database.cleanup().await
 }

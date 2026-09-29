@@ -12,6 +12,7 @@ mod error;
 mod event_data;
 mod events;
 mod history;
+mod history_context;
 pub(crate) mod history_keyset;
 mod list_cursor;
 pub(crate) mod lookup;

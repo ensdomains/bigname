@@ -17,6 +17,7 @@ mod keyset;
 mod lineage;
 mod options;
 mod paging;
+mod primary_values;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;
 mod read_filter;
@@ -40,7 +41,7 @@ use read_filter::{EventHistoryReadFilter, event_history_read_filter};
 use selectors::{name_history_selector, resource_history_selector};
 
 pub(crate) use attribution::load_attribution_map;
-pub use attribution::load_bounded_record_attribution;
+pub use attribution::{load_bounded_record_attribution, load_positional_record_names};
 pub use block_window::resolve_chain_block_ranges;
 #[cfg(any(test, feature = "test-support"))]
 pub use child_registrations::explain_name_history_page_with_child_registrations_for_test;
@@ -53,6 +54,7 @@ pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
+pub use primary_values::load_recorded_primary_names;
 pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,
