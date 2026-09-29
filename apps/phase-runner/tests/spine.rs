@@ -6397,3 +6397,249 @@ async fn seed_readable_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i64
         .await?;
     Ok(())
 }
+
+// A release that changes the interpreter content hash can land while the prior release's Project
+// redo is stopped mid-way (`required downstream redo active`). That redo's progress is invalid
+// under the new hash, so the Interpret redo that starts the new hash epoch supersedes it, and the
+// Project redo it stamps then runs under the new hash.
+const PRIOR_RELEASE_HASH: &str = "keccak256:prior-release";
+
+#[tokio::test]
+async fn a_new_hash_interpret_redo_supersedes_a_prior_hash_project_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_supersede_prior_project").await?;
+    let chain_id = "supersede-prior-project";
+    seed_hash_epoch(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    leave_project_redo_active(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "supersede-prior-project-runner",
+    )?;
+
+    runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await?;
+
+    let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    let current = Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned());
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                current.clone()
+            ),
+            ("project".into(), "completed".into(), false, current),
+        ],
+        "the new hash epoch ran Interpret and the stamped Project redo"
+    );
+    scratch.cleanup().await
+}
+
+// A Project redo from this binary's own hash is live work: a new Interpret redo still waits for it.
+#[tokio::test]
+async fn a_same_hash_active_project_redo_still_blocks_interpret_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_same_hash_project_redo").await?;
+    let chain_id = "same-hash-project-redo";
+    seed_hash_epoch(
+        scratch.pool(),
+        chain_id,
+        phase_runner::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
+    leave_project_redo_active(
+        scratch.pool(),
+        chain_id,
+        phase_runner::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
+    let before = active_project_redo(scratch.pool(), chain_id).await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "same-hash-project-redo-runner",
+    )?;
+
+    let error = runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a same-hash Project redo keeps blocking Interpret");
+    assert_eq!(error.kind(), ErrorKind::InvalidTransition);
+    assert!(
+        error.to_string().contains("while phase project is running"),
+        "{error}"
+    );
+    assert_eq!(active_project_redo(scratch.pool(), chain_id).await?, before);
+    scratch.cleanup().await
+}
+
+// A prior-hash Project redo whose writer still holds the Project lock is not superseded: the new
+// Interpret redo refuses and changes nothing.
+#[tokio::test]
+async fn a_prior_hash_project_redo_with_a_live_writer_is_not_superseded() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_supersede_live_writer").await?;
+    let chain_id = "supersede-live-writer";
+    seed_hash_epoch(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    leave_project_redo_active(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    let before = active_project_redo(scratch.pool(), chain_id).await?;
+    let project_lock = PhaseLock::acquire(
+        scratch.writer_connect_options(),
+        chain_id,
+        PhaseName::Project,
+    )
+    .await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "supersede-live-writer-runner",
+    )?;
+
+    let error = runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a running Project writer keeps its redo");
+    project_lock.release().await?;
+    assert_eq!(error.kind(), ErrorKind::LockHeld, "{error}");
+    assert_eq!(active_project_redo(scratch.pool(), chain_id).await?, before);
+    let interpret: (bool, Option<String>) = sqlx::query_as(
+        "SELECT redo_in_progress, input_content_hash FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(interpret, (false, Some(PRIOR_RELEASE_HASH.to_owned())));
+    scratch.cleanup().await
+}
+
+// The supersede commits with the Interpret redo start or not at all: a new-hash Interpret redo
+// refused for its range leaves the prior Project redo exactly as it was.
+#[tokio::test]
+async fn a_refused_new_hash_interpret_redo_keeps_the_prior_project_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_supersede_refused").await?;
+    let chain_id = "supersede-refused";
+    seed_hash_epoch(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    leave_project_redo_active(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    let before = active_project_redo(scratch.pool(), chain_id).await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "supersede-refused-runner",
+    )?;
+
+    let error = runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a partial range cannot start a new hash epoch");
+    assert_eq!(error.kind(), ErrorKind::ContentHashMismatch, "{error}");
+    assert!(error.to_string().contains("full range 0..=9"), "{error}");
+    assert_eq!(active_project_redo(scratch.pool(), chain_id).await?, before);
+    scratch.cleanup().await
+}
+
+/// Ingest completed through block 9; Interpret and Project completed at block 9 under `hash`.
+async fn seed_hash_epoch(pool: &sqlx::PgPool, chain_id: &str, hash: &str) -> Result<()> {
+    PhaseStore::new(pool.clone())
+        .initialize_chain(chain_id)
+        .await?;
+    mark_completed(pool, chain_id, PhaseName::Ingest, None).await?;
+    mark_completed(pool, chain_id, PhaseName::Interpret, Some(hash)).await?;
+    mark_completed(pool, chain_id, PhaseName::Project, Some(hash)).await?;
+    set_phase_extent(pool, chain_id, PhaseName::Interpret, 9).await?;
+    set_phase_extent(pool, chain_id, PhaseName::Project, 9).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET live_handoff_block_number = 9, live_handoff_block_hash = $2
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-block-9"))
+    .execute(pool)
+    .await?;
+    seed_interpret_redo_presence(pool, chain_id, 9).await
+}
+
+/// The Project row as a stamped Project redo leaves it when its binary stops mid-way without
+/// recording the stop (a kill): active marker, saved progress, attempt generation 74.
+async fn leave_project_redo_active(pool: &sqlx::PgPool, chain_id: &str, hash: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running', redo_in_progress = true, redo_mode = 'redo',
+             redo_attempt_generation = 74,
+             redo_previous_phase_status = phase_status,
+             redo_previous_last_error = last_error,
+             redo_previous_started_at = started_at,
+             redo_previous_finished_at = finished_at,
+             redo_from_block_number = 0, redo_to_block_number = 9,
+             redo_current_block_number = 5, redo_current_block_hash = $3,
+             redo_target_block_number = 9, redo_target_block_hash = $4,
+             input_content_hash = $2,
+             last_error = 'required downstream redo active: interpret redo completed',
+             started_at = now(), finished_at = NULL
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .bind(hash)
+    .bind(format!("{chain_id}-block-5"))
+    .bind(format!("{chain_id}-block-9"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+type ProjectRedoRow = (
+    String,
+    bool,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
+
+async fn active_project_redo(pool: &sqlx::PgPool, chain_id: &str) -> Result<ProjectRedoRow> {
+    let row: ProjectRedoRow = sqlx::query_as(
+        "SELECT phase_status, redo_in_progress, redo_attempt_generation,
+                redo_to_block_number, redo_current_block_number, input_content_hash, last_error
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?;
+    anyhow::ensure!(row.1 && row.2 == 74, "the Project redo is active: {row:?}");
+    Ok(row)
+}

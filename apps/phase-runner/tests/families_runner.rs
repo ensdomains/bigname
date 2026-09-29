@@ -3,7 +3,13 @@
 #[allow(dead_code)]
 mod support;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Result, ensure};
 use phase_runner::{
@@ -12,8 +18,8 @@ use phase_runner::{
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     heads::{BlockMarker, HeadMarkers},
     phase::{
-        BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume,
-        PhaseSet, RunMode,
+        BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseResume, PhaseSet, RunMode,
     },
     project_phase::{FamilySettings, ProjectPhase},
     runner::{PhaseRunner, RedoPhase},
@@ -128,15 +134,178 @@ async fn a_one_shot_redo_replays_the_families_to_the_project_block() -> Result<(
     scratch.cleanup().await
 }
 
+// A full-history Project redo stopped part-way through its family rebuild (a graceful stop after
+// one batch) and rerun with the same range under the same binary resumes the rebuild from its
+// family marker: the reset the first attempt recorded is the only one.
+#[tokio::test]
+async fn a_stopped_full_history_project_redo_resumes_its_rebuild() -> Result<()> {
+    let scratch = ready("families_redo_resume").await?;
+    let range = BlockRange::new(0, HEAD)?;
+    let reset = stop_after_one_batch(&scratch, range).await?;
+
+    redo_range(&scratch, budgeted(), range).await?;
+    ensure!(
+        project_state(&scratch).await? == ("completed".into(), Some(HEAD), false),
+        "the rerun completed the redo at the head"
+    );
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    ensure!(repair_completed(&scratch).await?);
+    let (state, after) = rebuild_record(&scratch).await?;
+    ensure!(
+        state == "complete" && after == reset,
+        "the rerun resumed the rebuild instead of resetting it again: reset generation {reset:?} \
+         became {after:?}"
+    );
+    scratch.cleanup().await
+}
+
+// A rerun over a different range starts the rebuild again, even though the first attempt left one.
+#[tokio::test]
+async fn a_project_redo_rerun_over_another_range_rebuilds_from_the_start() -> Result<()> {
+    let scratch = ready("families_redo_other_range").await?;
+    let reset = stop_after_one_batch(&scratch, BlockRange::new(0, 20)?).await?;
+
+    redo_range(&scratch, budgeted(), BlockRange::new(0, HEAD)?).await?;
+    ensure!(project_state(&scratch).await? == ("completed".into(), Some(HEAD), false));
+    let (state, after) = rebuild_record(&scratch).await?;
+    ensure!(
+        state == "complete" && after.is_some() && after != reset,
+        "a different range resets: {reset:?} then {after:?}"
+    );
+    scratch.cleanup().await
+}
+
+// A rerun after the Interpret input revision moved (a recompute-flags pass queued behind the
+// stopped Project redo) starts the rebuild again: the rebuilt prefix read another input.
+#[tokio::test]
+async fn a_project_redo_rerun_after_an_interpret_revision_change_rebuilds() -> Result<()> {
+    let scratch = ready("families_redo_revision").await?;
+    let range = BlockRange::new(0, HEAD)?;
+    let reset = stop_after_one_batch(&scratch, range).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET redo_attempt_generation = redo_attempt_generation + 1
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+
+    redo_range(&scratch, budgeted(), range).await?;
+    ensure!(project_state(&scratch).await? == ("completed".into(), Some(HEAD), false));
+    let (state, after) = rebuild_record(&scratch).await?;
+    ensure!(
+        state == "complete" && after.is_some() && after != reset,
+        "a changed input revision resets: {reset:?} then {after:?}"
+    );
+    scratch.cleanup().await
+}
+
+fn budgeted() -> FamilySettings {
+    FamilySettings {
+        max_blocks_per_run: 10,
+        retry_family_failures: false,
+        ..FamilySettings::default()
+    }
+}
+
+/// Run the Project redo over `range` and stop it after its first family batch, the way a
+/// graceful `docker stop` lands between two batches. Returns the reset generation of the
+/// rebuild the stopped attempt left.
+async fn stop_after_one_batch(scratch: &ScratchDatabase, range: BlockRange) -> Result<Option<i64>> {
+    let stop = CancellationToken::new();
+    let project: Arc<dyn Phase> = Arc::new(StopAfterBatches {
+        inner: ProjectPhase::new(scratch.pool().clone()).with_family_settings(budgeted()),
+        stop: stop.clone(),
+        left: AtomicUsize::new(1),
+    });
+    let stopped = run_redo(scratch, project, range, stop).await?;
+    ensure!(
+        stopped.is_err(),
+        "the stopped redo reports itself incomplete"
+    );
+    let (status, _, in_redo) = project_state(scratch).await?;
+    ensure!(
+        status == "running" && in_redo,
+        "the stopped redo stays active"
+    );
+    let reached = marker(scratch).await?;
+    ensure!(
+        reached.is_some_and(|number| number < range.to),
+        "the rebuild stopped part-way: {reached:?}"
+    );
+    let (state, reset) = rebuild_record(scratch).await?;
+    ensure!(
+        state == "rebuilding" && reset.is_some(),
+        "{state} {reset:?}"
+    );
+    Ok(reset)
+}
+
+/// Project, stopping the redo once `left` batches have run.
+struct StopAfterBatches {
+    inner: ProjectPhase,
+    stop: CancellationToken,
+    left: AtomicUsize,
+}
+
+impl Phase for StopAfterBatches {
+    fn name(&self) -> PhaseName {
+        PhaseName::Project
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await;
+            if self.left.fetch_sub(1, Ordering::SeqCst) == 1 {
+                self.stop.cancel();
+            }
+            outcome
+        })
+    }
+}
+
+/// The repair record's state and the family generation its rebuild's reset wrote.
+async fn rebuild_record(scratch: &ScratchDatabase) -> Result<(String, Option<i64>)> {
+    Ok(sqlx::query_as(
+        "SELECT state, reset_sequence FROM project_repair_record WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
 async fn redo(scratch: &ScratchDatabase, settings: FamilySettings) -> Result<()> {
+    redo_range(scratch, settings, BlockRange::new(0, HEAD)?).await
+}
+
+async fn redo_range(
+    scratch: &ScratchDatabase,
+    settings: FamilySettings,
+    range: BlockRange,
+) -> Result<()> {
     let project: Arc<dyn Phase> =
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(settings));
-    // A failing batch is retried as a transient failure, so the redo is bounded.
     let stop = CancellationToken::new();
+    run_redo(scratch, project, range, stop).await??;
+    Ok(())
+}
+
+/// Run the one-shot Project redo over `range` with `project`, within two minutes; the inner
+/// result is the redo command's.
+async fn run_redo(
+    scratch: &ScratchDatabase,
+    project: Arc<dyn Phase>,
+    range: BlockRange,
+    stop: CancellationToken,
+) -> Result<phase_runner::error::RunnerResult<()>> {
+    // A failing batch is retried as a transient failure, so the redo is bounded.
+    let timed_out = Arc::new(AtomicBool::new(false));
     let deadline = {
         let stop = stop.clone();
+        let timed_out = Arc::clone(&timed_out);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(120)).await;
+            timed_out.store(true, Ordering::SeqCst);
             stop.cancel();
         })
     };
@@ -158,17 +327,16 @@ async fn redo(scratch: &ScratchDatabase, settings: FamilySettings) -> Result<()>
     .redo(
         &chain_config()?,
         RedoPhase::Phase(PhaseName::Project),
-        BlockRange::new(0, HEAD)?,
+        range,
         stop.clone(),
     )
     .await;
     deadline.abort();
     ensure!(
-        !stop.is_cancelled(),
+        !timed_out.load(Ordering::SeqCst),
         "the redo did not finish within two minutes"
     );
-    result?;
-    Ok(())
+    Ok(result)
 }
 
 fn context(head: &BlockMarker, resume: Option<&BlockMarker>) -> PhaseContext {
