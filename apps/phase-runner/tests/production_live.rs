@@ -34,7 +34,7 @@ use phase_runner::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, PhaseResume, PhaseSet, RedoAttemptFence, RunMode,
     },
-    project_phase::ProjectPhase,
+    project_phase::{FamilySettings, ProjectPhase},
     rewind::rewind_to_ancestor,
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
