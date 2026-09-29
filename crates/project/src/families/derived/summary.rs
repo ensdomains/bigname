@@ -46,11 +46,14 @@ pub(crate) struct Refreshed {
     pub(crate) undo_rows: u64,
 }
 
-/// Compose again, journal and write the summaries of the names block `number` touched.
+/// Compose again, journal and write the summaries of the names block `number` touched. `after`
+/// is the family marker's block the block follows, -1 with none: a rebuild range composes once,
+/// at its last block, for every block after it.
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
+    after: i64,
 ) -> Result<Refreshed> {
     let block = input::read_block(transaction, chain_id, number)
         .await?
@@ -63,6 +66,7 @@ pub(super) async fn refresh(
         .bind(chain_id)
         .bind(number)
         .bind(block.timestamp_seconds)
+        .bind(after)
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| {
@@ -169,13 +173,18 @@ pub(super) async fn refresh(
 }
 
 /// The names block `$2` (at time `$3`, in seconds) of chain `$1` touched, read from its journal (each changed row's
-/// before-image and key) and the changed rows as they now stand. A name reads its own rows by
-/// name or node (name state, triples, associations, history, registry node and pointer, owner
-/// events), and the rows of every resource its candidates, key states, association targets,
-/// lifecycle events and owner events sit on; each changed resource is widened to those names.
+/// before-image and key) and the changed rows as they now stand, with the names of the surfaces
+/// and registry events of the blocks after `$4`, the family marker's block (-1 with none), up to
+/// `$2`. The marker's block is bound, not joined, so the planner reads those blocks by the
+/// `(chain_id, block_number)` indexes instead of every event of the chain up to `$2`.
+///
+/// A name reads its own rows by name or node (name state, triples, associations, history,
+/// registry node and pointer, owner events), and the rows of every resource its candidates, key
+/// states, association targets, lifecycle events and owner events sit on; each changed resource
+/// is widened to those names.
 /// A registry event of the block that carries a resource adds every name a registry event of that
 /// resource carries, since it can move the resource's unnamed Transfers from one to another.
-const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
+pub(super) const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     WITH journal AS (
         SELECT family, key::jsonb AS key, before_image
         FROM project_family_undo
@@ -341,18 +350,27 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     -- last block, for all of its blocks.
     linked AS (
         SELECT DISTINCT carried.logical_name_id
-        FROM normalized_events registry_event
-        LEFT JOIN project_family_marker marker ON marker.chain_id = registry_event.chain_id
-        JOIN normalized_events carried
-          ON carried.resource_id = registry_event.resource_id
-         AND carried.chain_id = $1
-         AND carried.source_family = registry_event.source_family
-         AND carried.logical_name_id IS NOT NULL
-         AND carried.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE registry_event.chain_id = $1 AND registry_event.block_number <= $2
-          AND registry_event.block_number > COALESCE(marker.current_block_number, -1)
-          AND registry_event.resource_id IS NOT NULL
-          AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        FROM (
+            SELECT DISTINCT registry_event.resource_id, registry_event.source_family
+            FROM normalized_events registry_event
+            WHERE registry_event.chain_id = $1
+              AND registry_event.block_number > $4 AND registry_event.block_number <= $2
+              AND registry_event.resource_id IS NOT NULL
+              AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+        ) registry
+        -- One lookup of each resource's events: OFFSET 0 keeps the subquery from being pulled
+        -- up, so the planner cannot hash-join the new blocks' resources to every event of the
+        -- chain; the lookup stays parameterized by the resource.
+        CROSS JOIN LATERAL (
+            SELECT carried_event.logical_name_id
+            FROM normalized_events carried_event
+            WHERE carried_event.resource_id = registry.resource_id
+              AND carried_event.chain_id = $1
+              AND carried_event.source_family = registry.source_family
+              AND carried_event.logical_name_id IS NOT NULL
+              AND carried_event.canonicality_state IN ('canonical', 'safe', 'finalized')
+            OFFSET 0
+        ) carried
     ),
     -- A name whose composition the clock changes by this block's time.
     clocked AS (
@@ -364,9 +382,8 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     surfaced AS (
         SELECT surface.logical_name_id
         FROM name_surfaces surface
-        LEFT JOIN project_family_marker marker ON marker.chain_id = surface.chain_id
-        WHERE surface.chain_id = $1 AND surface.block_number <= $2
-          AND surface.block_number > COALESCE(marker.current_block_number, -1)
+        WHERE surface.chain_id = $1
+          AND surface.block_number > $4 AND surface.block_number <= $2
     )
     SELECT logical_name_id FROM (
         SELECT logical_name_id FROM named

@@ -6,10 +6,9 @@ use sqlx::types::Uuid;
 
 use super::values::{json_address_at_paths, json_timestamp_at_paths, object_field, string_field};
 
-/// The holder and authority a released ENSv1 lease had when it lapsed. Project writes the
-/// block only on a [released v1 authority](../../../../../docs/glossary.md#released-v1-authority)
-/// tombstone, so its presence means the name has no current registrant. It is never current
-/// data: no relation, permission or current field is derived from it.
+/// The holder and contract of an ended registration. Project writes this historical block
+/// for released ENSv1 leases and supported ENSv2 expiry/unregister releases. It supplies the
+/// `former_registrant` relation, never current authority relations or permissions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LapsedRegistration {
     /// The lapsed lease's last holder.
@@ -19,16 +18,19 @@ pub(crate) struct LapsedRegistration {
     /// is the protocol arm (`ens_v1` / `ens_v2`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) held_through: Option<LapsedHeldThrough>,
-    /// Block time of the block at which the release was recorded: the first block whose
-    /// timestamp is strictly past the lease's expiry plus the BaseRegistrar's 90-day grace
-    /// period, the point at which the registrar treats the name as available again.
+    /// Canonical block time at which Project recorded the release. For ENSv1 leases this is
+    /// the first observed block strictly past expiry plus the BaseRegistrar's 90-day grace,
+    /// when the registrar treats the name as available again.
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) released_at: Option<String>,
-    /// How the registration ended: `expired` (an ENSv1 lease past its grace, or an ENSv2
-    /// registration past its expiry, which its holder can still renew during the ENSv2 grace)
-    /// or `unregistered` (an explicit ENSv2 unregister, which burns the token).
+    /// How the registration ended: `expired` (an ENSv1 lease past grace, or an ENSv2 registry
+    /// path expiry) or `unregistered` (an explicit ENSv2 unregister). Expiry alone does not
+    /// imply lost renewal eligibility: the ENSv2 `.eth` registrar admits an available name
+    /// with a retained latest owner during grace. Unregister burns an existing owner token.
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) release_kind: Option<LapsedReleaseKind>,
 }
@@ -41,7 +43,7 @@ pub(crate) enum LapsedReleaseKind {
     Unregistered,
 }
 
-/// The contract a lapsed ENSv1 lease was held through.
+/// The contract an ended registration was held through.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LapsedHeldThrough {

@@ -132,8 +132,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `from_timestamp` | inclusive lower Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
 | `to_timestamp` | inclusive upper Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
-| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` and `relation=former_registrant` (Unix seconds or RFC 3339) | `expires_after` (new) |
-| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` and `relation=former_registrant` (Unix seconds or RFC 3339) | `expires_before` (new) |
+| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_registrant` (Unix seconds or RFC 3339) | `expires_after` (new) |
+| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_registrant` (Unix seconds or RFC 3339) | `expires_before` (new) |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -1001,7 +1001,7 @@ Common parameter rules:
 | `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
 | `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
 | `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive Unix-seconds or RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v1-routes.md#history-collection-filters)) |
-| `expires_after`, `expires_before` | `GET /v1/names` and `relation=former_registrant` | Unix-seconds or RFC 3339 window over `expires_at`; at least one is required on `/v1/names`, `expires_after` inclusive, `expires_before` exclusive |
+| `expires_after`, `expires_before` | `GET /v1/names`; `GET /v1/addresses/{address}/names?relation=former_registrant` | Unix-seconds or RFC 3339 window over `expires_at`; `expires_after` inclusive, `expires_before` exclusive. At least one is required on `/v1/names`; both are optional for `former_registrant` |
 | `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 

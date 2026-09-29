@@ -598,6 +598,7 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20260929190000_project_family_name_lookup_indexes.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" preceding-shape
             fi
@@ -720,6 +721,7 @@ for migration_file in \
     "$ROOT/migrations/20260929160000_remove_served_projections.sql" \
     "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
+    "$ROOT/migrations/20260929190000_project_family_name_lookup_indexes.sql" \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql"
 do
@@ -1050,6 +1052,8 @@ for migration_file in \
     "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
+    "$ROOT/migrations/20260929190000_project_family_name_lookup_indexes.sql" \
+    "$ROOT/migrations/20260929190000_project_family_name_lookup_indexes.sql" \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \

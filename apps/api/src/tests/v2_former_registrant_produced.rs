@@ -67,7 +67,7 @@ fn registered(label: &str, block: i64) -> Result<Vec<RawLogInput>> {
     ])
 }
 
-async fn publish_release(database: &TestDatabase, unregister: bool) -> Result<()> {
+async fn publish_release(database: &TestDatabase, unregister: bool, migrated: bool) -> Result<()> {
     let (manifest, rules) = v2_history_bounded_regeneration::manifest_and_rules();
     let mut logs = registered("departed", 120)?;
     if unregister {
@@ -147,6 +147,25 @@ async fn publish_release(database: &TestDatabase, unregister: bool) -> Result<()
     seed_v2_history_blocks(database, 120..=123).await?;
     v2_history_bounded_rebinding::persist_with_manifests(&database.pool, &[manifest], &output)
         .await?;
+    if migrated {
+        let mut migration = history_event(
+            "departed-migration",
+            release.logical_name_id.as_deref(),
+            release.resource_id,
+            Some(CHAIN),
+            Some(121),
+            Some("0xhistory121"),
+            Some("0xtxmigration"),
+            Some(0),
+            CanonicalityState::Canonical,
+        );
+        migration.event_kind = "MigrationApplied".into();
+        migration.source_family = "ens_v2_migration_l1".into();
+        migration.derivation_kind = "ens_v2_migration".into();
+        migration.before_state = json!({});
+        migration.after_state = json!({"transition_id": "departed-migration"});
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[migration]).await?;
+    }
     database
         .seed_snapshot_selector_chain_positions(&json!({CHAIN: {
             "chain_id": CHAIN, "block_number": 123, "block_hash": "0xhistory123",
@@ -159,7 +178,7 @@ async fn publish_release(database: &TestDatabase, unregister: bool) -> Result<()
 #[tokio::test]
 async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    publish_release(&database, true).await?;
+    publish_release(&database, true, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
     assert_eq!(
         profile["data"]["registration_status"], "released",
@@ -179,6 +198,8 @@ async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> R
     .await?;
     assert_eq!(status, StatusCode::OK, "{former}");
     assert_eq!(v2_names_listed(&former), ["departed.eth"]);
+    assert!(profile["data"].get("migrated_at").is_none(), "{profile}");
+    assert!(former["data"][0].get("migrated_at").is_none(), "{former}");
     assert_eq!(
         former["data"][0]["lapsed_registration"],
         profile["data"]["lapsed_registration"]
@@ -189,7 +210,7 @@ async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> R
 #[tokio::test]
 async fn v2_former_registrant_real_displacement_is_not_an_unregister() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    publish_release(&database, false).await?;
+    publish_release(&database, false, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
     assert_eq!(
         profile["data"]["registration_status"], "released",
@@ -206,5 +227,31 @@ async fn v2_former_registrant_real_displacement_is_not_an_unregister() -> Result
     .await?;
     assert_eq!(status, StatusCode::OK, "{former}");
     assert!(v2_names_listed(&former).is_empty(), "{former}");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_former_registrant_preserves_name_detail_migration_timestamp() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    publish_release(&database, true, true).await?;
+    let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
+    assert_eq!(profile["data"]["authority"], "ens_v2", "{profile}");
+    assert_eq!(
+        profile["data"]["registration_status"], "released",
+        "{profile}"
+    );
+    assert_eq!(profile["data"]["migrated_at"], "1700000121", "{profile}");
+    let (status, former) = read_family_response(
+        &database,
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&namespace=ens"),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{former}");
+    assert_eq!(v2_names_listed(&former), ["departed.eth"]);
+    assert_eq!(former["data"][0]["authority"], profile["data"]["authority"]);
+    assert_eq!(
+        former["data"][0]["migrated_at"], profile["data"]["migrated_at"],
+        "{former}"
+    );
     database.cleanup().await
 }

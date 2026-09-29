@@ -23,7 +23,7 @@ use crate::v2::{
     collection_snapshot::CollectionSnapshot,
     cursor::invalid_cursor_error,
     list_cursor::{ListCursor, ListPosition},
-    name_record::lapsed_registration,
+    name_record::{lapsed_registration, load_migrated_at},
     name_rows_error,
     vocab::Authority,
 };
@@ -118,6 +118,13 @@ pub(super) async fn get_address_former_registrants(
         page.rows.iter().map(|row| row.namespace.as_str()),
     )
     .await?;
+    let migrated_logical_name_ids = page
+        .rows
+        .iter()
+        .filter(|row| Authority::from_provenance(&row.provenance) == Some(Authority::EnsV2))
+        .map(|row| row.logical_name_id.clone())
+        .collect::<Vec<_>>();
+    let migrated_at_by_name = load_migrated_at(&state.pool, &migrated_logical_name_ids).await?;
     let data = page
         .rows
         .iter()
@@ -125,6 +132,7 @@ pub(super) async fn get_address_former_registrants(
             former_row(
                 row,
                 primary_names.get(&row.namespace).and_then(Option::as_deref),
+                migrated_at_by_name.get(&row.logical_name_id).cloned(),
             )
         })
         .collect();
@@ -173,7 +181,11 @@ fn reject_unsupported(params: &QueryParams) -> V2Result<()> {
     Ok(())
 }
 
-fn former_row(row: &NameCurrentRow, primary_name: Option<&str>) -> AddressName {
+fn former_row(
+    row: &NameCurrentRow,
+    primary_name: Option<&str>,
+    migrated_at: Option<String>,
+) -> AddressName {
     let registration = name_registration_fields(Some(row), &row.namespace);
     AddressName {
         name: row.normalized_name.clone(),
@@ -194,7 +206,7 @@ fn former_row(row: &NameCurrentRow, primary_name: Option<&str>) -> AddressName {
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         authority: Authority::from_provenance(&row.provenance),
-        migrated_at: None,
+        migrated_at,
         relations: vec![Relation::FormerRegistrant],
         is_primary: primary_name == Some(row.normalized_name.as_str()),
         resolution: None,

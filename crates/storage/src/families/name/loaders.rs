@@ -83,6 +83,18 @@ pub(super) async fn histories(
         .collect()
 }
 
+/// The latest MigrationApplied on chain `$1` of each of the names `$2`, by
+/// `project_name_state_name_idx` (the primary key leads with the namespace, which the names do
+/// not bind), and its event by identity.
+pub(crate) const MIGRATIONS_SQL: &str = "/* storage:families.name.migrations */
+     SELECT state.logical_name_id, state.migration_position ->> 'event_identity' AS identity,
+            event.normalized_event_id, event.migration_correlation_ids[1] AS transition_id
+     FROM bigname_phase.project_name_state state
+     LEFT JOIN bigname_phase.normalized_events event
+       ON event.event_identity = state.migration_position ->> 'event_identity'
+     WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2::text[])
+       AND state.migration_position IS NOT NULL";
+
 /// Each name's latest MigrationApplied, its generated id and correlation id read back by
 /// identity.
 pub(super) async fn migrations(
@@ -90,21 +102,12 @@ pub(super) async fn migrations(
     chain_id: &str,
     ids: &[String],
 ) -> Result<BTreeMap<String, MigrationProof>> {
-    let rows = sqlx::query(
-        "/* storage:families.name.migrations */
-         SELECT state.logical_name_id, state.migration_position ->> 'event_identity' AS identity,
-                event.normalized_event_id, event.migration_correlation_ids[1] AS transition_id
-         FROM bigname_phase.project_name_state state
-         LEFT JOIN bigname_phase.normalized_events event
-           ON event.event_identity = state.migration_position ->> 'event_identity'
-         WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2::text[])
-           AND state.migration_position IS NOT NULL",
-    )
-    .bind(chain_id)
-    .bind(ids)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load name migrations")?;
+    let rows = sqlx::query(MIGRATIONS_SQL)
+        .bind(chain_id)
+        .bind(ids)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load name migrations")?;
     rows.into_iter()
         .map(|row| {
             Ok((
