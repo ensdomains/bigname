@@ -2534,7 +2534,8 @@ mod public_v2_records {
         let mut source = manifest();
         let mut payload: serde_json::Value = serde_json::from_str(&source.payload_json)?;
         let events = payload["abi"]["events"].as_array_mut().unwrap();
-        events.retain(|event| event["name"] != "AddrChanged");
+        // AddrChanged and ABIChanged must name their role, so only the others can be role-free.
+        events.retain(|event| event["name"] != "AddrChanged" && event["name"] != "ABIChanged");
         for event in events.iter_mut() {
             event["emitter_roles"] = json!([]);
         }

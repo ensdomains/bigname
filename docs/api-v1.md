@@ -1115,7 +1115,8 @@ Rules:
   status, not on a list of known reasons: an unsupported row serves
   `status=unsupported` even when it names no reason or names a reason the build
   does not recognize. Exceptions are per-route and named there, such as the
-  name-detail partial serve for `current_authority_not_projected` in
+  name-detail and batch-lookup partial serve for
+  `current_authority_not_projected` in
   [`api-v1-routes.md`](api-v1-routes.md).
 - When an unsupported projected row names a reason that this build does not
   recognize and that cannot cross the serving boundary as public vocabulary,

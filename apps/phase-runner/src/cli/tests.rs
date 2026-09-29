@@ -227,6 +227,7 @@ fn redo_takes_the_family_run_budget_and_keeps_every_family_failure_fatal() {
     };
     assert_eq!(project_families.max_blocks_per_run, 10);
     assert!(!project_families.retry_family_failures);
+    assert!(!project_families.require_hydration_url);
 }
 
 #[test]
@@ -257,6 +258,7 @@ fn run_takes_the_family_run_budget_and_retries_family_failures() {
     };
     assert_eq!(project_families.max_blocks_per_run, 10);
     assert!(project_families.retry_family_failures);
+    assert!(project_families.require_hydration_url);
 }
 
 #[test]

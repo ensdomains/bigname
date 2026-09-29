@@ -86,7 +86,7 @@ shard_2_tests=(
     "harness::pipeline::tests::one_shot_command_deadline_terminates_descendants"
     "harness::pipeline::tests::stop_reports_a_child_that_crashed_after_readiness"
     "harness::tests::local_server_start_lock_serializes_waiters"
-    "scenarios::basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap"
+    "scenarios::basenames_lifecycle::l2_resolver_records_and_contenthash_clear_and_reset"
     "scenarios::basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only"
     "scenarios::basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage"
     "scenarios::catchup_equivalence::primary_route_normalization_preserves_contract_instance_identity"

@@ -523,11 +523,14 @@ state cannot reconstruct the count. The measured dRPC cost remains a required
 D3 cutover input; D1/D7 tooling must close this durable-accounting gap before
 automating the evidence capture.
 For every configured chain on which canonical-head hydration runs (currently
-`ethereum-mainnet`), `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` must contain a
-`CHAIN=HTTP_URL` entry. A missing entry is a fatal project-phase configuration
-error. The check runs before event-derived project publication or hydration
-writes, so previously hydrated values remain intact while the chain is stopped
-for configuration repair.
+`ethereum-mainnet`), the supervised `phase-runner run` needs a `CHAIN=HTTP_URL`
+entry in `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`. A missing entry is a fatal
+project-phase configuration error. The check runs before any Project batch
+publishes, a rebuild after a fingerprint change included, so previously
+hydrated values remain intact while the chain is stopped for configuration
+repair. The one-shot `phase-runner redo` does not need the entry: its Project
+undo and replay read no hydration RPC, and the supervised runner refreshes the
+values the replay leaves empty.
 
 The retained ENS chain set is the union of chains in ENS [name
 surfaces](glossary.md#surface-name-surface) and active ENS manifests. Later

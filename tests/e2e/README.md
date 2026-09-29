@@ -349,7 +349,7 @@ explicitly with issue #314.
 - Basenames:
   `basenames::basenames_declared_state_matrix_end_to_end`;
   `basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones`;
-  `basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap`;
+  `basenames_lifecycle::l2_resolver_records_and_contenthash_clear_and_reset`;
   `basenames_lifecycle::l2_zero_addr60_uses_stubbed_verified_transport`;
   `basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only`;
   `basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage`;

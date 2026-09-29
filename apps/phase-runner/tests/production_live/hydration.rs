@@ -307,6 +307,46 @@ async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()>
     db.cleanup().await
 }
 
+/// The one-shot redo builds its phase with an empty URL set and without the URL requirement
+/// (the CLI's redo settings). Its undo and replay never read RPC, so it publishes the replayed
+/// block on mainnet without the URL the supervised runner needs.
+#[tokio::test]
+async fn project_redo_runs_without_a_hydration_url() -> Result<()> {
+    let db = setup("live_family_redo_no_rpc", 2).await?;
+    seed_reverse(db.pool(), ADDRESS).await?;
+    publish(db.pool(), ETHEREUM, 1, 2, 0, 0).await?;
+    ProjectPhase::with_hydration(db.pool().clone(), ChainRpcUrls::default())
+        .with_family_settings(FamilySettings {
+            retry_family_failures: false,
+            require_hydration_url: false,
+            ..FamilySettings::default()
+        })
+        .run_batch(PhaseContext {
+            chain_id: ETHEREUM.into(),
+            phase: PhaseName::Project,
+            mode: RunMode::Redo(BlockRange::new(1, 1)?),
+            redo_attempt: None,
+            sources: Arc::from([]),
+            available_heads: Some(HeadMarkers {
+                latest: BlockMarker::new(1, block_hash(1, 1))?,
+                safe: None,
+                finalized: None,
+            }),
+            live_handoff: None,
+            resume: PhaseResume::default(),
+        })
+        .await?;
+    let marker: i64 = sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id=$1",
+    )
+    .bind(ETHEREUM)
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(marker, 1, "the redo replayed its block");
+    assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?;
+    db.cleanup().await
+}
+
 async fn reverse_failure(failure: &str, shortened: bool) -> Result<()> {
     let db = setup("live_family_reverse_failure", 3).await?;
     seed_reverse(db.pool(), ADDRESS).await?;

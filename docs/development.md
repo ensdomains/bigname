@@ -164,9 +164,10 @@ same PostgreSQL system/database identity as `BIGNAME_DATABASE_URL`.
 
 Standalone Interpret and Project redo perform no ingest-provider I/O, but they require the complete intake-capable source descriptor set so the persisted cursor identities can prove the redo range. In an `all` redo, Interpret receives only intake-capable descriptors after Ingest validates their exact cursor-key set.
 Project redo, including the automatic project cascade after
-interpret redo, performs the same canonical-head hydration as supervised
-project; configure `BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS` or pass
-`--hydration-rpc CHAIN=HTTP_URL` when eligible Ethereum rows exist. The
+interpret redo, undoes and replays without hydration RPC and runs without
+`BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS`; the supervised `run`, which needs
+it for `ethereum-mainnet`, refreshes the hydrated values the replay leaves
+empty. The
 `rewind` command selects an exact stored ancestor and delegates its
 orphaning and downstream repair stamps to normal head publication. See
 [`chain-intake.md`](chain-intake.md) for the phase boundary.

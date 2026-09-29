@@ -42,7 +42,8 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
 /// for every source (default key set, indexed answers, and `include=inventory`), which serves
 /// declared record inventory on whatever chain the deployment indexes (e.g. Sepolia v2). Verified execution keeps its own admission in the lookup engine, and
 /// the chain-gated [`resolution_record_inventory_lookup_key`] stays the supported readback key for
-/// verified name detail and diagnostics, which remain scoped to the mainnet profiles.
+/// diagnostics, which remain scoped to the mainnet profiles. Name detail reads this key for both
+/// sources.
 pub fn resolution_record_inventory_lookup_key_any_chain(
     row: &NameCurrentRow,
 ) -> Option<(Uuid, Value)> {

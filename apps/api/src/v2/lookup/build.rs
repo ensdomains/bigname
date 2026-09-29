@@ -253,17 +253,15 @@ fn build_detail_record(
     })
 }
 
+/// The identity-only record of a name whose row the projection declined to serve. Every
+/// unsupported status reaching here downgrades: [`identity_record_status`] already serves the one
+/// partial-serve reason as `ok`.
 fn authority_unsupported_record(
     record: &bigname_storage::IdentityNameRecordRow,
     status: Status,
     unsupported_reason: Option<String>,
 ) -> Option<LookupRecord> {
-    (status == Status::Unsupported
-        && string_field(record.row.coverage.get("unsupported_reason"))
-            .filter(|reason| !reason.trim().is_empty())
-            .as_deref()
-            .is_none_or(downgrades_unsupported_name))
-    .then(|| LookupRecord {
+    (status == Status::Unsupported).then(|| LookupRecord {
         name: record.row.normalized_name.clone(),
         display_name: record.row.canonical_display_name.clone(),
         namespace: record.row.namespace.clone(),
@@ -390,13 +388,26 @@ pub(super) fn lookup_relations(
     .collect()
 }
 
+/// A lookup record's name-level status, classified as name detail classifies the same row: an
+/// unsupported row downgrades to the identity-only record unless its reason is the ratified
+/// partial-serve reason, which serves the fields that can be served under `status=ok`
+/// (`docs/api-v1-routes.md` § `GET /v1/names/{name}`).
 fn identity_record_status(coverage: &Value) -> Status {
     match string_field(coverage.get("status")).as_deref() {
         Some("stale") => Status::Stale,
+        Some("unsupported") if !row_downgrades(coverage) => Status::Ok,
         Some("unsupported") => Status::Unsupported,
         Some("failed") => Status::Failed,
         _ => Status::Ok,
     }
+}
+
+/// Whether an unsupported row's own reason downgrades it; a missing reason fails closed.
+fn row_downgrades(coverage: &Value) -> bool {
+    string_field(coverage.get("unsupported_reason"))
+        .filter(|reason| !reason.trim().is_empty())
+        .as_deref()
+        .is_none_or(downgrades_unsupported_name)
 }
 
 fn identity_record_unsupported_reason(
@@ -434,4 +445,35 @@ fn product_lookup_reason(reason: &str) -> V2Result<String> {
         "rejected lookup reason containing pipeline vocabulary",
         "failed to map lookup reason vocabulary",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Status, identity_record_status};
+    use crate::v2::vocab::PARTIAL_SERVE_UNSUPPORTED_REASON;
+
+    #[test]
+    fn lookup_status_follows_the_name_detail_partial_serve_rule() {
+        let partial = json!({"status": "unsupported", "unsupported_reason": PARTIAL_SERVE_UNSUPPORTED_REASON});
+        assert_eq!(identity_record_status(&partial), Status::Ok);
+        for reason in [
+            json!("conflicting_current_ens_authority"),
+            json!("a_reason_this_build_has_never_seen"),
+            json!(""),
+            serde_json::Value::Null,
+        ] {
+            let coverage = json!({"status": "unsupported", "unsupported_reason": reason});
+            assert_eq!(
+                identity_record_status(&coverage),
+                Status::Unsupported,
+                "{coverage}"
+            );
+        }
+        assert_eq!(
+            identity_record_status(&json!({"status": "projected"})),
+            Status::Ok
+        );
+    }
 }
