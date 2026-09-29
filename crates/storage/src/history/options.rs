@@ -54,6 +54,10 @@ pub struct HistoryBlockWindow {
 pub struct HistoryPageOptions {
     pub order: HistoryOrder,
     pub event_kinds: Vec<String>,
+    /// An explicit intersection with no matching kinds; empty `event_kinds` alone is unrestricted.
+    pub match_no_events: bool,
+    /// One exact stored key, plus reset rows in the existing history scope.
+    pub record_key: Option<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub block_window: Option<HistoryBlockWindow>,
     /// Publication upper bounds for expanding bindings and historical ownership anchors.

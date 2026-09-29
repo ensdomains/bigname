@@ -19,8 +19,8 @@ use super::{
     HistoryInclude, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
     build_event_detail, decode, encode, format_timestamp, history_event_type, history_include,
     history_sort_token, history_storage_order, history_total_count, insert_history_filter_keys,
-    map_history_page_error, product_history_event_kinds, raw_event_kind,
-    resolve_history_block_window, validate_latest_collection_selectors,
+    map_history_page_error, raw_event_kind, resolve_history_block_window,
+    validate_latest_collection_selectors,
 };
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -45,6 +45,9 @@ impl QueryParamAllowlist for EventsQueryParams {
         "contract_address",
         "registration_id",
         "type",
+        "exclude_type",
+        "kind",
+        "record_key",
         "from_block",
         "to_block",
         "from_timestamp",
@@ -102,9 +105,9 @@ pub(crate) async fn get_events(
     let include = history_include(&params.include)?;
     let namespace = resolve_events_namespace(&params)?;
     let mut parsed = parse_events_filter(&params, namespace.as_deref())?;
-    if params.event_types.is_none() {
-        parsed.storage_filter.event_kinds = product_history_event_kinds();
-    }
+    let kinds = super::history_filters::event_kinds(&params);
+    parsed.storage_filter.match_no_events = kinds.is_empty();
+    parsed.storage_filter.event_kinds = kinds;
     let order = parsed.storage_filter.order;
 
     let (snapshot, request_cursor) =
@@ -135,12 +138,11 @@ pub(crate) async fn get_events(
         &snapshot.block_bounds(),
     ));
     parsed.storage_filter.publication_block_bounds = Some(snapshot.block_bounds());
-    let summary_mode = if parsed.anchored {
-        if params.include.iter().any(|v| v == "total_count") {
-            HistorySummaryMode::Count
-        } else {
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
-        }
+    let exact_count = params.include.iter().any(|v| v == "total_count");
+    let summary_mode = if exact_count && (parsed.anchored || params.contract_address.is_some()) {
+        HistorySummaryMode::Count
+    } else if parsed.anchored {
+        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
     } else {
         HistorySummaryMode::None
     };
@@ -425,7 +427,10 @@ pub(crate) fn parse_events_filter(
                 }),
             contract_address: params.contract_address.clone(),
             event_kinds,
-            bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
+            match_no_events: false,
+            record_key: params.history_filters.record_key.clone(),
+            bind_cursor_anchor_to_event_kinds: params.event_types.is_some()
+                || params.history_filters.is_explicit(),
             from_block: params.from_block,
             to_block: params.to_block,
             order: history_storage_order(params.order),

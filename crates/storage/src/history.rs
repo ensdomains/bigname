@@ -200,6 +200,10 @@ pub struct EventHistoryFilter {
     /// Lowercase EVM address of the emitting contract; matches the raw log emitter.
     pub contract_address: Option<String>,
     pub event_kinds: Vec<String>,
+    /// An explicit intersection with no matching kinds; empty `event_kinds` alone is unrestricted.
+    pub match_no_events: bool,
+    /// One exact stored key, plus reset rows in the existing history scope.
+    pub record_key: Option<String>,
     pub bind_cursor_anchor_to_event_kinds: bool,
     pub from_block: Option<i64>,
     pub to_block: Option<i64>,

@@ -37,6 +37,8 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) namespace: Option<String>,
     pub(in crate::history) contract_address: Option<String>,
     pub(in crate::history) event_kinds: Vec<String>,
+    pub(in crate::history) match_no_events: bool,
+    pub(in crate::history) record_key: Option<String>,
     pub(in crate::history) bind_cursor_anchor_to_event_kinds: bool,
     pub(in crate::history) from_block: Option<i64>,
     pub(in crate::history) to_block: Option<i64>,
@@ -54,6 +56,8 @@ impl EventHistoryReadFilter {
             self.publication_block_bounds = options.publication_block_bounds.clone();
         }
         self.event_kinds = options.event_kinds.clone();
+        self.match_no_events = options.match_no_events;
+        self.record_key = options.record_key.clone();
         self.bind_cursor_anchor_to_event_kinds = options.bind_cursor_anchor_to_event_kinds;
         self.order = options.order;
         self.block_window = options.block_window.clone();
@@ -219,6 +223,8 @@ pub(in crate::history) async fn event_history_read_filter(
             .contract_address
             .map(|address| address.to_ascii_lowercase()),
         event_kinds: filter.event_kinds,
+        match_no_events: filter.match_no_events,
+        record_key: filter.record_key,
         bind_cursor_anchor_to_event_kinds: filter.bind_cursor_anchor_to_event_kinds,
         from_block: filter.from_block,
         to_block: filter.to_block,
