@@ -10,9 +10,17 @@
 -- summary rows by name, so without the column that release's summaries silently lose their
 -- owner and the filtered label reads fail. The release rotates the families' input content hash,
 -- so its first family run rebuilds anyway; applying this migration first costs no extra
--- rebuild. With the switch on, fenced routes answer 409 stale until the rebuild finishes. It
--- takes no marker lock, so a family run in flight when it applies fails once on the missing
--- marker and the next run rebuilds.
+-- rebuild. With the switch on, fenced routes answer 409 stale until the rebuild finishes.
+--
+-- It first takes the family marker table in EXCLUSIVE mode, the lock a family writer takes first
+-- (inserting or locking its chain's marker row), and holds it to commit. So no family run can
+-- create a marker, including one for a chain that has none yet, or write any family row between
+-- the reset and the new column: a run that starts meanwhile waits and then sees the column.
+-- Plain marker reads (the API's publication fence) are not blocked. A family run already past
+-- its marker lock holds its row locks, so the migration waits for that run's transaction.
+-- The reset list is every journalled and derived family table of
+-- crates/project/src/families/tables.rs plus the marker, undo and repair tables; the test
+-- crates/project/tests/families_summary_owner_migration.rs checks that it stays so.
 DO $migration$
 DECLARE
     family text;
@@ -20,6 +28,7 @@ BEGIN
 IF to_regclass('bigname_phase.project_name_summary') IS NULL THEN
     RETURN;
 END IF;
+LOCK TABLE bigname_phase.project_family_marker IN EXCLUSIVE MODE;
 
 IF NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_attribute
@@ -28,7 +37,8 @@ IF NOT EXISTS (
 ) THEN
     FOREACH family IN ARRAY ARRAY[
         'project_family_marker', 'project_family_undo', 'project_repair_record',
-        'project_name_state', 'project_binding_candidate', 'project_lifecycle_key_state',
+        'child_registration_events', 'project_name_state', 'project_binding_candidate',
+        'project_lifecycle_key_state',
         'project_lifecycle_triple_summary', 'project_lifecycle_association',
         'project_lifecycle_event', 'project_child_registration_state', 'project_wrapper_state',
         'project_registry_node_state', 'project_registry_owner_event',

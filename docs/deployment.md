@@ -1345,10 +1345,15 @@ The build that adds `owner` and `exclude_owner` to
 stores the owner each name serves in the [name summary](glossary.md#name-summary),
 so it needs `20260929170000_project_name_summary_owner.sql`, which adds
 `project_name_summary.owner`. On a database without the column it also resets
-every owned key family and the [family marker](glossary.md#family-marker), as
+every owned key family, including `child_registration_events`, with the
+[family marker](glossary.md#family-marker), undo journal and repair records, as
 the name-summary schema-migration above does, so the next family run rebuilds
 them and writes every name's owner; fenced routes answer `409 stale` until that
-rebuild finishes. Apply it before starting the release: the family writer
+rebuild finishes. It takes the marker table in `EXCLUSIVE` mode first and holds
+it to commit, so a family run cannot create or lock a marker, for a chain with
+or without one, between the reset and the new column: a run that starts
+meanwhile waits and then rebuilds with the column. A run already holding its
+marker delays the schema-migration until that run's transaction ends. Apply it before starting the release: the family writer
 inserts summary rows by column name, so without the column that release's
 summaries silently lose their owner and the filtered label reads fail. The
 composition that fills it lives in hashed storage sources
