@@ -92,7 +92,12 @@ impl ProjectPhase {
         };
         let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
             .with_max_blocks_per_run(self.families.max_blocks_per_run)
-            .with_rebuild_ranges(self.families.rebuild_ranges);
+            .with_rebuild_ranges(self.families.rebuild_ranges)
+            .with_resumed_redo(
+                context
+                    .redo_attempt
+                    .is_some_and(|attempt| attempt.resumes_interrupted),
+            );
         let options = match &self.hydration_rpc_urls {
             Some(rpc_urls) => options.with_hydration(rpc_urls.clone()),
             None => options,
