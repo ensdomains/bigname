@@ -6643,6 +6643,120 @@ async fn a_pending_prior_hash_project_stamp_is_left_to_the_interpret_redo() -> R
     scratch.cleanup().await
 }
 
+// Project can stand below the Ingest handoff when the release lands (Live advanced Interpret, and
+// Project had not caught up). Adopting the new hash needs a Project redo through the handoff, so
+// the stamp the new-hash Interpret redo leaves must cover it, or the follow-on Project redo is
+// refused for its range. Superseded variant: a killed prior-hash Project redo over 0..=5.
+#[tokio::test]
+async fn a_superseded_short_project_redo_is_restamped_through_the_ingest_handoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_supersede_short").await?;
+    let chain_id = "supersede-short";
+    leave_short_project_redo(scratch.pool(), chain_id, false).await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "supersede-short-runner",
+    )?;
+
+    runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_new_hash_epoch_completed(scratch.pool(), chain_id).await?;
+    scratch.cleanup().await
+}
+
+// Pending variant: the prior binary's stamped Project redo over 0..=5 was stopped gracefully, so
+// the new Interpret redo widens it rather than superseding it. The widened stamp must reach the
+// Ingest handoff too.
+#[tokio::test]
+async fn a_pending_short_project_stamp_is_widened_through_the_ingest_handoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_pending_short").await?;
+    let chain_id = "pending-short";
+    leave_short_project_redo(scratch.pool(), chain_id, true).await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "pending-short-runner",
+    )?;
+
+    runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_new_hash_epoch_completed(scratch.pool(), chain_id).await?;
+    scratch.cleanup().await
+}
+
+/// A prior-hash epoch with Ingest and Interpret through block 9 and Project at block 5 inside a
+/// prior-hash Project redo over 0..=5: active (a kill) or pending (a recorded stop).
+async fn leave_short_project_redo(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    pending: bool,
+) -> Result<()> {
+    seed_hash_epoch(pool, chain_id, PRIOR_RELEASE_HASH).await?;
+    set_phase_extent(pool, chain_id, PhaseName::Project, 5).await?;
+    leave_project_redo_active(pool, chain_id, PRIOR_RELEASE_HASH).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET redo_to_block_number = 5,
+             redo_current_block_number = CASE WHEN $2 THEN NULL ELSE 3 END,
+             redo_current_block_hash = CASE WHEN $2 THEN NULL ELSE $3 END,
+             redo_target_block_number = CASE WHEN $2 THEN NULL ELSE 5 END,
+             redo_target_block_hash = CASE WHEN $2 THEN NULL ELSE $4 END,
+             last_error = CASE
+                 WHEN $2 THEN 'required downstream redo: interpret redo completed'
+                 ELSE last_error
+             END
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .bind(pending)
+    .bind(format!("{chain_id}-block-3"))
+    .bind(format!("{chain_id}-block-5"))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn assert_new_hash_epoch_completed(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
+    let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await?;
+    let current = Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned());
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                current.clone()
+            ),
+            ("project".into(), "completed".into(), false, current),
+        ],
+        "the new hash epoch ran Interpret and the stamped Project redo"
+    );
+    Ok(())
+}
+
 /// Ingest completed through block 9; Interpret and Project completed at block 9 under `hash`.
 async fn seed_hash_epoch(pool: &sqlx::PgPool, chain_id: &str, hash: &str) -> Result<()> {
     PhaseStore::new(pool.clone())
