@@ -40,6 +40,7 @@ pub(super) fn control_owner(
     // transfer moves; a registrar ERC721 transfer does not, since the NameWrapper holds that
     // token while the name is wrapped.
     // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
     let wrapper_selected = wrapper_selected(authority);
     for tagged in in_scope {
         let event = tagged.event;
