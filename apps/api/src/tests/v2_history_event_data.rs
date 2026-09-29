@@ -131,11 +131,25 @@ async fn confirmed_migration_is_a_history_event() -> Result<()> {
                    "expiry": 1_900_000_000_i64, "token_id": format!("0x{resource:064x}")}),
         )
     };
+    // The migration producer's shape: the boundary sits on the pending `LabelRegistered` grant,
+    // which a fresh registration has not given a resource yet, and names the successor binding's
+    // resource in its payload. The registry's `TokenResource` copy two logs later carries it.
+    let linked = |identity: &str, logical: &str, resource: u128, block: i64| {
+        let mut event = grant(identity, logical, resource, block);
+        event.event_identity =
+            format!("{identity}:RegistrationGranted:linked:0x{resource:064x}:0");
+        event.log_index = Some(7);
+        event
+    };
+    let without_resource = |mut event: NormalizedEvent| {
+        event.resource_id = None;
+        event
+    };
     let migration = |identity: &str, logical: &str, resource: u128, block: i64, path: &str| {
         let mut event = event_data_event(
             identity,
             Some(logical),
-            Some(Uuid::from_u128(resource)),
+            None,
             "MigrationApplied",
             "ens_v2_migration_l1",
             block,
@@ -153,7 +167,8 @@ async fn confirmed_migration_is_a_history_event() -> Result<()> {
     publish_event_data(
         &database,
         &[
-            grant("migrated-grant", &migrated, 0x7701, 301),
+            without_resource(grant("migrated-grant", &migrated, 0x7701, 301)),
+            linked("migrated-linked", &migrated, 0x7701, 301),
             migration(
                 "ens_v2_migration:1:ethereum-mainnet:corr-migrated:MigrationApplied",
                 &migrated,
@@ -196,18 +211,27 @@ async fn confirmed_migration_is_a_history_event() -> Result<()> {
     assert_eq!(migrations[0]["log_index"], json!(5));
     assert_eq!(migrations[0]["data"], json!({"migration_path": "unwrapped"}));
     assert_eq!(history["page"]["total_count"], json!(rows.len()));
-    // The registration the migration made is still one registration row, and the migration row
-    // names that ENSv2 registration.
+    // The migration row names the ENSv2 registration its successor binding holds, the one the
+    // linked grant carries, although its own event has no resource.
     let registrations = rows
         .iter()
         .filter(|row| row["type"] == json!("registration"))
         .collect::<Vec<_>>();
-    assert_eq!(registrations.len(), 1);
-    assert_eq!(
-        migrations[0]["registration_id"],
-        json!(Uuid::from_u128(0x7701).to_string())
+    assert_eq!(registrations.len(), 2, "{registrations:?}");
+    let registration_id = json!(Uuid::from_u128(0x7701).to_string());
+    assert_eq!(migrations[0]["registration_id"], registration_id);
+    assert!(
+        registrations.iter().any(|row| row["registration_id"] == registration_id),
+        "{registrations:?}"
     );
-    assert_eq!(registrations[0]["registration_id"], migrations[0]["registration_id"]);
+    let by_registration = event_data_rows(
+        &event_data_payload(
+            &database,
+            &format!("/v1/events?registration_id={}&type=migration", Uuid::from_u128(0x7701)),
+        )
+        .await?,
+    );
+    assert_eq!(by_registration.len(), 1, "{by_registration:?}");
 
     for name in ["native.eth", "pending.eth"] {
         let rows = event_data_rows(
@@ -371,25 +395,65 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     )
     .fetch_all(&database.pool)
     .await?;
-    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 * 4 + 3;
-    let mut bare = history_event(
-        "primary-claim-without-name",
-        None,
-        None,
-        Some(EVENT_DATA_CHAIN),
-        Some(block),
-        Some(&hash),
-        Some("0xclaimwithoutname"),
-        Some(ordinal),
-        CanonicalityState::Canonical,
-    );
-    bare.event_kind = "ReverseChanged".to_owned();
-    bare.source_family = "ens_v1_reverse_l1".to_owned();
-    bare.derivation_kind = "ens_v1_reverse_claim".to_owned();
-    bare.raw_fact_ref = json!({"kind": "raw_log", "emitting_address": ENS_REVERSE_REGISTRAR});
-    bare.before_state = json!({});
-    bare.after_state = claims[0].clone();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[bare]).await?;
+    let reverse_node = claims[0]["reverse_node"].as_str().expect("reverse node").to_owned();
+    // A claim at a fresh log span of the block, and optionally a `NameChanged` on its reverse node
+    // `gap` logs later from `resolver`.
+    let claim_with_write = |label: &str, write: Option<(&str, i64)>| {
+        let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 * 4 + 3;
+        let tx = format!("0xclaim{label}");
+        let mut claim = history_event(
+            &format!("primary-claim-{label}"),
+            None,
+            None,
+            Some(EVENT_DATA_CHAIN),
+            Some(block),
+            Some(&hash),
+            Some(&tx),
+            Some(ordinal),
+            CanonicalityState::Canonical,
+        );
+        claim.event_kind = "ReverseChanged".to_owned();
+        claim.source_family = "ens_v1_reverse_l1".to_owned();
+        claim.derivation_kind = "ens_v1_reverse_claim".to_owned();
+        claim.raw_fact_ref = json!({"kind": "raw_log", "emitting_address": ENS_REVERSE_REGISTRAR});
+        claim.before_state = json!({});
+        claim.after_state = claims[0].clone();
+        let mut events = vec![claim];
+        if let Some((resolver, gap)) = write {
+            let mut name = history_event(
+                &format!("primary-claim-{label}-write"),
+                None,
+                None,
+                Some(EVENT_DATA_CHAIN),
+                Some(block),
+                Some(&hash),
+                Some(&tx),
+                Some(ordinal + gap),
+                CanonicalityState::Canonical,
+            );
+            name.event_kind = "RecordChanged".to_owned();
+            name.source_family = "ens_v1_resolver_l1".to_owned();
+            name.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
+            name.raw_fact_ref = json!({"kind": "raw_log", "emitting_address": resolver});
+            name.before_state = json!({});
+            name.after_state = json!({"source_event": "NameChanged", "resolver": resolver,
+                "node": reverse_node, "record_key": "name", "record_family": "name",
+                "selector_key": null, "value_retained": false, "raw_name": "unrelated.eth"});
+            events.push(name);
+        }
+        events
+    };
+    // `claim(owner)`: no name write in the transaction, so no name.
+    let mut extra = claim_with_write("without-name", None);
+    // The first name write after the claim is on a resolver the registry did not select for the
+    // reverse node: a separate call, not the claim's.
+    extra.extend(claim_with_write(
+        "other-resolver",
+        Some(("0x00000000000000000000000000000000000000b2", 1)),
+    ));
+    // A write on the claim's resolver beyond the registry's writes of the claim's own call.
+    extra.extend(claim_with_write("later-call", Some((ENS_REVERSE_RESOLVER, 5))));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &extra).await?;
 
     let data = |payload: &Value| {
         event_data_rows(payload)
@@ -413,6 +477,8 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
             json!({"address": address, "coin_type": 60, "name": "beta.eth", "name_status": "set"}),
             json!({"address": address, "coin_type": 60, "name_status": "cleared"}),
             json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
+            json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
+            json!({"address": address, "coin_type": 60, "name_status": "unknown"}),
         ],
     );
     let basenames = data(
@@ -431,6 +497,26 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
             json!({"address": address, "coin_type": 2_147_492_101_u64, "name_status": "cleared"}),
         ],
     );
+    // The claim's companion record row names its reverse node, as the adapter stores it.
+    let basenames_node: String = sqlx::query_scalar(
+        "SELECT lower(after_state ->> 'reverse_node') FROM normalized_events
+         WHERE namespace = 'basenames' AND event_kind = 'ReverseChanged' LIMIT 1",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    let records = data(
+        &event_data_payload_in(
+            &database,
+            &["ens", "basenames"],
+            "/v1/events?namespace=basenames&type=record&include=data&order=asc",
+        )
+        .await?,
+    );
+    assert_eq!(records.len(), 2, "{records:?}");
+    for record in &records {
+        assert_eq!(record["node"], json!(basenames_node), "{record}");
+        assert!(record.get("resolver").is_some(), "{record}");
+    }
 
     database.cleanup().await
 }
@@ -455,7 +541,7 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
         let logical = seed_event_data_name(&database, name, 499, resource).await?;
         names.insert(name, (logical, Uuid::from_u128(resource)));
     }
-    seed_v2_history_blocks(&database, 499..=511).await?;
+    seed_v2_history_blocks(&database, 499..=513).await?;
     let node = |name: &str| bigname_lookup::ens_namehash_hex(name).expect("namehash");
     let mut events = Vec::new();
     let mut pointer = |name: &str, resolver: &str, block: i64, log: i64| {
@@ -548,7 +634,44 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
         record_write(5, 509, 0),
         record_write(6, 509, 1),
     ]);
-    publish_event_data(&database, &events, 511).await?;
+    // mr-freshy.eth is wrapped at 510: the authority transition records the resolver it keeps on
+    // the wrapper resource, and the owner then points the name at another resolver on that
+    // resource. The registrar resource's pointer to the first resolver is never cleared, but the
+    // registry no longer selects that resolver, so a later write to it is not mr-freshy.eth's.
+    const OTHER_RESOLVER: &str = "0x0000000000000000000000000000000000080a12";
+    let wrapper = Uuid::from_u128(0x8f01);
+    sqlx::query(
+        "INSERT INTO bigname_phase.resources (resource_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1, $2, '0xhistory510', 510, 'canonical')",
+    )
+    .bind(wrapper)
+    .bind(EVENT_DATA_CHAIN)
+    .execute(&database.pool)
+    .await?;
+    let freshy = names["mr-freshy.eth"].0.clone();
+    let wrapped_pointer = |identity: &str, family: &str, resolver: &str, log: i64| {
+        event_data_event(
+            identity,
+            Some(&freshy),
+            Some(wrapper),
+            "ResolverChanged",
+            family,
+            510,
+            "0xtx510",
+            log,
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+            json!({"source_event": "NewResolver", "node": node("mr-freshy.eth"),
+                   "resolver": resolver}),
+        )
+    };
+    events.extend([
+        wrapped_pointer("wrap:mr-freshy.eth", "ens_v1_wrapper_l1", NODE_RESOLVER, 0),
+        node_write(&node("mr-freshy.eth"), 510, 1),
+        wrapped_pointer("repoint:mr-freshy.eth", "ens_v1_registry_l1", OTHER_RESOLVER, 2),
+        node_write(&node("mr-freshy.eth"), 512, 0),
+    ]);
+    publish_event_data(&database, &events, 513).await?;
 
     let rows = event_data_rows(
         &event_data_payload(&database, "/v1/events?type=record&include=data&order=asc&page_size=50")
@@ -570,6 +693,8 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
     assert_eq!(name_at(507, 0), None, "record 8 shared by three names");
     assert_eq!(name_at(509, 0), None, "record 5 after shaird.eth relinked away");
     assert_eq!(name_at(509, 1), Some(json!("shaird.eth")));
+    assert_eq!(name_at(510, 1), Some(json!("mr-freshy.eth")), "wrapped, same resolver");
+    assert_eq!(name_at(512, 0), None, "the registry selects another resolver since 510");
 
     let resolver = json!({"chain_id": 1, "address": RECORD_RESOLVER});
     assert_eq!(
