@@ -1641,7 +1641,8 @@ A recognized namespace with no available publication returns retryable `409 stal
   are invalid; send multiple values in one comma-separated value.
 - `record_key` selects one exact, nonempty, case-sensitive stored history key,
   for example `addr:60`, `text:avatar`, `name`, or `abi:16`. Its URL-decoded
-  value is not trimmed, normalized, or split on commas. It is independent of
+  value is not trimmed, normalized, or split on commas. Empty values and keys
+  containing a NUL character return `400 invalid_input`. It is independent of
   the narrower record-lookup key grammar. Matching rows are writes or clears
   of that key plus record-version resets already within the route's history
   scope, even when no earlier write of that key was retained. Other keys and

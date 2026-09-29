@@ -284,3 +284,29 @@ async fn history_query_filters_reject_invalid_values_and_repeated_parameters() -
     assert_eq!(status, StatusCode::BAD_REQUEST);
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn history_query_record_key_rejects_nul_before_storage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    g_seed_records(&database).await?;
+    let mut responses = Vec::new();
+    for route in [
+        format!("/v1/names/{G_NAME}/history?scope=both"),
+        format!("/v1/addresses/{G_ADDRESS}/history?scope=both"),
+        format!("/v1/events?contract_address={G_RESOLVER}"),
+    ] {
+        for key in ["%00", "addr:60%00"] {
+            let uri = format!("{route}&record_key={key}");
+            let (status, payload) = hk_get(&database, &uri).await?;
+            responses.push((uri, status, payload));
+        }
+    }
+    assert!(
+        responses
+            .iter()
+            .all(|(_, status, payload)| *status == StatusCode::BAD_REQUEST
+                && payload["error"]["code"] == "invalid_input"),
+        "invalid record keys must be client errors on every history route: {responses:?}"
+    );
+    database.cleanup().await
+}
