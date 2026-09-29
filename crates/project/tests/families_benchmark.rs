@@ -5,7 +5,7 @@
 //!     cargo test -p bigname-project --test families_benchmark -- --ignored --nocapture
 //! ```
 //!
-//! It seeds `rebuild_performance/seed.sql`, rebuilds the families to `FAMILY_BENCHMARK_BASE`
+//! It seeds `rebuild_performance/seed.sql` and `REGISTRY_CHILDREN`, rebuilds the families to `FAMILY_BENCHMARK_BASE`
 //! (default 200) block by block and again in ranges, follows block by block to 300, undoes back to the base and replays. It prints the
 //! elapsed time of each phase and the per-block distribution. With `FAMILY_BENCHMARK_MIN_MS`
 //! set, it writes what `auto_explain` reports for every statement of the follow, the undo and
@@ -24,6 +24,40 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 const CHAIN: &str = "ethereum-sepolia";
 const SEED: &str = include_str!("rebuild_performance/seed.sql");
+/// ENSv1 registry children with no name surface on top of the seed, which has none: one per
+/// twentieth name, created by a NewOwner (a `SubregistryChanged` naming no name) under a seed
+/// name, and every second one transferred 30 blocks later, so the follow above the base
+/// creates, transfers and re-indexes such children.
+const REGISTRY_CHILDREN: &str = "
+INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+SELECT md5('c' || i)::uuid, '__CHAIN__', '0x' || lpad(to_hex(1 + (i % 270)), 64, '0'),
+       1 + (i % 270), 'canonical'::canonicality_state
+FROM generate_series(1, __NAMES__ / 20) i;
+INSERT INTO normalized_events (event_identity, namespace, resource_id, event_kind, source_family,
+    manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index,
+    log_index, derivation_kind, canonicality_state, after_state, raw_fact_ref)
+SELECT 'seed:child:' || kind || ':' || i, 'ens', md5('c' || i)::uuid, kind,
+       'ens_v1_registry_l1', 1, '__CHAIN__', block, '0x' || lpad(to_hex(block), 64, '0'),
+       '0x' || md5('ct' || i || kind), 0, 20, 'ens_v1_unwrapped_authority',
+       'canonical'::canonicality_state,
+       CASE kind
+           WHEN 'SubregistryChanged' THEN jsonb_build_object('source_event', 'NewOwner',
+               'node', '0x' || md5('n' || i) || md5('m' || i),
+               'child_node', '0x' || md5('cn' || i) || md5('cm' || i),
+               'labelhash', '0x' || md5('cl' || i) || md5('ck' || i),
+               'owner', '0x' || substr(md5('co' || i), 1, 40),
+               'owner_getter', '0x' || substr(md5('co' || i), 1, 40), 'emitter_role', 'registry')
+           ELSE jsonb_build_object('source_event', 'Transfer',
+               'node', '0x' || md5('cn' || i) || md5('cm' || i),
+               'owner', '0x' || substr(md5('cp' || i), 1, 40),
+               'owner_getter', '0x' || substr(md5('cp' || i), 1, 40), 'emitter_role', 'registry')
+       END,
+       '{\"emitting_address\":\"0x00000000000000000000000000000000000000a3\"}'
+FROM generate_series(1, __NAMES__ / 20) i
+CROSS JOIN LATERAL (VALUES ('SubregistryChanged', 1 + (i % 270)),
+    ('AuthorityTransferred', 31 + (i % 270))) kinds(kind, block)
+WHERE kind = 'SubregistryChanged' OR i % 2 = 0;
+";
 const CONTENT_HASH: &str = "families-benchmark";
 
 async fn marker(pool: &PgPool, number: i64) -> Result<Marker> {
@@ -134,13 +168,15 @@ async fn family_block_timings() -> Result<()> {
     ] {
         raw_sql(script).execute(&mut *transaction).await?;
     }
-    raw_sql(
-        &SEED
-            .replace("__NAMES__", &names.to_string())
-            .replace("__CHAIN__", CHAIN),
-    )
-    .execute(&mut *transaction)
-    .await?;
+    for script in [SEED, REGISTRY_CHILDREN] {
+        raw_sql(
+            &script
+                .replace("__NAMES__", &names.to_string())
+                .replace("__CHAIN__", CHAIN),
+        )
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     raw_sql("ANALYZE").execute(&setup).await?;
     raw_sql(&format!(
