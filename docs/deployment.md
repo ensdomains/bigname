@@ -229,6 +229,15 @@ are not preserved; export them first if an incident record needs them.
 `BIGNAME_SERVE_FROM_FAMILIES` no longer exists: Compose does not forward it, and
 neither binary reads it, so a value left in `.env.server` has no effect.
 
+`20260929170000_project_resource_pointer_root_node_index.sql` adds the partial
+index `project_resource_pointer_root_node_idx` that the composed name reader's
+resource pointer lookup probes for ENSv2 root registry pointers. It builds with a
+plain `CREATE INDEX` inside the migration transaction, so it blocks writes to
+`project_resource_pointer` (the Project family step) while it builds. The build
+reads the table once and indexes only the root registry rows; on a 500,000-row
+table it took about 50 ms with the table cached, so no concurrent prebuild is
+needed.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
