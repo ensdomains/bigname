@@ -4727,6 +4727,7 @@ async fn intermediate_ingest_redo_persists_its_loaded_source_boundary() -> Resul
             Some(RedoAttemptFence {
                 generation: 0,
                 execution_range: BlockRange::new(0, 300)?,
+                resumes_interrupted: false,
             }),
             &PhaseProgress {
                 current: Some(summary),

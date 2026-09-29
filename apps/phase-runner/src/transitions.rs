@@ -18,6 +18,7 @@ pub(crate) struct PhaseStateRow {
     pub target_block_hash: Option<String>,
     pub input_content_hash: Option<String>,
     pub redo_in_progress: bool,
+    pub redo_attempt_generation: i64,
     pub redo_mode: Option<String>,
     pub redo_previous_phase_status: Option<String>,
     pub redo_previous_last_error: Option<String>,
@@ -63,6 +64,7 @@ pub(crate) async fn lock_chain_phase_state(
                target_block_hash,
                input_content_hash,
                redo_in_progress,
+               redo_attempt_generation,
                redo_mode,
                redo_previous_phase_status,
                redo_previous_last_error,
@@ -245,6 +247,8 @@ fn require_compatible_active_phase(
 ) -> RunnerResult<()> {
     let required_ingest_recovery = matches!(phase, PhaseName::Ingest | PhaseName::Live)
         && is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?);
+    // An Interpret redo starting a new hash epoch supersedes a Project redo of another hash.
+    let superseded = crate::redo_supersede::superseded_project_redo(rows, phase, mode)?;
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
         if other == phase {
@@ -260,6 +264,7 @@ fn require_compatible_active_phase(
                 row,
             )
             && !recompute_can_queue_behind_project_redo(phase, other, mode, row)
+            && superseded.is_none_or(|superseded| superseded.phase_name != row.phase_name)
         {
             return Err(RunnerError::new(
                 ErrorKind::InvalidTransition,

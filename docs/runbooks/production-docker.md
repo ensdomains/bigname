@@ -1183,9 +1183,25 @@ in the same step.
    `--attest-watch-set-coverage <token>`. If no marker exists, let the unflagged
    redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or
-   use one for another redo. Do not use the unattended `run` path for an attestation;
+   use one for another redo. Do not use the unattended `run` path for an attestation.
+   If the previous release left a Project redo unfinished, for example stopped
+   between phases before this deploy, the Interpret redo that starts the new
+   interpreter content hash supersedes it: that Project redo's progress was
+   written under the prior hash and is invalid. In the transaction that starts
+   the Interpret redo, the runner restores the Project row the way a finished
+   redo restores it and logs a warning naming the superseded hash and range;
+   the Interpret redo's completion then stamps the Project redo again under the
+   new hash. The Interpret redo refuses with a lock error while any runner still
+   holds the Project lock; stop that runner and rerun. A Project redo started
+   under the running binary's own hash is never superseded: it still blocks the
+   Interpret redo until it is completed by rerunning its reported command. Do not
+   edit `chain_phase_state` by hand;
 8. complete the matching full-history Project redo while the supervisor remains
-   stopped;
+   stopped. If it stops part-way, rerun the same command: with the same range
+   under the same binary it resumes the owned-key family rebuild from the family
+   marker instead of starting again at the first block. A rerun over another
+   range, or after an Interpret redo or flag recomputation changed Project's
+   input in between, rebuilds from the first block;
 9. start the long-running phase runner only after those one-shot redos succeed.
    When the release also carries a versioned schema-migration or required
    replays, complete them before the Sepolia reset and full
@@ -1354,7 +1370,9 @@ range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
 --from-block <n> --to-block <n>\` with the chain's configured sources as --source
 options …` — because the stamp records neither the sources nor the verifier URL:
 add back the `--source` options the chain runs with and
-`--verification-database-url` when the phase is Verify or `all`.
+`--verification-database-url` when the phase is Verify or `all`. A rerun of an
+interrupted Project redo with the same range under the same binary resumes an
+unfinished family rebuild from its family marker.
 `recompute-flags` needs neither intake sources nor hydration RPC. Bounded
 Project redo/rebuild also needs no hydration RPC; current enrichment is repaired
 by later Project Follow work. A redo over several chains that is stopped between two of them exits
@@ -1579,7 +1597,11 @@ The restore-or-re-roll decision was validated on 2026-07-29.
    under [interpretation replay](../storage.md#interpretation-replay). Keep the
    stack down until every required re-derivation step completes.
 5. Treat saved Interpret and Project redo progress from the prior hash as
-   invalid. Preserve pending Ingest or Verify redo markers and complete the
+   invalid. The new binary discards it itself: its full-history Interpret redo
+   restarts an interrupted Interpret redo from the beginning and supersedes an
+   unfinished Project redo from the prior hash, as described in step 7 of the
+   [planned boundary](#planned-migration-and-fingerprint-boundary). Do not
+   clear those markers by hand. Preserve pending Ingest or Verify redo markers and complete the
    exact persisted work named by the runner before starting `--phase all`; do
    not delete or skip those markers. When an all-phase redo fails, follow every
    phase-specific recovery command that it reports in dependency order.

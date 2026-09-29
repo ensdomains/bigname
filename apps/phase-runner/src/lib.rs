@@ -33,6 +33,7 @@ mod redo_recompute;
 mod redo_required_boundary;
 mod redo_stamp;
 mod redo_state;
+mod redo_supersede;
 pub mod rewind;
 pub mod runner;
 mod runner_support;

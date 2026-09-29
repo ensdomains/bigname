@@ -1545,8 +1545,16 @@ attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 content hash it completed with. Each transition commits with the work it
 describes: the reset commits with the rebuild's intent, the last undo with the
 move to replaying, and the final replayed or rebuilt block with the
-completion. A run that stops between blocks is resumed by the next. A redo
-retried after it completed is recognised only while the marker, its
+completion. A run that stops between blocks is resumed by the next. Each
+start of a Project redo moves the Project row to a new redo attempt, so a
+rebuild records the attempt it began under. When the runner reruns an
+interrupted redo with the same range under the same interpreter content hash,
+keeping its saved progress, a rebuild the attempt just before it left is
+carried over to the new attempt and resumes from the family marker, provided
+its input revision is unchanged and the families were written under this
+binary's content hash. Otherwise, including a rerun over another range, a
+skipped attempt or a moved input revision, the redo rebuilds from the start. A
+redo retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... generations (single
 blocks or rebuild ranges) committed since its reset, counted across runs from

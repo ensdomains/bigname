@@ -17,6 +17,7 @@ pub(crate) struct RedoSession {
     interrupted_before_redo: bool,
     range: BlockRange,
     attempt_generation: i64,
+    resumes_interrupted: bool,
     recompute_flags: bool,
     required_ingest: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
@@ -26,6 +27,7 @@ impl RedoSession {
         RedoAttemptFence {
             generation: self.attempt_generation,
             execution_range: self.range,
+            resumes_interrupted: self.resumes_interrupted,
         }
     }
 }
@@ -164,6 +166,9 @@ pub(crate) async fn begin(
             !phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash)
         };
     let preserve_started_at = resume_same_epoch || same_active_audit;
+    if let Some(project) = crate::redo_supersede::superseded_project_redo(&rows, phase, mode)? {
+        crate::redo_supersede::supersede(&mut transaction, chain_id, project).await?;
+    }
     let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
         UPDATE chain_phase_state SET phase_status = 'running',
@@ -257,6 +262,7 @@ pub(crate) async fn begin(
         previous,
         range: execution_range,
         attempt_generation,
+        resumes_interrupted: resume_same_epoch,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         required_ingest,
         manifest_authority_audit: attestation_audit,
