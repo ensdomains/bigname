@@ -314,7 +314,7 @@ async fn a_registrar_transfer_back_to_the_lease_keeps_the_owner_the_registry_tra
     let back = served(&fixture).await?;
     ensure!(
         back == json!({"status": "active", "authority_kind": "registrar", "registered": true,
-                       "expiry": EXPIRY, "owner": BOB}),
+                       "expiry": EXPIRY.to_string(), "owner": BOB}),
         "the registrar transfer back to the lease lost the registry owner: {back}"
     );
     fixture.assert_undo_restores(12).await?;
@@ -376,7 +376,7 @@ async fn a_second_registry_only_binding_keeps_the_registration_of_the_first() ->
     ensure!(
         first
             == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
-                       "expiry": EXPIRY, "owner": BOB}),
+                       "expiry": EXPIRY.to_string(), "owner": BOB}),
         "the first registry-only binding: {first}"
     );
     fixture.apply(13, FamilyMode::Normal).await?;
@@ -384,7 +384,7 @@ async fn a_second_registry_only_binding_keeps_the_registration_of_the_first() ->
     ensure!(
         second
             == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
-                       "expiry": EXPIRY, "owner": CAROL}),
+                       "expiry": EXPIRY.to_string(), "owner": CAROL}),
         "the second registry-only binding lost the registration: {second}"
     );
     let handoffs: Vec<Value> = fixture
@@ -522,7 +522,7 @@ async fn a_registry_clear_on_the_read_anchor_supersedes_the_lease_binding_snapsh
         let row = served(&fixture).await?;
         ensure!(
             row == json!({"status": "active", "authority_kind": "registrar", "registered": true,
-                          "expiry": EXPIRY, "owner": ZERO}),
+                          "expiry": EXPIRY.to_string(), "owner": ZERO}),
             "{label}: the registry clear lost to the binding snapshot: {row}"
         );
         fixture.assert_undo_restores(11).await?;
@@ -637,7 +637,7 @@ async fn a_successor_grant_earlier_in_the_block_reaches_the_inherited_handoff() 
     let row = served(&fixture).await?;
     ensure!(
         row == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
-                      "expiry": renewed, "owner": ALICE}),
+                      "expiry": renewed.to_string(), "owner": ALICE}),
         "the second registry-only binding reads the successor's registration: {row}"
     );
     fixture.assert_undo_restores(13).await?;
@@ -759,7 +759,7 @@ async fn an_unwrap_to_the_registry_itself_serves_the_zero_owner() -> Result<()> 
     let row = served(&fixture).await?;
     ensure!(
         row == json!({"status": "active", "authority_kind": "registrar", "registered": true,
-                      "expiry": EXPIRY, "owner": ZERO}),
+                      "expiry": EXPIRY.to_string(), "owner": ZERO}),
         "the unwrap served the registry's own address: {row}"
     );
     fixture.assert_undo_restores(12).await?;
