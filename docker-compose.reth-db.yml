@@ -1,3 +1,4 @@
+# Requires a custom image built with the optional reth-db feature.
 # Direct Reth database reads for the phase runner. docs/reth-db-reader.md
 # explains the mount contract; docs/runbooks/production-docker.md has the
 # operator steps.

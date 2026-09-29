@@ -36,13 +36,18 @@ reads need. Create or start that network and complete
 
 ## Direct Reth reader
 
+The standard image currently uses RPC intake and excludes this reader and
+`reth-db-smoke`. This section applies only to a custom image that explicitly
+enables `phase-runner/reth-db` and installs the optional sample. The normal
+Mainnet example uses `ETHEREUM_INTAKE_RPC_URL` without the Reth overlay.
+
 This applies to any deployment whose intake source kind is `reth_db`: Ethereum
 Mainnet, and Ethereum Sepolia once it has been
 [switched from local RPC](../deployment.md#switching-sepolia-from-local-rpc-to-direct-reth-reads).
 There is no separate reader container. The reader is the `phase-runner` service
 of that deployment's Compose project with `docker-compose.reth-db.yml` applied,
 and the same service definition runs the one-off sample and
-`source-transport` commands through `docker compose run`: the image ships the
+`source-transport` commands through `docker compose run`: the custom image must install the
 sample as `/usr/local/bin/reth-db-smoke` next to `phase-runner`, so
 `docker compose ... run --rm phase-runner sh -c 'reth-db-smoke ethereum-sepolia
 "$RETH_DATA_DIR" <block,block,...>'` reads through the production mounts, user
@@ -59,8 +64,8 @@ explicitly, as [deployment.md](../deployment.md#phase-runner-configuration)
 requires for every provider variable a descriptor names: the runner and the
 one-off `source-transport` run both read the descriptor's `=URL_ENV` from the
 container environment, and `docker compose --env-file` only supplies
-interpolation values. `docker-compose.server.yml` forwards `RETH_DATA_DIR` but
-not the RPC variables. For a one-off run alone,
+interpolation values. `docker-compose.server.yml` forwards `RETH_DATA_DIR` and
+`ETHEREUM_INTAKE_RPC_URL`, but not arbitrary RPC variables. For a one-off run alone,
 `docker compose ... run --rm -e SEPOLIA_INTAKE_RPC_URL phase-runner ...`
 passes the value from the invoking shell's environment instead.
 [Direct Reth reader](../reth-db-reader.md#mount-contract) explains why each
@@ -1243,7 +1248,8 @@ in the same step.
    reviewed verification path rather than omitting or bypassing Verify. Under
    the source-role contract, other configurations use `cross_checked`
    with a distinct [verification-only](../glossary.md#source-role) dRPC,
-   `node_checked` with a distinct verification-only Ethereum Mainnet reth, or
+   `node_checked` with a distinct verification-only Ethereum Mainnet reth in an
+   opt-in reader build, or
    `quick_synced` from the target-covering intake cursor without one;
 10. confirm the phase state directly in the database while the API is still
    stopped — the `project` row in `chain_phase_state` current with no pending

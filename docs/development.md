@@ -86,9 +86,14 @@ writer has been removed.
 
 ## Stage B phase runner
 
+Normal builds and CI use RPC intake without the optional direct Reth database
+reader. Explicit local builds may enable `phase-runner/reth-db`; see
+[Direct Reth reader](reth-db-reader.md). Avoid `--all-features` when exercising
+the normal build, since it opts back into that reader.
+
 The phase runner implements `ingest`, `interpret`, `project`, read-only
 `verify`, and continuous `live` follow. Verification operates only on finalized
-history. A distinct [verification-only](glossary.md#source-role) Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest seam, an explicit verification-only Ethereum Mainnet reth records `node_checked`, and Ethereum Sepolia records `cross_checked` with a distinct verification-only
+history. A distinct [verification-only](glossary.md#source-role) Base dRPC records `cross_checked` through the Coinbase-to-dRPC ingest seam, an explicit verification-only Ethereum Mainnet reth records `node_checked` in an opt-in reader build, and Ethereum Sepolia records `cross_checked` with a distinct verification-only
 dRPC or `quick_synced` without one.
 V2 verified name, record, and ENS/60 primary-name reads use the phase runner's
 schema-v2 lookup state. Other API reads use phase projections.
@@ -100,8 +105,8 @@ chain/source descriptors, for example:
 export BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=manifests/mainnet
 export BIGNAME_PHASE_RUNNER_CHAINS=ethereum-mainnet
 export BIGNAME_PHASE_RUNNER_VERIFICATION_DATABASE_URL=postgresql://bigname_verify:<secret>@127.0.0.1:5432/bigname
-export RETH_DATA_DIR=/var/lib/reth/mainnet
-export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+export ETHEREUM_INTAKE_RPC_URL=http://127.0.0.1:8545
+export BIGNAME_PHASE_RUNNER_SOURCES=ethereum-mainnet:rpc:drpc:ethereum_head:0=ETHEREUM_INTAKE_RPC_URL
 export BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS=ethereum-mainnet=http://127.0.0.1:8545
 ```
 
@@ -126,7 +131,7 @@ cargo phase redo \
   --phase ingest \
   --from-block 0 \
   --to-block 100 \
-  --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+  --source ethereum-mainnet:rpc:drpc:ethereum_head:0=ETHEREUM_INTAKE_RPC_URL
 ```
 
 After normal Mainnet Verify has completed through block 100, the same current
@@ -138,7 +143,7 @@ cargo phase redo \
   --phase verify \
   --from-block 0 \
   --to-block 100 \
-  --source ethereum-mainnet:reth:reth_db:ethereum_head:0=RETH_DATA_DIR
+  --source ethereum-mainnet:rpc:drpc:ethereum_head:0=ETHEREUM_INTAKE_RPC_URL
 ```
 
 Verify redo cannot establish a chain's first verified extent; use the normal

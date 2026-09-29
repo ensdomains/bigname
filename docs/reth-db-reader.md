@@ -1,5 +1,13 @@
 # Direct Reth reader
 
+Direct database intake is currently opt-in. Normal Cargo builds, CI and the
+standard Docker image omit it. Build the runner explicitly with
+`cargo build --locked -p phase-runner --features reth-db`; the bounded sample
+has its own build command below. An unavailable-reader error is returned when
+a default build is configured with `reth_db`; it never silently switches a
+stored source to RPC. Standard Mainnet examples instead use `drpc` and
+`ETHEREUM_INTAKE_RPC_URL`.
+
 The reader dependency is Reth v2.5.0 and uses the built-in Mainnet or Sepolia
 chain specification for the configured Ethereum chain. Other chains remain
 unsupported. The dependency, reference pin, lockfile and Rust 1.98.0 build
@@ -117,9 +125,10 @@ figure is recommended here.
 
 ## Bounded sample
 
-The image ships the bounded operator sample as `/usr/local/bin/reth-db-smoke`
-next to `phase-runner` (`Dockerfile`), so it runs with the production mounts,
-user and PID namespace through the phase runner's service definition:
+The standard image does not ship the bounded operator sample. A custom image
+must build it with `bigname-ingest/reth-db` and install it as
+`/usr/local/bin/reth-db-smoke` next to an enabled `phase-runner` before using
+the following container command with the required mounts, user and PID namespace:
 
 ```sh
 docker compose --env-file .env.server \

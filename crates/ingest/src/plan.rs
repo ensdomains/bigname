@@ -17,10 +17,13 @@ pub fn validate_request(request: &BatchRequest) -> Result<()> {
     }
     if request.chain_id == "ethereum-mainnet"
         && (request.sources.len() != 1
-            || normalized_kind(&request.sources[0].kind) != ProviderKind::Reth)
+            || !matches!(
+                normalized_kind(&request.sources[0].kind),
+                ProviderKind::Rpc | ProviderKind::Reth
+            ))
     {
         return Err(IngestError::configuration(
-            "ethereum-mainnet ingest requires one local Reth DB source",
+            "ethereum-mainnet ingest requires one RPC or local Reth DB source",
         ));
     }
     if request.chain_id == "base-mainnet" {
@@ -200,7 +203,22 @@ mod tests {
         assert!(
             validate_request(&request("ethereum-mainnet", vec![source("reth-db", 0)],)).is_ok()
         );
-        assert!(validate_request(&request("ethereum-mainnet", vec![source("rpc", 0)],)).is_err());
+        assert!(validate_request(&request("ethereum-mainnet", vec![source("rpc", 0)])).is_ok());
+        assert!(validate_request(&request("ethereum-mainnet", vec![source("drpc", 0)])).is_ok());
+        assert!(
+            validate_request(&request(
+                "ethereum-mainnet",
+                vec![source("coinbase-sql", 0)]
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_request(&request(
+                "ethereum-mainnet",
+                vec![source("rpc", 0), source("reth-db", 0)]
+            ))
+            .is_err()
+        );
         assert!(
             validate_request(&request(
                 "base-mainnet",

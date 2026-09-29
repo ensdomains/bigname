@@ -64,6 +64,46 @@ fn reference_less_mainnet_provider_trust_is_serialized() -> RunnerResult<()> {
     Ok(())
 }
 
+#[test]
+fn mainnet_rpc_intake_uses_provider_trust_without_a_direct_reader() -> RunnerResult<()> {
+    let rpc = SourceConfig::new(
+        "ethereum-mainnet",
+        "rpc-intake",
+        "drpc",
+        SeedBasis::EthereumHead,
+        0,
+        "https://intake.invalid",
+    )?;
+    let intake = [&rpc];
+    let selected = provider_trusted_source("ethereum-mainnet", &intake)?;
+    assert_eq!(selected.source_key, "rpc-intake");
+    let plan = super::super::verification_plan("ethereum-mainnet", std::slice::from_ref(&rpc))?;
+    assert_eq!(plan.verification_level(), VerificationLevel::QuickSynced);
+    let chain = crate::config::ChainConfig::new("ethereum-mainnet", vec![rpc.clone()], false)?;
+    assert!(crate::runner::PhaseRunner::verify_before_live(&chain)?);
+    for (basis, start) in [(SeedBasis::BaseSeam, 0), (SeedBasis::EthereumHead, 1)] {
+        let invalid = SourceConfig::new(
+            "ethereum-mainnet",
+            "rpc",
+            "drpc",
+            basis,
+            start,
+            "https://invalid.example",
+        )?;
+        assert!(validate_intake_shape("ethereum-mainnet", &[&invalid]).is_err());
+    }
+    let second = SourceConfig::new(
+        "ethereum-mainnet",
+        "second",
+        "drpc",
+        SeedBasis::EthereumHead,
+        0,
+        "https://second.invalid",
+    )?;
+    assert!(validate_intake_shape("ethereum-mainnet", &[&rpc, &second]).is_err());
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn existing_filesystem_identity_does_not_depend_on_canonical_spelling() -> RunnerResult<()> {

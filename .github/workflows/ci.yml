@@ -126,21 +126,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
+      # Exercise the test helpers without enabling the optional direct Reth reader.
       - name: cargo check
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo check --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support
 
       - name: cargo check (e2e workspace)
         run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
 
       - name: cargo clippy (strict workspace packages)
-        run: cargo clippy --workspace --all-targets --all-features --exclude bigname-adapters --no-deps -- -D warnings
+        run: cargo clippy --workspace --all-targets --features bigname-adapters/test-activation,bigname-storage/test-support --exclude bigname-adapters --no-deps -- -D warnings
 
       # The adapter crate still carries pre-existing warning classes. Deny
       # every other warning here so new lint classes cannot silently widen the
       # baseline while those targeted classes are paid down.
       - name: cargo clippy (adapter warning-class baseline)
         run: >-
-          cargo clippy -p bigname-adapters --all-targets --all-features --
+          cargo clippy -p bigname-adapters --all-targets --features test-activation --
           -D warnings
           -A clippy::unusual-byte-groupings
           -A clippy::too-many-arguments
@@ -293,7 +294,7 @@ jobs:
           scripts/sync-refs --check
 
       - name: cargo test
-        run: cargo test ${{ matrix.packages }} --all-features
+        run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
 
   phase_runner_shard_1:
     name: test (phase-runner shard 1/3)
@@ -392,7 +393,7 @@ jobs:
           -p bigname-lookup
           -p bigname-project
           -p bigname-metrics
-          --all-features
+          --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
           --partition slice:1/3
 
@@ -407,7 +408,7 @@ jobs:
           -p bigname-lookup
           -p bigname-project
           -p bigname-metrics
-          --all-features
+          --features bigname-adapters/test-activation,bigname-storage/test-support
           --doc
 
   phase_runner_shard_2:
@@ -507,7 +508,7 @@ jobs:
           -p bigname-lookup
           -p bigname-project
           -p bigname-metrics
-          --all-features
+          --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
           --partition slice:2/3
 
@@ -608,7 +609,7 @@ jobs:
           -p bigname-lookup
           -p bigname-project
           -p bigname-metrics
-          --all-features
+          --features bigname-adapters/test-activation,bigname-storage/test-support
           --no-fail-fast
           --partition slice:3/3
 

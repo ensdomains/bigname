@@ -99,6 +99,45 @@ sol! {
 }
 
 #[tokio::test]
+async fn mainnet_rpc_intake_persists_provider_rows_and_cursor() -> Result<()> {
+    let scratch = ScratchDatabase::create("mainnet_rpc_intake").await?;
+    let chain_id = "ethereum-mainnet";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, server) = spawn_rpc(true, false).await?;
+    let chain = ChainConfig::new(
+        chain_id,
+        vec![SourceConfig::new(
+            chain_id,
+            "rpc",
+            "drpc",
+            SeedBasis::EthereumHead,
+            0,
+            endpoint,
+        )?],
+        false,
+    )?;
+    let runner = production_ingest_runner(scratch.runner(), "mainnet-rpc-intake")?;
+    run_until_ingest_handoff(runner, chain, scratch.pool(), BLOCK_1).await?;
+    server.abort();
+    let logs: i64 = sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE chain_id = $1")
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert_eq!(logs, 2);
+    let cursor: (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT source_kind, next_block_number, last_processed_block_hash FROM ingest_cursors WHERE chain_id = $1 AND source_key = 'rpc'",
+    ).bind(chain_id).fetch_one(scratch.pool()).await?;
+    assert_eq!(cursor, ("drpc".to_owned(), 2, Some(BLOCK_1.to_owned())));
+    let transaction: (Vec<u8>, String) =
+        sqlx::query_as("SELECT input, value::text FROM raw_transactions WHERE chain_id = $1")
+            .bind(chain_id)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(transaction, (vec![0xde, 0xad], "7".to_owned()));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verification_only_source_never_reaches_finite_ingest_or_cursors() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_production_ingest").await?;
     let chain_id = "rpc-ingest-test";

@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+reth-db = ["bigname-ingest/reth-db"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -19,7 +23,7 @@ uuid.workspace = true
 url.workspace = true
 
 bigname-content-hash.workspace = true
-bigname-ingest = { workspace = true, features = ["reth-db"] }
+bigname-ingest.workspace = true
 bigname-interpret.workspace = true
 bigname-lookup.workspace = true
 bigname-manifests.workspace = true
@@ -32,6 +36,7 @@ bigname-content-hash.workspace = true
 bigname-manifests.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["process"] }
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 axum.workspace = true

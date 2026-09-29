@@ -699,7 +699,8 @@ Phases per chain:
 4. `verify` — read-only [stored-history verification](glossary.md#stored-history-verification)
    through a finalized boundary; Base
    can compare its Coinbase-loaded range with a distinct dRPC through the ingest
-   seam, Ethereum Mainnet can compare with a distinct local reth, and Ethereum
+   seam, Ethereum Mainnet can compare with a distinct local reth in an opt-in
+   reader build, and Ethereum
    Sepolia can compare with a distinct [verification-only](glossary.md#source-role)
    dRPC or record its [provider-trusted](glossary.md#verification-level)
    ingested extent without an independent reference

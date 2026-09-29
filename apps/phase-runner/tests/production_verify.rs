@@ -277,15 +277,27 @@ async fn sepolia_verification_only_reference_records_cross_checked() -> Result<(
 
 #[tokio::test]
 async fn mainnet_without_reference_records_quick_synced() -> Result<()> {
+    mainnet_provider_trust_case("reth_db", "reth-intake", "/fixture/reth").await
+}
+
+#[tokio::test]
+async fn mainnet_rpc_without_reference_records_quick_synced() -> Result<()> {
+    mainnet_provider_trust_case("drpc", "rpc-intake", "https://intake.invalid").await
+}
+
+async fn mainnet_provider_trust_case(kind: &str, key: &str, endpoint: &str) -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_provider_trusted").await?;
     seed_chain(scratch.pool(), ETHEREUM, 8, 7, 5, 1).await?;
     sqlx::query(
         "UPDATE ingest_cursors SET next_block_number = 9, target_block_number = 8,
-                last_processed_block_number = 8, last_processed_block_hash = $2
+                last_processed_block_number = 8, last_processed_block_hash = $2,
+                source_key = $3, source_kind = $4
          WHERE chain_id = $1 AND source_key = 'reth-intake'",
     )
     .bind(ETHEREUM)
     .bind(block_hash(ETHEREUM, 8))
+    .bind(key)
+    .bind(kind)
     .execute(scratch.pool())
     .await?;
     let runner = verifier_runner(
@@ -294,11 +306,17 @@ async fn mainnet_without_reference_records_quick_synced() -> Result<()> {
         Arc::new(CompleteLivePhase),
     )
     .await?;
-    let configured = ethereum_chain()?;
     let intake_only = ChainConfig::new(
-        configured.chain_id.clone(),
-        configured.intake_sources().to_vec(),
-        configured.verify_before_live,
+        ETHEREUM,
+        vec![SourceConfig::new(
+            ETHEREUM,
+            key,
+            kind,
+            SeedBasis::EthereumHead,
+            0,
+            endpoint,
+        )?],
+        false,
     )?;
     runner
         .run_chain(&intake_only, CancellationToken::new())

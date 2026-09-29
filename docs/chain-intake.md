@@ -25,7 +25,7 @@ For each configured chain, the path is:
    current projection surfaces.
 4. `verify` freezes a finalized boundary. Only a [`verification-only`](glossary.md#source-role) source is independent. Base can compare with dRPC and record
    `cross_checked` only through the Coinbase-to-dRPC ingest seam, Ethereum
-   Mainnet can compare with reth and record `node_checked`, and Ethereum
+   Mainnet can compare with reth in an opt-in reader build and record `node_checked`, and Ethereum
    Sepolia can record `cross_checked` with a distinct verification-only dRPC or
    `quick_synced` from its target-covering intake cursor without one.
    That cursor must cover the target. Its binding and coverage are checked when
@@ -98,8 +98,8 @@ watch plan.
 After the initial spine completes, the live loop takes one provider snapshot,
 fills its bounded gap, then advances or redoes `interpret` and `project` through
 the published head before polling again. Base uses the RPC member of its
-Coinbase-SQL/RPC source pair for head follow; Ethereum uses the same local Reth
-database provider as ingest. The live code reuses ingest's provider cache,
+Coinbase-SQL/RPC source pair for head follow; Ethereum uses the same configured
+RPC provider as ingest (or the direct Reth provider in an opt-in reader build). The live code reuses ingest's provider cache,
 source validation, watch plan, fetch, and persistence path.
 Before publishing a loaded suffix, live verifies that its stored parent path
 reaches the common ancestor selected from the snapshot. A provider reorg between
@@ -271,9 +271,16 @@ retained facts still cannot establish independent coverage of those facts;
 this command does not clear that provenance restriction.
 
 Production intake shape is exact:
-`ethereum-mainnet` has one local Reth DB
-source, while `base-mainnet` has one Coinbase SQL historical source and one
-dRPC source meeting at block `48,428,000`; either may add one distinct verification-only source of its supported kind. `ethereum-sepolia` has exactly one
+`ethereum-mainnet` has exactly one RPC intake source with `ethereum_head` seed
+basis and start block zero. A direct Reth DB source remains available only in
+an opt-in `reth-db` build. The standard build and example configuration use
+RPC and retain provider-trusted `quick_synced` verification; they do not claim
+independent `node_checked` verification. Contract manifests do not select the
+intake transport, so their watched addresses, ranges and capabilities are unchanged.
+Existing database source bindings still apply: changing a stored source kind or
+key is not an automatic transport migration. `base-mainnet` has one Coinbase
+SQL historical source and one dRPC source meeting at block `48,428,000`. Each
+chain may add one distinct verification-only source of its supported kind. `ethereum-sepolia` has exactly one
 dRPC or local Reth DB intake source with `ethereum_head` seed basis and start block zero, plus zero or one verification-only dRPC with the same seed basis and start. The
 runner will validate the Sepolia rule before Ingest creates a source cursor,
 contacts the provider, or writes raw facts. Live follow uses only the chain
@@ -557,7 +564,7 @@ integrity error for that attempt and prevents redo completion; retry only after
 the sources agree. This applies to required and ordinary redos. The
 [manifest widening workflow](manifests.md#mandatory-historical-fetch-after-watch-plan-widening)
 documents the source-schema evidence and why the check runs for every batch.
-For `--phase verify`, Base may add one distinct verification-only `drpc`, Ethereum Mainnet one distinct verification-only `reth_db`, and Sepolia one distinct verification-only `drpc`. Without that optional reference, each chain records `quick_synced` from its target-covering intake cursor. Base with `reth_db` is rejected during configuration validation rather than starting
+For `--phase verify`, Base may add one distinct verification-only `drpc`, Ethereum Mainnet one distinct verification-only `reth_db` in an opt-in reader build, and Sepolia one distinct verification-only `drpc`. Without that optional reference, each chain records `quick_synced` from its target-covering intake cursor. Base with `reth_db` is rejected during configuration validation rather than starting
 a database walk. More than one `--chain` may
 be supplied. `--all-chains` is separate sugar that discovers every chain with
 an active synchronized manifest and applies the same phase selection and range

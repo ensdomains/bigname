@@ -12,7 +12,7 @@ Usage:
 Runs database-backed tests against an isolated local PostgreSQL container.
 
 Defaults:
-  command                             cargo test --workspace --all-features
+  command                             cargo test --workspace --features bigname-adapters/test-activation,bigname-storage/test-support
   BIGNAME_TEST_POSTGRES_CONTAINER     bigname-test-postgres
   BIGNAME_TEST_POSTGRES_IMAGE         postgres:16-alpine
   BIGNAME_TEST_POSTGRES_PORT          55432
@@ -47,7 +47,7 @@ if [ "${1:-}" = "--" ]; then
 fi
 
 if [ "$#" -eq 0 ]; then
-  set -- cargo test --workspace --all-features
+  set -- cargo test --workspace --features bigname-adapters/test-activation,bigname-storage/test-support
 fi
 
 redact_url() {

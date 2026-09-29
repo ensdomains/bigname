@@ -29,7 +29,7 @@ in-place change cannot preserve durable state. `phases` then invokes
 persist ingest-through-project output and continuously follow provider heads,
 including reorg-driven downstream redo and canonical-head hydration. Its
 read-only verification phase can compare Base's Coinbase-loaded range with dRPC
-through the `48,428,000` ingest seam and Ethereum Mainnet with local reth. Only a distinct [verification-only](glossary.md#source-role) reference earns an independent level, and the target-covering intake cursor records
+through the `48,428,000` ingest seam and, in an opt-in reader build, Ethereum Mainnet with local reth. Only a distinct [verification-only](glossary.md#source-role) reference earns an independent level, and the target-covering intake cursor records
 `quick_synced` without one. V2 and operational paths consume its
 phase projections and lookup output. Apply append-only SQLx schema-migrations
 through deployment automation; there is no application schema-migration command
@@ -37,6 +37,12 @@ in the image. A release may also carry explicitly reviewed additive baseline
 indexes whose exact `CREATE INDEX CONCURRENTLY` statements and validity checks
 are listed in the release runbook. Those exceptional indexes are applied and
 recorded as a separate pre-deploy step rather than entered in `_sqlx_migrations`.
+
+Standard builds and the published image currently omit direct Reth database
+support and the `reth-db-smoke` executable. Mainnet intake uses the configured
+`ETHEREUM_INTAKE_RPC_URL` via `drpc`; without an independent reference, Verify
+records `quick_synced`. The optional reader remains available for explicit local
+builds described in [Direct Reth reader](reth-db-reader.md).
 
 ## Server Compose
 
@@ -514,7 +520,8 @@ Capacity, retry, and polling controls use the
 `BIGNAME_PHASE_RUNNER_*` names exposed by `phase-runner --help`.
 For that rollout, [source roles](glossary.md#source-role) are `intake`, `verification-only`, and `both`; omission defaults to `both`. Only intake-capable keys receive cursors or Ingest/Live requests, and only verification-only sources earn `cross_checked` or `node_checked`; `both` falls back to `quick_synced`. The runner rejects dRPC endpoints with the same parsed URL identity and reth paths that share the configured datadir or any provider-opened storage root (`db`, `static_files`, or `rocksdb`) by filesystem device and inode, without exposing either value. This catches symlink and bind-mount aliases; a missing or inaccessible root falls back individually to canonical or lexical spelling identity. Intake-membership changes require reset. Stronger levels are downgraded after provider-trusted revalidation, while `quick_synced` is not auto-upgraded.
 Sepolia's from-zero sources for the Issue #411 rollout are `ethereum-sepolia:sepolia-intake:drpc:ethereum_head:0:intake=SEPOLIA_INTAKE_RPC_URL` and `ethereum-sepolia:sepolia-verify:drpc:ethereum_head:0:verification-only=SEPOLIA_VERIFY_RPC_URL`.
-The server Compose file forwards the documented `RETH_DATA_DIR` source and the
+The server Compose file forwards `ETHEREUM_INTAKE_RPC_URL`, the optional
+`RETH_DATA_DIR` source and the
 hydration URL map. Its reth overlay (`docker-compose.reth-db.yml`) builds the
 [direct reader's mount contract](reth-db-reader.md#mount-contract) at the same
 container path: a separate writable host directory (`RETH_READER_DIR`) as the
@@ -541,7 +548,7 @@ receipt primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L128 @
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433).
-An explicit verification-only Ethereum Mainnet
+In an opt-in reader build, an explicit verification-only Ethereum Mainnet
 `reth_db` records `node_checked`; intake-capable reth alone records
 `quick_synced`. `ethereum-sepolia` requires exactly one `drpc` or `reth_db`
 intake source at block zero. A distinct verification-only dRPC records `cross_checked`;
@@ -1272,6 +1279,9 @@ job, which drains the API only. Neither slice authorizes production rollout or
 completes the issue.
 
 ### Switching Sepolia from local RPC to direct Reth reads
+
+This procedure requires a custom image with `phase-runner/reth-db` enabled.
+The standard image currently omits the direct reader and its smoke executable.
 
 The direct reader is compiled against Reth v2.5.0 (`crates/ingest/Cargo.toml`) and selects Reth's built-in Sepolia chain specification from the chain id; there is no chain specification to supply and no other Reth version to build against. It refuses to open a datadir whose stored genesis block hash is not Sepolia's, naming both hashes. Run it only against a Reth v2.5.0 node, and test a [bounded read-only sample](reth-db-reader.md#bounded-sample) before pausing ingestion. Supply the [direct-reader mounts](reth-db-reader.md#mount-contract) and one `reth_db` intake descriptor; keep historical state RPC separate. Pause any host automation that would restart or recreate the runner during the change (for example an image auto-update job), gracefully stop the runner, retain the cursor and phase-state evidence, and run the [same-node transport command](chain-intake.md#same-node-sepolia-transport-change), which performs the [source transport](glossary.md#source-transport) change. The command refuses, and changes nothing, when the node has pruned history that Ingest plans to read when it resumes: a direct reader whose retention floor is above block zero is refused while Ingest has catch-up work or an unstarted redo below that floor, because resumed Ingest applies the same [source-floor admission](chain-intake.md#download-range-planning). Once Ingest has handed off to live follow (including a completed extent that is awaiting completed-phase revalidation), the floor is judged where live follow resumes, the block after the highest published block the node still holds, so a node that pruned history below the handoff but retains what live follow needs is admitted. Save its receipt before resuming the existing replay range with the new intake descriptor. Do not reset the database or restart from block zero. The command may be reversed against the same node for rollback; keep the matching runtime/configuration until progress is verified.
 

@@ -34,7 +34,7 @@ pub(super) fn validate_intake_shape(chain_id: &str, sources: &[&SourceConfig]) -
         }
         "ethereum-mainnet" => {
             sources.len() == 1
-                && matches!(kind(&sources[0]), kind if kind == "reth" || kind == "reth_db")
+                && matches!(kind(&sources[0]).as_str(), "drpc" | "reth" | "reth_db")
                 && sources[0].seed_basis == SeedBasis::EthereumHead
                 && sources[0].start_block_number == 0
         }
@@ -331,11 +331,10 @@ pub(super) fn provider_trusted_source<'a>(
 ) -> RunnerResult<&'a SourceConfig> {
     let target_kind = match chain_id {
         "base-mainnet" => "drpc",
-        "ethereum-sepolia" => {
+        "ethereum-mainnet" | "ethereum-sepolia" => {
             validate_intake_shape(chain_id, intake)?;
             return Ok(intake[0]);
         }
-        "ethereum-mainnet" => "reth_db",
         _ => "",
     };
     let mut candidates = intake.iter().copied().filter(|source| {
