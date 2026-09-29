@@ -183,39 +183,16 @@ pub(super) fn parse_lookup_json_body(
     })
 }
 
-/// `include` takes the GET routes' comma-separated grammar and allows `inventory` only, on
-/// `profile=detail`: feed is the field-budgeted path (docs/api-v1-routes.md).
-pub(super) fn parse_lookup_include(
-    value: Option<&str>,
-    profile: LookupProfile,
-) -> V2Result<LookupInclude> {
-    let mut include = LookupInclude::default();
-    for part in value
-        .into_iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        match part {
-            "inventory" => include.inventory = true,
-            _ => {
-                return Err(V2Error::invalid_input(
-                    "include must contain only inventory",
-                ));
-            }
-        }
-    }
-    if include.inventory && profile != LookupProfile::Detail {
+/// `include` is no longer accepted: `profile=detail` records carry their record key lists under
+/// `records` (docs/api-v1-routes.md).
+pub(super) fn reject_lookup_include(value: Option<&str>) -> V2Result<()> {
+    // An empty expansion string is no expansion, as on the GET routes.
+    if value.is_some_and(|value| !value.trim().is_empty()) {
         return Err(V2Error::invalid_input(
-            "include=inventory requires profile=detail",
+            "include is not supported; profile=detail records list their record keys under records",
         ));
     }
-    Ok(include)
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct LookupInclude {
-    pub(crate) inventory: bool,
+    Ok(())
 }
 
 pub(super) fn parse_lookup_profile(value: Option<&str>) -> V2Result<LookupProfile> {

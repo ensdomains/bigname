@@ -10,9 +10,7 @@ use super::support::{ResolutionRecordKey, parse_resolution_record_key, serving_r
 mod abi;
 #[cfg(test)]
 pub(crate) use abi::abi_content_types_test_hooks;
-pub(crate) use abi::{
-    abi_input_for_identity_row, fill_records_route_abi_content_types, load_abi_content_types,
-};
+pub(crate) use abi::{fill_records_route_abi_content_types, load_abi_content_types};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RecordInventory {

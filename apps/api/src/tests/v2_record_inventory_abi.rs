@@ -1,4 +1,5 @@
-// ABI content types on `include=inventory` (docs/api-v1-routes.md, records route). Decoding
+// ABI content types on the records route's `include=inventory` and the grouped `records.abi_keys`
+// of name detail and lookup (docs/api-v1-routes.md). Decoding
 // `ABIChanged` per resolver family is covered in
 // crates/adapters/src/schema_v2/tests/abi_changed.rs; these cases pin the public shape,
 // availability, selection through the family reducers, and batch cost.
@@ -262,17 +263,33 @@ async fn seed_abi_public_resolver_v2_name(
     rebuild_fixture_families(&database.pool, ABI_CHAIN, number, &hash).await
 }
 
-/// The lookup container and the records route container for one name, asserted equal.
+/// The ABI answer of lookup `profile=detail` for one name in the records route's terms,
+/// `{abi_content_types, abi_unsupported_reason?}`. Lookup's `records` is asserted equal to name
+/// detail's, and its ABI answer to the records route container's wherever that route lists the
+/// content types (the grouped view also lists them for a row that is not authoritative).
 async fn abi_inventory_on_both_routes(database: &TestDatabase, name: &str) -> Result<Value> {
     let payload = v2_lookup_json(
         database,
-        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": name}]}),
+        json!({"profile": "detail", "inputs": [{"name": name}]}),
     )
     .await?;
-    let lookup = payload["data"][0]["record"]["inventory"].clone();
+    let grouped = payload["data"][0]["record"]["records"].clone();
+    let detail = v2_get_json(database, &format!("/v1/names/{name}")).await?;
+    assert_eq!(detail["data"]["records"], grouped, "{detail:#}");
+    let mut abi = json!({
+        "abi_content_types": grouped.get("abi_keys").cloned().unwrap_or(Value::Null)
+    });
+    if let Some(reason) = grouped.get("abi_unsupported_reason") {
+        abi["abi_unsupported_reason"] = reason.clone();
+    }
     let records = v2_get_json(database, &format!("/v1/names/{name}/records?include=inventory")).await?;
-    assert_eq!(records["data"]["inventory"], lookup, "{records:#}");
-    Ok(lookup)
+    let inventory = &records["data"]["inventory"];
+    if inventory["abi_unsupported_reason"] != json!("inventory_not_authoritative") {
+        for field in ["abi_content_types", "abi_unsupported_reason"] {
+            assert_eq!(inventory.get(field), abi.get(field), "{field}: {records:#}");
+        }
+    }
+    Ok(abi)
 }
 
 #[tokio::test]
@@ -304,12 +321,13 @@ async fn abi_content_types_are_served_identically_on_lookup_and_records() -> Res
     assert_eq!(inventory["abi_content_types"], json!(["1", "4", wide]), "{inventory}");
     assert!(inventory.get("abi_unsupported_reason").is_none(), "{inventory}");
     // The ordinary keys are unchanged: ABI stays outside the grammar and the counts.
+    let after = v2_get_json(&database, "/v1/names/abi-types.eth/records?include=inventory").await?;
     for field in ["known_keys", "unset_keys", "unsupported_keys"] {
-        assert_eq!(inventory[field], before["data"]["inventory"][field], "{field}");
+        assert_eq!(after["data"]["inventory"][field], before["data"]["inventory"][field], "{field}");
     }
     assert!(
-        !inventory["known_keys"].to_string().contains("abi"),
-        "{inventory}"
+        !after["data"]["inventory"]["known_keys"].to_string().contains("abi"),
+        "{after}"
     );
     let response = v2_get_response(&database, "/v1/names/abi-types.eth/records?keys=abi:1").await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -544,18 +562,23 @@ async fn abi_content_types_follow_clears_resets_and_resolver_switches() -> Resul
     )?;
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     seed_abi_boundary(&database, name, resource, "ResolverChanged", CUSTOM_RESOLVER).await?;
+    // The grouped view lists the content type the resolver was seen writing, as it lists every
+    // other observed key; the records route's container cannot speak for the row.
     let inventory = abi_inventory_on_both_routes(&database, name).await?;
-    assert_eq!(inventory["abi_content_types"], Value::Null, "{inventory}");
+    assert_eq!(inventory, json!({"abi_content_types": ["512"]}), "{inventory}");
+    let records = v2_get_json(&database, &format!("/v1/names/{name}/records?include=inventory")).await?;
+    let container = &records["data"]["inventory"];
+    assert_eq!(container["abi_content_types"], Value::Null, "{records}");
     assert_eq!(
-        inventory["abi_unsupported_reason"],
+        container["abi_unsupported_reason"],
         json!("inventory_not_authoritative"),
-        "{inventory}"
+        "{records}"
     );
     database.cleanup().await
 }
 
-// Without an inventory row the records route keeps its container and says why; the lookup route
-// omits the container. An unsupported inventory is covered with the default key set.
+// Without an inventory row the records route keeps its container and says why; lookup omits
+// `records`. An unsupported inventory is covered with the default key set.
 #[tokio::test]
 async fn abi_content_types_are_withheld_without_an_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -600,10 +623,10 @@ async fn abi_content_types_are_withheld_without_an_inventory() -> Result<()> {
     assert_eq!(inventory["abi_unsupported_reason"], json!("inventory_not_available"));
     let lookup = v2_lookup_json(
         &database,
-        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": "abi-missing.eth"}]}),
+        json!({"profile": "detail", "inputs": [{"name": "abi-missing.eth"}]}),
     )
     .await?;
-    assert!(lookup["data"][0]["record"].get("inventory").is_none(), "{lookup:#}");
+    assert!(lookup["data"][0]["record"].get("records").is_none(), "{lookup:#}");
     database.cleanup().await
 }
 
@@ -729,14 +752,14 @@ async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
     // The detail profile adds one more read for the batch, with the attributed events.
     let (payload, reads) = lookup_inventory_reads(
         &database,
-        json!({"profile": "detail", "include": "inventory", "inputs": inputs}),
+        json!({"profile": "detail", "inputs": inputs}),
     )
     .await?;
     let results = payload["data"].as_array().context("lookup results")?;
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["inventory"]["abi_content_types"],
+            result["record"]["records"]["abi_keys"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );
@@ -759,7 +782,6 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
         &database,
         json!({
             "profile": "detail",
-            "include": "inventory",
             "inputs": names.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()
         }),
     )
@@ -768,7 +790,7 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["inventory"]["abi_content_types"],
+            result["record"]["records"]["abi_keys"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );

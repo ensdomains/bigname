@@ -30,6 +30,7 @@ mod permission_support;
 mod permission_values;
 mod permissions;
 mod primary_name;
+pub(crate) mod record_groups;
 mod registries;
 mod resolvers;
 mod restrictions;

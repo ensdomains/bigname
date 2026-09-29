@@ -19,9 +19,7 @@ const SHARED_DETAIL_FIELDS: &[&str] = &[
     "migrated_at",
     "resolver",
     "subregistry",
-    "addresses",
-    "text_records",
-    "content_hash",
+    "records",
     "primary_address",
     "primary_name",
     "chain_id",
@@ -154,10 +152,9 @@ async fn lookup_detail_status_matches_name_detail_for_wrapped_and_ownerless_name
     Ok(())
 }
 
-/// `include=inventory` on a lookup record is the records route's container for the same row, and
-/// is absent where that route serves none.
+/// Lookup serves name detail's grouped `records`, and omits it where name detail does.
 #[tokio::test]
-async fn lookup_include_inventory_matches_the_records_route() -> Result<()> {
+async fn lookup_detail_records_match_name_detail() -> Result<()> {
     for (name, served) in [("eth", true), ("alice.eth", false)] {
         let database = TestDatabase::new_migrated().await?;
         if served {
@@ -165,25 +162,144 @@ async fn lookup_include_inventory_matches_the_records_route() -> Result<()> {
         } else {
             seed_alice_state_inputs(&database, AliceInputState::Unbound).await?;
         }
-        let batch = v2_lookup_json(
-            &database,
-            json!({"profile": "detail", "include": "inventory", "inputs": [{"name": name}]}),
-        )
-        .await?;
-        let record = &batch["data"][0]["record"];
-        let records = v2_name_record_payload_for_database(
-            &database,
-            &format!("/v1/names/{name}/records?include=inventory"),
-        )
-        .await?;
-        assert_eq!(record["status"], json!("ok"), "{name}: {record}");
-        assert_eq!(
-            record.get("inventory"),
-            records["data"].get("inventory"),
-            "{name}: lookup {record}\nrecords {records}"
-        );
-        assert_eq!(record.get("inventory").is_some(), served, "{name}: {record}");
+        let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+        assert_eq!(detail.get("records").is_some(), served, "{name}: {detail}");
         database.cleanup().await?;
     }
     Ok(())
+}
+
+/// A resolver whose implementation is not an admitted profile: the keys it was seen writing are
+/// listed on both routes, with no value.
+#[tokio::test]
+async fn lookup_detail_records_list_an_unknown_resolvers_keys_without_values() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, "alice.eth").await?;
+    let records = &detail["records"];
+    assert_eq!(records["address_keys"], json!(["60"]), "{detail}");
+    assert_eq!(records["addresses"], json!({}), "{detail}");
+    assert_eq!(records["text_keys"], json!(["description"]), "{detail}");
+    assert_eq!(records["texts"], json!({}), "{detail}");
+    assert!(records.get("contenthash").is_none(), "{detail}");
+    assert!(records.get("name").is_none(), "{detail}");
+    database.cleanup().await
+}
+
+const GROUPED_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
+
+async fn seed_grouped_records_name(database: &TestDatabase, name: &str, id: u128) -> Result<()> {
+    seed_identity_name(
+        database,
+        &format!("ens:{name}"),
+        name,
+        name,
+        &format!("namehash:{name}"),
+        Uuid::from_u128(id),
+        Uuid::from_u128(id + 1),
+        Uuid::from_u128(id + 2),
+        GROUPED_RESOLVER,
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await
+}
+
+/// A cleared value is a listed key mapped to `null` (a cleared singleton is `null`) on both routes.
+#[tokio::test]
+async fn lookup_detail_records_serve_cleared_values_as_null() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let name = "cleared.eth";
+    seed_grouped_records_name(&database, name, 0x5a0c10).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        name,
+        GROUPED_RESOLVER,
+        38,
+        "0xname26",
+        &[
+            family_fixture_record_write("text:url", Some(json!("https://cleared.example"))),
+            family_fixture_record_write("text:email", Some(json!("kept@example.test"))),
+            json!({"source_event":"ContenthashChanged", "record_key":"contenthash",
+                "record_family":"contenthash", "selector_key":null,
+                "contenthash_hex":"0xe3010170"}),
+            family_fixture_record_write("text:url", Some(json!(""))),
+            json!({"source_event":"ContenthashChanged", "record_key":"contenthash",
+                "record_family":"contenthash", "selector_key":null, "contenthash_hex":"0x"}),
+        ],
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 38, "0xname26").await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    let records = &detail["records"];
+    // `seed_identity_name` also writes the fixture's own text records.
+    let text_keys = records["text_keys"].as_array().expect("text keys");
+    assert!(text_keys.contains(&json!("url")) && text_keys.contains(&json!("email")), "{detail}");
+    assert_eq!(records["texts"]["email"], json!("kept@example.test"), "{detail}");
+    assert_eq!(records["texts"].get("url"), Some(&Value::Null), "{detail}");
+    assert_eq!(records.get("contenthash"), Some(&Value::Null), "{detail}");
+    database.cleanup().await
+}
+
+/// The forward `name` record on the name's own node: a write, a clear, a rewrite and a
+/// record-version reset, served alike on both routes. It is not the primary name.
+#[tokio::test]
+async fn lookup_detail_records_follow_the_forward_name_record() -> Result<()> {
+    const CHAIN: &str = "ethereum-mainnet";
+    const FAMILY: &str = "ens_v1_resolver_l1";
+    let database = TestDatabase::new_migrated().await?;
+    let name = "forward.eth";
+    seed_grouped_records_name(&database, name, 0x5a0c20).await?;
+    let manifest =
+        declare_family_fixture_resolver(&database.pool, "ens", CHAIN, FAMILY, GROUPED_RESOLVER)
+            .await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let publish = |kind: &'static str, after: Value| {
+        let database = &database;
+        async move {
+            publish_node_record_event(
+                database,
+                CHAIN,
+                "ens",
+                kind,
+                FAMILY,
+                Some(manifest),
+                GROUPED_RESOLVER,
+                (None, None),
+                after,
+            )
+            .await
+        }
+    };
+    let name_changed = |value: &str| {
+        json!({"source_event":"NameChanged", "resolver":GROUPED_RESOLVER, "node":node,
+            "record_key":"name", "record_family":"name", "selector_key":null,
+            "value_retained":false, "raw_name":value})
+    };
+    let forward_name = |detail: &Value| detail["records"].get("name").cloned();
+
+    // Never written, on an authoritative inventory: unset.
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+
+    publish("RecordChanged", name_changed("forward-target.eth")).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    assert_eq!(forward_name(&detail), Some(json!("forward-target.eth")), "{detail}");
+    assert!(detail.get("primary_name").is_none(), "{detail}");
+
+    // `setName("")` clears it.
+    publish("RecordChanged", name_changed("")).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+
+    // A rewrite counts again, and a record-version reset drops it.
+    publish("RecordChanged", name_changed("rewritten.eth")).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    assert_eq!(forward_name(&detail), Some(json!("rewritten.eth")), "{detail}");
+    publish("RecordVersionChanged", version_after(&node, GROUPED_RESOLVER, 1)).await?;
+    let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
+    assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+    database.cleanup().await
 }

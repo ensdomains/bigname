@@ -175,9 +175,21 @@ async fn verified_name_detail_executes_the_chain_neutral_inventory_keys_on_sepol
     let data = &detail["data"];
     assert_eq!(data["status"], json!("ok"), "{detail}");
     assert!(data.get("unsupported_reason").is_none(), "{detail}");
-    assert_eq!(data["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{detail}");
+    // `records` lists exactly the keys the lookup read; the forward name is not read.
+    assert_eq!(
+        data["records"],
+        json!({
+            "address_keys": ["60"],
+            "addresses": {"60": SEPOLIA_DETAIL_EXECUTED},
+            "text_keys": [],
+            "texts": {},
+            "abi_keys": [],
+            "abis": {}
+        }),
+        "{detail}"
+    );
     assert_eq!(data["primary_address"], json!(SEPOLIA_DETAIL_EXECUTED));
-    assert_eq!(data["unsupported_fields"], json!(["content_hash", "text_records"]));
+    assert!(data.get("unsupported_fields").is_none(), "{detail}");
     // Registration facts stay indexed.
     assert_eq!(data["registration_status"], json!("active"));
     assert_eq!(
@@ -212,15 +224,27 @@ async fn verified_name_detail_reads_the_profile_set_without_inventory_keys() -> 
     assert_eq!(status, StatusCode::OK, "{detail}");
     let data = &detail["data"];
     assert_eq!(data["status"], json!("ok"), "{detail}");
-    assert_eq!(data["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{detail}");
     assert_eq!(data["primary_address"], json!(SEPOLIA_DETAIL_EXECUTED));
-    // Unset avatar, description and email are served as absent, not as unsupported.
+    // Unset avatar, description, email and contenthash are served as cleared (`null`), not as
+    // unknown. The inventory row lists no key and no ABI write.
     assert_eq!(
-        data["text_records"],
-        json!({"url": "https://alice.example"}),
+        data["records"],
+        json!({
+            "address_keys": ["60"],
+            "addresses": {"60": SEPOLIA_DETAIL_EXECUTED},
+            "text_keys": ["avatar", "description", "email", "url"],
+            "texts": {
+                "avatar": null,
+                "description": null,
+                "email": null,
+                "url": "https://alice.example"
+            },
+            "abi_keys": [],
+            "abis": {},
+            "contenthash": null
+        }),
         "{detail}"
     );
-    assert!(data.get("content_hash").is_none(), "{detail}");
     assert!(data.get("unsupported_fields").is_none(), "{detail}");
 
     assert_eq!(joined_keys(rpc_handle).await?, PROFILE_KEYS_SORTED);
@@ -239,11 +263,11 @@ async fn verified_name_detail_reports_a_failed_getter_as_failed() -> Result<()> 
     let data = &detail["data"];
     assert_eq!(data["status"], json!("failed"), "{detail}");
     assert_eq!(data["failure_reason"], json!("resolver_call_reverted"));
-    assert!(data.get("addresses").is_none(), "{detail}");
-    assert_eq!(
-        data["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
-    );
+    // The failed key stays listed with no value.
+    assert_eq!(data["records"]["address_keys"], json!(["60"]), "{detail}");
+    assert_eq!(data["records"]["addresses"], json!({}), "{detail}");
+    assert!(data.get("primary_address").is_none(), "{detail}");
+    assert_eq!(data["unsupported_fields"], json!(["primary_address"]));
     assert_eq!(data["registration_status"], json!("active"));
     assert_eq!(joined_keys(rpc_handle).await?, ["addr:60"]);
     database.cleanup().await
@@ -301,12 +325,17 @@ async fn verified_name_detail_takes_the_first_failed_key_in_key_order() -> Resul
     let data = &detail["data"];
     assert_eq!(data["status"], json!("failed"), "{detail}");
     assert_eq!(data["failure_reason"], json!("resolver_call_failed"), "{detail}");
-    assert_eq!(data["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{detail}");
+    // The failed contenthash and the reverted text:url stay listed with no value.
+    let records = &data["records"];
+    assert_eq!(records["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{detail}");
+    assert_eq!(records["text_keys"], json!(["avatar", "description", "email", "url"]), "{detail}");
     assert_eq!(
-        data["unsupported_fields"],
-        json!(["content_hash", "text_records"]),
+        records["texts"],
+        json!({"avatar": null, "description": null, "email": null}),
         "{detail}"
     );
+    assert!(records.get("contenthash").is_none(), "{detail}");
+    assert!(data.get("unsupported_fields").is_none(), "{detail}");
     assert_eq!(joined_keys(rpc_handle).await?, PROFILE_KEYS_SORTED);
     database.cleanup().await
 }
@@ -344,11 +373,8 @@ async fn verified_name_detail_discovers_a_null_resolver_without_inventory() -> R
 
     let indexed = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
     assert!(indexed["data"].get("resolver").is_none(), "{indexed}");
-    assert_eq!(
-        indexed["data"]["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"]),
-        "the name has no inventory: {indexed}"
-    );
+    assert!(indexed["data"].get("records").is_none(), "the name has no inventory: {indexed}");
+    assert_eq!(indexed["data"]["unsupported_fields"], json!(["primary_address"]), "{indexed}");
 
     let response = app_router(state)
         .oneshot(
@@ -363,8 +389,15 @@ async fn verified_name_detail_discovers_a_null_resolver_without_inventory() -> R
     let data = &payload["data"];
     assert_eq!(data["status"], json!("ok"), "{payload}");
     assert!(data.get("resolver").is_none(), "{payload}");
-    assert_eq!(data["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{payload}");
-    assert_eq!(data["text_records"], json!({"url": "https://alice.example"}));
+    assert_eq!(data["records"]["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{payload}");
+    assert_eq!(data["records"]["texts"]["url"], json!("https://alice.example"));
+    // With no inventory row the ABI content types cannot be listed.
+    assert!(data["records"].get("abi_keys").is_none(), "{payload}");
+    assert_eq!(
+        data["records"]["abi_unsupported_reason"],
+        json!("inventory_not_available"),
+        "{payload}"
+    );
     assert_eq!(joined_keys(rpc_handle).await?, PROFILE_KEYS_SORTED);
     lookup_pool.close().await;
     database.cleanup().await
