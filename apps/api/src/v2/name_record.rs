@@ -184,20 +184,14 @@ pub(crate) async fn get_name_record(
     })?;
 
     let record_inventory = if row_has_current_registration(&row) {
-        load_name_record_inventory(
-            &state.pool,
-            &row,
-            &selected_snapshot,
-            include_resolution_auxiliary,
-            route_source,
-        )
-        .await
-        .map_err(|error| {
-            api_error_to_v2_for_resource(
-                snapshot_selection_api_error(error),
-                SnapshotReadResource::Name,
-            )
-        })?
+        load_name_record_inventory(&state.pool, &row, &selected_snapshot)
+            .await
+            .map_err(|error| {
+                api_error_to_v2_for_resource(
+                    snapshot_selection_api_error(error),
+                    SnapshotReadResource::Name,
+                )
+            })?
     } else {
         None
     };
