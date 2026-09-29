@@ -588,7 +588,11 @@ collection route carry neither header.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
   `owner`, `registrant`, `registration_status`, `registered_at`, `created_at`,
-  and `expires_at`. Every row has an `expires_at` inside the window. A name
+  `expires_at` and `grace_ends_at`. Every row has an `expires_at` inside the
+  window. `expires_at` is the served expiry of
+  [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
+  cutover a `.eth` name with a live ENSv2 entry is listed by that entry's
+  expiry, before it by its ENSv1 lease's. A name
   whose exact-name authority is unsupported is omitted, as on search, because
   a listing row carries no `unsupported_reason`.
 - Coverage: the listing serves [composed name rows](glossary.md#composed-name-row)

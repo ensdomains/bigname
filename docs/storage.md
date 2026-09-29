@@ -231,7 +231,11 @@ Family indexes serve these concrete readers:
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;
-  zero-owner attribution uses `project_registry_owner_event_name_idx`.
+  zero-owner attribution uses `project_registry_owner_event_name_idx`. The reserved names a
+  Universal Resolver proxy change recomposes (`project:families.derived.cutover_names`) are
+  read without an index: the statement first checks the block's journal by its primary key
+  and scans `project_lifecycle_event` only on a block that changed a proxy row, a handful of
+  blocks per chain.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.

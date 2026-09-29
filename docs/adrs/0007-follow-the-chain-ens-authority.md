@@ -276,6 +276,16 @@ released stays with ENSv2 under the 2026-09-25 amendment, as the Universal
 Resolver does. The difference is listed in
 [`upstream.md`](../upstream.md#ensv1-authority-without-an-ensv2-entry).
 
+Amendment (2026-09-29, TYR-90): authority is unchanged, but resolution and
+expiry follow the [Universal Resolver cutover](../glossary.md#universal-resolver-cutover),
+the block from which the chain's client-facing Universal Resolver resolves
+through ENSv2. From it, such a name still has its ENSv1 owner and registration
+but serves no resolver or records, as the Universal Resolver finds none; before
+it, clients resolve through ENSv1 and the name resolves as ENSv1 records. A
+reservation still defers ownership to ENSv1, but from the cutover the name
+serves the reservation's expiry and the ENSv2 grace period
+(`docs/api-v1.md` § Expiry and grace).
+
 ## Consequences
 
 - Under the 2026-09-25 amendment, a name live on ENSv1 whose ENSv2

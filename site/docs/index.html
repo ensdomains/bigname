@@ -425,7 +425,7 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
 {
   id: 'vocabulary', title: 'Vocabulary',
   summary: 'Field names that recur across routes, the registration lifecycle words, and the NameWrapper fields.',
-  keywords: ['registration_status', 'active', 'wrapped', 'registered', 'released', 'unregistered', 'wrapper_state', 'wrapper_fuses', 'emancipated', 'locked', 'fuses', 'completeness', 'dictionary', 'expires_at', 'registered_at', 'created_at', 'registration_id', 'token_id', 'display_name', 'namehash'],
+  keywords: ['registration_status', 'active', 'wrapped', 'registered', 'released', 'unregistered', 'wrapper_state', 'wrapper_fuses', 'emancipated', 'locked', 'fuses', 'completeness', 'dictionary', 'expires_at', 'grace_ends_at', 'unresolvable_reason', 'registered_at', 'created_at', 'registration_id', 'token_id', 'display_name', 'namehash'],
   sections: [
     { h: 'Status, registration status, and completeness', id: 'three', html: `<p>Three fields answer three different questions and are easy to confuse.</p>` + T(['Field', 'Question it answers', 'Values'], [
       ['status', 'Did this item produce an answer?', 'ok, not_found, invalid_name, mismatch, unsupported, stale, failed'],
@@ -447,7 +447,9 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
 <dt>registration_id</dt><dd>An opaque handle for one registration lifecycle. For a <code>.eth</code> second-level name it is always the BaseRegistrar lease, whether or not the name is wrapped; if you stored a handle for a wrapped <code>.eth</code> name before this rule, read the name again. Current Mainnet controller-derived history can still expose a wrapper handle when the wrap recorded no lease link; the registrar-first manifest rollout remains required to close that history gap.</dd>
 <dt>token_id</dt><dd>The token ID as a decimal string.</dd>
 <dt>owner, manager, registrant</dt><dd>The token or registry owner, the controller, and the registrant.</dd>
-<dt>registered_at, created_at, expires_at</dt><dd>When the registration started, when the name was first observed, and when the registrar lease expires.</dd>
+<dt>registered_at, created_at, expires_at</dt><dd>When the registration started, when the name was first observed, and when the registration expires. Once the chain resolves through ENSv2, a <code>.eth</code> name with a live ENSv2 entry serves that entry's expiry; before that, the ENSv1 lease's.</dd>
+<dt>grace_ends_at</dt><dd>When the renewal grace after <code>expires_at</code> ends: 90 days for an ENSv1 lease or a Basename, 28 days for an ENSv2 <code>.eth</code> registration, none for a subname. <code>registration_status</code> does not change during grace; treat a name past <code>expires_at</code> as expired and renewable until this time.</dd>
+<dt>unresolvable_reason</dt><dd><code>no_live_ens_v2_entry</code> when the chain resolves through ENSv2 and a <code>.eth</code> name that ENSv1 decides has no live ENSv2 entry: the Universal Resolver finds no resolver, so <code>resolver</code> and <code>records</code> are omitted.</dd>
 <dt>resolver</dt><dd><code>{chain_id, address}</code>.</dd>
 <dt>records (grouped)</dt><dd>The name profile's and lookup detail's resolver records: each category's key list beside its value map. A listed key missing from its map is unknown; a listed key mapped to <code>null</code> is cleared. <code>contenthash</code> and <code>name</code> are the value, <code>null</code> when cleared, or absent when unknown. The records route serves keyed answers instead.</dd>
 <dt>primary_name, primary_address, is_primary</dt><dd>The primary name for an address and coin type; the primary or default address for a name; whether a row is the selected primary.</dd>

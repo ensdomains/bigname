@@ -1460,6 +1460,19 @@ included, so the publishing steps can tell which registration of the resource a
 grant was written under. Permission composition uses that position with the current resource lifecycle
 when deciding whether the grant remains effective.
 
+The Universal Resolver proxy family (`project_universal_resolver_proxy`) keeps,
+per declared `ens_execution` proxy, the implementation its latest `Upgraded`
+installed and how Interpret classified it against the manifest. The composed
+name reader follows the client-facing proxy's chain through these rows once per
+batch to decide whether the publication is past the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), which
+moves the served expiry of reserved `.eth` names and withholds resolution from
+`.eth` names ENSv1 decides without a live ENSv2 entry (`docs/api-v1.md` §
+Expiry and grace). Schema-migration
+`20260929200000_project_universal_resolver_proxy.sql` adds the table; an empty
+table reads as not cut over, and the content-hash rotation that ships with it
+rebuilds the families.
+
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
 one resource's latest pointer, including unnamed changes, for root, alias and
 wildcard composition. `project_named_resource_pointer` keeps the latest named
@@ -1526,7 +1539,9 @@ resource that a registry event of a block since the family marker's carries
 (such an event can move the resource's unnamed Transfers to another name, and a
 rebuild range composes once for all its blocks), every name whose surface
 appeared since the family marker's block, and every name whose stored
-`recompose_at` the block's time has reached. `recompose_at` is the first second
+`recompose_at` the block's time has reached. A block that changes a Universal
+Resolver proxy row also recomposes every name with an ENSv2 reservation, since
+the cutover moves the expiry those names serve. `recompose_at` is the first second
 at which the name's composition can change with no fact changing: a binding
 interval opening or closing, or a NameWrapper expiry or grace boundary. It is
 stored in Unix seconds, since a NameWrapper expiry can lie past the last

@@ -468,7 +468,14 @@ which reads the ENSv1 registry.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 When ENSv1 decides a `.eth` label that never had an ENSv2 registration, that is
 the one difference: the Universal Resolver finds no resolver for it; see
-[`upstream.md`](upstream.md#ensv1-authority-without-an-ensv2-entry). No name is
+[`upstream.md`](upstream.md#ensv1-authority-without-an-ensv2-entry). From the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover), which
+Project reads from the admitted proxies' `Upgraded` events
+(`project_universal_resolver_proxy`), the composed row follows the Universal
+Resolver for resolution: such a name, and every name below it, serves no
+resolver or records, while its owner and registration stay as selection decides
+them. From the cutover a name with a live ENSv2 entry also serves that entry's
+expiry and grace (`docs/api-v1.md` § Expiry and grace). No name is
 refused for holding facts on both arms, so Project no longer produces the
 earlier `conflicting_current_ens_authority` (Mainnet) or
 `independent_ens_deployments_overlap` (Sepolia) reasons. Configured ingest start

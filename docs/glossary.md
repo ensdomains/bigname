@@ -2390,6 +2390,20 @@ resolver
 This path does not turn the ancestor into the name's declared exact resolver
 and has no live/indexed comparison.
 
+## Universal Resolver cutover
+
+the point from which a chain resolves `.eth` names through ENSv2: while the
+client-facing Universal Resolver proxy's chain of implementations ends at a
+UniversalResolverV2 implementation the `ens_execution` manifest lists in
+`universal_resolver_implementations`, read from the proxies' admitted
+`Upgraded` events at each block
+([`docs/manifests.md`](manifests.md#universal_resolver_implementations)). A
+rollback to an unlisted implementation ends it. Past the cutover a `.eth` name
+with a live ENSv2 entry serves that entry's expiry and the ENSv2 grace, and a
+`.eth` name ENSv1 decides without one resolves to nothing
+([Expiry and grace](api-v1.md#expiry-and-grace)). Sepolia cut over at block
+`11710193`; Mainnet has not.
+
 ## Verified lookup
 
 request-scoped resolution or primary-name verification

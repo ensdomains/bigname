@@ -58,6 +58,11 @@ Each manifest contains:
   [authority arms](glossary.md#authority-epoch) whose names the declared
   Universal Resolver may verify; absent means `["ens_v1"]` (see
   [`verified_authority_arms`](#verified_authority_arms))
+- `universal_resolver_implementations` — optional, `ens_execution` only: the
+  UniversalResolverV2 implementations whose installation behind the declared
+  Universal Resolver proxy marks the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover) (see
+  [`universal_resolver_implementations`](#universal_resolver_implementations))
 
 For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Each `(namespace, source_family, chain, deployment_epoch, manifest_version)` tuple may come from only one file; the loader rejects duplicate tuples across repository layouts regardless of rollout status. Within one manifest version, every `[[contracts]].role` must be unique, except the instance role `ensv1_mirror_resolver`, which may repeat with distinct addresses (see [ENSv1 mirror resolver declarations](#ensv1-mirror-resolver-declarations)). The loader rejects these violations before repository sync.
 
@@ -247,6 +252,33 @@ remain verifiable through that profile's Universal Resolver. The loader rejects
 the field on any other source family, an empty list, an arm outside
 `ens_v1`/`ens_v2`, and duplicate entries.
 
+### `universal_resolver_implementations`
+
+`universal_resolver_implementations` is an optional top-level list of addresses
+that only an `ens_execution` manifest may carry, and only alongside a
+`universal_resolver` contract: the client-facing Universal Resolver proxy. The
+manifest may also declare `universal_resolver_managed`, a proxy that the
+client-facing proxy points at. When the manifest admits the proxies'
+`Upgraded(address)` event, Interpret records each upgrade with the new
+implementation classified against the manifest: a listed implementation, another
+declared proxy, or anything else. Project keeps each proxy's latest upgrade in
+`project_universal_resolver_proxy`. A block is past the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) while the
+client-facing proxy's chain of implementations, following declared proxies, ends
+at a listed implementation. A proxy with no `Upgraded` yet reads as not cut over,
+because the proxy constructor sets its first implementation without the event;
+so do a rollback to an unlisted implementation and a chain with no listed
+implementation, such as Mainnet today.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20260916@366de741)
+
+The cutover changes two composed-name facts, both in `docs/api-v1.md` §
+Expiry and grace: which expiry a `.eth` name with a live ENSv2 entry serves, and
+whether a `.eth` name that ENSv1 decides still resolves. A change of the list is a
+manifest-payload change and rotates the content hash. The loader rejects the
+field on any other source family, without a `universal_resolver` contract, an
+invalid address, and duplicate entries.
+
 ### `chain`
 
 `chain` names the authority chain for that manifest within the selected deployment profile. Mainnet manifests use chain IDs like `ethereum-mainnet` and `base-mainnet`. Sepolia support is additive as a separate manifest profile root and chain-ID set.
@@ -421,6 +453,18 @@ ownership and explicit `verified_authority_arms = ["ens_v1", "ens_v2"]`.
 The [deployment inventory](sepolia-deployment.md#resolver-and-discovery-coverage)
 requires rollout verification of the proxy route to the selected root.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+
+The manifest is active, so its events are watched and interpreted. It also
+declares the managed proxy `0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1` as
+`universal_resolver_managed`, admits both proxies' `Upgraded` event, and lists
+the deployment's UniversalResolverV2 `0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3`
+in `universal_resolver_implementations`. Neither proxy artifact carries a
+receipt, so both start blocks come from chain evidence (`docs/upstream.md`,
+"Sepolia Universal Resolver proxies admitted from chain evidence"). The
+Sepolia cutover is block `11710193`, where the managed proxy moved to that
+implementation.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
 
 ### ENSv1 (`sepolia` deployment profile)
 

@@ -52,7 +52,9 @@ step-3-gate vocabulary needed by the route schemas:
 | `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, and `resolves_to` values | `relation_facets`, role-specific match arrays |
 | `resolution` | on a `resolves_to` row read for one decimal coin type only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)) | subgraph `resolver.coinTypes` |
 | `resolutions` | on a `resolves_to` row read with `coin_type=evm` only: `[{coin_type, record_key}]`, one entry per EVM coin type (`60`, or `2147483648` through `4294967295`, the set ENSIP-19 treats as EVM (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)) whose stored resolver record matched the address, ascending by coin type, each with the stored record key that matched. The ENSIP-19 default record appears once, as coin type `2147483648` (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f). A row carries at most 100 entries; a row that matched more returns `422 unsupported` for the whole request; read one decimal `coin_type` at a time instead. It lists matches only, not every coin type the resolver has records for; see the [known divergence](upstream.md#resolves-to-matched-coin-types) | subgraph `resolver.coinTypes`, which lists every coin type the resolver has observed whatever its value (upstream: .refs/ens_subgraph/schema.graphql:L294-L295 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/resolver.ts:L59-L79 @ ens_subgraph@723f1b6) |
-| `expires_at` | expiry, RFC 3339: the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted). A seconds value before 1970-01-01T00:00:00Z or after 9999-12-31T23:59:59Z, stored as a number or a quoted number, is an unknown expiry: every route omits the field and expiry sorting places the row with the other unknown expiries | `expiry_date`, `expiration` (unix), `expiry` |
+| `expires_at` | expiry, RFC 3339: for a `.eth` second-level name with a live ENSv2 entry, that entry's expiry once the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), whichever arm holds authority (see [Expiry and grace](#expiry-and-grace)); otherwise the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted). A seconds value before 1970-01-01T00:00:00Z or after 9999-12-31T23:59:59Z, stored as a number or a quoted number, is an unknown expiry: every route omits the field and expiry sorting places the row with the other unknown expiries | `expiry_date`, `expiration` (unix), `expiry` |
+| `grace_ends_at` | when the renewal grace of `expires_at` ends, RFC 3339: `expires_at` plus 90 days for an ENSv1 `.eth` lease or a Basenames name, plus 28 days (the ENSv2 `.eth` registrar's grace period) for a `.eth` name that serves an ENSv2 expiry, and equal to `expires_at` for a name with no registrar grace, such as a subname; present exactly when `expires_at` is (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
+| `unresolvable_reason` | on name detail and lookup: why a name resolves to nothing although its authority records a resolver. `no_live_ens_v2_entry`: the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1 decides the name, and neither it nor its `.eth` second-level ancestor has a live ENSv2 entry. The resolver and records are then withheld (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
@@ -1532,6 +1534,45 @@ it runs and returns the rows that sort after that position:
   documented request-scope recheck, which returns `409 conflict` for a head,
   publication, or readiness change and `409 stale` when an Interpret redo is
   involved (see [`GET /v1/search`](api-v1-routes.md#get-v1search)).
+
+### Expiry and grace
+
+A `.eth` second-level name can hold an ENSv1 BaseRegistrar lease and an ENSv2
+`eth` registry entry at once: premigration reserves every live ENSv1 name in
+ENSv2 with the lease's expiry plus 62 days, the ENSv1 grace of 90 days less the
+ENSv2 grace of 28, so that both renewal deadlines fall on the same second.
+Which expiry a name serves follows where resolution starts on chain. Before the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) clients
+resolve through ENSv1, so `expires_at` is the ENSv1 lease's expiry and
+`grace_ends_at` adds the 90-day ENSv1 grace, reservation or not. From the
+cutover a name with a live ENSv2 entry (a reservation or registration that has
+not been released or passed its expiry) serves that entry's expiry and adds
+the 28-day ENSv2 grace, even while ENSv1 still decides who owns it: the
+reservation defers ownership to ENSv1 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)),
+not its expiry. A name ENSv2 decides always serves its ENSv2 expiry and grace.
+The ENSv1 lease's own date is not served separately.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L233 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+
+`registration_status` stays the state at the indexed head: a name past
+`expires_at` but inside its grace keeps its status, and an app shows it as
+expired when `now` is past `expires_at` and renewable until `grace_ends_at`.
+`GET /v1/names` windows and sorts on the same `expires_at`.
+
+From the cutover the Universal Resolver reads only ENSv2 registries, so a `.eth`
+name that ENSv1 decides with no live ENSv2 entry, and every name below it,
+resolve to nothing: the deployment registers `eth` without a resolver. Such a
+name keeps its owner, registration and expiry, serves no `resolver` or
+`records`, reports `unresolvable_reason: "no_live_ens_v2_entry"` on name detail
+and lookup, and does not match `relation=resolves_to`. Verified reads call the
+Universal Resolver and find nothing for it either. A live reservation still resolves, through `ENSV1Resolver`, which reads the
+ENSv1 registry. Before the cutover, and on Mainnet, which has none, this rule
+does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 
 ### Lapsed registration
 
