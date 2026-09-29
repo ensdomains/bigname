@@ -90,7 +90,10 @@ pub async fn compose_name_summary_publication(
         false,
     )
     .await?;
-    let null_resolver_names = if publication.chain_id == "ethereum-mainnet" {
+    let null_resolver_names = if matches!(
+        publication.chain_id.as_str(),
+        "ethereum-mainnet" | "ethereum-sepolia"
+    ) {
         composed
             .values()
             .filter_map(|composed| composed.row.as_ref())

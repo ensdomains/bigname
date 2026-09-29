@@ -9,6 +9,10 @@
 //! every address a name's retained registration events named, the last registrant included, so
 //! the read composes the address's indexed names and keeps those whose lapsed registrant is the
 //! address. It never feeds `owner`, `manager` or `registrant`.
+//! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L341-L362 @ ens_v2_sepolia_20260916@366de741)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
 //!
 //! Rows sort by the served expiry, then namespace, name and namehash; a row without an expiry (an
 //! unregistered ENSv2 name) sorts after every dated row ascending and before them descending,

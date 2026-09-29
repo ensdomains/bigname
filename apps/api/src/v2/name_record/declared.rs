@@ -54,6 +54,7 @@ pub(crate) enum LapsedHeldThrough {
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
     Wrapper,
     /// An ENSv2 registration, held as the registry's token.
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L367 @ ens_v2_sepolia_20260916@366de741)
     Registry,
 }
 

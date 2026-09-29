@@ -47,16 +47,16 @@ before returning and discloses `meta.as_of`; a page whose publication changed
 while it was read returns `409 stale`. Counts and rows use the same filters. No
 historical projection is retained by a pagination token. Their cursors differ:
 
-- `GET /v1/names` uses a
+- `GET /v1/names` and `GET /v1/addresses/{address}/names?relation=former_registrant` use a
   [current-state list cursor](glossary.md#current-state-list-cursor): it binds
-  the namespace, window, and order and holds only the last row's position. A
+  the namespace, window, order, and address when applicable, and holds only the last row's position. A
   continuation reads the publication current when it runs, so a newer
   publication does not refuse it, and the `409 stale` of a page whose
   publication changed during its read asks for a retry with the same cursor.
   A cursor carrying the publication fields that cursors issued before that
   contract carried returns `400 invalid_input` once. See
   [current-state list cursors](api-v1.md#current-state-list-cursors).
-- Subnames, address names, and permissions cursors bind anchors, filters,
+- Subnames, address names other than `former_registrant`, and permissions cursors bind anchors, filters,
   sorting, the served project publication (including same-height replacement)
   and manifest revisions. A changed or unavailable publication, or an older
   cursor without that binding, returns `409 stale` and requires restarting
@@ -686,12 +686,13 @@ collection route carry neither header.
   `registration_id` is the BaseRegistrar lease whether or not the name is
   wrapped; see
   [registration identity of wrapped names](api-v1.md#registration-identity-of-wrapped-names).
-  A released ENSv1 name keeps its lapsed `expires_at`, serves no current
-  `registrant`, and carries
-  `lapsed_registration: {registrant?, held_through?, released_at?}` with the
-  holder the lease had when it lapsed; see
-  [lapsed registration](api-v1.md#lapsed-registration). The block is omitted
-  for every name that is not released. An ENSv1 wrapper-backed row also carries
+  A released ENSv1 lease or a supported ENSv2 expiry/unregister release carries
+  `lapsed_registration: {registrant?, held_through?, released_at?, release_kind?}`
+  with its last holder and how it ended; see
+  [lapsed registration](api-v1.md#lapsed-registration) for the supported causes,
+  pinned contract evidence, and expiry/grace field rules. It serves no current
+  `registrant`. The block is omitted for names that are not released and for other
+  release causes. An ENSv1 wrapper-backed row also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
   [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed

@@ -860,7 +860,7 @@ the publication in `meta.as_of`. A publication further behind, from another
 interpreter generation or on an orphaned fork is unavailable.
 
 The API captures and rechecks the marker's `sequence` around indexed reads.
-Publication-bound cursors (subnames, address names, `resolves_to`, permissions,
+Publication-bound cursors (subnames, address names other than `former_registrant`, `resolves_to`, permissions,
 registries and labels, and resolver `/aliases`, `/links` and `/roles`) retain
 their family publication token. Legacy cursors carrying the removed serving
 source return `409 stale` until the client restarts pagination. History and
@@ -1504,10 +1504,10 @@ readable surface answers `404 not_found`.
 ### Current-state list cursors
 
 A [current-state list cursor](glossary.md#current-state-list-cursor), the
-cursor of `GET /v1/search`, `GET /v1/names`, or the resolver overview's
-`bound_names`, holds the list's sort and filters, the sort position of the last
-row it returned, and, when the request pinned `at`, that `at` token (of these
-three, only the resolver overview accepts `at`). It holds no publication,
+cursor of `GET /v1/search`, `GET /v1/names`, the address-name relation
+`former_registrant`, or the resolver overview's `bound_names`, holds the list's
+sort and filters, the sort position of the last row it returned, and, when the
+request pinned `at`, that `at` token (only the resolver overview accepts `at`). It holds no publication,
 generation, or evaluation time. A continuation reads whatever is published when
 it runs and returns the rows that sort after that position:
 
@@ -1516,7 +1516,7 @@ it runs and returns the rows that sort after that position:
 - Pages of one walk can read different publications, and `meta.as_of` reports
   the one each page read. A row whose sort key changed between pages can be
   returned again or not at all: a renewal moves a name's `expires_at` in
-  `GET /v1/names`, and a resolver change moves a name into or out of
+  `GET /v1/names`, a re-registration removes a `former_registrant` row, and a resolver change moves a name into or out of
   `bound_names`. Rows published after the first page can appear on later
   pages.
 - A position after the last row returns `200` with empty `data`,

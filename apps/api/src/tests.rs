@@ -462,6 +462,7 @@ include!("tests/v2_family_status.rs");
 include!("tests/v2_family_records.rs");
 include!("tests/v2_family_reverse_page.rs");
 include!("tests/v2_family_lookup.rs");
+include!("tests/v2_family_lookup_cutover.rs");
 #[path = "tests/v2_family_lookup_redo.rs"]
 mod lookup_redo;
 include!("tests/v2_family_permissions.rs");
