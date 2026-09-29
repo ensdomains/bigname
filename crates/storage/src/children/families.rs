@@ -15,8 +15,8 @@ use sqlx::{PgPool, Postgres, Transaction, types::time::OffsetDateTime};
 use crate::families::{
     name::read_snapshot,
     topology::{
-        FamilyChildRow, children_page_on, count_children_of_parents_on, count_children_on,
-        require_publication,
+        FamilyChildRow, RegistryLabels, children_page_on, count_children_of_parents_on,
+        count_children_on, require_publication,
     },
 };
 
@@ -24,7 +24,7 @@ use super::{
     DECLARED_SURFACE_CLASS,
     types::{
         ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentPageFilter,
-        ChildrenCurrentRow, ChildrenCurrentSummary, RegistryChildrenPage,
+        ChildrenCurrentRow, ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
     },
 };
 
@@ -80,6 +80,7 @@ pub(super) async fn registry_page(
     pool: &PgPool,
     parent_logical_name_id: &str,
     registry_address: &str,
+    owner: Option<RegistryLabelOwnerFilter<'_>>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<RegistryChildrenPage> {
@@ -89,7 +90,10 @@ pub(super) async fn registry_page(
         &mut transaction,
         parent_logical_name_id,
         &ChildrenCurrentPageFilter::default(),
-        Some(&registry),
+        Some(RegistryLabels {
+            registry: &registry,
+            owner,
+        }),
         cursor,
         page_size,
     )

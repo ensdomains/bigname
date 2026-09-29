@@ -1548,7 +1548,9 @@ whether the name has a serving resource, the registration status, the expiry
 and registration times, and whether the latest registry Transfer attributed to
 the name names the zero owner, attributed by the child-read contract (by the name the Transfer carries, else the latest named registry event of
 any kind of its resource and family, read from the readable interpreted events,
-else an active surface at its node). Every name with a
+else an active surface at its node), and the owner the name row serves
+(`control.owner`, else `control.registry_owner`, lower-cased), which the
+registry labels' `owner` and `exclude_owner` filters read. Every name with a
 surface has a row. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
