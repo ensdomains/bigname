@@ -1285,6 +1285,7 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
     let mut keys = vec![
         "registration_id",
         "registrant",
+        "owner",
         "registered_at",
         "created_at",
         "expires_at",
@@ -1305,6 +1306,8 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         assert_eq!(record["authority"], "ens_v1");
     }
     assert_keys(record, &keys);
+    // An active registration serves its registry owner, here the registrant.
+    assert_eq!(record["owner"], record["registrant"]);
     assert_eq!(record["status"], "ok");
     assert_eq!(record["name"], name);
     assert_eq!(record["namespace"], namespace);
