@@ -176,16 +176,19 @@ pub(super) async fn apply(
 
 /// A proxy change can move reserved names' served expiry and null other names' resolver.
 /// Refresh reservations plus names with active disagreements on this chain, so publication
-/// retires newly outdated evidence without scanning every name. The journal guard admits the
-/// candidate scans only for a block that changed a proxy row.
+/// retires newly outdated evidence without scanning every name. A later ENSv2 entry release
+/// adds active-evidence descendants of the normal work list's affected parent names. The
+/// journal guards admit the candidate scans only for a proxy change or an ENSv2 release.
 pub(super) async fn cutover_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
+    touched_names: &[String],
 ) -> Result<Vec<String>> {
     sqlx::query_scalar(CUTOVER_NAMES)
         .bind(chain_id)
         .bind(number)
+        .bind(touched_names)
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| {
@@ -213,4 +216,28 @@ const CUTOVER_NAMES: &str = r#"/* project:families.derived.cutover_names */
         WHERE undo.chain_id = $1 AND undo.block_number = $2
           AND undo.family = 'project_universal_resolver_proxy'
     )
+    UNION
+    SELECT DISTINCT evidence.logical_name_id
+    FROM resolution_divergences evidence
+    JOIN name_surfaces child ON child.logical_name_id = evidence.logical_name_id
+    WHERE evidence.resolver_chain_id = $1 AND evidence.cleared_at IS NULL
+      AND child.namespace = 'ens' AND cardinality(child.labelhashes) > 2
+      AND EXISTS (
+          SELECT 1 FROM name_surfaces parent
+          WHERE parent.logical_name_id = ANY($3)
+            AND parent.namespace = 'ens' AND cardinality(parent.labelhashes) = 2
+            AND split_part(parent.raw_name, '.', 2) = 'eth'
+            AND child.labelhashes[cardinality(child.labelhashes)-1:] = parent.labelhashes
+      )
+      AND EXISTS (
+          SELECT 1 FROM project_family_undo undo
+          JOIN project_lifecycle_event event
+            ON event.chain_id = $1 AND event.state_kind = undo.key::jsonb ->> 1
+           AND event.state_key = undo.key::jsonb ->> 2
+           AND event.event_identity = undo.key::jsonb ->> 3
+          WHERE undo.chain_id = $1 AND undo.block_number = $2
+            AND undo.family = 'project_lifecycle_event'
+            AND event.event_kind = 'RegistrationReleased'
+            AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
+      )
 "#;

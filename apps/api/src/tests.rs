@@ -463,6 +463,8 @@ include!("tests/v2_family_lookup.rs");
 include!("tests/v2_family_lookup_cutover.rs");
 #[path = "tests/v2_family_lookup_redo.rs"]
 mod lookup_redo;
+#[path = "tests/v2_family_lookup_release.rs"]
+mod v2_family_lookup_release;
 include!("tests/v2_family_permissions.rs");
 include!("tests/v2_family_history_publication.rs");
 include!("tests/v2_family_records_review.rs");
