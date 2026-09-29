@@ -1555,7 +1555,9 @@ carried over to the new attempt and resumes from the family marker, provided
 its input revision is unchanged and the families were written under this
 binary's content hash. Otherwise, including a rerun over another range, a
 skipped attempt, an invalidation or a moved input revision, the redo rebuilds
-from the start. A
+from the start. Either way the rerun targets at least the unfinished repair's
+replay target, the publication the stopped attempt started from, so a redo
+whose range ends below that publication still restores the families to it. A
 redo retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... generations (single
