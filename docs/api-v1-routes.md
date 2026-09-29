@@ -299,7 +299,10 @@ collection route carry neither header.
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
   accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
   is the normalized all-three set. Reverse rows match when any listed relation
-  matches. `relation=resolves_to` stands alone and answers the names whose
+  matches, with the same meaning as on `GET /v1/addresses/{address}/names`.
+  The address-name relation `role_holder` is not served here: naming it
+  returns `400 invalid_input`, and `any` does not include it.
+  `relation=resolves_to` stands alone and answers the names whose
   current `addr:<coin_type>` resolver record resolves to the input address for
   the input `coin_type`, with the same matching rule, ENSIP-19 default-address
   fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`
@@ -1639,7 +1642,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
-  cites for it lies at or below the published block. The name's attachment to
+  cites for it lies at or below the published block. A `role_holder` row is
+  read from the address's current registry-scope grant on the name's selected
+  resource instead and cites the event that last changed that grant. The name's attachment to
   the row's resource is judged at or below the published block too: the row is
   admitted only when some [surface binding](glossary.md#surface-binding) of
   that name to that resource on the row's chain was written at or below the
@@ -1722,6 +1727,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   `SurfaceBound` that restored it, above the published block. Wrapper grace-period and expiry transitions have no
   cited event of their own, so a relation row gated by them can appear or
   vanish between pages of the same read.
+- Known limitation: the `role_holder` relation has no historical shape. It is
+  read only from the address's current registry-scope grant rows, and the
+  ownership matcher reproduces no permission grant, so a role revoked after the
+  published block, or held on a registration that stopped being the name's
+  selected one after it, drops that name's events from the read. A grant
+  changed after the published block, for example by a role added to one the
+  address already held, cites the newer event and is not admitted either,
+  although the address held a role at the published block. The same-holder
+  transfer rule above does not apply to it.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
@@ -1809,7 +1823,7 @@ Per friendly `type`, `data` may contain:
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
 | `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
-| `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
+| `permission` | `address` (the subject), `grant_scope` (as on permission rows), `powers`, `added_powers` and `removed_powers` (product power vocabulary; see [permission change values](#permission-change-values)), `fuses` (uint32 word for NameWrapper fuse changes) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
@@ -1958,6 +1972,35 @@ value is the claim the reverse record made, not a verified primary name; it
 does not imply that the name resolves forward to the address. A name set
 directly on the reverse node's resolver without a claim is a `record` row
 (`key` `name`), not a `primary_name` row.
+
+#### Permission change values
+
+A `permission` row records one change to one grant: the subject `address`
+under one `grant_scope`, in the shape `GET /v1/permissions` rows use. `powers` is the subject's whole set under that
+grant right after the change, including the powers the change left untouched;
+an empty list means the change left the subject nothing under that grant. It
+is the stored event value, before the read-time masks (NameWrapper fuses,
+grace, expiry) that current permission rows apply, and it does not include
+powers the subject holds under another grant, the registry root or an
+operator approval. Current permission rows remain the answer to what the
+subject holds now.
+
+`added_powers` and `removed_powers` are present only when the event's own log
+states the subject's previous set. An ENSv2 `EACRolesChanged` log carries the
+account's old and new role bitmaps, so these rows list the powers the change
+granted and revoked; either list may be empty, and the previous set is
+`powers` without `added_powers`, plus `removed_powers`.
+(upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L308 @ ens_v2@a971bd64)
+ENSv1, Basenames and NameWrapper permission rows are derived from ownership,
+registration and wrapper events that state no previous permission set, so
+they omit both lists rather than report an unobserved previous set; their
+`powers` is still the resulting set, and an empty `powers` marks a
+revocation. A NameWrapper fuse change carries `fuses` only. A role change on
+an ENSv2 registry's root resource is stored as `RootPermissionChanged`, which
+is not a `permission` row and carries none of these fields, even though its
+log states the previous roles too.
 
 ### `GET /v1/names/{name}/history`
 
@@ -2626,10 +2669,20 @@ introduces it rebuilds Project from full history before serving the option; see
   names, break ties by name identity and then by the grouped resource, in both
   orders.
   `relation` accepts a comma-separated set of v2 vocabulary values
-  `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
-  Rows match when any listed relation matches. The storage relations map as
-  token-holder -> `owner`, effective-controller -> `manager`, and
-  registrant -> `registrant`. `dedupe=name` groups by name surface and is the
+  `owner`, `manager`, `registrant`, and `role_holder`; `any` normalizes to all
+  four values. Rows match when any listed relation matches. The storage
+  relations map as token-holder -> `owner`, effective-controller -> `manager`,
+  registrant -> `registrant`, and role-holder -> `role_holder`. `role_holder`
+  matches an address that holds an ENSv2 registry role on the name's current
+  registration, as served by `GET /v1/permissions` with `grant_scope.kind`
+  `registry`: any role, not only the ones that change the name's resolver or
+  subregistry, while the `was_reserved` marker alone is not a role. It does
+  not make the address the `manager`, and it combines with the other
+  relations: an owner that also holds a role matches both. Roles held on the
+  registry root and ENSv2 registry operators add no `role_holder` rows (see
+  [address collections](projections.md#address-and-child-collections)), so a
+  page that omits a name does not prove the address holds no permission on
+  it. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
   `relation=former_registrant` lists the released names whose ended
   registration the path address last held, for renewal reminders: an ENSv1
@@ -2658,7 +2711,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
   from the address-to-record family indexes rather than the authority
-  relations. It stands alone: `resolves_to` combined with `owner`, `manager`,
+  relations. It stands alone: `resolves_to` combined with `owner`, `manager`, `role_holder`,
   `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
   it, because it is coin-type scoped and its rows are not authority claims.
   `coin_type` is accepted only with `relation=resolves_to`; supplying it with
@@ -2724,8 +2777,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `relation=resolves_to` row whose name has only a retained serving resource,
   and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, and `registrant` that matched, or
-  `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
+  subset of `owner`, `manager`, `registrant`, and `role_holder` that matched,
+  or `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
   `addr:2147483648` when the ENSIP-19 default EVM address answered). On a
@@ -3121,8 +3174,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and `include=raw` add the [history event
   payloads](#history-event-payloads-includedata-includeraw).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
-  comma-separated set of `owner`, `manager`, and `registrant`; `any`
-  normalizes to all three values. Rows match when any listed relation matches.
+  comma-separated set of `owner`, `manager`, `registrant`, and `role_holder`
+  with the meanings of `GET /v1/addresses/{address}/names`; `any` normalizes
+  to all four values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate

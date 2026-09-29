@@ -474,7 +474,7 @@ transport do not create alternate exact-name rows.[^bn-readme-l70][^v1-l2rev-bas
 Address-to-name collections start from the current family address indexes and
 compose each candidate's selected name, lifecycle and permission relations in
 the admitted publication snapshot. Relation vocabulary is `registrant`,
-`token_holder`, and `effective_controller`. Surface is the default unit;
+`token_holder`, `effective_controller`, and `role_holder`. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
 relations. For a node an ENSv1 registry `NewOwner` created, the address index
 also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
@@ -483,7 +483,31 @@ whether or not a surface names the node. A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
-the node's registry-only resource, and with no surface binding. Raw unbounded diagnostic address history separately includes retained
+the node's registry-only resource, and with no surface binding.
+
+A fourth relation, `role_holder`, lists the holders of an ENSv2 registry role
+on a name's selected registration resource. `PermissionedRegistry` keeps
+per-account roles on each registration's token resource, and a holder can act
+on the name within them without owning the token, for example change its
+resolver or subregistry.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L155 @ ens_v2@a971bd64)
+Any role counts; the `was_reserved` marker alone does not, because it
+authorizes nothing.
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
+A role holder is not an `effective_controller`. The read takes the holders
+from the served permission rows of the resource (the F8 grants with registry
+scope after the read-time masks `GET /v1/permissions` applies), not from the
+address index: the candidate names are the names bound to a resource on which
+the address has such a grant, and the composed name keeps the holder only
+while that resource is its selected resource. Only the requested address's
+grants are read, so an untrusted subregistry that grants roles on one
+registration to many accounts adds no work to another address's read. A role held on the registry root
+reaches every name in the registry, and an ENSv2 registry operator approved
+with `setApprovalForAll` is not a permission row, so neither adds names to an
+address's collection. Reverse lookup does not serve this relation.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+
+Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
 in [the audit route contract](api-v1-routes.md).
 
@@ -1685,8 +1709,18 @@ attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 content hash it completed with. Each transition commits with the work it
 describes: the reset commits with the rebuild's intent, the last undo with the
 move to replaying, and the final replayed or rebuilt block with the
-completion. A run that stops between blocks is resumed by the next. A redo
-retried after it completed is recognised only while the marker, its
+completion. A run that stops between blocks is resumed by the next. Each
+start of a Project redo moves the Project row to a new redo attempt, so a
+rebuild records the attempt it began under. When the runner reruns an
+interrupted redo with the same range while the Project row still records the
+running binary's interpreter content hash (no other hash and no manifest or
+authority invalidation marker in between), keeping its saved progress, a rebuild the attempt just before it left is
+carried over to the new attempt and resumes from the family marker, provided
+its input revision is unchanged and the families were written under this
+binary's content hash. Otherwise, including a rerun over another range, a
+skipped attempt, an invalidation or a moved input revision, the redo rebuilds
+from the start. A
+redo retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... generations (single
 blocks or rebuild ranges) committed since its reset, counted across runs from

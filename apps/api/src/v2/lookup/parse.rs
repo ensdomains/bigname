@@ -110,7 +110,7 @@ pub(super) fn parse_address_input(
         .map_err(api_error_to_v2)?
         .parse::<u64>()
         .map_err(|_| V2Error::invalid_input("coin_type must fit in an unsigned 64-bit integer"))?;
-    let relation = parse_relation_set_param(input.relation.as_deref())?;
+    let relation = lookup_relation_set(input.relation.as_deref())?;
     if relation
         .as_ref()
         .is_some_and(RelationSet::is_former_registrant)
@@ -261,6 +261,31 @@ fn parse_reverse_cursor(
     let payload = decode(cursor)?;
     let storage_cursor = lookup_reverse_storage_cursor(&payload, &binding)?;
     Ok((Some(storage_cursor), Some(encode(&payload))))
+}
+
+/// The reverse lookup relation set: `role_holder` is an address-name relation only, so it is
+/// rejected here, and `any` keeps its three-relation meaning.
+fn lookup_relation_set(value: Option<&str>) -> V2Result<Option<RelationSet>> {
+    let relation = parse_relation_set_param(value)?;
+    if relation
+        .as_ref()
+        .is_some_and(|relation| relation.as_slice().contains(&Relation::RoleHolder))
+    {
+        if relation.as_ref().is_some_and(RelationSet::is_all)
+            && value.is_some_and(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .all(|part| part != "role_holder")
+            })
+        {
+            return Ok(Some(RelationSet::lookup_all()));
+        }
+        return Err(V2Error::invalid_input(
+            "relation=role_holder is not supported for lookup",
+        ));
+    }
+    Ok(relation)
 }
 
 fn relation_to_storage_roles(

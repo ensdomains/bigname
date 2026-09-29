@@ -10,6 +10,7 @@
 //! `FamilyPosition`), never by the generated event id.
 mod address_names;
 mod address_relations;
+mod address_roles;
 mod assemble;
 mod candidates;
 mod facts;

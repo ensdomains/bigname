@@ -2,9 +2,11 @@
 //! address index (`project_address_name_index`) lists for the address, composed at read
 //! (`families::name`), with each name's relations recomputed at its publication
 //! (`address_relations.rs`). The index holds every address a relation can take under some
-//! admission and mask, so the read only removes rows. The rows are bound in the served
-//! `address_names_current` shape into the served page statements (`address_names::source`), so
-//! the grouping, dedupe, filters, sorts, cursors and totals are the served SQL.
+//! admission and mask, so the read only removes rows. Names on which the address holds an
+//! ENSv2 registry role come from the served grant rows instead (`address_roles.rs`). The rows
+//! are bound in the served `address_names_current` shape into the served page statements
+//! (`address_names::source`), so the grouping, dedupe, filters, sorts, cursors and totals are
+//! the served SQL.
 //!
 //! The rows carry what a route reads: identity, relations, the publication's position. They do
 //! not carry the served event attribution (`provenance.normalized_event_id`, the relation's own
@@ -24,6 +26,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::{
     FamilyPosition,
     address_relations::{ControllerCandidate, NameRelationsInput, relations},
+    address_roles::{RoleHolder, RoleHolderLoad, role_holders},
 };
 use crate::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
@@ -119,39 +122,39 @@ pub(crate) async fn compose_address_name_rows(
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
+    // The names on which the address holds an ENSv2 registry role, which the index does not
+    // list (`address_roles.rs`).
+    let mut indexed = indexed;
+    indexed
+        .extend(super::address_roles::role_name_candidates(&mut *conn, address, namespace).await?);
     if indexed.is_empty() {
         // The route captures and revalidates its requested namespace publication. No rows
         // identify another chain to read here; unrelated markers cannot veto that scope.
         return Ok((json!([]), json!([])));
     }
-    let mut by_chain: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut by_chain: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (chain_id, name) in indexed {
-        by_chain.entry(chain_id).or_default().push(name);
+        by_chain.entry(chain_id).or_default().insert(name);
     }
     let wanted = address.to_ascii_lowercase();
     let (mut rows, mut names) = (Vec::new(), Vec::new());
     for (chain_id, ids) in by_chain {
         let publication = servable_publication(conn, &chain_id).await?;
+        let ids: Vec<String> = ids.into_iter().collect();
         let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
-        let inputs = ChainInputs::load(conn, &chain_id, composed.values()).await?;
+        let clock_seconds = publication.timestamp_seconds();
+        let roles = RoleHolderLoad::Subject(address);
+        let inputs =
+            ChainInputs::load(conn, &chain_id, composed.values(), clock_seconds, roles).await?;
         for row in composed.values() {
-            let candidates = inputs.candidates_of(&row.logical_name_id);
-            let input = NameRelationsInput {
-                row,
-                candidates: &candidates,
-                binding: inputs.selected_binding(row),
-                wrapper: row
-                    .resource_id
-                    .and_then(|resource| inputs.wrappers.get(&resource.to_string())),
-                clock_seconds: publication.timestamp_seconds(),
-            };
+            let input = inputs.input(row, clock_seconds);
             let mut listed = false;
             for (related, relation) in relations(&input) {
                 if related == wanted {
                     let mut relation_row = address_name_row(&related, relation, row, &publication);
                     if with_history_evidence
                         && let Some(position) =
-                            super::address_relations::relation_position(&input, relation)
+                            super::address_relations::relation_position(&input, &related, relation)
                     {
                         relation_row["provenance"]["event_identity"] =
                             json!(position.event_identity);
@@ -233,6 +236,7 @@ struct ChainInputs {
     candidates: BTreeMap<String, Vec<ControllerCandidate>>,
     bindings: BTreeMap<String, BindingCandidate>,
     wrappers: BTreeMap<String, WrapperRow>,
+    role_holders: BTreeMap<String, Vec<RoleHolder>>,
 }
 
 impl ChainInputs {
@@ -240,6 +244,8 @@ impl ChainInputs {
         conn: &mut PgConnection,
         chain_id: &str,
         composed: impl IntoIterator<Item = &'a NameCurrentRow>,
+        clock_seconds: i64,
+        roles: RoleHolderLoad<'_>,
     ) -> Result<Self> {
         let composed: Vec<&NameCurrentRow> = composed.into_iter().collect();
         let ids: Vec<String> = composed
@@ -304,19 +310,42 @@ impl ChainInputs {
             .into_iter()
             .map(|wrapper| (wrapper.resource_id.clone(), wrapper))
             .collect();
+        let role_holders = role_holders(
+            &mut *conn,
+            chain_id,
+            &resources,
+            &wrappers,
+            clock_seconds,
+            roles,
+        )
+        .await?;
         Ok(Self {
             candidates,
             bindings,
             wrappers,
+            role_holders,
         })
     }
 
-    fn candidates_of(&self, logical_name_id: &str) -> Vec<&ControllerCandidate> {
-        self.candidates
-            .get(logical_name_id)
-            .into_iter()
-            .flatten()
-            .collect()
+    /// The relations input of one composed name of the batch.
+    fn input<'a>(&'a self, row: &'a NameCurrentRow, clock_seconds: i64) -> NameRelationsInput<'a> {
+        let resource = row.resource_id.map(|resource| resource.to_string());
+        NameRelationsInput {
+            row,
+            candidates: self
+                .candidates
+                .get(&row.logical_name_id)
+                .map_or(&[][..], Vec::as_slice),
+            binding: self.selected_binding(row),
+            wrapper: resource
+                .as_ref()
+                .and_then(|resource| self.wrappers.get(resource)),
+            clock_seconds,
+            role_holders: resource
+                .as_ref()
+                .and_then(|resource| self.role_holders.get(resource))
+                .map_or(&[][..], Vec::as_slice),
+        }
     }
 
     fn selected_binding(&self, row: &NameCurrentRow) -> Option<&BindingCandidate> {
@@ -326,7 +355,8 @@ impl ChainInputs {
     }
 }
 
-/// Address relations for composed names on the caller's snapshot, used by batch lookup.
+/// Address relations for composed names on the caller's snapshot, used by batch lookup. They
+/// hold no `role_holder` relations: reverse lookup does not serve it ([`RoleHolderLoad::Skip`]).
 pub(crate) async fn name_relations_on(
     conn: &mut PgConnection,
     composed: &BTreeMap<String, NameCurrentRow>,
@@ -341,18 +371,12 @@ pub(crate) async fn name_relations_on(
     let mut out = BTreeMap::new();
     for (chain, names) in chains {
         let publication = servable_publication(conn, &chain).await?;
-        let inputs = ChainInputs::load(conn, &chain, names.iter().copied()).await?;
+        let clock_seconds = publication.timestamp_seconds();
+        let roles = RoleHolderLoad::Skip;
+        let inputs =
+            ChainInputs::load(conn, &chain, names.iter().copied(), clock_seconds, roles).await?;
         for row in names {
-            let candidates = inputs.candidates_of(&row.logical_name_id);
-            let input = NameRelationsInput {
-                row,
-                candidates: &candidates,
-                binding: inputs.selected_binding(row),
-                wrapper: row
-                    .resource_id
-                    .and_then(|resource| inputs.wrappers.get(&resource.to_string())),
-                clock_seconds: publication.timestamp_seconds(),
-            };
+            let input = inputs.input(row, clock_seconds);
             let related = relations(&input)
                 .into_iter()
                 .map(|(address, relation)| {
@@ -360,7 +384,8 @@ pub(crate) async fn name_relations_on(
                         "registrant" => AddressNameRelation::Registrant,
                         "token_holder" => AddressNameRelation::TokenHolder,
                         "effective_controller" => AddressNameRelation::EffectiveController,
-                        _ => unreachable!("family relations have three defined kinds"),
+                        "role_holder" => AddressNameRelation::RoleHolder,
+                        _ => unreachable!("family relations have four defined kinds"),
                     };
                     crate::IdentityAddressRelationRow {
                         address,

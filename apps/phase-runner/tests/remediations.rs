@@ -2228,6 +2228,7 @@ async fn ingest_redo_round_trips_two_source_markers_and_fences_manifest_changes(
             Some(RedoAttemptFence {
                 generation: 0,
                 execution_range: BlockRange::new(10, 40)?,
+                resumes_interrupted: false,
             }),
             &PhaseProgress {
                 current: Some(BlockMarker::new(15, "redo-cursor-block-15")?),
@@ -2302,6 +2303,7 @@ async fn ingest_redo_round_trips_two_source_markers_and_fences_manifest_changes(
             Some(RedoAttemptFence {
                 generation: 0,
                 execution_range: BlockRange::new(10, 40)?,
+                resumes_interrupted: false,
             }),
             &PhaseProgress {
                 current: Some(BlockMarker::new(16, "redo-cursor-block-16")?),

@@ -88,6 +88,29 @@ pub(crate) async fn stamp_required_in_transaction(
     requested: BlockRange,
     reason: &str,
 ) -> RunnerResult<bool> {
+    stamp(transaction, chain_id, phase, requested, reason, true).await
+}
+
+/// Stamp `requested` without clipping its end to the phase's recorded head: a hash-adopting redo
+/// must reach the Ingest handoff even when the phase stands below it.
+pub(crate) async fn stamp_unclipped_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    phase: PhaseName,
+    requested: BlockRange,
+    reason: &str,
+) -> RunnerResult<bool> {
+    stamp(transaction, chain_id, phase, requested, reason, false).await
+}
+
+async fn stamp(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    phase: PhaseName,
+    requested: BlockRange,
+    reason: &str,
+    clip_to_head: bool,
+) -> RunnerResult<bool> {
     if !matches!(
         phase,
         PhaseName::Interpret | PhaseName::Project | PhaseName::Verify
@@ -119,7 +142,11 @@ pub(crate) async fn stamp_required_in_transaction(
     if current < requested.from {
         return Ok(false);
     }
-    let through = current.min(requested.to);
+    let through = if clip_to_head {
+        current.min(requested.to)
+    } else {
+        requested.to
+    };
     if active {
         extend_active(
             transaction,

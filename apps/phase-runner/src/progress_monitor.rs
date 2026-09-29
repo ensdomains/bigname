@@ -329,6 +329,7 @@ mod tests {
         let redo_attempt = mode.range().map(|execution_range| RedoAttemptFence {
             generation: 1,
             execution_range,
+            resumes_interrupted: false,
         });
         PhaseContext {
             chain_id: "chain".into(),

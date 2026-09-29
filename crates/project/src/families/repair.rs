@@ -417,6 +417,30 @@ pub(crate) async fn begin_rebuild(
     Ok(())
 }
 
+/// Carry a rebuild over to `attempt`, the rerun of the interrupted redo that began it. Its facts
+/// (target, input revision, reset generation) stay; only the attempt later blocks fence on moves.
+pub(crate) async fn adopt_rebuild(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    attempt: i64,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "/* project:families.repair.adopt_rebuild */ UPDATE project_repair_record
+         SET attempt = $2, updated_at = now()
+         WHERE chain_id = $1 AND state = 'rebuilding'",
+    )
+    .bind(chain_id)
+    .bind(attempt)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to adopt the rebuild record", error))?
+    .rows_affected();
+    if updated != 1 {
+        return Err(fence_error(chain_id, "rebuilding", None));
+    }
+    Ok(())
+}
+
 /// The replay or rebuild published the served target: record the completion identity in the
 /// same commit as that publication.
 pub(crate) async fn complete(

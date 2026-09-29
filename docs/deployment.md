@@ -692,16 +692,28 @@ rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless. When a full-history Interpret redo for an interpreter
 content hash rotation starts at the finite ingest bounds after Live has
 advanced, the runner extends Interpret
-through its recorded head and stamps the range onto Project clipped to
-Project's own recorded head — the same range unless a crash between the two
-phases' live-cycle advances left Project one block behind. Run or resume
-the stamped Project range exactly as recorded. Project hash adoption uses its
+through its recorded head and stamps Project with the range its hash
+adoption requires: from the first ingested block to the Ingest handoff or
+Project's own recorded head, whichever is higher. That is the Interpret range
+unless a crash between the two phases' live-cycle advances left Project one
+block behind, in which case it ends at Project's head; when Project stood below
+the handoff it still reaches the handoff. While upstream discovery repair has
+installed required Ingest work, completed Ingest bounds are unavailable and the
+stamp falls back to Project's head; the runner refuses Project until the repair
+and the Interpret replay after it complete, and that replay widens the stamp.
+Run or resume the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
 an interrupted attempt keeps the live-extended range. When that interruption
 belongs to an attested Interpret redo from the prior interpreter content hash,
 restart the same audited range with its token; the range restarts from its
 beginning rather than resuming the cursor written under the prior interpreter
-content hash.
+content hash. A Project redo the prior binary started and left unfinished is
+likewise invalid under the new hash and would otherwise block the new Interpret redo:
+the Interpret redo that starts the new hash supersedes it in its own start
+transaction, restoring the Project row as a finished redo would, provided no
+runner holds the Project lock, and its completion stamps the Project redo
+again. A Project redo whose row records the running binary's hash still
+blocks a new Interpret redo.
 
 The first manifest sync under the binary that adds `_bigname_compiled_watch`
 rewrites every stored active payload. For every chain with existing derived

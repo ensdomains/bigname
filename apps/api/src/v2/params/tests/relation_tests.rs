@@ -30,7 +30,7 @@ fn resolves_to_relation_parses_alone_and_rejects_mixing() {
         let message = error.envelope().error.message;
         assert!(message.contains("resolves_to"), "{mixed}: {message}");
     }
-    // `any` stays the three authority relations.
+    // `any` stays the authority relations and does not include `resolves_to`.
     let params = parse(RawQueryParams {
         relation: Some("any".to_owned()),
         ..RawQueryParams::default()
