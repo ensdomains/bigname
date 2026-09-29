@@ -192,3 +192,22 @@ pub(super) fn classify_expiry(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grace_accepts_quoted_seconds_and_exceeds_the_signed_range_exactly() {
+        for expiry in [json!(2_000_000_000_i64), json!("2000000000")] {
+            assert_eq!(
+                grace_ends_at(Some(&expiry), Grace::EnsV2),
+                json!("2002419200")
+            );
+        }
+        assert_eq!(
+            grace_ends_at(Some(&json!(i64::MAX)), Grace::EnsV2),
+            json!((i128::from(i64::MAX) + i128::from(ENS_V2_GRACE_PERIOD_SECONDS)).to_string())
+        );
+    }
+}

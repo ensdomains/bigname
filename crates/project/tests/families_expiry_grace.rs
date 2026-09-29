@@ -148,6 +148,54 @@ async fn reserved(fixture: &Fixture, logical_name_id: &str, n: u32, block: i64) 
     Ok(())
 }
 
+/// The manifest-sync input Project captures before publishing a block. Reusing its id rotates
+/// the declaration while historical proxy upgrades remain readable.
+async fn execution_manifest(
+    fixture: &Fixture,
+    manifest_id: Option<i64>,
+    block: i64,
+    top: &str,
+    start: i64,
+) -> Result<i64> {
+    let payload = json!({"contracts": [
+        {"role": "universal_resolver", "address": top, "start_block": start},
+        {"role": "universal_resolver_managed", "address": MANAGED_PROXY, "start_block": 0}
+    ], "universal_resolver_implementations": [ADMITTED]});
+    let id = match manifest_id {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO manifest_versions (manifest_version, namespace, source_family,
+                 chain_id, deployment_label, rollout_status, normalizer_version, file_path,
+                 manifest_payload)
+             VALUES (1, 'ens', 'ens_execution', $1, 'fixture', 'active', 'fixture',
+                 'fixture/ens_execution.toml', $2) RETURNING manifest_id",
+            )
+            .bind(CHAIN)
+            .bind(&payload)
+            .fetch_one(&fixture.pool)
+            .await?
+        }
+    };
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, block_number, block_hash,
+             derivation_kind, canonicality_state, after_state)
+         VALUES ($1, 'ens', 'SourceManifestUpdated', 'ens_execution', 1, $2, $3, $4, $5,
+             'manifest_sync', 'canonical',
+             jsonb_build_object('rollout_status', 'active', 'manifest_payload', $6::jsonb))",
+    )
+    .bind(format!("execution-manifest:{id}:{block}"))
+    .bind(id)
+    .bind(CHAIN)
+    .bind(block)
+    .bind(hash(block))
+    .bind(payload)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(id)
+}
+
 /// An `Upgraded` of a declared Universal Resolver proxy, as the adapter classifies it.
 async fn upgraded(
     fixture: &Fixture,
@@ -209,6 +257,7 @@ fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&
 #[tokio::test]
 async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over() -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_reserved", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
     let alice = leased(&fixture, "alice.eth", 1, 1).await?;
     reserved(&fixture, &alice, 1, 4).await?;
     fixture.apply(5, FamilyMode::Normal).await?;
@@ -279,6 +328,7 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
 async fn after_the_cutover_an_eth_name_without_a_live_entry_and_its_subnames_do_not_resolve()
 -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_unresolvable", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
     let bob = leased(&fixture, "bob.eth", 2, 1).await?;
     let sub = surface(&fixture, "sub.bob.eth").await?;
     let sub_lease = uuid(0x3000);
@@ -368,5 +418,60 @@ async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_an
             && row["grace_ends_at"] == json!((RESERVED_EXPIRY + 28 * DAY).to_string()),
         "{row}"
     );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publication() -> Result<()> {
+    const SUCCESSOR: &str = "0x00000000000000000000000000000000000000f1";
+    let fixture = Fixture::new("families_expiry_grace_rotation", 12).await?;
+    let manifest = execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+
+    execution_manifest(&fixture, Some(manifest), 7, SUCCESSOR, 7).await?;
+    // Rotation retains the retired proxy's replayable upgrade alongside the successor's.
+    upgraded(
+        &fixture,
+        7,
+        SUCCESSOR,
+        "universal_resolver",
+        OLD_IMPLEMENTATION,
+        "other",
+    )
+    .await?;
+    // Sync cannot change the previously published result before Project consumes its input.
+    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
+    fixture.apply(7, FamilyMode::Normal).await?;
+    ensure!(
+        served(&fixture, &alice).await?["expiry"] == json!(LEASE_EXPIRY.to_string()),
+        "a retired proxy still determines the expiry after declaration rotation"
+    );
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
+    fixture.assert_undo_restores(7).await?;
+    fixture.assert_rebuild_equal(7).await?;
+
+    // A declaration change with no new upgrade reuses retained implementation evidence only
+    // once that declaration starts. The start block itself must publish the changed expiry.
+    execution_manifest(&fixture, Some(manifest), 8, TOP_PROXY, 9).await?;
+    fixture.apply(8, FamilyMode::Normal).await?;
+    ensure!(served(&fixture, &alice).await?["expiry"] == json!(LEASE_EXPIRY.to_string()));
+    fixture.apply(9, FamilyMode::Normal).await?;
+    ensure!(served(&fixture, &alice).await?["expiry"] == json!(RESERVED_EXPIRY.to_string()));
+    ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
+    fixture.assert_undo_restores(9).await?;
+    fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
 }

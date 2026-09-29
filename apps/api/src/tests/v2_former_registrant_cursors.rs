@@ -155,6 +155,12 @@ async fn v2_former_registrant_cursor_walks_explicit_unregisters_and_mixed_expiri
                 {
                     assert!(row["expires_at"].is_null());
                     assert_eq!(row["lapsed_registration"]["release_kind"], "unregistered");
+                    let released_at = if row["name"] == "unregistered-a.eth" {
+                        "1767225603"
+                    } else {
+                        "1767225604"
+                    };
+                    assert_eq!(row["lapsed_registration"]["released_at"], released_at);
                 }
             }
             let mut uri = format!("{base}&page_size=1");
@@ -242,4 +248,52 @@ async fn v2_former_registrant_cursor_binds_fractional_lower_bound() -> Result<()
 #[tokio::test]
 async fn v2_former_registrant_cursor_binds_fractional_upper_bound() -> Result<()> {
     former_cursor_binds_fractional_bound("expires_before", "02").await
+}
+
+#[tokio::test]
+async fn v2_former_registrant_rejects_registration_dedupe() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_former_cursor_names(&database, true).await?;
+    let base = former_cursor_route();
+    let first = v2_names_payload(&database, &format!("{base}&page_size=1")).await?;
+    let cursor = first["page"]["next_cursor"].as_str().context("cursor")?;
+    let next = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
+    let explicit_name =
+        v2_names_payload(&database, &format!("{base}&dedupe=name&cursor={cursor}")).await?;
+    assert_eq!(next["data"], explicit_name["data"]);
+    for suffix in [String::new(), format!("&cursor={cursor}")] {
+        let response =
+            v2_names_response(&database, &format!("{base}&dedupe=registration{suffix}")).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = read_json(response).await?;
+        assert_eq!(
+            body["error"]["message"],
+            "dedupe=registration is not supported with relation=former_registrant"
+        );
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_former_registrant_expiry_bounds_are_rejected_on_other_relations() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_former_cursor_names(&database, true).await?;
+    for relation in ["resolves_to", "owner", "any"] {
+        for bound in ["expires_after", "expires_before"] {
+            let response = v2_names_response(&database, &format!(
+                "/v1/addresses/{FORMER_CURSOR_HOLDER}/names?relation={relation}&{bound}=2026-01-01T00:00:00Z"
+            )).await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{relation} {bound}"
+            );
+            let body: Value = read_json(response).await?;
+            assert_eq!(
+                body["error"]["message"],
+                "expires_after and expires_before require relation=former_registrant"
+            );
+        }
+    }
+    database.cleanup().await
 }

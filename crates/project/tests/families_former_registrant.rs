@@ -1,4 +1,4 @@
-//! The last holder of an ended ENSv2 registration (TYR-63). A released ENSv2 name serves
+//! The last holder after ENSv2 path expiry or explicit unregister (TYR-63). Those names serve
 //! `lapsed_registration` with the registry token's holder when the registration ended, held
 //! through the registry: `expired` for a registration past its expiry, which keeps that expiry
 //! and its ENSv2 grace, and `unregistered` for an explicit unregister, which keeps neither. A
@@ -191,7 +191,7 @@ async fn an_unregistered_ens_v2_registration_names_its_last_holder_without_an_ex
             Some(&name),
             Some(&resource),
             json!({"source_event": "LabelUnregistered", "registry_contract_instance_id": "eth",
-                   "token_id": "3", "released_at": 1_800_000_048}),
+                   "token_id": "3", "sender": BOB}),
             REGISTRY,
         )
         .await?;
@@ -205,7 +205,8 @@ async fn an_unregistered_ens_v2_registration_names_its_last_holder_without_an_ex
     );
     ensure!(
         released["lapsed_registration"]["registrant"] == json!(BOB)
-            && released["lapsed_registration"]["release_kind"] == json!("unregistered"),
+            && released["lapsed_registration"]["release_kind"] == json!("unregistered")
+            && released["lapsed_registration"]["released_at"] == json!(1_800_000_048),
         "{released}"
     );
     fixture.cleanup().await

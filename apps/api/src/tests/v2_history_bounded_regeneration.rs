@@ -55,7 +55,7 @@ fn manifest() -> ManifestInput {
     manifest_and_rules().0
 }
 
-fn manifest_and_rules() -> (ManifestInput, Vec<DiscoveryRuleInput>) {
+pub(super) fn manifest_and_rules() -> (ManifestInput, Vec<DiscoveryRuleInput>) {
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
     )

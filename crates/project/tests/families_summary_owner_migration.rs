@@ -52,9 +52,13 @@ fn reset_literal() -> BTreeSet<String> {
         .collect()
 }
 
-/// Every table the reset must empty, from the family inventory rather than the migration.
+/// The family inventory when this historical migration was introduced. The Universal Resolver
+/// table was added later by 20260929200000_project_universal_resolver_proxy.sql, so the owner
+/// migration cannot reset it. Keep it installed for the current family runner used below, but
+/// do not seed it as predecessor state or include it in the historical reset assertion.
 fn reset_tables() -> Vec<String> {
     families::family_tables()
+        .filter(|table| *table != "project_universal_resolver_proxy")
         .map(str::to_owned)
         .chain(CONTROL_TABLES.map(str::to_owned))
         .collect()

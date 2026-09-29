@@ -161,6 +161,16 @@ pub(crate) async fn get_address_names(
     if let Some(namespace) = params.namespace.as_deref() {
         ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
     }
+    if (params.expires_after.is_some() || params.expires_before.is_some())
+        && !params
+            .relation
+            .as_ref()
+            .is_some_and(RelationSet::is_former_registrant)
+    {
+        return Err(V2Error::invalid_input(
+            "expires_after and expires_before require relation=former_registrant",
+        ));
+    }
     if params
         .relation
         .as_ref()
@@ -179,11 +189,6 @@ pub(crate) async fn get_address_names(
             &params,
         )
         .await;
-    }
-    if params.expires_after.is_some() || params.expires_before.is_some() {
-        return Err(V2Error::invalid_input(
-            "expires_after and expires_before require relation=former_registrant",
-        ));
     }
     if params.coin_type.is_some() {
         return Err(V2Error::invalid_input(

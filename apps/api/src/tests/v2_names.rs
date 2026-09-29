@@ -243,6 +243,8 @@ async fn v2_get_names_retains_finite_expiry_beyond_the_calendar_range() -> Resul
             .expect("finite alpha expiry remains listed");
         assert_eq!(alpha["expires_at"], json!(expiry.to_string()), "{expiry}");
         assert!(alpha.get("expires_at_reason").is_none(), "{alpha}");
+        assert_eq!(alpha["grace_ends_at"], json!((expiry + 90 * 86_400).to_string()),
+            "finite grace is retained beyond the calendar boundary: {alpha}");
         for order in ["asc", "desc"] {
             let exact = v2_names_payload(
                 &database,

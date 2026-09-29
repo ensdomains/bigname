@@ -262,7 +262,12 @@ client-facing proxy points at. When the manifest admits the proxies'
 `Upgraded(address)` event, Interpret records each upgrade with the new
 implementation classified against the manifest: a listed implementation, another
 declared proxy, or anything else. Project keeps each proxy's latest upgrade in
-`project_universal_resolver_proxy`. A block is past the
+`project_universal_resolver_proxy` and classifies it against the active manifest
+set captured for that publication. When a declaration rotates, the retired
+address's upgrades remain replayable, but only the currently declared
+`universal_resolver` selects the client-facing entrypoint. Manifest changes and
+declaration start blocks reclassify retained upgrades without moving their event
+positions; undo restores the previous declaration choice. A block is past the
 [Universal Resolver cutover](glossary.md#universal-resolver-cutover) while the
 client-facing proxy's chain of implementations, following declared proxies, ends
 at a listed implementation. A proxy with no `Upgraded` yet reads as not cut over,
@@ -277,7 +282,9 @@ Expiry and grace: which expiry a `.eth` name with a live ENSv2 entry serves, and
 whether a `.eth` name that ENSv1 decides still resolves. A change of the list is a
 manifest-payload change and rotates the content hash. The loader rejects the
 field on any other source family, without a `universal_resolver` contract, an
-invalid address, and duplicate entries.
+invalid address, duplicate entries, and any implementation address that is also
+a declared client-facing or managed proxy. A proxy hop must follow that proxy's
+own upgrade rather than count as a terminal implementation.
 
 ### `chain`
 

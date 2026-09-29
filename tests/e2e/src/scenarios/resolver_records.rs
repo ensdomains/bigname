@@ -1396,6 +1396,14 @@ pub(super) async fn assert_zero_api_shapes(
         )
         .await?;
         assert_zero_name_shape(&body["data"], namespace, name);
+        let grace_seconds = support::decimal_unix_seconds(&body["data"]["grace_ends_at"])?
+            .unix_timestamp()
+            - support::decimal_unix_seconds(&body["data"]["expires_at"])?.unix_timestamp();
+        assert_eq!(
+            grace_seconds,
+            90 * 86_400,
+            "ENSv1 and Basenames registrations have 90 days of renewal grace"
+        );
     }
     let batch = zero_api_response(
         api.client

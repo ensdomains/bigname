@@ -1625,14 +1625,18 @@ The ENSv1 lease's own date is not served separately.
 `expires_at` but inside its grace keeps its status, and an app shows it as
 expired when `now` is past `expires_at` and renewable until `grace_ends_at`.
 `GET /v1/names` windows and sorts on the same `expires_at`.
+`expires_at` and its grace are derived from integral Unix seconds, including
+quoted integer values in retained input.
+Adding grace preserves the exact finite deadline even beyond year 9999 or the
+signed-integer range; both expiry fields remain decimal strings.
 
 From the cutover the Universal Resolver reads only ENSv2 registries, so a `.eth`
 name that ENSv1 decides with no live ENSv2 entry, and every name below it,
 resolve to nothing: the deployment registers `eth` without a resolver. Such a
 name keeps its owner, registration and expiry, serves no `resolver` or
 `records`, reports `unresolvable_reason: "no_live_ens_v2_entry"` on name detail
-and lookup, and does not match `relation=resolves_to`. Verified reads call the
-Universal Resolver and find nothing for it either. A live reservation still resolves, through `ENSV1Resolver`, which reads the
+and lookup, and does not match `relation=resolves_to`. Verified name detail
+applies the same withholding. A live reservation still resolves, through `ENSV1Resolver`, which reads the
 ENSv1 registry. Before the cutover, and on Mainnet, which has none, this rule
 does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)).
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
@@ -1641,9 +1645,11 @@ does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-
 
 ### Lapsed registration
 
-A released name also carries `lapsed_registration`, the holder its registration
-had when it ended: an ENSv1 lease that lapsed past its grace, or an ENSv2
-registration that passed its expiry or was unregistered. It is a separate block
+A released name carries `lapsed_registration` when it is an ENSv1 lease that lapsed
+past its grace, or an ENSv2 registration released by `RegistryPathExpired` or
+`LabelUnregistered`. Other release causes, such as a registration displaced during
+token regeneration, carry no block and do not enter `relation=former_registrant`.
+The block identifies the holder when the registration ended. It is separate
 so that nobody reads it as current state:
 
 ```json
@@ -1672,13 +1678,13 @@ is `registrar` or `wrapper`, the contract the lapsed lease was held through, or
 `registry` for an ENSv2 registration, and is omitted for any other value; the top-level `authority` field is a different
 thing and names the `ens_v0`, `ens_v1` or `ens_v2` side. `released_at` is the time of the
 block at which Bigname recorded the release. That is the first block whose
-timestamp is after `expires_at` plus the 90-day grace period, so it is always
+timestamp is after `expires_at` plus the 90-day grace period for an ENSv1 lease, so it is always
 later than `expires_at` plus 90 days and never equal to it. For an ENSv2
 registration it is the block that recorded the unregister, or the first block
 at or past its expiry. `release_kind` is `expired` for a lapsed ENSv1 lease and
-an ENSv2 registration past its expiry, which keeps its `expires_at` and can
-still be renewed until `grace_ends_at` because the registry remembers its last
-owner, and `unregistered` for an explicit ENSv2 unregister, which burns the
+an ENSv2 registration past its expiry, which keeps its `expires_at`; the `.eth`
+registrar still permits renewal during its grace while the registry remembers its last
+owner. `unregistered` identifies an explicit ENSv2 unregister, which burns the
 token, serves `expires_at: null`, `expires_at_reason: "released"` and
 `grace_ends_at: null`, and cannot be renewed. Other fields are omitted when unknown.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)

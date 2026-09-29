@@ -140,7 +140,8 @@ async fn build_verified_name_record(
     record.primary_address = (!primary_address_unserved)
         .then(|| groups.addresses.get("60").cloned().flatten())
         .flatten();
-    record.records = has_current_registration.then_some(groups);
+    record.records =
+        (has_current_registration && row.unresolvable_reason().is_none()).then_some(groups);
     record.status = status;
     record.unsupported_reason = verified_profile_unsupported_reason(answers, status);
     record.failure_reason = verified_profile_failure_reason(answers, status);
