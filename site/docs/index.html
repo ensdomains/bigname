@@ -477,7 +477,7 @@ const P = {
   pageSize: { name: 'page_size', in: 'query', type: 'integer', default: '50', desc: 'Between 1 and 200.' },
   relation: { name: 'relation', in: 'query', type: 'set', desc: 'A comma-separated set of <code>owner</code>, <code>manager</code>, and <code>registrant</code>. A row matches on any of them. <code>any</code> means all three.' },
   scope: { name: 'scope', in: 'query', type: 'enum', values: ['name', 'registration', 'both'], default: 'both', desc: 'Events on the name surface, events on the registrations and resources behind it, or both.' },
-  eventType: { name: 'type', in: 'query', type: 'set', desc: 'One or a comma-separated set of product event categories: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>.' },
+  eventType: { name: 'type', in: 'query', type: 'set', desc: 'One or a comma-separated set of product event categories: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, <code>permission</code>, <code>subregistry</code>, or <code>migration</code>.' },
   fromTimestamp: { name: 'from_timestamp', in: 'query', desc: 'Inclusive RFC 3339 lower timestamp bound, resolved from indexed block timestamps. Intersects any block range.' },
   toTimestamp: { name: 'to_timestamp', in: 'query', desc: 'Inclusive RFC 3339 upper timestamp bound. A window outside indexed history returns an empty page.' },
   historyOrder: { name: 'order', in: 'query', type: 'enum', values: ['desc', 'asc'], default: 'desc', desc: 'Newest first or oldest first over the same chain-position order. Bound into the cursor.' },
@@ -487,7 +487,7 @@ const P = {
   toBlock: { name: 'to_block', in: 'query', type: 'integer', desc: 'The highest block to include.' },
 };
 const EVENT_FIELDS = [
-  ['type', 'The product event category: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>.'],
+  ['type', 'The product event category: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, <code>permission</code>, <code>subregistry</code>, or <code>migration</code>.'],
   ['name, namespace', 'The name the row belongs to.'],
   ['subject', 'Name history with <code>include=child_registrations</code> only: <code>child</code> for a direct child registration, <code>name</code> for any other row. Absent otherwise.'],
   ['registration_id', 'The registration lifecycle the event belongs to, or <code>null</code> when it is not attached to one.'],
