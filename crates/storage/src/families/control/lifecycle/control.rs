@@ -19,8 +19,9 @@ use crate::families::control::{
 /// SurfaceBound of the selected resource recorded (`admitted_registrar_bindings`), and each of
 /// the name's registry AuthorityTransferred
 /// events F2c keeps (`project_registry_owner_event`) that the admission holds, each read as the
-/// registry getter's view (`OwnerEvent::reported_owner`). A binding snapshot that is the latest
-/// fact gives way to a newer registry write of the node (`superseding_transfer`). For an ENSv2 name those are its ENSv2
+/// registry getter's view (`OwnerEvent::reported_owner`). For an ENSv1 or Basenames name that is
+/// not NameWrapper-selected, the node's newest registry write decides instead, unless a newer
+/// explicit clear follows it (`newest_registry_write`). For an ENSv2 name those are its ENSv2
 /// registry's transfers on the selected lifecycle key, so the owner a registration names counts
 /// until a later ERC1155 transfer, and an earlier registration's owner never reaches a later
 /// one on another resource. A SubregistryChanged never counts, as in the served lateral.
@@ -31,8 +32,8 @@ pub(super) fn control_owner(
     is_v2: bool,
     selected_key: Option<&str>,
 ) -> (FoldedOwner, Option<String>) {
-    // Each owner fact, with whether it is a binding snapshot: the registry owner a SurfaceBound
-    // recorded when its binding opened, which a newer registry write can outdate.
+    // Each owner fact, with whether it is an explicit clear: an epoch whose owner is null, as a
+    // release's (`newest_registry_write`).
     let mut owners: Vec<(Position, Option<String>, bool)> = Vec::new();
     let mut kinds: Vec<(Position, &str)> = Vec::new();
     for tagged in in_scope {
@@ -103,23 +104,25 @@ pub(super) fn control_owner(
     for epoch in admitted_epochs(facts, authority, is_v2, selected_key) {
         // An epoch that states no owner leaves the owner as the earlier facts set it.
         if let Some(owner) = epoch.owner {
-            owners.push((epoch.position.clone(), owner, false));
+            let clear = owner.is_none();
+            owners.push((epoch.position.clone(), owner, clear));
         }
         kinds.push((epoch.position, "AuthorityEpochChanged"));
     }
     for (position, candidate) in admitted_registry_only(facts, authority, is_v2, selected_key) {
-        owners.push((position.clone(), candidate.bound_owner.clone(), true));
+        owners.push((position.clone(), candidate.bound_owner.clone(), false));
     }
     for (position, owner) in admitted_registrar_bindings(facts, authority, is_v2) {
-        owners.push((position.clone(), Some(owner.to_owned()), true));
+        owners.push((position.clone(), Some(owner.to_owned()), false));
     }
-    let owner = latest(owners, |(position, _, _)| position).map(|(position, owner, snapshot)| {
-        if snapshot && !is_v2 {
-            superseding_transfer(facts, &position).map_or(owner, OwnerEvent::reported_owner)
-        } else {
-            owner
-        }
-    });
+    let folded = latest(owners, |(position, _, _)| position);
+    let owner = match newest_registry_write(facts, authority, is_v2) {
+        Some(write) => Some(match folded {
+            Some((position, owner, true)) if position > write.position => owner,
+            _ => write.reported_owner(),
+        }),
+        None => folded.map(|(_, owner, _)| owner),
+    };
     let kind = latest(kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
     (
         FoldedOwner {
@@ -130,19 +133,33 @@ pub(super) fn control_owner(
     )
 }
 
-/// The node's latest ENSv1 or Basenames registry owner write when it is newer than a binding
-/// snapshot at `snapshot`. The snapshot is the registry owner the binding read when it opened; a
-/// later registry `Transfer` or `NewOwner` of the node sets `owner(node)` again, whatever
-/// resource the adapter anchored it on. A zero-equivalent write while the registrar lease stays
-/// selected sits on the registry's read-anchor resource, which the admission does not hold for
-/// the name, so without this the older snapshot would stand.
+/// The registry owner write that decides the served owner of a name the registry holds: the
+/// node's newest ENSv1 or Basenames registry `NewOwner` or `Transfer` in canonical order,
+/// whatever resource the adapter anchored it on, read as the getter's view. Only a registry write
+/// sets `owner(node)`; every other owner fact of such a name restates one (a binding's snapshot
+/// of the getter, a registrar transfer's retained registry owner, a registry-only or boundary
+/// epoch's owner, `NameUnwrapped`'s raw controller argument) or clears it (a release's explicit
+/// null). So the newest write wins over every older fact, and a newer fact overrides it only when
+/// it is such a clear. A NameWrapper-selected name keeps the fold: the owner it serves is the
+/// wrapped token's holder, while the registry names the NameWrapper. ENSv2 names have their own
+/// registry and keep the fold.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
-fn superseding_transfer<'a>(facts: &'a NameFacts, snapshot: &Position) -> Option<&'a OwnerEvent> {
-    facts
-        .registry_node
-        .as_ref()?
-        .latest_transfer()
-        .filter(|transfer| &transfer.position > snapshot)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+fn newest_registry_write<'a>(
+    facts: &'a NameFacts,
+    authority: &Authority<'_>,
+    is_v2: bool,
+) -> Option<&'a OwnerEvent> {
+    // The selected binding's authority kind, not the family that bound it: a `NameUnwrapped`
+    // binds the reactivated lease through the NameWrapper's events, as a registrar authority.
+    if is_v2
+        || authority
+            .binding
+            .is_some_and(|binding| binding.authority_kind.as_deref() == Some("wrapper"))
+    {
+        return None;
+    }
+    facts.registry_node.as_ref()?.latest_transfer()
 }
 
 /// What the owner fold found: the owner its latest owner fact reports (none for a clear or an

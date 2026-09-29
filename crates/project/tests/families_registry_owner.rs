@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e2";
+const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000e3";
+const V1_WRAPPER: &str = "ens_v1_wrapper_l1";
 const ETH_NODE: &str = "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae";
 const ALICE: &str = "0x00000000000000000000000000000000000000a1";
 const BOB: &str = "0x00000000000000000000000000000000000000b2";
@@ -49,10 +51,10 @@ async fn write(
     resource: &str,
     after: Value,
 ) -> Result<()> {
-    let emitter = if family == V1_REGISTRAR {
-        REGISTRAR
-    } else {
-        REGISTRY
+    let emitter = match family {
+        V1_REGISTRAR => REGISTRAR,
+        V1_WRAPPER => NAME_WRAPPER,
+        _ => REGISTRY,
     };
     let name = name();
     fixture
@@ -640,5 +642,127 @@ async fn a_successor_grant_earlier_in_the_block_reaches_the_inherited_handoff() 
     );
     fixture.assert_undo_restores(13).await?;
     fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+/// Clear, reclaim, clear: the registrant clears the registry owner (a zero-equivalent write the
+/// adapter anchors on the read anchor), reclaims it through the registrar (a registry NewOwner
+/// the adapter links to the lease, which the families admit), then clears it again on the read
+/// anchor. The reclaim is an actual owner write, not a snapshot, and the newer clear still sets
+/// `owner(node)` to zero.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_clear_after_an_admitted_reclaim_serves_the_zero_owner() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_clear_reclaim_clear", 20).await?;
+    registered(&fixture, 10, ALICE, None).await?;
+    zero_equivalent_transfer(&fixture, 11, 1, "Transfer", ZERO, "literal_zero").await?;
+    write(
+        &fixture,
+        12,
+        1,
+        "AuthorityTransferred",
+        V1_REGISTRY,
+        &lease(),
+        json!({"source_event": "NewOwner", "node": ETH_NODE, "child_node": node(),
+               "owner": ALICE, "owner_getter": ALICE, "emitter_role": "registry"}),
+    )
+    .await?;
+    zero_equivalent_transfer(&fixture, 13, 1, "Transfer", ZERO, "literal_zero").await?;
+    let mut served_at = Vec::new();
+    for block in 11..=13 {
+        fixture.apply(block, FamilyMode::Normal).await?;
+        served_at.push(served(&fixture).await?["owner"].clone());
+    }
+    ensure!(
+        served_at == vec![json!(ZERO), json!(ALICE), json!(ZERO)],
+        "clear, reclaim, clear: {served_at:?}"
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+/// `unwrapETH2LD(label, ALICE, registry)` on a wrapped `.eth` name: the NameWrapper writes the
+/// registry itself as the node's owner (which `owner(node)` reads as zero), emits `NameUnwrapped`
+/// with that raw address, and then hands the registrar token to ALICE. The unwrap's authority
+/// epoch reactivates the lease with the raw address as its owner; the served owner is the
+/// registry write's getter view, zero.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+#[tokio::test]
+async fn an_unwrap_to_the_registry_itself_serves_the_zero_owner() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_unwrap_registry_self", 20).await?;
+    let wrapper = uuid(5);
+    registered(&fixture, 10, ALICE, Some(11)).await?;
+    // wrapETH2LD: the registrar reclaims the node for the NameWrapper, which binds its token.
+    write(
+        &fixture,
+        11,
+        1,
+        "AuthorityTransferred",
+        V1_REGISTRY,
+        &lease(),
+        json!({"source_event": "NewOwner", "node": ETH_NODE, "child_node": node(),
+               "owner": NAME_WRAPPER, "owner_getter": NAME_WRAPPER, "emitter_role": "registry"}),
+    )
+    .await?;
+    fixture
+        .binding(&uuid(110), &name(), &wrapper, "ens_v1", 11, 3, Some(12))
+        .await?;
+    let wrapped = json!({"source_event": "NameWrapped", "node": node(), "owner": BOB,
+                         "fuses": 0, "wrapper_state": "wrapped", "expiry": EXPIRY,
+                         "authority_kind": "wrapper", "authority_key": "wrapper:key",
+                         "surface_known": true, "binding_kind": "declared_registry_path"});
+    for kind in ["SurfaceBound", "AuthorityEpochChanged"] {
+        write(&fixture, 11, 3, kind, V1_WRAPPER, &wrapper, wrapped.clone()).await?;
+    }
+    // unwrapETH2LD: ens.setOwner(node, registry), then NameUnwrapped(node, registry), then the
+    // registrar token to ALICE.
+    zero_equivalent_transfer(&fixture, 12, 1, "Transfer", REGISTRY, "registry_self").await?;
+    fixture
+        .binding(&uuid(111), &name(), &lease(), "ens_v1", 12, 2, None)
+        .await?;
+    let unwrapped = json!({"source_event": "NameUnwrapped", "node": node(), "owner": REGISTRY,
+                           "authority_kind": "registrar", "authority_key": "lease",
+                           "binding_kind": "declared_registry_path",
+                           "registry_contract": REGISTRY});
+    for kind in ["SurfaceBound", "AuthorityEpochChanged"] {
+        write(
+            &fixture,
+            12,
+            2,
+            kind,
+            V1_WRAPPER,
+            &lease(),
+            unwrapped.clone(),
+        )
+        .await?;
+    }
+    write(
+        &fixture,
+        12,
+        3,
+        "TokenControlTransferred",
+        V1_REGISTRAR,
+        &lease(),
+        json!({"from": NAME_WRAPPER, "to": ALICE, "namehash": node(),
+               "source_event": "Transfer"}),
+    )
+    .await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    let wrapped_row = served(&fixture).await?;
+    ensure!(
+        wrapped_row["owner"] == json!(BOB),
+        "a wrapped name serves the wrapper holder: {wrapped_row}"
+    );
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let row = served(&fixture).await?;
+    ensure!(
+        row == json!({"status": "active", "authority_kind": "registrar", "registered": true,
+                      "expiry": EXPIRY, "owner": ZERO}),
+        "the unwrap served the registry's own address: {row}"
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }

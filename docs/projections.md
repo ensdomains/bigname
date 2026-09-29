@@ -765,19 +765,27 @@ registry owner the registrar adapter read from retained registry state (`owner_g
 fold reads that bound owner for every admitted, non-state-derived registrar binding of the
 selected resource. So a registry `Transfer` that opened a registry-only binding, whose
 `AuthorityTransferred` sits on the registry-only resource and is no longer admitted once a
-registrar token transfer binds the lease again, still decides the owner served. A bound owner is
-a snapshot of the registry owner when its binding opened: when it is the fold's latest fact and
-the node has a newer registry `NewOwner` or `Transfer` in `project_registry_owner_event`, that
-newer write's owner is served instead, whatever resource it sits on. That covers a
-zero-equivalent write while the lease stays selected, which the adapter anchors on the
-registry's read-anchor resource.
+registrar token transfer binds the lease again, still decides the owner served.
 
-Every registry owner fact the fold and the fallback below read is the registry getter's view,
-`owner(node)`: the event's `owner_getter`, which is zero for a literal zero and, on a registry
-whose getter maps its own address to zero, for that address (`owner_getter_reason`
-`registry_self`), such as a `reclaim` to the registry itself; none when the owner word is
-unmasked; and the reported `registry_owner` or `owner` only for a payload written before the
-getter was recorded.
+For an ENSv1 or Basenames name whose selected binding is not a NameWrapper authority, one rule
+decides the served registry owner: the node's newest registry `NewOwner` or `Transfer` in
+canonical order, from `project_registry_owner_event` and whatever resource the adapter anchored
+it on, wins over every older owner fact. Only a registry write sets `owner(node)`. Every other
+owner fact of such a name either restates one (a binding's bound owner, a registrar transfer's
+retained registry owner, a registry-only or boundary epoch's owner, `NameUnwrapped`'s raw
+controller argument) or clears it (a release's explicit null owner), so a newer fact overrides
+the newest write only when it is such a clear. This covers a zero-equivalent write while the
+lease stays selected, which the adapter anchors on the registry's read-anchor resource and the
+admission does not hold, whatever came between it and the older fact. A NameWrapper-selected
+name keeps the fold, because the owner it serves is the wrapped token's holder while the
+registry names the NameWrapper; ENSv2 names keep theirs.
+
+A registry owner write is read as the registry getter's view, `owner(node)`: the event's
+`owner_getter`, which is zero for a literal zero and, on a registry whose getter maps its own
+address to zero, for that address (`owner_getter_reason` `registry_self`), such as a `reclaim` or
+an `unwrapETH2LD` to the registry itself; none when the owner word is unmasked; and the reported
+`registry_owner` or `owner` only for a payload written before the getter was recorded. The raw
+owner an epoch restates never decides the owner of a name the rule above covers.
 
 An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
 registry record always serves a registry owner, because the registry answers `owner(node)` for
