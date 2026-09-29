@@ -256,3 +256,4 @@ async fn v2_address_history_follows_a_name_managed_through_registry_roles() -> R
     );
     database.cleanup().await
 }
+
