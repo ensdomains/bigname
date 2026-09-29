@@ -74,6 +74,7 @@ fn the_reset_literal_names_every_family_table() {
 /// An ENSv2 registration of `name` on `chain` at `block`, as the adapter writes it: the pending
 /// LabelRegistered grant, then the TokenResource log's SurfaceBound, grant, AuthorityTransferred
 /// naming `owner` and ExpiryChanged, and the name's open ENSv2 binding to `resource`.
+#[allow(clippy::too_many_arguments)]
 async fn register_on(
     fixture: &Fixture,
     chain: &str,
