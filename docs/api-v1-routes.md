@@ -908,8 +908,10 @@ its value map:
   (or dropped by a record-version reset) is left out of `seen_singletons` and
   served as `null` only when the resolver has that record's getter; the
   admitted legacy ENS public resolvers `0x5FfC0143…` and `0x1da02271…` have no
-  contenthash getter, so an unwritten `contenthash` on them, or on a mirror of
-  them, stays omitted.
+  contenthash getter, so their inventories (and a mirror's of them) list
+  `contenthash` as an unsupported family and an unwritten `contenthash` stays
+  omitted; the records route answers it `unsupported` with
+  `record_family_not_supported_by_resolver`.
   (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121-L147 @ ens_app_v3@7175858) `contenthash` is the
   scalar contenthash string. `name`
   is the forward name record written on the name's own node (ENS
@@ -1027,8 +1029,13 @@ its value map:
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
   Product records use product reason vocabulary: retained-selector misses use
-  `value_not_retained`, and phase-unsupported record families use
-  `record_family_not_supported`.
+  `value_not_retained`, phase-unsupported record families use
+  `record_family_not_supported`, and a family the admitted resolver has no
+  getter for (`contenthash` on the legacy ENS public resolvers `0x5FfC0143…`
+  and `0x1da02271…`, and on a mirror of them) uses
+  `record_family_not_supported_by_resolver` instead of `not_found`; with
+  `include=inventory` that key is in `unsupported_keys`.
+  (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121-L147 @ ens_app_v3@7175858)
   Indexed record values are served only from a record inventory whose coverage
   is authoritative: coverage `status` is `full` or `projected` and it names no
   `unsupported_reason`. A name whose serving resolver's inventory row is

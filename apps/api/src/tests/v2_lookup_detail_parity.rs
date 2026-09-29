@@ -373,6 +373,28 @@ async fn lookup_detail_records_default_singletons_only_where_the_resolver_holds_
             "{role}: {detail}"
         );
         assert_eq!(records.get("name"), Some(&Value::Null), "{role}: {detail}");
+        // The records route agrees: no `not_found` for a family the resolver cannot hold.
+        let route = v2_name_record_payload_for_database(
+            &database,
+            "/v1/names/profile.eth/records?keys=contenthash&include=inventory",
+        )
+        .await?;
+        let answer = &route["data"]["records"]["contenthash"];
+        if contenthash_unset {
+            assert_eq!(answer, &json!({"status": "not_found"}), "{role}: {route}");
+        } else {
+            assert_eq!(
+                answer,
+                &json!({"status": "unsupported",
+                    "unsupported_reason": "record_family_not_supported_by_resolver"}),
+                "{role}: {route}"
+            );
+            assert_eq!(
+                route["data"]["inventory"]["unsupported_keys"],
+                json!(["contenthash"]),
+                "{role}: {route}"
+            );
+        }
         database.cleanup().await?;
     }
     Ok(())

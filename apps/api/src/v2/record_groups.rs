@@ -187,15 +187,11 @@ impl RecordGroups {
         }
         if sections.authoritative {
             // An authoritative row is complete for the families its resolver holds: a singleton
-            // it has no entry for is unset, unless the row lists that family as unsupported or
-            // the resolver has no getter for it (a legacy public resolver without contenthash).
+            // it has no entry for is unset, unless the row lists that family as unsupported,
+            // which it does for a family the resolver has no getter for (a legacy public
+            // resolver without contenthash, crates/storage/src/families/records/profiles.rs).
             let complete = |family: &str| {
-                (!lists_unsupported_family(sections.unsupported_families, family)
-                    && bigname_storage::families::records::inventory_resolver_holds_family(
-                        sections.provenance,
-                        family,
-                    ))
-                .then_some(None)
+                (!lists_unsupported_family(sections.unsupported_families, family)).then_some(None)
             };
             groups.contenthash = complete("contenthash");
             groups.name = complete("name");
@@ -343,12 +339,6 @@ mod tests {
     use super::*;
     use crate::v2::support::parse_resolution_record_key;
 
-    /// A current public resolver's classification, which holds every singleton family.
-    static MODERN: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
-        json!({"abi_observation_classification":
-            {"source_family": "ens_v1_resolver_l1", "role": "public_resolver"}})
-    });
-
     fn sections<'a>(
         authoritative: bool,
         selectors: &'a Value,
@@ -361,7 +351,6 @@ mod tests {
             entries,
             explicit_gaps: empty,
             unsupported_families: empty,
-            provenance: &MODERN,
         }
     }
 
@@ -451,7 +440,6 @@ mod tests {
             entries: &entries,
             explicit_gaps: &empty,
             unsupported_families: &unsupported,
-            provenance: &MODERN,
         });
         let value = serde_json::to_value(&groups).expect("serializes");
         // Written, value unknown; and a family the row cannot speak for.
@@ -461,30 +449,17 @@ mod tests {
     }
 
     #[test]
-    fn a_resolver_without_the_contenthash_getter_leaves_it_unknown() {
+    fn a_family_listed_without_a_getter_leaves_the_singleton_unknown() {
         let empty = json!([]);
-        for role in ["public_resolver_5ffc0143", "public_resolver_1da02271"] {
-            let legacy = json!({"abi_observation_classification":
-                {"source_family": "ens_v1_resolver_l1", "role": role}});
-            let groups = RecordGroups::indexed(InventorySections {
-                provenance: &legacy,
-                ..sections(true, &empty, &empty, &empty)
-            });
-            let value = serde_json::to_value(&groups).expect("serializes");
-            assert!(value.get("contenthash").is_none(), "{role}: {value}");
-            assert_eq!(value["name"], Value::Null, "{role}: {value}");
-        }
-        // No captured classification: nothing is claimed unset.
-        let bare = json!({});
+        let without = json!([{"record_family": "contenthash",
+            "unsupported_reason": "record_family_not_supported_by_resolver"}]);
         let groups = RecordGroups::indexed(InventorySections {
-            provenance: &bare,
+            unsupported_families: &without,
             ..sections(true, &empty, &empty, &empty)
         });
         let value = serde_json::to_value(&groups).expect("serializes");
-        assert!(
-            value.get("contenthash").is_none() && value.get("name").is_none(),
-            "{value}"
-        );
+        assert!(value.get("contenthash").is_none(), "{value}");
+        assert_eq!(value["name"], Value::Null, "{value}");
     }
 
     #[test]

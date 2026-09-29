@@ -1,79 +1,62 @@
-//! Which singleton record families an inventory's resolver can hold, read from the classification
-//! the inventory captured in its snapshot (`provenance.abi_observation_classification`; for a
-//! mirror, the mirrored ENSv1 resolver's). An authoritative inventory that holds no write for such
-//! a family may call it unset only when the resolver has the getter.
+//! Record families an admitted resolver has no getter for. An inventory assembled for such a
+//! resolver lists the family in `unsupported_families`, so no route reads the absence of a write
+//! as "unset" (the records route's per-key answer, and the grouped records' singleton default).
+//! A mirrored inventory is assembled with the mirrored ENSv1 resolver's classification, so a
+//! mirror of such a resolver inherits the listing.
 
-use serde_json::Value;
+/// The reason an inventory gives for a family its resolver cannot hold.
+pub(crate) const FAMILY_WITHOUT_GETTER_REASON: &str = "record_family_not_supported_by_resolver";
 
-/// The admitted ENSv1 public resolver generations whose getter surface lacks a record family,
-/// by `(source_family, role, record_family)`. Both lack `IContentHashResolver`; both keep
-/// `INameResolver`. The manifest declares them with the same profiles
-/// (manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml).
+/// The admitted ENSv1 public resolver generations whose getter surface lacks a record family.
+/// Both lack `IContentHashResolver`; both keep `INameResolver`. The manifest declares them with
+/// the same profiles (manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml).
 /// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121-L134 @ ens_app_v3@7175858)
 /// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L135-L147 @ ens_app_v3@7175858)
-const LACKING: &[(&str, &str, &str)] = &[
+const WITHOUT_GETTER: &[(&str, &str, &[&str])] = &[
     (
         "ens_v1_resolver_l1",
         "public_resolver_5ffc0143",
-        "contenthash",
+        &["contenthash"],
     ),
     (
         "ens_v1_resolver_l1",
         "public_resolver_1da02271",
-        "contenthash",
+        &["contenthash"],
     ),
 ];
 
-/// Whether the resolver behind an inventory with this `provenance` has the getter for
-/// `record_family`. An inventory that names no classification fails closed.
-pub fn inventory_resolver_holds_family(provenance: &Value, record_family: &str) -> bool {
-    let Some(classification) = provenance
-        .get("abi_observation_classification")
-        .filter(|classification| classification.is_object())
-    else {
-        return false;
-    };
-    let field = |name: &str| classification.get(name).and_then(Value::as_str);
-    let (Some(source_family), Some(role)) = (field("source_family"), field("role")) else {
-        return false;
-    };
-    !LACKING.iter().any(|(family, lacking_role, lacking)| {
-        *family == source_family && *lacking_role == role && *lacking == record_family
-    })
+/// The record families the classified resolver `(source_family, role)` has no getter for.
+pub(crate) fn families_without_getter(
+    source_family: Option<&str>,
+    role: Option<&str>,
+) -> &'static [&'static str] {
+    WITHOUT_GETTER
+        .iter()
+        .find(|(family, lacking_role, _)| {
+            source_family == Some(*family) && role == Some(*lacking_role)
+        })
+        .map_or(&[], |(_, _, families)| families)
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::inventory_resolver_holds_family;
-
-    fn provenance(role: &str) -> serde_json::Value {
-        json!({"abi_observation_classification":
-            {"source_family": "ens_v1_resolver_l1", "role": role}})
-    }
+    use super::families_without_getter;
 
     #[test]
     fn legacy_public_resolvers_lack_contenthash_but_hold_name() {
         for role in ["public_resolver_5ffc0143", "public_resolver_1da02271"] {
-            assert!(!inventory_resolver_holds_family(
-                &provenance(role),
-                "contenthash"
-            ));
-            assert!(inventory_resolver_holds_family(&provenance(role), "name"));
+            assert_eq!(
+                families_without_getter(Some("ens_v1_resolver_l1"), Some(role)),
+                ["contenthash"]
+            );
         }
-        assert!(inventory_resolver_holds_family(
-            &provenance("public_resolver_226159d5"),
-            "contenthash"
-        ));
-    }
-
-    #[test]
-    fn an_inventory_without_a_classification_holds_nothing() {
-        assert!(!inventory_resolver_holds_family(&json!({}), "contenthash"));
-        assert!(!inventory_resolver_holds_family(
-            &json!({"abi_observation_classification": null}),
-            "name"
-        ));
+        for (family, role) in [
+            (Some("ens_v1_resolver_l1"), Some("public_resolver_226159d5")),
+            (Some("ens_v1_resolver_l1"), Some("public_resolver")),
+            (Some("ens_v2_resolver_l1"), Some("public_resolver_5ffc0143")),
+            (None, None),
+        ] {
+            assert!(families_without_getter(family, role).is_empty(), "{role:?}");
+        }
     }
 }

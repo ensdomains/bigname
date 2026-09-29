@@ -5865,7 +5865,7 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
 /// A mirror serves the mirrored ENSv1 resolver's getter surface: a legacy public resolver there
 /// has no contenthash to report unset.
 #[tokio::test]
-async fn v2_get_name_mirrored_from_a_legacy_resolver_leaves_contenthash_unknown() -> Result<()> {
+async fn v2_get_name_and_records_mirrored_from_a_legacy_resolver_leave_contenthash_unknown() -> Result<()> {
     const MIRROR: &str = "0x1010101010101010101010101010101010101010";
     for (role, contenthash_unset) in [
         ("public_resolver_5ffc0143", false),
@@ -5889,6 +5889,22 @@ async fn v2_get_name_mirrored_from_a_legacy_resolver_leaves_contenthash_unknown(
             "{role}: {payload}"
         );
         assert_eq!(records.get("name"), Some(&Value::Null), "{role}: {payload}");
+        // The records route agrees through the mirror.
+        let route = v2_mirror_records_payload_on(
+            "/v1/names/alice.eth/records?keys=contenthash",
+            "alice.eth",
+            MIRROR,
+            MirrorFixtureSource::Exact,
+            role,
+        )
+        .await?;
+        let expected = if contenthash_unset {
+            json!({"status": "not_found"})
+        } else {
+            json!({"status": "unsupported",
+                "unsupported_reason": "record_family_not_supported_by_resolver"})
+        };
+        assert_eq!(route["data"]["records"]["contenthash"], expected, "{role}: {route}");
     }
     Ok(())
 }
