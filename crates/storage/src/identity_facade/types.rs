@@ -71,7 +71,8 @@ impl ReverseIdentityRoles {
                 AddressNameRelation::Registrant | AddressNameRelation::TokenHolder
             ),
             Self::Managed => matches!(relation, AddressNameRelation::EffectiveController),
-            Self::Both => true,
+            // Reverse lookup serves the three ownership and control relations only.
+            Self::Both => !matches!(relation, AddressNameRelation::RoleHolder),
         }
     }
 }

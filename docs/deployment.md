@@ -265,6 +265,19 @@ with a larger budget that still fits the window. Afterwards, confirm that
 with `WHERE (source_family = 'ens_v2_root_l1'::text)`: `IF NOT EXISTS` skips an
 existing index of the same name without checking its definition.
 
+`20260929190000_project_family_name_lookup_indexes.sql` adds
+`project_lifecycle_key_state_name_idx` (partial, `WHERE logical_name_id IS NOT NULL`) and
+`project_name_state_name_idx`, both on `(chain_id, logical_name_id)`, which the name summary
+composition probes by name id. Each is a plain `CREATE INDEX` inside the
+schema-migration transaction, so it takes a SHARE lock on its whole table until the
+schema-migration commits, blocking every write to the table and `VACUUM` and `ANALYZE` on
+it, and waits first for any transaction already writing it. Apply it in the same planned
+window as the two above, with the phase runner, redo processes and API stopped. The same
+`lock_timeout`, `statement_timeout` and retry procedure apply, with
+`--target-version 20260929190000`. Afterwards, confirm both indexes are `indisvalid` and
+`indisready` in `pg_index` and that `pg_get_indexdef` shows `(chain_id, logical_name_id)`,
+with `WHERE (logical_name_id IS NOT NULL)` on the key state index only.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in

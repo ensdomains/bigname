@@ -260,6 +260,8 @@ CREATE TABLE IF NOT EXISTS project_name_state (
     PRIMARY KEY (chain_id, namespace, logical_name_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_name_state_name_idx
+    ON project_name_state (chain_id, logical_name_id);
 COMMENT ON TABLE project_name_state IS
     'Project-owned name facts of family F1: the latest MigrationApplied of a name and the latest authority epoch start per authority arm (docs/projections.md, Owned key families).';
 COMMENT ON COLUMN project_name_state.namespace IS
@@ -424,6 +426,9 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_key_state (
     PRIMARY KEY (chain_id, resource_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_lifecycle_key_state_name_idx
+    ON project_lifecycle_key_state (chain_id, logical_name_id)
+    WHERE logical_name_id IS NOT NULL;
 COMMENT ON TABLE project_lifecycle_key_state IS
     'Project-owned lifecycle state of family F2a per resource: membership-only maxima over the resource''s own lifecycle events in the canonical event order.';
 COMMENT ON COLUMN project_lifecycle_key_state.chain_id IS

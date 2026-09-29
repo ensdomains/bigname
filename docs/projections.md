@@ -499,7 +499,7 @@ transport do not create alternate exact-name rows.[^bn-readme-l70][^v1-l2rev-bas
 Address-to-name collections start from the current family address indexes and
 compose each candidate's selected name, lifecycle and permission relations in
 the admitted publication snapshot. Relation vocabulary is `registrant`,
-`token_holder`, and `effective_controller`. Surface is the default unit;
+`token_holder`, `effective_controller`, and `role_holder`. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
 relations. For a node an ENSv1 registry `NewOwner` created, the address index
 also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
@@ -508,7 +508,34 @@ whether or not a surface names the node. A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
-the node's registry-only resource, and with no surface binding. Raw unbounded diagnostic address history separately includes retained
+the node's registry-only resource, and with no surface binding.
+
+A fourth relation, `role_holder`, lists the holders of an ENSv2 registry role
+on a name's selected registration resource. `PermissionedRegistry` keeps
+per-account roles on each registration's token resource, and a holder can act
+on the name within them without owning the token, for example change its
+resolver or subregistry.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L155 @ ens_v2@a971bd64)
+Any role counts; the `was_reserved` marker alone does not, because it
+authorizes nothing.
+(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
+A role holder is not an `effective_controller`. The read takes the holders
+from the served permission rows of the resource (the F8 grants with registry
+scope after the read-time masks `GET /v1/permissions` applies), not from the
+address index: the candidate names are the names bound to a resource on which
+the address has such a grant, and the composed name keeps the holder only
+while that resource is its selected resource. Only the requested address's
+grants are read, so the membership read does not process other holders' grants
+on the same registration. A request whose explicit relation set excludes
+`role_holder` skips both role-candidate discovery and role-grant loading;
+unfiltered reads and sets including `role_holder` retain them. This does not
+bound the request's ordinary ownership enumeration or other work. A role held on the registry root
+reaches every name in the registry, and an ENSv2 registry operator approved
+with `setApprovalForAll` is not a permission row, so neither adds names to an
+address's collection. Reverse lookup does not serve this relation.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+
+Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
 in [the audit route contract](api-v1-routes.md).
 

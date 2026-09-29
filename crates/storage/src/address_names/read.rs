@@ -95,6 +95,7 @@ async fn load_address_names_current_internal(
         &mut snapshot,
         address,
         namespace,
+        relations,
         true,
     )
     .await?;

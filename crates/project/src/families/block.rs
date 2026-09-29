@@ -236,7 +236,8 @@ pub(crate) async fn publish(
         record,
         manifests,
     } = opened;
-    let mut stats = write(&mut transaction, chain_id, &block, rows).await?;
+    let after = prior.current.as_ref().map_or(-1, |marker| marker.number);
+    let mut stats = write(&mut transaction, chain_id, &block, after, rows).await?;
     journal_marker(&mut transaction, chain_id, &block, &prior).await?;
     stats.undo_rows += 1;
     let next = FamilyMarker {
@@ -287,18 +288,20 @@ pub(crate) async fn publish(
     Ok((next, stats))
 }
 
-/// Journal every changed row's pre-block image, then write the changes table by table.
+/// Journal every changed row's pre-block image, then write the changes table by table. `after`
+/// is the block of the family marker the write follows, -1 with none.
 async fn write(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
+    after: i64,
     rows: &store::RowSet,
 ) -> Result<BlockStats> {
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
         // The name summaries follow the block clock too, which moves with no row changing.
-        refresh_derived(transaction, chain_id, block, &mut stats).await?;
+        refresh_derived(transaction, chain_id, block, after, &mut stats).await?;
         return Ok(stats);
     }
     let journal = changes
@@ -325,7 +328,7 @@ async fn write(
         let written = store::replace(transaction, super::tables::spec(name), keys, inserts).await?;
         stats.rows.insert(name, written);
     }
-    refresh_derived(transaction, chain_id, block, &mut stats).await?;
+    refresh_derived(transaction, chain_id, block, after, &mut stats).await?;
     Ok(stats)
 }
 
@@ -335,9 +338,10 @@ async fn refresh_derived(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &input::BlockHeader,
+    after: i64,
     stats: &mut BlockStats,
 ) -> Result<()> {
-    let touched = super::derived::touched(transaction, chain_id, block.number).await?;
+    let touched = super::derived::touched(transaction, chain_id, block.number, Some(after)).await?;
     let summary = super::derived::refresh(transaction, chain_id, &touched).await?;
     if summary.rows > 0 {
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);

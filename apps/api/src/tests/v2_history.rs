@@ -2382,6 +2382,7 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
         row_at(107)["data"],
         json!({
             "address": "0x00000000000000000000000000000000000000dd",
+            "grant_scope": { "kind": "registration", "detail": {} },
             "powers": ["registration_control"],
         })
     );
