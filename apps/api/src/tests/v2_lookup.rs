@@ -359,7 +359,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     assert_eq!(payload["data"][0]["record"]["namespace"], json!("ens"));
     assert_eq!(payload["data"][0]["record"]["status"], json!("ok"));
     assert_eq!(
-        payload["data"][0]["record"]["addresses"]["60"],
+        payload["data"][0]["record"]["records"]["addresses"]["60"],
         json!(address)
     );
     assert_eq!(payload["data"][0]["record"]["primary_address"], json!(address));
@@ -392,7 +392,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
         .as_object()
         .expect("feed record must be an object");
     assert_eq!(feed_record.get("name"), Some(&json!("case.eth")));
-    assert!(feed_record.get("addresses").is_none());
+    assert!(feed_record.get("records").is_none());
     assert!(feed_record.get("owner").is_none());
 
     let detail = v2_lookup_json(
@@ -436,7 +436,7 @@ async fn v2_lookup_withholds_resolver_without_projected_authority() -> Result<()
     assert_eq!(record["registration_status"], json!("unregistered"));
     // The record keeps the detail shape for this reason. With no selected binding there is no
     // served resolver, so neither the pointer nor the records written on it are served.
-    assert_eq!(record["addresses"]["60"], Value::Null, "{record}");
+    assert_eq!(record["records"]["addresses"]["60"], Value::Null, "{record}");
     assert!(record.get("resolver").is_none());
 
     // Reverse detail shares build_detail_record with the forward path, so the
@@ -495,7 +495,7 @@ async fn v2_lookup_serves_a_root_registry_pointer_without_projected_authority() 
     assert!(record.get("registration_id").is_none(), "{record}");
     assert!(record.get("authority").is_none_or(Value::is_null), "{record}");
     assert_eq!(
-        record["addresses"]["60"],
+        record["records"]["addresses"]["60"],
         json!("0x0000000000000000000000000000000000000def")
     );
 
@@ -518,14 +518,9 @@ async fn v2_lookup_withholds_retained_inventory_for_released_tombstone() -> Resu
     assert_eq!(record["status"], json!("ok"));
     assert_eq!(record["registration_status"], json!("released"));
     assert!(record.get("resolver").is_none());
-    assert!(record.get("addresses").is_none());
-    assert!(record.get("text_records").is_none());
-    assert!(record.get("content_hash").is_none());
+    assert!(record.get("records").is_none(), "{record}");
     assert!(record.get("primary_address").is_none());
-    assert_eq!(
-        record["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
-    );
+    assert_eq!(record["unsupported_fields"], json!(["primary_address"]));
 
     database.cleanup().await?;
     Ok(())
@@ -675,9 +670,7 @@ async fn v2_lookup_ignores_stale_audit_inventory_for_reservation() -> Result<()>
     assert_eq!(record["registration_status"], json!("unregistered"));
     assert!(record.get("registration_id").is_none());
     assert!(record.get("resolver").is_none());
-    assert!(record.get("addresses").is_none());
-    assert!(record.get("text_records").is_none());
-    assert!(record.get("content_hash").is_none());
+    assert!(record.get("records").is_none(), "{record}");
     assert!(record.get("primary_address").is_none());
 
     database.cleanup().await?;
@@ -730,11 +723,9 @@ async fn v2_lookup_flattens_phase_writer_byte_values() -> Result<()> {
     )
     .await?;
 
-    assert_eq!(payload["data"][0]["record"]["addresses"]["0"], json!("0x001122"));
-    assert_eq!(
-        payload["data"][0]["record"]["content_hash"],
-        json!("0xe3010170")
-    );
+    let records = &payload["data"][0]["record"]["records"];
+    assert_eq!(records["addresses"]["0"], json!("0x001122"), "{records}");
+    assert_eq!(records["contenthash"], json!("0xe3010170"), "{records}");
 
     database.cleanup().await
 }
@@ -753,20 +744,16 @@ async fn v2_lookup_marks_unsupported_phase_inventory_fields() -> Result<()> {
     .await?;
     let record = &payload["data"][0]["record"];
 
-    assert!(record.get("addresses").is_none());
+    // The keys the resolver was seen writing stay listed; none of their values is known.
+    assert_unknown_resolver_records(record);
     assert!(record.get("primary_address").is_none());
-    assert!(record.get("text_records").is_none());
-    assert!(record.get("content_hash").is_none());
-    assert_eq!(
-        record["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
-    );
+    assert_eq!(record["unsupported_fields"], json!(["primary_address"]));
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_lookup_include_inventory_serves_the_records_route_container() -> Result<()> {
+async fn v2_lookup_detail_records_list_keys_beside_their_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(
         &database,
@@ -782,8 +769,8 @@ async fn v2_lookup_include_inventory_serves_the_records_route_container() -> Res
         38,
     )
     .await?;
-    // One entry the row cannot serve: a text write whose value the event did not retain. It
-    // partitions into unsupported_keys on both routes.
+    // One entry the row cannot serve: a text write whose value the event did not retain. Its key
+    // is listed with no value.
     insert_family_fixture_record_writes(
         &database.pool,
         "ens",
@@ -801,7 +788,6 @@ async fn v2_lookup_include_inventory_serves_the_records_route_container() -> Res
         &database,
         json!({
             "profile": "detail",
-            "include": "inventory",
             "inputs": [
                 {"name": "inventory-batch.eth"},
                 {"name": "never-seeded.eth"},
@@ -811,71 +797,55 @@ async fn v2_lookup_include_inventory_serves_the_records_route_container() -> Res
     )
     .await?;
     let record = &payload["data"][0]["record"];
-    let inventory = &record["inventory"];
-    assert!(inventory["known_keys"].as_array().is_some_and(|keys| keys.contains(&json!("addr:60"))), "{record}");
-    assert_eq!(inventory["unset_keys"], json!([]));
-    assert_eq!(inventory["unsupported_keys"], json!(["text:url"]));
-    assert!(record.get("addresses").is_some(), "{record}");
+    let records = &record["records"];
+    assert!(records["seen_addresses"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{record}");
+    assert!(records["addresses"].get("60").is_some(), "{record}");
+    // `seed_identity_name` writes its own text records beside the unretained one.
+    let text_keys = records["seen_texts"].as_array().expect("text keys");
+    assert!(text_keys.contains(&json!("url")), "{record}");
+    assert!(records["texts"].get("url").is_none(), "{record}");
+    assert!(record.get("inventory").is_none(), "{record}");
 
-    // The container is the records route's, key for key.
-    let response = v2_get_response(
-        &database,
-        "/v1/names/inventory-batch.eth/records?include=inventory",
-    )
-    .await?;
-    let status = response.status();
-    let records: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "{records:#}");
-    assert_eq!(records["data"]["inventory"], *inventory, "{records:#}");
+    // Name detail serves the same object.
+    let detail = v2_get_json(&database, "/v1/names/inventory-batch.eth").await?;
+    assert_eq!(detail["data"]["records"], *records, "{detail:#}");
 
     assert_eq!(payload["data"][1]["status"], json!("not_found"));
     assert!(payload["data"][1].get("record").is_none());
     let reverse_rows = payload["data"][2]["records"].as_array().expect("reverse rows");
-    assert!(!reverse_rows.is_empty());
-    assert!(reverse_rows.iter().all(|row| row.get("inventory").is_none()), "{reverse_rows:?}");
-
-    // Without the include the container is absent, on the same rows.
-    let plain = v2_lookup_json(
-        &database,
-        json!({"profile": "detail", "inputs": [{"name": "inventory-batch.eth"}]}),
-    )
-    .await?;
-    assert!(plain["data"][0]["record"].get("inventory").is_none());
+    let row = reverse_rows
+        .iter()
+        .find(|row| row["name"] == json!("inventory-batch.eth"))
+        .expect("the owner's reverse rows include the name");
+    assert_eq!(row["records"], *records, "{reverse_rows:?}");
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_lookup_include_inventory_lists_an_unsupported_row_under_unsupported_keys() -> Result<()> {
+async fn v2_lookup_detail_lists_the_keys_of_an_unknown_resolver_without_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
 
     let payload = v2_lookup_json(
         &database,
-        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": "alice.eth"}]}),
+        json!({"profile": "detail", "inputs": [{"name": "alice.eth"}]}),
     )
     .await?;
     let record = &payload["data"][0]["record"];
     assert_eq!(payload["data"][0]["status"], json!("ok"));
-    assert!(record.get("addresses").is_none(), "{record}");
-    let inventory = &record["inventory"];
-    assert_eq!(inventory["known_keys"], json!([]));
-    assert_eq!(inventory["unset_keys"], json!([]));
-    assert!(inventory["unsupported_keys"].as_array().is_some_and(|keys| keys.contains(&json!("addr:60"))), "{record}");
-    let records = v2_get_json(
-        &database,
-        "/v1/names/alice.eth/records?include=inventory",
-    )
-    .await?;
-    assert_eq!(records["data"]["inventory"], *inventory, "{records:#}");
+    assert_unknown_resolver_records(record);
+    let detail = v2_get_json(&database, "/v1/names/alice.eth").await?;
+    assert_eq!(detail["data"]["records"], record["records"], "{detail:#}");
 
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_lookup_include_rejects_feed_and_unknown_expansions() -> Result<()> {
+async fn v2_lookup_rejects_every_include() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     for body in [
+        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": "alice.eth"}]}),
         json!({"profile": "feed", "include": "inventory", "inputs": [{"name": "alice.eth"}]}),
         json!({"profile": "detail", "include": "lineage", "inputs": [{"name": "alice.eth"}]}),
         json!({"profile": "detail", "include": "inventory,counts", "inputs": [{"name": "alice.eth"}]}),
@@ -895,6 +865,20 @@ async fn v2_lookup_include_rejects_feed_and_unknown_expansions() -> Result<()> {
     database.cleanup().await
 }
 
+/// The grouped records of `unknown_resolver_record_writes` behind a resolver whose
+/// implementation is not an admitted profile: both keys listed, no value known.
+fn assert_unknown_resolver_records(record: &Value) {
+    let records = &record["records"];
+    assert_eq!(records["seen_addresses"], json!(["60"]), "{record}");
+    assert_eq!(records["addresses"], json!({}), "{record}");
+    assert_eq!(records["seen_texts"], json!(["description"]), "{record}");
+    assert_eq!(records["texts"], json!({}), "{record}");
+    assert_eq!(records["abis"], json!({}), "{record}");
+    assert_eq!(records["seen_singletons"], json!([]), "{record}");
+    assert!(records.get("contenthash").is_none(), "{record}");
+    assert!(records.get("name").is_none(), "{record}");
+}
+
 #[tokio::test]
 async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -910,14 +894,9 @@ async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -
     let record = &payload["data"][0]["record"];
 
     assert_eq!(payload["data"][0]["status"], json!("ok"));
-    assert!(record.get("addresses").is_none(), "{record}");
+    assert_unknown_resolver_records(record);
     assert!(record.get("primary_address").is_none(), "{record}");
-    assert!(record.get("text_records").is_none(), "{record}");
-    assert!(record.get("content_hash").is_none(), "{record}");
-    assert_eq!(
-        record["unsupported_fields"],
-        json!(["addresses", "content_hash", "primary_address", "text_records"])
-    );
+    assert_eq!(record["unsupported_fields"], json!(["primary_address"]));
 
     database.cleanup().await
 }
@@ -2449,7 +2428,7 @@ async fn v2_lookup_reverse_feed_miss_and_all_miss_meta() -> Result<()> {
         payload["data"][0]["records"][0]["relations"],
         json!(["owner"])
     );
-    assert!(payload["data"][0]["records"][0].get("addresses").is_none());
+    assert!(payload["data"][0]["records"][0].get("records").is_none());
     assert_eq!(payload["data"][0]["page"]["page_size"], json!(50));
     assert_eq!(payload["data"][0]["page"]["total_count"], Value::Null);
     assert_eq!(payload["data"][1]["status"], json!("ok"));

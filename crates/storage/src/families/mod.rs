@@ -5,4 +5,7 @@ pub mod name;
 pub mod records;
 pub mod topology;
 
+#[cfg(test)]
+mod id_index_plan_tests;
+
 pub(crate) use name::read_snapshot;

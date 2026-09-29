@@ -39,8 +39,8 @@ use head::{load_served_head, revalidate_served_head};
 use page::ReverseLookupPage;
 use parse::{
     LookupProfile, ParsedAddressLookup, bind_address_cursor, ensure_lookup_batch_limit,
-    parse_address_input, parse_lookup_include, parse_lookup_json_body, parse_lookup_namespace,
-    parse_lookup_profile, parse_name_input,
+    parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
+    parse_name_input, reject_lookup_include,
 };
 use relation_filter::{
     requires_relation_post_filter, reverse_record_matches_relation, trim_reverse_record_relations,
@@ -60,7 +60,7 @@ pub(crate) async fn get_lookup(
     let body = parse_lookup_json_body(body)?;
     ensure_lookup_batch_limit(body.inputs.len())?;
     let profile = parse_lookup_profile(body.profile.as_deref())?;
-    let include = parse_lookup_include(body.include.as_deref(), profile)?;
+    reject_lookup_include(body.include.as_deref())?;
     let namespace = parse_lookup_namespace(body.namespace.as_deref())?;
     let has_address_inputs = body
         .inputs
@@ -116,7 +116,6 @@ pub(crate) async fn get_lookup(
     render_name_lookup_results(
         &state,
         profile,
-        include,
         &name_inputs,
         selected_snapshot,
         &mut results,
@@ -135,6 +134,7 @@ pub(crate) async fn get_lookup(
     )
     .await?;
     apply_migrated_at(&state, &mut results).await?;
+    apply_record_abis(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
@@ -187,6 +187,29 @@ async fn apply_migrated_at(state: &AppState, results: &mut [Option<LookupResult>
         record.migrated_at = migrated_at.get(logical_name_id).cloned();
     }
     Ok(())
+}
+
+/// Fills the ABI key list on every rendered `records` group, in one batched read across name
+/// results and reverse rows (`record_groups.rs`).
+async fn apply_record_abis(state: &AppState, results: &mut [Option<LookupResult>]) -> V2Result<()> {
+    let targets = results
+        .iter_mut()
+        .flatten()
+        .flat_map(|result| {
+            result
+                .record
+                .iter_mut()
+                .chain(result.records.iter_mut().flatten())
+        })
+        .filter_map(|record| {
+            let source = record.abi_source.as_ref();
+            record.records.as_mut().map(|groups| (groups, source))
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    crate::v2::record_groups::fill_abi_content_types(&state.pool, targets).await
 }
 
 async fn render_reverse_lookup_results(

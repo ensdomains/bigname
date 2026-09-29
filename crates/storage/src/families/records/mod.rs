@@ -19,6 +19,7 @@ mod mirror;
 mod payload;
 mod pointer;
 mod primary;
+mod profiles;
 mod resolves_to;
 mod resolves_to_serving;
 mod reverse;

@@ -180,6 +180,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
         &storage_event("RegistrationGranted", Some("ens:alice.eth")),
         Some("alice.eth"),
         HistoryInclude::default(),
+        &HistoryRowContext::default(),
     )
     .expect("product event must build");
 
@@ -195,6 +196,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
         &storage_event("RecordChanged", None),
         None,
         HistoryInclude::default(),
+        &HistoryRowContext::default(),
     )
     .expect("product event without name must build");
     assert_eq!(event.name, None);
@@ -209,6 +211,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
         &storage_event("RecordChanged", None),
         None,
         HistoryInclude::DATA,
+        &HistoryRowContext::default(),
     )
     .expect("detailed product event must build");
     let serialized = serde_json::to_value(&detailed).expect("event must serialize");
@@ -220,6 +223,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
         &storage_event("RecordChanged", None),
         None,
         HistoryInclude::RAW,
+        &HistoryRowContext::default(),
     )
     .expect("raw product event must build");
     let serialized = serde_json::to_value(&raw).expect("event must serialize");
@@ -234,6 +238,7 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
             data: true,
             raw: true,
         },
+        &HistoryRowContext::default(),
     )
     .expect("raw detailed product event must build");
     let serialized = serde_json::to_value(&both).expect("event must serialize");
@@ -245,22 +250,26 @@ fn build_event_derives_name_and_drops_non_product_kinds() {
             &storage_event("SurfaceBound", Some("ens:alice.eth")),
             Some("alice.eth"),
             HistoryInclude::default(),
+            &HistoryRowContext::default(),
         )
         .is_none()
     );
-    assert!(
+    assert_eq!(
         build_event(
             &storage_event("MigrationApplied", Some("ens:alice.eth")),
             Some("alice.eth"),
             HistoryInclude::default(),
+            &HistoryRowContext::default(),
         )
-        .is_none()
+        .map(|event| event.event_type),
+        Some(HistoryEventType::Migration)
     );
     assert!(
         build_event(
             &storage_event("ContractDiscovered", None),
             None,
-            HistoryInclude::default()
+            HistoryInclude::default(),
+            &HistoryRowContext::default()
         )
         .is_none()
     );

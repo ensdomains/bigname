@@ -145,6 +145,9 @@ struct PrimaryClaimEvent {
     kind: &'static str,
     family: &'static str,
     emitter: &'static str,
+    /// The event's log within the claim transaction. Events the adapter derives from one log
+    /// share it.
+    log: i64,
     after: Value,
 }
 
@@ -172,7 +175,8 @@ fn primary_claim_hex(raw: &[u8]) -> Value {
 /// (`NewResolver`), resolver.rs (`NameChanged`, `record_after`).
 ///
 /// Basenames (`basenames_base_primary`, coin type 2147492101) emits NameForAddrChanged: the
-/// reverse change and the direct claim naming the tuple (reverse.rs, `NameForAddrChanged`).
+/// reverse change and the direct claim naming the tuple, both from the one log
+/// (reverse.rs, `NameForAddrChanged`).
 fn primary_claim_events(
     namespace: &str,
     address: &str,
@@ -239,12 +243,14 @@ fn primary_claim_events(
                 kind: "ReverseChanged",
                 family,
                 emitter: registrar,
+                log: 0,
                 after: reverse("NameForAddrChanged"),
             },
             PrimaryClaimEvent {
                 kind: "RecordChanged",
                 family,
                 emitter: registrar,
+                log: 0,
                 after: claim,
             },
         ]);
@@ -254,12 +260,14 @@ fn primary_claim_events(
             kind: "ReverseChanged",
             family,
             emitter: registrar,
+            log: 0,
             after: reverse("ReverseClaimed"),
         },
         PrimaryClaimEvent {
             kind: "ResolverChanged",
             family: "ens_v1_registry_l1",
             emitter: ENS_REGISTRY,
+            log: 1,
             after: json!({"source_event": "NewResolver", "node": node,
                 "resolver": ENS_REVERSE_RESOLVER, "emitter_role": "registry"}),
         },
@@ -267,6 +275,7 @@ fn primary_claim_events(
             kind: "RecordChanged",
             family: "ens_v1_resolver_l1",
             emitter: ENS_REVERSE_RESOLVER,
+            log: 2,
             after: json!({
                 "source_event": "NameChanged",
                 "resolver": ENS_REVERSE_RESOLVER,
@@ -357,7 +366,7 @@ async fn publish_primary_claim(
         .into_iter()
         .enumerate()
         .map(|(offset, event)| {
-            let log_index = transaction * 4 + offset as i64;
+            let log_index = transaction * 4 + event.log;
             let mut normalized = history_event(
                 &format!("primary-claim-{transaction}-{offset}"),
                 None,
@@ -1418,7 +1427,7 @@ async fn family_record_fixture_inputs_reach_indexed_api_on_both_namespaces() -> 
             body["data"]["resolver"]["address"],
             json!("0x1000000000000000000000000000000000000001")
         );
-        assert_eq!(body["data"]["addresses"]["60"], json!(address));
+        assert_eq!(body["data"]["records"]["addresses"]["60"], json!(address));
         database.cleanup().await?;
     }
     Ok(())

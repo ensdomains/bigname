@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::v2::name_record::LapsedRegistration;
-use crate::v2::name_records_inventory::RecordInventory;
+use crate::v2::record_groups::{AbiSource, RecordGroups};
 use crate::v2::{
     AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
     Status,
@@ -125,15 +123,13 @@ pub(crate) struct LookupRecord {
     pub(crate) resolver: Option<Resolver>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
+    /// Present on `profile=detail` records that may serve resolver records and have a record
+    /// inventory, as on name detail (`record_groups.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) addresses: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) text_records: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) content_hash: Option<String>,
-    /// Present only on `profile=detail` name results with `include=inventory`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) inventory: Option<RecordInventory>,
+    pub(crate) records: Option<RecordGroups>,
+    /// The inventory row `records` came from, for the request's one batched ABI read.
+    #[serde(skip)]
+    pub(crate) abi_source: Option<AbiSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
