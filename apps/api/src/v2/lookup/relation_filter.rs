@@ -6,7 +6,7 @@ use crate::v2::{Relation, RelationSet};
 
 pub(super) fn requires_relation_post_filter(relation: Option<&RelationSet>) -> bool {
     relation.is_some_and(|relation| {
-        !relation.is_all()
+        relation.as_slice() != Relation::LOOKUP
             && !relation.is_exact_manager()
             && !relation.is_exact_owner_and_registrant()
             && !relation.is_resolves_to()
@@ -49,6 +49,8 @@ pub(super) fn relation_to_storage(
         Relation::Owner => Some(bigname_storage::AddressNameRelation::TokenHolder),
         Relation::Manager => Some(bigname_storage::AddressNameRelation::EffectiveController),
         Relation::Registrant => Some(bigname_storage::AddressNameRelation::Registrant),
+        // Rejected on lookup inputs (parse.rs); never a reverse lookup facet.
+        Relation::RoleHolder => None,
         // Served from `address_records_current` by `resolves_to.rs`; never an authority facet.
         Relation::ResolvesTo => None,
     }

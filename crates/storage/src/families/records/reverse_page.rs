@@ -352,20 +352,11 @@ async fn candidates_on(
            AND surface.namespace = ANY($2)
            AND ($10::text[] IS NULL OR surface.chain_id = ANY($10))
            AND COALESCE(surface.raw_name = $3::jsonb ->> surface.namespace, false) = $4
-           AND (surface.chain_id, surface.logical_name_id) IN (
-               SELECT indexed.chain_id, indexed.logical_name_id
-               FROM bigname_phase.project_address_name_index indexed
-               WHERE indexed.address = lower($1) AND indexed.relation = ANY($5)
-               UNION ALL
-               -- A name the address manages through an ENSv2 registry role (address_roles.rs).
-               SELECT candidate.chain_id, candidate.logical_name_id
-               FROM bigname_phase.project_grant grant_row
-               JOIN bigname_phase.project_binding_candidate candidate
-                 ON candidate.chain_id = grant_row.chain_id
-                AND candidate.resource_id = grant_row.resource_id
-               WHERE $11::text[] IS NOT NULL
-                 AND grant_row.subject = lower($1) AND grant_row.scope_kind = 'registry'
-                 AND grant_row.effective_powers ?| $11::text[]
+           AND EXISTS (
+               SELECT 1 FROM bigname_phase.project_address_name_index indexed
+               WHERE indexed.address = lower($1)
+                 AND indexed.logical_name_id = surface.logical_name_id
+                 AND indexed.chain_id = surface.chain_id AND indexed.relation = ANY($5)
            )
            AND ($6::text IS NULL OR (surface.raw_name, surface.namespace, surface.namehash) > ($6, $7, $8))
          ORDER BY surface.raw_name, surface.namespace, surface.namehash, surface.logical_name_id
@@ -373,9 +364,7 @@ async fn candidates_on(
     )
     .bind(&input.address).bind(namespaces).bind(primary).bind(is_primary).bind(relations)
     .bind(after.map(|key| &key.0)).bind(after.map(|key| &key.1)).bind(after.map(|key| &key.2))
-    .bind(limit).bind(chains)
-    .bind((rank == 1).then_some(super::address_roles::MANAGEMENT_POWERS.as_slice()))
-    .persistent(false).fetch_all(conn).await
+    .bind(limit).bind(chains).persistent(false).fetch_all(conn).await
     .context("failed to seek family reverse lookup candidates")
 }
 

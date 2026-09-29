@@ -299,9 +299,10 @@ collection route carry neither header.
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
   accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
   is the normalized all-three set. Reverse rows match when any listed relation
-  matches, with the same meaning as on `GET /v1/addresses/{address}/names`,
-  including `manager` through an ENSv2 registry `set_resolver` or
-  `set_subregistry` role. `relation=resolves_to` stands alone and answers the names whose
+  matches, with the same meaning as on `GET /v1/addresses/{address}/names`.
+  The address-name relation `role_holder` is not served here: naming it
+  returns `400 invalid_input`, and `any` does not include it.
+  `relation=resolves_to` stands alone and answers the names whose
   current `addr:<coin_type>` resolver record resolves to the input address for
   the input `coin_type`, with the same matching rule, ENSIP-19 default-address
   fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`
@@ -2648,21 +2649,25 @@ introduces it rebuilds Project from full history before serving the option; see
   names, break ties by name identity and then by the grouped resource, in both
   orders.
   `relation` accepts a comma-separated set of v2 vocabulary values
-  `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
-  Rows match when any listed relation matches. The storage relations map as
-  token-holder -> `owner`, effective-controller -> `manager`, and
-  registrant -> `registrant`. `manager` also matches an address holding the
-  ENSv2 registry `set_resolver` or `set_subregistry` role on the name's current
-  registration, as served by `GET /v1/permissions`; other roles, roles held on
-  the registry root, and ENSv2 registry operators do not make an address a
-  `manager` (see [address collections](projections.md#address-and-child-collections)).
-  A page that omits a name therefore does not prove the address holds no
-  permission on it. `dedupe=name` groups by name surface and is the
+  `owner`, `manager`, `registrant`, and `role_holder`; `any` normalizes to all
+  four values. Rows match when any listed relation matches. The storage
+  relations map as token-holder -> `owner`, effective-controller -> `manager`,
+  registrant -> `registrant`, and role-holder -> `role_holder`. `role_holder`
+  matches an address that holds an ENSv2 registry role on the name's current
+  registration, as served by `GET /v1/permissions` with `grant_scope.kind`
+  `registry`: any role, not only the ones that change the name's resolver or
+  subregistry, while the `was_reserved` marker alone is not a role. It does
+  not make the address the `manager`, and it combines with the other
+  relations: an owner that also holds a role matches both. Roles held on the
+  registry root and ENSv2 registry operators add no `role_holder` rows (see
+  [address collections](projections.md#address-and-child-collections)), so a
+  page that omits a name does not prove the address holds no permission on
+  it. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
   from the address-to-record family indexes rather than the authority
-  relations. It stands alone: `resolves_to` combined with `owner`, `manager`,
+  relations. It stands alone: `resolves_to` combined with `owner`, `manager`, `role_holder`,
   `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
   it, because it is coin-type scoped and its rows are not authority claims.
   `coin_type` is accepted only with `relation=resolves_to`; supplying it with
@@ -2728,8 +2733,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `relation=resolves_to` row whose name has only a retained serving resource,
   and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, and `registrant` that matched, or
-  `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
+  subset of `owner`, `manager`, `registrant`, and `role_holder` that matched,
+  or `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
   `addr:2147483648` when the ENSIP-19 default EVM address answered). On a
@@ -3125,8 +3130,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and `include=raw` add the [history event
   payloads](#history-event-payloads-includedata-includeraw).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
-  comma-separated set of `owner`, `manager`, and `registrant`; `any`
-  normalizes to all three values. Rows match when any listed relation matches.
+  comma-separated set of `owner`, `manager`, `registrant`, and `role_holder`
+  with the meanings of `GET /v1/addresses/{address}/names`; `any` normalizes
+  to all four values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate

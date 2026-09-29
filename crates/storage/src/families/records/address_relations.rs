@@ -14,8 +14,9 @@
 //!   registrant's recipient before an owner lapse. The lapse also removes wrapper_state, so both
 //!   readers then withhold the token-holder relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder or
-//!   registrant, where the mask allows. Each holder of an ENSv2 registry management role on the
-//!   name's selected resource is an effective controller as well (`address_roles.rs`).
+//!   registrant, where the mask allows.
+//! - The role holders are the holders of an ENSv2 registry role on the name's selected resource
+//!   (`address_roles.rs`). Holding a role does not make an address the effective controller.
 //!
 //! The mask reads the NameWrapper row of the name's resource: whether a PermissionScopeChanged
 //! ever set it (`scope_modifiers`), the composed `wrapper_state`, and the grace test at the
@@ -24,7 +25,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::{FamilyPosition, address_roles::RoleManager};
+use super::{FamilyPosition, address_roles::RoleHolder};
 use crate::{
     NameCurrentRow,
     families::control::{
@@ -58,14 +59,15 @@ pub(super) struct NameRelationsInput<'a> {
     /// The NameWrapper row of the name's resource.
     pub(super) wrapper: Option<&'a WrapperRow>,
     pub(super) clock_seconds: i64,
-    /// The ENSv2 registry management role holders of the name's selected resource.
-    pub(super) role_managers: &'a [RoleManager],
+    /// The ENSv2 registry role holders of the name's selected resource.
+    pub(super) role_holders: &'a [RoleHolder],
 }
 
 /// The relation names, in the served relation rank order.
 pub(super) const REGISTRANT: &str = "registrant";
 pub(super) const TOKEN_HOLDER: &str = "token_holder";
 pub(super) const EFFECTIVE_CONTROLLER: &str = "effective_controller";
+pub(super) const ROLE_HOLDER: &str = "role_holder";
 
 /// The (address, relation) pairs of one name; empty for a name without a bound, registered row.
 pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static str)> {
@@ -109,15 +111,13 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         };
         out.push((effective, EFFECTIVE_CONTROLLER));
     }
-    for manager in input.role_managers {
-        out.push((Some(manager.subject.clone()), EFFECTIVE_CONTROLLER));
+    for holder in input.role_holders {
+        out.push((Some(holder.subject.clone()), ROLE_HOLDER));
     }
-    let mut seen = BTreeSet::new();
     out.into_iter()
         .filter_map(|(address, relation)| {
             let address = address?.to_ascii_lowercase();
-            (address != ZERO && seen.insert((address.clone(), relation)))
-                .then_some((address, relation))
+            (address != ZERO).then_some((address, relation))
         })
         .collect()
 }
@@ -245,8 +245,8 @@ fn registry_only_window(
 mod tests;
 
 /// The actual event that supplied `address`'s current relation, for bounded history
-/// attribution. Reuses the controller fold, the role holder's grant and the registration fold's
-/// selected event; it does not infer an acquisition time from the publication time.
+/// attribution. Reuses the controller fold, the role holder's grant row and the registration
+/// fold's selected event; it does not infer an acquisition time from the publication time.
 pub(super) fn relation_position(
     input: &NameRelationsInput<'_>,
     address: &str,
@@ -263,23 +263,16 @@ pub(super) fn relation_position(
         let open = modifier.is_none()
             || (matches!(wrapper_state, Some("wrapped" | "emancipated"))
                 && in_grace == Some(false));
-        let controller = controller(input, open);
-        if let Some((_, position)) = controller
-            .as_ref()
-            .filter(|(controller, _)| controller.eq_ignore_ascii_case(address))
-        {
-            return Some(position.clone());
-        }
-        if let Some(manager) = input
-            .role_managers
-            .iter()
-            .find(|manager| manager.subject.eq_ignore_ascii_case(address))
-        {
-            return Some(manager.position.clone());
-        }
-        if let Some((_, position)) = controller {
+        if let Some((_, position)) = controller(input, open) {
             return Some(position);
         }
+    }
+    if relation == ROLE_HOLDER {
+        return input
+            .role_holders
+            .iter()
+            .find(|holder| holder.subject.eq_ignore_ascii_case(address))
+            .map(|holder| holder.position.clone());
     }
     FamilyPosition::from_json(input.row.provenance.get("registrant_position")?)
 }

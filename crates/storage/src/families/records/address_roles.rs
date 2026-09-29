@@ -1,20 +1,24 @@
-//! Names an address manages through an ENSv2 registry role on the name's own registration.
+//! The `role_holder` relation: names on which an address holds an ENSv2 registry role.
 //!
-//! ENSv2 `PermissionedRegistry.setResolver` and `setSubregistry` accept any account holding
-//! `ROLE_SET_RESOLVER` or `ROLE_SET_SUBREGISTRY` on the name's token resource, so such a role
-//! holder manages the name without owning it.
+//! An ENSv2 `PermissionedRegistry` keeps per-account role bitmaps on each registration's token
+//! resource (`EACRolesChanged`), and a holder can act on the name within those roles without
+//! owning it, for example `setResolver` and `setSubregistry` check `ROLE_SET_RESOLVER` and
+//! `ROLE_SET_SUBREGISTRY` on the token resource.
 //! (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L155 @ ens_v2@a971bd64)
-//! (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L33-L41 @ ens_v2@a971bd64)
+//! (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7-L63 @ ens_v2@a971bd64)
+//! Holding a role does not make the address the name's manager (the effective controller).
 //!
-//! A holder qualifies when a served permission row of the name's selected resource
-//! (`GET /v1/permissions`, the F8 grant after the read-time masks of `masked_grants`) has the
-//! registry scope and holds one of [`MANAGEMENT_POWERS`]. Other roles (renewing, unregistering,
-//! admin roles), roles held on the registry root, and ENSv2 registry operators do not add a
-//! name: a root role reaches every name of the registry, and operators are not permission rows.
+//! An address is a role holder of a name when a served permission row of the name's selected
+//! resource (`GET /v1/permissions`, the F8 grant after the read-time masks of `masked_grants`)
+//! has the registry scope and holds at least one role. The `was_reserved` marker alone is not a
+//! role: it authorizes nothing.
+//! (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
+//! Roles held on the registry root reach every name of the registry and add no name; ENSv2
+//! registry operators are not permission rows and add none either.
 //!
-//! The grants are read at request time, so the membership follows the published grant rows
-//! with no Project index of its own. The candidate names come from the grant's resource through
-//! the F1 binding candidates; the composed name keeps a holder only while that resource is its
+//! The grants are read at request time, so the relation follows the published grant rows with
+//! no Project index of its own. The candidate names come from the grant's resource through the
+//! F1 binding candidates; the composed name keeps a holder only while that resource is its
 //! selected resource.
 use std::collections::BTreeMap;
 
@@ -28,18 +32,18 @@ use crate::families::control::{
     rows::{Maxima, WrapperRow, text},
 };
 
-/// The ENSv2 registry roles whose holder manages the name: its resolver and its subregistry.
-pub(crate) const MANAGEMENT_POWERS: [&str; 2] = ["set_resolver", "set_subregistry"];
+/// The ENSv2 registry role bit that marks a registration made from a reservation; not a role.
+const MARKER: &str = "was_reserved";
 
 /// One role holder of a name's selected resource, with its grant row's position.
 #[derive(Clone, Debug)]
-pub(crate) struct RoleManager {
+pub(crate) struct RoleHolder {
     pub(crate) subject: String,
     pub(crate) position: FamilyPosition,
 }
 
 /// The (chain, name) pairs bound, now or before, to a resource on which `address` holds a
-/// management role grant. A superset: the composed name decides.
+/// registry-scope grant with some power. A superset: the composed name decides.
 pub(super) async fn role_name_candidates(
     conn: &mut PgConnection,
     address: &str,
@@ -53,26 +57,24 @@ pub(super) async fn role_name_candidates(
            ON candidate.chain_id = grant_row.chain_id
           AND candidate.resource_id = grant_row.resource_id
          WHERE grant_row.subject = lower($1) AND grant_row.scope_kind = 'registry'
-           AND grant_row.effective_powers ?| $3::text[]
+           AND NOT grant_row.revoked
            AND ($2::text IS NULL OR candidate.namespace = $2)",
     )
     .bind(address)
     .bind(namespace)
-    .bind(MANAGEMENT_POWERS.as_slice())
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the registry role names of {address}"))
 }
 
-/// The management role holders of each resource at `clock_seconds`, as the permission read
-/// serves them.
-pub(super) async fn role_managers(
+/// The role holders of each resource at `clock_seconds`, as the permission read serves them.
+pub(super) async fn role_holders(
     conn: &mut PgConnection,
     chain_id: &str,
     resources: &[String],
     wrappers: &BTreeMap<String, WrapperRow>,
     clock_seconds: i64,
-) -> Result<BTreeMap<String, Vec<RoleManager>>> {
+) -> Result<BTreeMap<String, Vec<RoleHolder>>> {
     if resources.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -80,11 +82,10 @@ pub(super) async fn role_managers(
         "/* storage:families.records.address_role_grants */ SELECT to_jsonb(grant_row)
          FROM bigname_phase.project_grant grant_row
          WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])
-           AND grant_row.scope_kind = 'registry' AND grant_row.effective_powers ?| $3::text[]",
+           AND grant_row.scope_kind = 'registry' AND NOT grant_row.revoked",
     )
     .bind(chain_id)
     .bind(resources)
-    .bind(MANAGEMENT_POWERS.as_slice())
     .fetch_all(&mut *conn)
     .await
     .context("failed to load the registry role grants")?;
@@ -120,14 +121,14 @@ pub(super) async fn role_managers(
             key_states.get(resource),
             clock_seconds,
         );
-        let managers: Vec<RoleManager> = served
+        let mut holders: Vec<RoleHolder> = served
             .iter()
-            .filter(|grant| grant.scope_kind.as_deref() == Some("registry") && manages(grant))
+            .filter(|grant| grant.scope_kind.as_deref() == Some("registry") && holds_role(grant))
             .filter_map(|grant| {
                 let row = grants
                     .iter()
                     .find(|row| row.subject == grant.subject && row.scope == grant.scope)?;
-                Some(RoleManager {
+                Some(RoleHolder {
                     subject: grant.subject.to_ascii_lowercase(),
                     position: FamilyPosition {
                         block_number: row.position.block_number,
@@ -138,19 +139,21 @@ pub(super) async fn role_managers(
                 })
             })
             .collect();
-        if !managers.is_empty() {
-            out.insert(resource.clone(), managers);
+        holders.sort_by(|left, right| left.subject.cmp(&right.subject));
+        holders.dedup_by(|left, right| left.subject == right.subject);
+        if !holders.is_empty() {
+            out.insert(resource.clone(), holders);
         }
     }
     Ok(out)
 }
 
-fn manages(grant: &ServedGrant) -> bool {
+fn holds_role(grant: &ServedGrant) -> bool {
     grant
         .effective_powers
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .any(|power| MANAGEMENT_POWERS.contains(&power))
+        .any(|power| power != MARKER)
 }

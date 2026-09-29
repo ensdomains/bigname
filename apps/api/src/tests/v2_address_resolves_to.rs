@@ -178,7 +178,7 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
     assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(105));
     assert_no_banned_v1_spellings(&payload);
 
-    // The authority relations are untouched: `any` stays the three authority relations and no
+    // The authority relations are untouched: `any` stays the authority relations and no
     // authority row carries a resolution.
     let any_payload = v2_address_names_payload_for_database(
         &database,

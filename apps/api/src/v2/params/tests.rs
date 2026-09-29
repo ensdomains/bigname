@@ -159,7 +159,7 @@ fn relation_sets_parse_any_and_canonicalize_duplicates() {
     .expect("relation any must parse");
     assert_eq!(
         params.relation.as_ref().map(RelationSet::canonical_value),
-        Some("owner,manager,registrant".to_owned())
+        Some("owner,manager,registrant,role_holder".to_owned())
     );
 
     let error = parse(RawQueryParams {

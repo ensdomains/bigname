@@ -2,7 +2,7 @@
 //! address index (`project_address_name_index`) lists for the address, composed at read
 //! (`families::name`), with each name's relations recomputed at its publication
 //! (`address_relations.rs`). The index holds every address a relation can take under some
-//! admission and mask, so the read only removes rows. Names the address manages through an
+//! admission and mask, so the read only removes rows. Names on which the address holds an
 //! ENSv2 registry role come from the served grant rows instead (`address_roles.rs`). The rows
 //! are bound in the served `address_names_current` shape into the served page statements
 //! (`address_names::source`), so the grouping, dedupe, filters, sorts, cursors and totals are
@@ -26,7 +26,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::{
     FamilyPosition,
     address_relations::{ControllerCandidate, NameRelationsInput, relations},
-    address_roles::{RoleManager, role_managers},
+    address_roles::{RoleHolder, role_holders},
 };
 use crate::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
@@ -122,7 +122,7 @@ pub(crate) async fn compose_address_name_rows(
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
-    // The names the address manages through an ENSv2 registry role, which the index does not
+    // The names on which the address holds an ENSv2 registry role, which the index does not
     // list (`address_roles.rs`).
     let mut indexed = indexed;
     indexed
@@ -234,7 +234,7 @@ struct ChainInputs {
     candidates: BTreeMap<String, Vec<ControllerCandidate>>,
     bindings: BTreeMap<String, BindingCandidate>,
     wrappers: BTreeMap<String, WrapperRow>,
-    role_managers: BTreeMap<String, Vec<RoleManager>>,
+    role_holders: BTreeMap<String, Vec<RoleHolder>>,
 }
 
 impl ChainInputs {
@@ -307,13 +307,13 @@ impl ChainInputs {
             .into_iter()
             .map(|wrapper| (wrapper.resource_id.clone(), wrapper))
             .collect();
-        let role_managers =
-            role_managers(&mut *conn, chain_id, &resources, &wrappers, clock_seconds).await?;
+        let role_holders =
+            role_holders(&mut *conn, chain_id, &resources, &wrappers, clock_seconds).await?;
         Ok(Self {
             candidates,
             bindings,
             wrappers,
-            role_managers,
+            role_holders,
         })
     }
 
@@ -331,9 +331,9 @@ impl ChainInputs {
                 .as_ref()
                 .and_then(|resource| self.wrappers.get(resource)),
             clock_seconds,
-            role_managers: resource
+            role_holders: resource
                 .as_ref()
-                .and_then(|resource| self.role_managers.get(resource))
+                .and_then(|resource| self.role_holders.get(resource))
                 .map_or(&[][..], Vec::as_slice),
         }
     }
@@ -371,7 +371,8 @@ pub(crate) async fn name_relations_on(
                         "registrant" => AddressNameRelation::Registrant,
                         "token_holder" => AddressNameRelation::TokenHolder,
                         "effective_controller" => AddressNameRelation::EffectiveController,
-                        _ => unreachable!("family relations have three defined kinds"),
+                        "role_holder" => AddressNameRelation::RoleHolder,
+                        _ => unreachable!("family relations have four defined kinds"),
                     };
                     crate::IdentityAddressRelationRow {
                         address,

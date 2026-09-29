@@ -1,5 +1,5 @@
-// Names an address manages through ENSv2 registry roles on the name's own registration
-// (TYR-70). The fixture's beta.eth moves to an ENSv2 registration registered to V2_ADDRESS;
+// The `role_holder` address-name relation: names on which an address holds an ENSv2 registry
+// role on the name's own registration (TYR-70). The fixture's beta.eth moves to an ENSv2 registration registered to V2_ADDRESS;
 // ROLE_HOLDER holds roles on that registration only.
 
 const ROLE_HOLDER: &str = "0x3ed205a5ad7cc1545aea8fae0113df3026d9a861";
@@ -78,14 +78,17 @@ fn row_names_and_relations(payload: &Value) -> Vec<(String, Value)> {
 }
 
 #[tokio::test]
-async fn v2_address_names_list_a_name_managed_through_registry_roles() -> Result<()> {
+async fn v2_address_names_list_a_name_whose_registry_role_the_address_holds() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["set_resolver", "set_subregistry"])).await?;
 
-    // The permissions route already serves the grant.
+    // The permissions route serves the grant.
     let permissions = v2_permissions_payload_for_database(
         &database,
-        &format!("/v1/permissions?registration_id={}&address={ROLE_HOLDER}", Uuid::from_u128(ROLE_RESOURCE)),
+        &format!(
+            "/v1/permissions?registration_id={}&address={ROLE_HOLDER}",
+            Uuid::from_u128(ROLE_RESOURCE)
+        ),
     )
     .await?;
     assert_eq!(
@@ -94,56 +97,66 @@ async fn v2_address_names_list_a_name_managed_through_registry_roles() -> Result
         "{permissions}"
     );
 
-    for relation in ["manager", "any"] {
+    for relation in ["role_holder", "any", "manager,role_holder"] {
         let payload = role_holder_names(&database, relation).await?;
         assert_eq!(
             row_names_and_relations(&payload),
-            vec![("beta.eth".to_owned(), json!(["manager"]))],
+            vec![("beta.eth".to_owned(), json!(["role_holder"]))],
             "relation={relation}: {payload}"
         );
     }
-    for relation in ["owner", "registrant"] {
+    // Holding a role does not make the address the manager, owner or registrant.
+    for relation in ["manager", "owner", "registrant", "owner,manager,registrant"] {
         let payload = role_holder_names(&database, relation).await?;
         assert_eq!(payload["data"], json!([]), "relation={relation}: {payload}");
     }
+    let unfiltered = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{ROLE_HOLDER}/names"),
+    )
+    .await?;
+    assert_eq!(
+        row_names_and_relations(&unfiltered),
+        vec![("beta.eth".to_owned(), json!(["role_holder"]))]
+    );
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_address_names_list_either_qualifying_registry_role_alone() -> Result<()> {
-    for power in ["set_resolver", "set_subregistry"] {
+async fn v2_address_names_list_any_registry_role_but_not_the_reservation_marker() -> Result<()> {
+    for powers in [
+        json!(["renew"]),
+        json!(["unregister"]),
+        json!(["admin_set_resolver"]),
+        json!(["can_transfer_admin"]),
+        json!(["was_reserved", "renew"]),
+    ] {
         let database = TestDatabase::new_migrated().await?;
-        seed_role_holder(&database, json!([power])).await?;
-        let payload = role_holder_names(&database, "manager").await?;
+        seed_role_holder(&database, powers.clone()).await?;
         assert_eq!(
-            row_names_and_relations(&payload),
-            vec![("beta.eth".to_owned(), json!(["manager"]))],
-            "{power}: {payload}"
+            row_names_and_relations(&role_holder_names(&database, "role_holder").await?),
+            vec![("beta.eth".to_owned(), json!(["role_holder"]))],
+            "{powers}"
         );
         database.cleanup().await?;
     }
-    Ok(())
+    // `was_reserved` marks a registration made from a reservation; it is not a role.
+    let database = TestDatabase::new_migrated().await?;
+    seed_role_holder(&database, json!(["was_reserved"])).await?;
+    assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
+    database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_address_names_omit_registry_roles_that_do_not_manage_the_name() -> Result<()> {
+async fn v2_address_names_drop_a_role_holder_once_every_role_is_revoked() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    // Renewing, unregistering and the admin roles do not change how the name resolves.
-    let resource = seed_role_holder(
-        &database,
-        json!(["renew", "unregister", "admin_set_resolver", "admin_set_subregistry",
-            "can_transfer_admin"]),
-    )
-    .await?;
-    assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
-
-    // A later grant of a qualifying role lists the name; revoking every role removes it again.
+    let resource = seed_role_holder(&database, json!(["renew"])).await?;
     set_role_holder_powers(&database, resource, json!(["renew", "set_resolver"])).await?;
     assert_eq!(
-        row_names_and_relations(&role_holder_names(&database, "manager").await?),
-        vec![("beta.eth".to_owned(), json!(["manager"]))]
+        row_names_and_relations(&role_holder_names(&database, "role_holder").await?),
+        vec![("beta.eth".to_owned(), json!(["role_holder"]))]
     );
-    set_role_holder_powers(&database, resource, json!(["renew"])).await?;
+    set_role_holder_powers(&database, resource, json!([])).await?;
     assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
     database.cleanup().await
 }
@@ -181,10 +194,10 @@ async fn v2_address_names_omit_registry_root_role_holders() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_address_names_keep_the_owner_relations_of_a_role_holding_owner() -> Result<()> {
+async fn v2_address_names_add_role_holder_to_an_owner_that_holds_a_role() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!([])).await?;
-    // The registrant also holds a qualifying role: one row, with every relation it matched.
+    // The registrant also holds a role: one row, with every relation it matched.
     let (block, hash) = address_fixture_head(&database).await?;
     let name = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
     let event = address_role_event(
@@ -205,55 +218,75 @@ async fn v2_address_names_keep_the_owner_relations_of_a_role_holding_owner() -> 
     .await?;
     assert_eq!(
         row_names_and_relations(&payload),
-        vec![("beta.eth".to_owned(), json!(["registrant", "owner", "manager"]))],
+        vec![(
+            "beta.eth".to_owned(),
+            json!(["registrant", "owner", "manager", "role_holder"])
+        )],
         "{payload}"
     );
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_lists_a_name_managed_through_registry_roles() -> Result<()> {
+async fn v2_lookup_reverse_keeps_its_three_relations() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["set_resolver"])).await?;
     let payload = v2_lookup_json(
         &database,
         json!({"inputs": [
             {"id": "manager", "address": ROLE_HOLDER, "relation": "manager"},
-            {"id": "any", "address": ROLE_HOLDER, "relation": "any"},
-            {"id": "owner", "address": ROLE_HOLDER, "relation": "owner"}
+            {"id": "any", "address": ROLE_HOLDER, "relation": "any"}
         ]}),
     )
     .await?;
-    let listed = |index: usize| {
-        payload["data"][index]["records"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|record| (record["name"].as_str().unwrap().to_owned(), record["relations"].clone()))
-            .collect::<Vec<_>>()
-    };
-    let managed = vec![("beta.eth".to_owned(), json!(["manager"]))];
-    assert_eq!(listed(0), managed, "{payload}");
-    assert_eq!(listed(1), managed, "{payload}");
-    assert_eq!(listed(2), vec![], "{payload}");
+    for index in [0, 1] {
+        assert_eq!(payload["data"][index]["records"], json!([]), "{payload}");
+    }
+    assert_eq!(
+        payload["data"][1]["input"]["relation"],
+        json!("owner,manager,registrant")
+    );
+    let rejected = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/lookup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"inputs": [
+                        {"address": ROLE_HOLDER, "relation": "role_holder"}
+                    ]})
+                    .to_string(),
+                ))
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_address_history_follows_a_name_managed_through_registry_roles() -> Result<()> {
+async fn v2_address_history_follows_a_role_held_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["set_resolver"])).await?;
-    let payload = v2_address_names_payload_for_database(
-        &database,
-        &format!("/v1/addresses/{ROLE_HOLDER}/history?relation=manager&include=raw"),
-    )
-    .await?;
+    let history = |relation: &'static str| {
+        let database = &database;
+        async move {
+            v2_address_names_payload_for_database(
+                database,
+                &format!("/v1/addresses/{ROLE_HOLDER}/history?relation={relation}"),
+            )
+            .await
+        }
+    };
+    let payload = history("role_holder").await?;
     let rows = payload["data"].as_array().unwrap();
     assert!(rows.iter().all(|row| row["name"] == json!("beta.eth")), "{payload}");
     assert!(
         rows.iter().any(|row| row["type"] == json!("permission")),
         "the role grant itself is in the holder's history: {payload}"
     );
+    assert_eq!(history("any").await?["data"], payload["data"]);
+    assert_eq!(history("manager").await?["data"], json!([]));
     database.cleanup().await
 }
-
