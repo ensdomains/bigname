@@ -267,6 +267,7 @@ pub(crate) async fn load_address_names_page_from(
         entries,
         next_cursor,
         summary,
+        registry_children_digest: String::new(),
     })
 }
 

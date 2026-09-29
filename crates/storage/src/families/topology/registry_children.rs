@@ -34,6 +34,7 @@ pub(crate) async fn load_owned_registry_children(
     chain_id: &str,
     address: &str,
     candidates: &[String],
+    published_block: i64,
 ) -> Result<Vec<RegistryChildRow>> {
     // The predicates repeat `normalized_events_v1_subregistry_after_child_scope_idx`'s, so the
     // lookup by child reads that index.
@@ -79,10 +80,11 @@ pub(crate) async fn load_owned_registry_children(
     builder.push_bind(candidates);
     builder.push(") AND children.owner = lower(");
     builder.push_bind(address);
-    builder.push(
-        ") AND state.owner_resource_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM bigname_phase.name_surfaces surface
-                           WHERE surface.logical_name_id = children.child_logical_name_id)",
+    builder.push(") AND state.owner_resource_id IS NOT NULL AND NOT ");
+    push_published_surface_exists(
+        &mut builder,
+        "children.child_logical_name_id",
+        published_block,
     );
     let rows = builder
         .build()
@@ -105,4 +107,37 @@ pub(crate) async fn load_owned_registry_children(
         }
     }
     Ok(children)
+}
+
+/// The published-surface test of a name id, as SQL with `$block` naming the publication block
+/// parameter: a surface the ordinary compositor would read (active, named, canonical in a
+/// canonical block, `name::loaders::surfaces`) written at or before the publication
+/// (`name::batch::load_base`). A registry child is surface-less for a publication exactly when
+/// this is false, so the two paths hand a child over at the publication that composes it.
+pub(crate) fn published_surface_exists(id: &str, block: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM bigname_phase.name_surfaces surface
+                 JOIN bigname_phase.chain_lineage lineage
+                   ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+                 WHERE surface.logical_name_id = {id}
+                   AND surface.visibility_state = 'active' AND surface.raw_name <> ''
+                   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   AND surface.block_number <= {block})"
+    )
+}
+
+/// [`published_surface_exists`] on a query builder, binding the publication block.
+fn push_published_surface_exists(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    id: &str,
+    published_block: i64,
+) {
+    let (head, tail) = published_surface_exists(id, "\u{0}")
+        .split_once("\u{0}")
+        .map(|(head, tail)| (head.to_owned(), tail.to_owned()))
+        .expect("the surface test names its block once");
+    builder.push(head);
+    builder.push_bind(published_block);
+    builder.push(tail);
 }

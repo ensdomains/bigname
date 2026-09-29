@@ -2561,7 +2561,14 @@ introduces it rebuilds Project from full history before serving the option; see
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A
   registry `Transfer` moves the row to the new owner. Once a surface names the
-  child, only its ordinary row is listed. The listing covers the ENSv1 arm: a
+  child, only its ordinary row is listed; the surface counts from the family
+  publication that includes its block, so a surface Interpret commits after the
+  served publication leaves the child listed here until Project publishes it.
+  A label preimage can arrive without a new publication and rename such a row,
+  which can move it across a `sort=name` cursor, so every continuation cursor
+  is bound to the served renderings of the address's registry children: when
+  any changed since the cursor was issued, the continuation fails as `stale`
+  (409) and the read restarts without a cursor. The listing covers the ENSv1 arm: a
   Basenames registry child with no surface is listed only on its parent's
   subnames page. Reverse inputs of `POST /v1/lookup` still list only names
   with a current name row.

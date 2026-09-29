@@ -348,3 +348,120 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
 
     database.cleanup().await
 }
+
+/// A name surface Interpret commits after the publication does not take the child out of the
+/// published read: the child stays a registry-child row until Project publishes the block that
+/// serves the name's ordinary row, which then replaces it.
+#[tokio::test]
+async fn v2_registry_child_stays_listed_until_its_new_surface_is_published() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (_, (known, _, _)) = seed_registry_children_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&page_size=2");
+    let before = read_family_pages(&database, &uri).await?;
+
+    // Interpret names the child at 241; the families are still published at 240.
+    let (named, named_resource) = seed_family_name_at(
+        &database,
+        "known.alpha.eth",
+        0x7e1_0000,
+        "ens_v1",
+        "ens",
+        FAMILY_CHAIN,
+        241,
+    )
+    .await?;
+    let pages = read_family_pages(&database, &uri).await?;
+    assert_eq!(names_of(&rows_of(&pages)), names_of(&rows_of(&before)), "{pages:#?}");
+    assert_eq!(pages[0]["total_count"], json!(5), "{pages:#?}");
+    let row = rows_of(&pages)
+        .into_iter()
+        .find(|row| row["namehash"] == json!(known))
+        .expect("the child is still listed");
+    assert_eq!(
+        row["permission_resource_id"],
+        json!(Uuid::from_u128(0x7d1_0001).to_string()),
+        "{row:#}"
+    );
+    // The parent's subnames route still serves it the same way.
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    let subname = subnames
+        .iter()
+        .find(|subname| subname["namehash"] == json!(known))
+        .expect("the child is still a subname");
+    for field in ["name", "display_name", "owner", "registration_status"] {
+        assert_eq!(row[field], subname[field], "{field}: {row:#} vs {subname:#}");
+    }
+
+    // Once 241 is published with the name's registry fact, the ordinary row alone serves it.
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[family_event(
+            "rc-known-named",
+            Some(&named),
+            Some(named_resource),
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            241,
+            0,
+            json!({"source_event": "Transfer", "node": known, "owner": RC_OWNER,
+                   "owner_getter": RC_OWNER, "emitter_role": "registry",
+                   "authority_kind": "registry_only"}),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 241).await?;
+    let rows = rows_of(&read_family_pages(&database, &uri).await?);
+    let known_rows: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["name"] == json!("known.alpha.eth"))
+        .collect();
+    assert_eq!(known_rows.len(), 1, "{rows:#?}");
+    assert_eq!(
+        known_rows[0]["permission_resource_id"],
+        json!(named_resource.to_string()),
+        "{:#}",
+        known_rows[0]
+    );
+
+    database.cleanup().await
+}
+
+/// A label preimage that arrives between two requests renames a registry child, which can move
+/// it across a name-sorted cursor, so the continuation asks for a restart; a fresh read then
+/// serves the new name once.
+#[tokio::test]
+async fn v2_registry_child_rename_restarts_a_name_sorted_read() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=2");
+    let (status, first) = read_family_response(&database, &uri).await?;
+    assert_eq!(status, StatusCode::OK, "{first:#}");
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("a second page")
+        .to_owned();
+
+    // Unchanged renderings: the continuation resumes.
+    let (status, body) = read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+
+    insert_family_label_preimage(&database.pool, b"unknown").await?;
+    let (status, error) =
+        read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
+    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+
+    let rows = rows_of(&read_family_pages(&database, &uri).await?);
+    let mut expected = vec![
+        "alpha.eth",
+        "gains.alpha.eth",
+        "known.alpha.eth",
+        "unknown.alpha.eth",
+        "zeta.eth",
+    ];
+    expected.sort();
+    assert_eq!(names_of(&rows), expected, "{rows:#?}");
+
+    database.cleanup().await
+}

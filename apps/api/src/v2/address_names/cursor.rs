@@ -21,6 +21,9 @@ pub(crate) const SORT_KIND_CURSOR_KEY: &str = "sort_kind";
 pub(crate) const SORT_VALUE_CURSOR_KEY: &str = "sort_value";
 const LOGICAL_NAME_ID_CURSOR_KEY: &str = "logical_name_id";
 const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
+/// The digest of the address's registry-child renderings the page was read with
+/// (`AddressNamesCurrentSortedPage::registry_children_digest`).
+pub(crate) const REGISTRY_CHILDREN_KEY: &str = "registry_children";
 pub(crate) const SORT_KIND_NAME: &str = "name";
 pub(crate) const SORT_KIND_TIMESTAMP_NULL: &str = "timestamp_null";
 pub(crate) const SORT_KIND_TIMESTAMP_VALUE: &str = "timestamp_value";
@@ -42,6 +45,7 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
 pub(crate) fn address_names_cursor_payload(
     cursor: &AddressNamesCurrentSortedCursor,
     binding: &AddressNamesCursorBinding<'_>,
+    registry_children_digest: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         binding.sort.as_str(),
@@ -75,6 +79,10 @@ pub(crate) fn address_names_cursor_payload(
                 ORDER_FILTER_KEY.to_owned(),
                 binding.order.as_str().to_owned(),
             ),
+            (
+                REGISTRY_CHILDREN_KEY.to_owned(),
+                registry_children_digest.to_owned(),
+            ),
         ]),
         cursor_last_item(cursor),
         None,
@@ -88,7 +96,9 @@ pub(crate) fn address_names_storage_cursor(
     if payload.sort != binding.sort.as_str() {
         return Err(invalid_cursor_error());
     }
-    if payload.filters.len() != 8
+    // The registry-children digest is checked once the page is read (`registry_children_moved`).
+    if payload.filters.len() != 9
+        || !payload.filters.contains_key(REGISTRY_CHILDREN_KEY)
         || payload.filters.get("is_migrated")
             != Some(
                 &binding
@@ -206,4 +216,15 @@ fn relation_filter_value(value: Option<&RelationSet>) -> String {
     value
         .map(RelationSet::canonical_value)
         .unwrap_or_else(|| NONE_FILTER_VALUE.to_owned())
+}
+
+/// Whether a continuation's registry children render differently from when its cursor was
+/// issued: a label preimage arrived for one of them (or one appeared or left), which can move it
+/// across the cursor in a name-sorted page, so the read must restart.
+pub(crate) fn registry_children_moved(payload: &CursorPayload, digest: &str) -> bool {
+    payload
+        .filters
+        .get(REGISTRY_CHILDREN_KEY)
+        .map(String::as_str)
+        != Some(digest)
 }

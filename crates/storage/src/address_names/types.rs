@@ -202,4 +202,8 @@ pub struct AddressNamesCurrentSortedPage {
     pub entries: Vec<AddressNameCurrentEntry>,
     pub next_cursor: Option<AddressNamesCurrentSortedCursor>,
     pub summary: AddressNamesCurrentSummary,
+    /// A digest of the address's surface-less registry children and the names they render
+    /// (`families::records::registry_children`). A continuation cursor carries it; when it
+    /// changed, a late label preimage may have moved a child in the order, so the read restarts.
+    pub registry_children_digest: String,
 }

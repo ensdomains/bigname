@@ -3560,13 +3560,26 @@ async fn seed_family_name_on(
     namespace: &str,
     chain_id: &str,
 ) -> Result<(String, Uuid)> {
+    seed_family_name_at(database, name, seed, arm, namespace, chain_id, FAMILY_FIRST_BLOCK).await
+}
+
+/// `seed_family_name_on` with the surface, lineage, resource and binding committed at `block`.
+async fn seed_family_name_at(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+    arm: &str,
+    namespace: &str,
+    chain_id: &str,
+    block: i64,
+) -> Result<(String, Uuid)> {
     let (logical_name_id, namehash) = phase_logical_identity(namespace, name)?;
     let (resource_id, token_lineage_id, surface_binding_id) = (
         Uuid::from_u128(seed),
         Uuid::from_u128(seed + 1),
         Uuid::from_u128(seed + 2),
     );
-    let hash = format!("0xhistory{FAMILY_FIRST_BLOCK}");
+    let hash = format!("0xhistory{block}");
     upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
@@ -3583,7 +3596,7 @@ async fn seed_family_name_on(
             normalization_errors: json!([]),
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: FAMILY_FIRST_BLOCK,
+            block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
@@ -3595,7 +3608,7 @@ async fn seed_family_name_on(
             token_lineage_id,
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: FAMILY_FIRST_BLOCK,
+            block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
@@ -3608,7 +3621,7 @@ async fn seed_family_name_on(
             token_lineage_id: Some(token_lineage_id),
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: FAMILY_FIRST_BLOCK,
+            block_number: block,
             provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
@@ -3623,11 +3636,11 @@ async fn seed_family_name_on(
             resource_id,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             authority_arm: arm.to_owned(),
-            active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + FAMILY_FIRST_BLOCK)?,
+            active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + block)?,
             active_to: None,
             chain_id: chain_id.to_owned(),
             block_hash: hash,
-            block_number: FAMILY_FIRST_BLOCK,
+            block_number: block,
             provenance: json!({"seed": "family_differential", "transaction_index": 0,
                                "log_index": 0}),
             canonicality_state: CanonicalityState::Canonical,

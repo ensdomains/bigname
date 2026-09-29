@@ -37,4 +37,6 @@ pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
-pub(crate) use registry_children::{RegistryChildRow, load_owned_registry_children};
+pub(crate) use registry_children::{
+    RegistryChildRow, load_owned_registry_children, published_surface_exists,
+};

@@ -59,13 +59,13 @@ pub async fn load_family_address_names_page(
     let (mut rows, names) =
         compose_address_name_rows(&mut snapshot, address, namespace, false).await?;
     // The surface-less ENSv1 registry children the address owns, which compose no name row.
-    let children =
+    let (children, registry_children_digest) =
         super::registry_children::compose_registry_child_rows(&mut snapshot, address, namespace)
             .await?;
     if let Value::Array(rows) = &mut rows {
         rows.extend(children);
     }
-    let page = load_address_names_page_from(
+    let mut page = load_address_names_page_from(
         &mut snapshot,
         RowSource::Composed {
             rows: &rows,
@@ -84,6 +84,7 @@ pub async fn load_family_address_names_page(
         page_size,
     )
     .await?;
+    page.registry_children_digest = registry_children_digest;
     snapshot.commit().await?;
     Ok(page)
 }

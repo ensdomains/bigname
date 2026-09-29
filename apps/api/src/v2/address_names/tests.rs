@@ -26,7 +26,7 @@ fn address_names_cursor_payload_round_trips_name_cursor() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
 
     assert_eq!(
         address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name))
@@ -45,7 +45,7 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
         resource_id: Uuid::from_u128(0x1235),
     };
     let null_payload =
-        address_names_cursor_payload(&null_cursor, &binding(AddressNamesSort::ExpiresAt));
+        address_names_cursor_payload(&null_cursor, &binding(AddressNamesSort::ExpiresAt), "");
     assert_eq!(
         null_payload.last_item[SORT_KIND_CURSOR_KEY],
         SORT_KIND_TIMESTAMP_NULL
@@ -65,7 +65,7 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
         resource_id: Uuid::from_u128(0x1236),
     };
     let value_payload =
-        address_names_cursor_payload(&value_cursor, &binding(AddressNamesSort::ExpiresAt));
+        address_names_cursor_payload(&value_cursor, &binding(AddressNamesSort::ExpiresAt), "");
     assert_eq!(
         value_payload.last_item[SORT_KIND_CURSOR_KEY],
         SORT_KIND_TIMESTAMP_VALUE
@@ -89,17 +89,17 @@ fn address_names_cursor_rejects_cross_sort_filter_or_order() {
         resource_id: Uuid::from_u128(0x1234),
     };
 
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
     assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::ExpiresAt)).is_err());
 
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
     payload.filters.insert(
         ADDRESS_FILTER_KEY.to_owned(),
         "0x00000000000000000000000000000000000000bb".to_owned(),
     );
     assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
 
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
     payload
         .filters
         .insert(ORDER_FILTER_KEY.to_owned(), "desc".to_owned());
@@ -113,7 +113,7 @@ fn address_names_cursor_ignores_legacy_snapshot_component() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
     payload.snapshot = Some("legacy-snapshot".to_owned());
 
     assert_eq!(
@@ -133,7 +133,7 @@ fn address_names_cursor_rejects_cross_timestamp_sort_reuse() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::ExpiresAt));
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::ExpiresAt), "");
 
     assert!(
         address_names_storage_cursor(&payload, &binding(AddressNamesSort::RegisteredAt)).is_err()
@@ -147,7 +147,7 @@ fn address_names_cursor_token_decodes_to_bound_payload() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
     let encoded = crate::v2::encode(&payload);
 
     assert_eq!(

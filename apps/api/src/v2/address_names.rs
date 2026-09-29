@@ -194,13 +194,12 @@ pub(crate) async fn get_address_names(
         params.namespace.as_deref(),
     )
     .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = address_names_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
+    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor_payload
+        .as_ref()
+        .map(|payload| {
+            let cursor = address_names_storage_cursor(payload, &cursor_binding)?;
+            snapshot.validate_cursor(payload)?;
             Ok(cursor)
         })
         .transpose()?;
@@ -235,6 +234,12 @@ pub(crate) async fn get_address_names(
             ))
         })(error)
     })?;
+
+    if cursor_payload.as_ref().is_some_and(|payload| {
+        self::cursor::registry_children_moved(payload, &storage_page.registry_children_digest)
+    }) {
+        return Err(super::collection_snapshot::restart_required());
+    }
 
     let logical_name_ids = storage_page
         .entries
@@ -360,7 +365,11 @@ pub(crate) async fn get_address_names(
     };
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(address_names_cursor_payload(cursor, &cursor_binding)))
+        encode(&snapshot.bind_cursor(address_names_cursor_payload(
+            cursor,
+            &cursor_binding,
+            &storage_page.registry_children_digest,
+        )))
     });
     let has_more = next_cursor.is_some();
     let data = storage_page
