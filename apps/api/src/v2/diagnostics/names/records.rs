@@ -194,6 +194,13 @@ async fn build_name_records_diagnostic(
         &[],
         RECORD_CACHE_UNSUPPORTED_REASON,
     );
+    for section in [&mut record_inventory_section, &mut record_cache_section] {
+        for field in ["record_version_boundary", "last_change"] {
+            if let Some(provenance) = section.get_mut(field) {
+                super::format_provenance_timestamp(provenance)?;
+            }
+        }
+    }
     expose_record_boundary_name(&mut record_inventory_section, row);
     expose_record_boundary_name(&mut record_cache_section, row);
     apply_diagnostics_dictionary_names(&mut record_inventory_section)?;

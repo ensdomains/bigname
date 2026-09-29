@@ -20,7 +20,12 @@ pub(crate) async fn get_name_binding_diagnostic(
 ) -> V2Result<Json<Envelope<JsonValue>>> {
     let params = bind_diagnostic_path_name(input_name, params);
     let (row, selected_snapshot) = resolve_diagnostic_name(&state, &params).await?;
-    let data = build_name_binding_diagnostic_data(&row);
+    let mut data = build_name_binding_diagnostic_data(&row);
+    for path in ["/history/surface_head", "/history/resource_head"] {
+        if let Some(provenance) = data.pointer_mut(path) {
+            super::format_provenance_timestamp(provenance)?;
+        }
+    }
 
     diagnostic_envelope(data, &selected_snapshot)
 }

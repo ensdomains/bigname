@@ -137,6 +137,21 @@ fn diagnostic_envelope(
     }))
 }
 
+// Format only the declared provenance timestamp at the public response boundary.
+// The retained position remains precise for internal selection and identity.
+fn format_provenance_timestamp(provenance: &mut JsonValue) -> V2Result<()> {
+    let Some(timestamp) = provenance.pointer_mut("/chain_position/timestamp") else {
+        return Ok(());
+    };
+    if timestamp.is_null() {
+        return Ok(());
+    }
+    let seconds = bigname_storage::UnixSeconds::from_json(timestamp)
+        .ok_or_else(|| V2Error::internal_error("failed to map diagnostic provenance timestamp"))?;
+    *timestamp = JsonValue::String(seconds.unix_timestamp().to_string());
+    Ok(())
+}
+
 fn apply_diagnostics_dictionary_names(value: &mut JsonValue) -> V2Result<()> {
     match value {
         JsonValue::Object(object) => {

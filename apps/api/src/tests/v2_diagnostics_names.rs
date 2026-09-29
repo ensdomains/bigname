@@ -67,7 +67,7 @@ async fn v2_diagnostics_name_routes_return_declared_state_slices() -> Result<()>
         if case.suffix == "binding" {
             let head = json!({"normalized_event_id":resolver_event,"event_kind":"ResolverChanged",
                 "chain_position":{"chain_id":"ethereum-mainnet","block_number":21000003,
-                    "block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03+00:00"}});
+                    "block_hash":"0xbinding","timestamp":"1776384003"}});
             case.expected_data["history"] = json!({"surface_head":head,"resource_head":head});
         }
         let uri = format!("/v1/diagnostics/names/Alice.eth/{}", case.suffix);
@@ -142,6 +142,17 @@ async fn v2_diagnostics_name_records_executes_ephemeral_lookup_without_legacy_pe
     let status = response.status();
     let payload: Value = read_json(response).await?;
     assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    for path in [
+        "/data/record_inventory/last_change/chain_position/timestamp",
+        "/data/record_inventory/record_version_boundary/chain_position/timestamp",
+        "/data/record_cache/record_version_boundary/chain_position/timestamp",
+    ] {
+        assert_eq!(
+            payload.pointer(path),
+            Some(&json!("1776384003")),
+            "{path}: {payload}"
+        );
+    }
     assert_eq!(
         payload["data"]["comparison"],
         json!({
@@ -279,7 +290,7 @@ async fn v2_diagnostics_name_records_reuses_supported_inventory_boundary_fallbac
     let expected_boundary = json!({"namespace":"ens","name":"alice.eth",
     "registration_id":Uuid::from_u128(0x2200).to_string(),"normalized_event_id":event_id,
     "event_kind":"RecordVersionChanged","chain_position":{
-        "chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"2026-04-17T00:00:03+00:00"
+        "chain_id":"ethereum-mainnet","block_number":21000003,"block_hash":"0xbinding","timestamp":"1776384003"
     }});
 
     let payload = request_v2_diagnostics_json(
@@ -605,7 +616,8 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
     seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
 
     for suffix in ["coverage", "binding", "authority", "records"] {
-        let invalid_namespace = format!("/v1/diagnostics/names/alice.eth/{suffix}?namespace=unknown");
+        let invalid_namespace =
+            format!("/v1/diagnostics/names/alice.eth/{suffix}?namespace=unknown");
         let payload =
             request_v2_diagnostics_json(&database, &invalid_namespace, StatusCode::BAD_REQUEST)
                 .await?;
@@ -618,8 +630,16 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
         let invalid_at = format!("/v1/diagnostics/names/alice.eth/{suffix}?at=not-hex");
         let payload =
             request_v2_diagnostics_json(&database, &invalid_at, StatusCode::BAD_REQUEST).await?;
-        assert_eq!(payload["error"]["code"], json!("invalid_input"), "{invalid_at}");
-        assert_eq!(payload["error"]["message"], json!("at is invalid"), "{invalid_at}");
+        assert_eq!(
+            payload["error"]["code"],
+            json!("invalid_input"),
+            "{invalid_at}"
+        );
+        assert_eq!(
+            payload["error"]["message"],
+            json!("at is invalid"),
+            "{invalid_at}"
+        );
     }
 
     database.cleanup().await?;
