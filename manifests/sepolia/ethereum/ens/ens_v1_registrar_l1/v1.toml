@@ -35,13 +35,18 @@ start_block = 3702731
 # WrappedETHRegistrarController. Its deployment artifact, pinned with the Basenames
 # ens-contracts checkout, records the address and a successful creation receipt at
 # block 3790244, with the canonical Sepolia NameWrapper and ENS registry as
-# constructor arguments. The NameWrapper enabled it as a controller at block 3790246
-# and never disabled it; it renews through `NameWrapper.renew`, which is
-# `onlyController`.
+# constructor arguments. No pinned reference records its activation, so that rests on
+# chain evidence (docs/upstream.md, "Second Sepolia wrapped registrar controller admitted
+# from chain evidence"): the Sepolia NameWrapper's ControllerChanged(0xFED6a969…, true) at
+# block 3790246 in transaction
+# 0x3d990937aa69cf6202d71914d48648c1f0ea48cc9f744f20aaecc0ae6f29c041 (log 335) enabled
+# it, and it is the only ControllerChanged for the address through block 11807218, so it
+# was never disabled. It renews through `NameWrapper.renew`, which is `onlyController`.
 # (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L2 @ basenames@1809bbc)
 # (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L604 @ basenames@1809bbc)
 # (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L654-L656 @ basenames@1809bbc)
 # (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L665-L668 @ basenames@1809bbc)
+# (upstream: .refs/ens_v1/contracts/wrapper/Controllable.sol:L9-L19 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L315 @ ens_v1@91c966f)
 [[contracts]]
 role = "wrapped_registrar_controller"
