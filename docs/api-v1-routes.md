@@ -3070,9 +3070,9 @@ For a registrar lease first identified by a later readable observation, registra
   renewal transaction contains two `renewal` rows — the renewal-bridge arm and
   the ENSv1-registrar arm — and two `expiry` rows. Reservation-scoped state
   changes remain reservation/resource facts and do not produce registration
-  renewal rows; no synthetic collapsed renewal is created. The candidate
-  `MigrationApplied` and
-  `ContractDiscovered` kinds have no product event type. During slice 1, every
+  renewal rows; no synthetic collapsed renewal is created. An activated
+  `MigrationApplied` maps to `migration` (see [migrations](#migrations)); a
+  candidate one, and `ContractDiscovered`, have no product row. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded
   even if its familiar event kind would otherwise map above or its source family
   is `ens_v2_registry_l1`. An event admitted independently by an existing family
