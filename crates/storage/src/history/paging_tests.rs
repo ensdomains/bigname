@@ -246,10 +246,17 @@ async fn generic_plans_still_read_the_order_index_from_the_cursor_block() -> Res
     let database = phase_database("history_keyset_generic_plan", PLAN_FIXTURE).await?;
     let result = async {
         let mut connection = database.pool().acquire().await?;
-        sqlx::query("SET plan_cache_mode = force_generic_plan")
-            .execute(&mut *connection)
+        let before: String = sqlx::query_scalar("SHOW plan_cache_mode")
+            .fetch_one(&mut *connection)
             .await?;
         let failures = order_index_plan_failures(&mut connection, PlanMode::Generic).await?;
+        let after: String = sqlx::query_scalar("SHOW plan_cache_mode")
+            .fetch_one(&mut *connection)
+            .await?;
+        ensure!(
+            before == after,
+            "generic-plan helper changed the session mode"
+        );
         ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
     }
@@ -366,8 +373,8 @@ async fn order_index_plan_failures(
 }
 
 /// `EXPLAIN ANALYZE` the page query. A bound `EXPLAIN` plans with the values as constants
-/// whatever `plan_cache_mode` says, so the generic mode prepares the query and explains an
-/// `EXECUTE` of it with the same values.
+/// whatever `plan_cache_mode` says, so the generic mode forces a generic prepared execution,
+/// verifies PostgreSQL's plan counters, and restores the caller's session setting.
 async fn explain_page(
     connection: &mut PgConnection,
     mut query: QueryBuilder<'_, Postgres>,
@@ -375,7 +382,8 @@ async fn explain_page(
 ) -> Result<Value> {
     match mode {
         PlanMode::Unprepared => {
-            let mut explain = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
+            let mut explain =
+                QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ");
             explain.push(query.sql());
             let sql = explain.into_sql();
             let mut built = query.build();
@@ -386,37 +394,70 @@ async fn explain_page(
                 .await?)
         }
         PlanMode::Generic => {
-            sqlx::raw_sql(&format!("PREPARE history_page AS {}", query.sql()))
-                .execute(&mut *connection)
-                .await
-                .context("failed to prepare the page query")?;
-            let mut built = query.build();
-            let arguments = built
-                .take_arguments()
-                .map_err(anyhow::Error::from_boxed)?
-                .unwrap_or_default();
-            // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value as a
-            // quoted literal for it.
-            let placeholders = (1..=arguments.len())
-                .map(|index| format!("quote_nullable(${index})"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let literals: Vec<String> =
-                sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
-                    .persistent(false)
-                    .fetch_one(&mut *connection)
-                    .await?;
-            let plan = sqlx::query_scalar(&format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE history_page({})",
-                literals.join(", ")
-            ))
-            .persistent(false)
-            .fetch_one(&mut *connection)
-            .await;
-            sqlx::raw_sql("DEALLOCATE history_page")
+            let previous: String = sqlx::query_scalar("SHOW plan_cache_mode")
+                .fetch_one(&mut *connection)
+                .await?;
+            sqlx::query("SET plan_cache_mode = force_generic_plan")
                 .execute(&mut *connection)
                 .await?;
-            Ok(plan?)
+            let mut prepared = false;
+            let result: Result<Value> = async {
+                sqlx::raw_sql(&format!("PREPARE history_page AS {}", query.sql()))
+                    .execute(&mut *connection)
+                    .await
+                    .context("failed to prepare the page query")?;
+                prepared = true;
+                let mut built = query.build();
+                let arguments = built
+                    .take_arguments()
+                    .map_err(anyhow::Error::from_boxed)?
+                    .unwrap_or_default();
+                // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value
+                // as a quoted literal for it.
+                let placeholders = (1..=arguments.len())
+                    .map(|index| format!("quote_nullable(${index})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let literals: Vec<String> =
+                    sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+                        .persistent(false)
+                        .fetch_one(&mut *connection)
+                        .await?;
+                let plan = sqlx::query_scalar(&format!(
+                    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE history_page({})",
+                    literals.join(", ")
+                ))
+                .persistent(false)
+                .fetch_one(&mut *connection)
+                .await?;
+                let (generic, custom): (i64, i64) = sqlx::query_as(
+                    "SELECT generic_plans, custom_plans FROM pg_prepared_statements
+                     WHERE name = 'history_page'",
+                )
+                .fetch_one(&mut *connection)
+                .await?;
+                ensure!(generic == 1 && custom == 0,
+                    "expected one generic execution, found generic_plans={generic}, custom_plans={custom}");
+                eprintln!("verified history_page: generic_plans={generic}; custom_plans={custom}");
+                Ok(plan)
+            }.await;
+            // Restore even when preparation, execution, or the evidence assertion fails.
+            let cleanup = if prepared {
+                sqlx::raw_sql("DEALLOCATE history_page")
+                    .execute(&mut *connection)
+                    .await
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
+            let restore = sqlx::query("SELECT set_config('plan_cache_mode', $1, false)")
+                .bind(previous)
+                .execute(&mut *connection)
+                .await;
+            let plan = result?;
+            cleanup?;
+            restore?;
+            Ok(plan)
         }
     }
 }
@@ -463,3 +504,6 @@ fn page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
         }
     }
 }
+
+#[path = "contract_count_tests.rs"]
+mod contract_count_tests;

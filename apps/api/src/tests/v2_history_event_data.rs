@@ -689,6 +689,20 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     );
     assert!(history.iter().all(|row| row["name"] == json!("legal.eth")), "{history:?}");
     assert_eq!(history.len(), 3);
+    // The exact history key filter uses the same record-ID attribution, never the current
+    // name or a fabricated reset. It also excludes the node resolver's avatar writes.
+    let filtered = event_data_payload(&database,
+        "/v1/events?record_key=text:description&kind=RecordChanged&include=data&order=asc").await?;
+    let record_rows = event_data_rows(&filtered);
+    assert_eq!(record_rows.len(), 7);
+    assert!(record_rows.iter().all(|row| row.get("name").is_none()
+        && row["data"]["record_id"].is_string()));
+    for route in ["/v1/events?name=legal.eth", "/v1/names/legal.eth/history?scope=both"] {
+        let query = format!("{route}&record_key=text:description&order=asc");
+        let (ids, total) = hkw_baseline(&database, &query).await?;
+        assert_eq!(total, json!(3));
+        assert_eq!(hkw_rest(&database, &query, None, Some(&total)).await?, ids);
+    }
 
     database.cleanup().await
 }

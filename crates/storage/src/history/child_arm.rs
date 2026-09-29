@@ -40,6 +40,9 @@ impl ChildArm {
         parent: &str,
         filter: &EventHistoryReadFilter,
     ) -> anyhow::Result<Option<Self>> {
+        if filter.match_no_events || filter.record_key.is_some() {
+            return Ok(None);
+        }
         if !filter.event_kinds.is_empty()
             && !filter
                 .event_kinds

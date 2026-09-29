@@ -304,6 +304,16 @@ pub(super) fn push_history_filters<'a>(
 
     push_registration_filter(builder, filter, canonical_only);
 
+    if filter.match_no_events {
+        builder.push(" AND FALSE");
+    }
+    if let Some(key) = filter.record_key.as_ref() {
+        // The route selector has already bounded resolver/node/record-ID scope. A reset
+        // stays one reset; it never becomes an invented write of the requested key.
+        builder.push(" AND (ne.event_kind = 'RecordVersionChanged' OR (ne.event_kind = 'RecordChanged' AND ne.after_state ->> 'record_key' = ");
+        builder.push_bind(key);
+        builder.push("))");
+    }
     if !filter.event_kinds.is_empty() {
         builder.push(" AND ");
         push_string_filter(builder, "ne.event_kind", &filter.event_kinds);
