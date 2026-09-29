@@ -69,6 +69,10 @@ pub(crate) struct SearchName {
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<String>,
+    /// On `GET /v1/names` rows only: the last holder of a released registration
+    /// (`name_record::lapsed_registration`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lapsed_registration: Option<crate::v2::name_record::LapsedRegistration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +278,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
         created_at: registration.created_at,
         expires_at: registration.expires_at,
         grace_ends_at: registration.grace_ends_at,
+        lapsed_registration: None,
     }
 }
 

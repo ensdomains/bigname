@@ -50,6 +50,7 @@ pub(super) fn relation_to_storage(
         Relation::Manager => Some(bigname_storage::AddressNameRelation::EffectiveController),
         Relation::Registrant => Some(bigname_storage::AddressNameRelation::Registrant),
         // Served from `address_records_current` by `resolves_to.rs`; never an authority facet.
-        Relation::ResolvesTo => None,
+        // `former_registrant` is served only by `GET /v1/addresses/{address}/names`.
+        Relation::ResolvesTo | Relation::FormerRegistrant => None,
     }
 }

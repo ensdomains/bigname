@@ -628,6 +628,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
         "registrant": HOLDER,
         "held_through": "registrar",
         "released_at": "2024-02-12T22:13:20Z",
+        "release_kind": "expired",
     });
     let lapsed = &payload["data"][0]["record"];
     assert_eq!(lapsed["registration_status"], json!("released"), "{lapsed:?}");

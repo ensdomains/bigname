@@ -26,6 +26,19 @@ pub(crate) struct LapsedRegistration {
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) released_at: Option<String>,
+    /// How the registration ended: `expired` (an ENSv1 lease past its grace, or an ENSv2
+    /// registration past its expiry, which its holder can still renew during the ENSv2 grace)
+    /// or `unregistered` (an explicit ENSv2 unregister, which burns the token).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) release_kind: Option<LapsedReleaseKind>,
+}
+
+/// How a lapsed registration ended.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LapsedReleaseKind {
+    Expired,
+    Unregistered,
 }
 
 /// The contract a lapsed ENSv1 lease was held through.
@@ -38,6 +51,8 @@ pub(crate) enum LapsedHeldThrough {
     /// A lease held through the NameWrapper.
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
     Wrapper,
+    /// An ENSv2 registration, held as the registry's token.
+    Registry,
 }
 
 impl LapsedHeldThrough {
@@ -56,10 +71,18 @@ pub(crate) fn lapsed_registration(summary: &Value) -> Option<LapsedRegistration>
     let lapsed = object_field(declared_registration(summary)?, "lapsed_registration")?;
     Some(LapsedRegistration {
         registrant: json_address_at_paths(lapsed, &[&["registrant"]]),
-        held_through: string_field(lapsed.get("authority_kind"))
-            .as_deref()
-            .and_then(LapsedHeldThrough::from_authority_kind),
+        held_through: match string_field(lapsed.get("held_through")).as_deref() {
+            Some("registry") => Some(LapsedHeldThrough::Registry),
+            _ => string_field(lapsed.get("authority_kind"))
+                .as_deref()
+                .and_then(LapsedHeldThrough::from_authority_kind),
+        },
         released_at: json_timestamp_at_paths(lapsed, &[&["released_at"]]),
+        release_kind: match string_field(lapsed.get("release_kind")).as_deref() {
+            Some("expired") => Some(LapsedReleaseKind::Expired),
+            Some("unregistered") => Some(LapsedReleaseKind::Unregistered),
+            _ => None,
+        },
     })
 }
 

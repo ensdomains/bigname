@@ -148,7 +148,15 @@ pub(crate) async fn get_names(
         .map(|cursor| names_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
-    let data = storage_page.rows.iter().map(build_search_name).collect();
+    // A released row names its last holder, as name detail does (TYR-63).
+    let data = storage_page
+        .rows
+        .iter()
+        .map(|row| SearchName {
+            lapsed_registration: super::name_record::lapsed_registration(&row.row.declared_summary),
+            ..build_search_name(row)
+        })
+        .collect();
 
     Ok(Json(Envelope {
         data,

@@ -472,7 +472,13 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "registered_at": "2023-02-02T00:00:00+00:00",
                 "created_at": "2023-02-02T00:00:00+00:00",
                 "expires_at": "2023-11-14T22:13:20Z",
-                "grace_ends_at": "2024-02-12T22:13:20Z"
+                "grace_ends_at": "2024-02-12T22:13:20Z",
+                "lapsed_registration": {
+                    "registrant": HOLDER,
+                    "held_through": "registrar",
+                    "released_at": "2024-02-12T22:13:20Z",
+                    "release_kind": "expired"
+                }
             },
             {
                 "name": "live-listed.eth",
@@ -488,7 +494,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "grace_ends_at": "2030-06-15T17:46:40Z"
             }
         ]),
-        "the released name keeps its place at its old expiry, with no registrant or owner"
+        "the released name keeps its place at its old expiry, with no registrant or owner, and \
+         names its last holder"
     );
 
     // A window that covers only the old expiry still serves the released name.
@@ -499,17 +506,63 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     .await?;
     assert_eq!(v2_names_listed(&payload), vec!["lapsed-listed.eth"]);
 
-    // The lapsed holder is on the name's own record, not on the listing row.
+    // The name's own record names the same last holder.
     let detail =
         v2_name_record_payload_for_database(&database, "/v1/names/lapsed-listed.eth").await?;
-    assert_eq!(
-        detail["data"]["lapsed_registration"],
-        json!({
-            "registrant": HOLDER,
-            "held_through": "registrar",
-            "released_at": "2024-02-12T22:13:20Z",
-        })
-    );
+    let lapsed = json!({
+        "registrant": HOLDER,
+        "held_through": "registrar",
+        "released_at": "2024-02-12T22:13:20Z",
+        "release_kind": "expired",
+    });
+    assert_eq!(detail["data"]["lapsed_registration"], lapsed);
+
+    // The last holder finds the released name under `former_registrant`, and only there.
+    let former = v2_names_payload(
+        &database,
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant"),
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&former), vec!["lapsed-listed.eth"], "{former}");
+    let row = &former["data"][0];
+    assert_eq!(row["relations"], json!(["former_registrant"]));
+    assert_eq!(row["registration_status"], json!("released"));
+    assert_eq!(row["lapsed_registration"], lapsed);
+    assert_eq!(row["expires_at"], json!("2023-11-14T22:13:20Z"));
+    assert!(row.get("owner").is_none() && row.get("registrant").is_none(), "{row}");
+    let current = v2_names_payload(&database, &format!("/v1/addresses/{HOLDER}/names")).await?;
+    assert_eq!(v2_names_listed(&current), vec!["live-listed.eth"], "{current}");
+
+    // The window is over the served expiry: past the old expiry the name is outside it.
+    let windowed = v2_names_payload(
+        &database,
+        &format!(
+            "/v1/addresses/{HOLDER}/names?relation=former_registrant\
+             &expires_after=2023-11-14T22:13:21Z&sort=expires_at&order=desc"
+        ),
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&windowed), Vec::<String>::new());
+
+    for (uri, message) in [
+        (
+            format!("/v1/addresses/{HOLDER}/names?relation=former_registrant,owner"),
+            "relation=former_registrant cannot be combined with another relation or any",
+        ),
+        (
+            format!("/v1/addresses/{HOLDER}/names?expires_after=2023-01-01T00:00:00Z"),
+            "expires_after and expires_before require relation=former_registrant",
+        ),
+        (
+            format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&sort=name"),
+            "relation=former_registrant sorts by expires_at only",
+        ),
+    ] {
+        let response = v2_names_response(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let refused: Value = read_json(response).await?;
+        assert_eq!(refused["error"]["message"], json!(message), "{uri}");
+    }
 
     database.cleanup().await
 }

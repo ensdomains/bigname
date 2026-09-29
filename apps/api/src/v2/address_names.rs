@@ -5,9 +5,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::{
-    AddressNameCurrentEntry, EffectivePermissionRow, NameCurrentRow, PrimaryNameClaimStatus,
-};
+use bigname_storage::{EffectivePermissionRow, PrimaryNameClaimStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -37,10 +35,12 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
+mod former_registrant;
 mod record_counts;
 mod resolves_to;
 mod resolves_to_evm;
 mod role_summary;
+mod row;
 mod storage_mapping;
 
 use record_counts::load_address_name_record_counts;
@@ -53,6 +53,7 @@ pub(crate) use self::storage_mapping::{
 pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
 #[cfg(test)]
 pub(crate) use self::role_summary::grant_read_test_hooks;
+pub(crate) use self::row::{build_address_name, permission_resource_handle};
 
 pub(crate) struct AddressNamesQueryParams;
 
@@ -63,6 +64,8 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "finality",
         "relation",
         "coin_type",
+        "expires_after",
+        "expires_before",
         "authority",
         "is_migrated",
         "q",
@@ -115,6 +118,10 @@ pub(crate) struct AddressName {
     /// stored record matched, ascending, with the record key that matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolutions: Option<Vec<AddressNameResolution>>,
+    /// Present only on `relation=former_registrant` rows: the ended registration's last holder,
+    /// as name detail serves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lapsed_registration: Option<crate::v2::name_record::LapsedRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +165,23 @@ pub(crate) async fn get_address_names(
         .is_some_and(RelationSet::is_resolves_to)
     {
         return resolves_to::get_address_resolves_to(&state, &normalized_address, &params).await;
+    }
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_former_registrant)
+    {
+        return former_registrant::get_address_former_registrants(
+            &state,
+            &normalized_address,
+            &params,
+        )
+        .await;
+    }
+    if params.expires_after.is_some() || params.expires_before.is_some() {
+        return Err(V2Error::invalid_input(
+            "expires_after and expires_before require relation=former_registrant",
+        ));
     }
     if params.coin_type.is_some() {
         return Err(V2Error::invalid_input(
@@ -481,70 +505,6 @@ async fn load_primary_names_by_namespace<'a>(
         primary_names.insert(namespace.to_owned(), primary_name);
     }
     Ok(primary_names)
-}
-
-pub(crate) fn build_address_name(
-    entry: &AddressNameCurrentEntry,
-    name_row: Option<&NameCurrentRow>,
-    primary_name: Option<&str>,
-    migrated_at: Option<String>,
-    subname_count: Option<u64>,
-    record_count: Option<u64>,
-    role_summary: Option<Vec<AddressNameRoleSummary>>,
-) -> AddressName {
-    let registration = name_registration_fields(name_row, &entry.namespace);
-
-    // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
-    // route serves for it (`subnames::build_subname` with no name row), its registry owner and
-    // the registration fields of no name row, on its registry-only resource.
-    AddressName {
-        name: entry.normalized_name.clone(),
-        display_name: entry.canonical_display_name.clone(),
-        namespace: entry.namespace.clone(),
-        namehash: entry.namehash.clone(),
-        permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
-        owner: registration.owner.or_else(|| entry.served_owner.clone()),
-        registrant: registration.registrant,
-        registration_status: registration.registration_status,
-        registered_at: registration.registered_at,
-        created_at: registration.created_at,
-        expires_at: registration.expires_at,
-        grace_ends_at: registration.grace_ends_at,
-        authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
-        migrated_at,
-        relations: entry
-            .relations
-            .iter()
-            .copied()
-            .map(relation_from_storage)
-            .collect(),
-        is_primary: !entry.is_registry_child()
-            && primary_name == Some(entry.normalized_name.as_str()),
-        resolution: None,
-        resolutions: None,
-        subname_count,
-        record_count,
-        role_summary,
-        restrictions: None,
-    }
-}
-
-/// The value `GET /v1/permissions?registration_id=` resolves to this row's permission resource:
-/// the registration the name currently serves (its BaseRegistrar lease for a wrapped `.eth`
-/// name, whose rows live on the NameWrapper resource), or the resource itself when no
-/// current registration claims it. Unsupported name coverage does not erase a retained handle.
-/// A wrapped subname has no lease, so it keeps its NameWrapper resource.
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L414 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
-pub(crate) fn permission_resource_handle(
-    name_row: Option<&NameCurrentRow>,
-    resource_id: sqlx::types::Uuid,
-) -> String {
-    name_row
-        .filter(|row| super::permissions::registration_row(row))
-        .and_then(|row| registration_id(&row.declared_summary, None))
-        .unwrap_or_else(|| resource_id.to_string())
 }
 
 pub(crate) fn build_address_name_role_summary(

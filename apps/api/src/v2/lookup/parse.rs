@@ -111,6 +111,14 @@ pub(super) fn parse_address_input(
         .parse::<u64>()
         .map_err(|_| V2Error::invalid_input("coin_type must fit in an unsigned 64-bit integer"))?;
     let relation = parse_relation_set_param(input.relation.as_deref())?;
+    if relation
+        .as_ref()
+        .is_some_and(RelationSet::is_former_registrant)
+    {
+        return Err(V2Error::invalid_input(
+            "relation=former_registrant is served by GET /v1/addresses/{address}/names only",
+        ));
+    }
     let roles = relation_to_storage_roles(relation.as_ref());
     let page_size = parse_page_size(input.page_size)?;
     validate_reverse_cursor_encoding(input.cursor.as_deref())?;

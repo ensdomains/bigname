@@ -409,7 +409,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         registration.insert("registrant".into(), Value::Null);
         registration.insert(
             "lapsed_registration".into(),
-            json!({"registrant": registrant, "released_at": released_at}),
+            json!({"registrant": registrant, "released_at": released_at,
+                   "release_kind": "expired"}),
         );
     } else if v2_release {
         unreleased = Some(registration.clone());
@@ -422,6 +423,15 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         if !path {
             registration.insert("expiry".into(), Value::Null);
         }
+        // The registry token's holder when the registration ended (TYR-63): the latest grant,
+        // transfer or release registrant on the key. A path-expired registration stays
+        // renewable by it through the grace period; an unregistered one does not.
+        registration.insert(
+            "lapsed_registration".into(),
+            json!({"registrant": registrant, "released_at": released_at,
+                   "held_through": "registry",
+                   "release_kind": if path { "expired" } else { "unregistered" }}),
+        );
     }
 
     registration.insert(

@@ -116,6 +116,11 @@ pub(crate) enum Relation {
     /// resolver-record relation, not an authority relation: it is coin-type scoped, never part
     /// of `any`, and never combined with the authority relations in one set.
     ResolvesTo,
+    /// The address was the last registrant of the name's registration when it ended: an ENSv1
+    /// lease that lapsed past grace, or an ENSv2 registration that expired or was unregistered
+    /// (`lapsed_registration.registrant`). Never current authority, never part of `any`, and never
+    /// combined with another relation in one set.
+    FormerRegistrant,
 }
 
 impl Relation {
@@ -128,6 +133,7 @@ impl Relation {
             Self::Manager => "manager",
             Self::Registrant => "registrant",
             Self::ResolvesTo => "resolves_to",
+            Self::FormerRegistrant => "former_registrant",
         }
     }
 
@@ -137,6 +143,7 @@ impl Relation {
             "manager" => Some(Self::Manager),
             "registrant" => Some(Self::Registrant),
             "resolves_to" => Some(Self::ResolvesTo),
+            "former_registrant" => Some(Self::FormerRegistrant),
             _ => None,
         }
     }
@@ -158,13 +165,15 @@ impl RelationSet {
     /// with an authority relation has no canonical form and returns `None`.
     pub(crate) fn from_relations(relations: impl IntoIterator<Item = Relation>) -> Option<Self> {
         let requested = relations.into_iter().collect::<Vec<_>>();
-        if requested.contains(&Relation::ResolvesTo) {
-            return requested
-                .iter()
-                .all(|relation| *relation == Relation::ResolvesTo)
-                .then(|| Self {
-                    relations: vec![Relation::ResolvesTo],
-                });
+        for exclusive in [Relation::ResolvesTo, Relation::FormerRegistrant] {
+            if requested.contains(&exclusive) {
+                return requested
+                    .iter()
+                    .all(|relation| *relation == exclusive)
+                    .then(|| Self {
+                        relations: vec![exclusive],
+                    });
+            }
         }
         let mut normalized = Vec::new();
         for candidate in Relation::ALL {
@@ -199,6 +208,10 @@ impl RelationSet {
 
     pub(crate) fn is_resolves_to(&self) -> bool {
         self.relations == [Relation::ResolvesTo]
+    }
+
+    pub(crate) fn is_former_registrant(&self) -> bool {
+        self.relations == [Relation::FormerRegistrant]
     }
 
     pub(crate) fn is_exact_owner_and_registrant(&self) -> bool {
@@ -538,6 +551,7 @@ mod tests {
         assert_wire(Relation::Manager, "manager");
         assert_wire(Relation::Registrant, "registrant");
         assert_wire(Relation::ResolvesTo, "resolves_to");
+        assert_wire(Relation::FormerRegistrant, "former_registrant");
     }
 
     #[test]

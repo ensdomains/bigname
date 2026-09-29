@@ -361,6 +361,7 @@ pub(super) async fn get_address_resolves_to(
                 is_primary,
                 resolution,
                 resolutions,
+                lapsed_registration: None,
                 subname_count: include.counts.then(|| {
                     subname_counts_by_name
                         .get(&entry.logical_name_id)

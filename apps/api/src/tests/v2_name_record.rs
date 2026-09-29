@@ -1247,7 +1247,7 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
     assert_eq!(
         data.get("lapsed_registration"),
         Some(&json!({
-            "registrant":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"2026-06-09T23:59:55Z"
+            "registrant":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"2026-06-09T23:59:55Z","release_kind":"expired"
         }))
     );
     assert!(data.get("resolver").is_none(), "{payload}");
