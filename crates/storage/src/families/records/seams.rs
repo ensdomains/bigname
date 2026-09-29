@@ -10,6 +10,24 @@ mod scoped {
 
     tokio::task_local! {
         static INVENTORY_READS: Arc<Mutex<Vec<usize>>>;
+        static ROLE_READS: Arc<Mutex<Vec<&'static str>>>;
+    }
+
+    /// Records only the role-candidate and role-grant queries a request executes. This does
+    /// not count ordinary ownership candidates, composition, or other permission reads.
+    pub async fn with_role_read_counter<F: Future>(
+        reads: Arc<Mutex<Vec<&'static str>>>,
+        future: F,
+    ) -> F::Output {
+        ROLE_READS.scope(reads, future).await
+    }
+
+    pub(in crate::families::records) fn note_role_read(query: &'static str) {
+        let _ = ROLE_READS.try_with(|reads| {
+            if let Ok(mut reads) = reads.lock() {
+                reads.push(query);
+            }
+        });
     }
 
     /// Runs `future` appending to `reads` the resource count of every record inventory read in
@@ -33,9 +51,12 @@ mod scoped {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::note_inventory_read;
+pub(super) use scoped::{note_inventory_read, note_role_read};
 #[cfg(any(test, feature = "test-support"))]
-pub use scoped::with_inventory_read_counter;
+pub use scoped::{with_inventory_read_counter, with_role_read_counter};
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_inventory_read(_resources: usize) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) fn note_role_read(_query: &'static str) {}

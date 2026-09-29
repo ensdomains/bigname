@@ -61,7 +61,7 @@ pub async fn load_family_address_names_page(
 ) -> Result<AddressNamesCurrentSortedPage> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
     let (mut rows, names) =
-        compose_address_name_rows(&mut snapshot, address, namespace, false).await?;
+        compose_address_name_rows(&mut snapshot, address, namespace, relations, false).await?;
     // The surface-less ENSv1 registry children the address owns, which compose no name row.
     let (children, registry_children_digest) =
         super::registry_children::compose_registry_child_rows(&mut snapshot, address, namespace)
@@ -105,6 +105,7 @@ pub(crate) async fn compose_address_name_rows(
     conn: &mut PgConnection,
     address: &str,
     namespace: Option<&str>,
+    requested_relations: Option<&[AddressNameRelation]>,
     with_history_evidence: bool,
 ) -> Result<(Value, Value)> {
     let indexed: Vec<(String, String)> = sqlx::query_as(
@@ -124,9 +125,15 @@ pub(crate) async fn compose_address_name_rows(
     .with_context(|| format!("failed to load the address index of {address}"))?;
     // The names on which the address holds an ENSv2 registry role, which the index does not
     // list (`address_roles.rs`).
+    let include_roles = requested_relations
+        .filter(|relations| !relations.is_empty())
+        .is_none_or(|relations| relations.contains(&AddressNameRelation::RoleHolder));
     let mut indexed = indexed;
-    indexed
-        .extend(super::address_roles::role_name_candidates(&mut *conn, address, namespace).await?);
+    if include_roles {
+        indexed.extend(
+            super::address_roles::role_name_candidates(&mut *conn, address, namespace).await?,
+        );
+    }
     if indexed.is_empty() {
         // The route captures and revalidates its requested namespace publication. No rows
         // identify another chain to read here; unrelated markers cannot veto that scope.
@@ -143,7 +150,11 @@ pub(crate) async fn compose_address_name_rows(
         let ids: Vec<String> = ids.into_iter().collect();
         let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
         let clock_seconds = publication.timestamp_seconds();
-        let roles = RoleHolderLoad::Subject(address);
+        let roles = if include_roles {
+            RoleHolderLoad::Subject(address)
+        } else {
+            RoleHolderLoad::Skip
+        };
         let inputs =
             ChainInputs::load(conn, &chain_id, composed.values(), clock_seconds, roles).await?;
         for row in composed.values() {

@@ -185,6 +185,16 @@ fn build_event_data(
         HistoryEventType::Permission => {
             insert(&mut data, "address", address_field(after, "subject"));
             insert(&mut data, "grant_scope", grant_scope(row));
+            if after["scope"]["kind"].as_str() == Some("registrar_controller") {
+                insert(
+                    &mut data,
+                    "approved",
+                    after
+                        .get("approved")
+                        .filter(|value| value.is_boolean())
+                        .cloned(),
+                );
+            }
             let powers = permission_powers(after);
             if let (Some(powers), Some(previous)) = (&powers, logged_previous_powers(before)) {
                 data.insert("added_powers".to_owned(), difference(powers, &previous));
@@ -299,13 +309,20 @@ fn difference(left: &Value, right: &Value) -> Value {
 }
 
 /// The scope of the grant a permission event changed, in the `grant_scope` shape of permission
-/// rows. Omitted when the event names no scope the permission rows can serve.
+/// rows, plus the history-only registrar-controller scope. Omitted for events without a
+/// modeled scope, such as a NameWrapper fuse change.
 fn grant_scope(row: &StorageHistoryEvent) -> Option<Value> {
     let scope = row.after_state.get("scope")?;
     let scope = match string_field(scope, "kind")?.as_str() {
         "root" | "registry_root" => PermissionScope::Root,
         "registry" => PermissionScope::Registry,
         "resource" => PermissionScope::Resource,
+        "registrar_controller" => {
+            return Some(json!({
+                "kind": "registrar_controller",
+                "detail": {"registrar": contract_ref(row, &row.raw_fact_ref, "emitting_address")?},
+            }));
+        }
         "resolver" => PermissionScope::Resolver {
             chain_id: string_field(scope, "chain_id")?,
             resolver_address: string_field(scope, "resolver_address")?,
