@@ -356,17 +356,6 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     publish_primary_claim(&database.pool, "ens", V2_ADDRESS, b"").await?;
     publish_primary_claim(&database.pool, "basenames", V2_ADDRESS, b"bob.base.eth").await?;
     publish_primary_claim(&database.pool, "basenames", V2_ADDRESS, b"").await?;
-    // The adapter stores both rows of a `NameForAddrChanged` from its one log; the shared fixture
-    // spaces them over two log indexes, so put each claim record back on its claim's log.
-    sqlx::query(
-        "UPDATE normalized_events record SET log_index = claim.log_index
-         FROM normalized_events claim
-         WHERE record.namespace = 'basenames' AND record.event_kind = 'RecordChanged'
-           AND claim.event_kind = 'ReverseChanged'
-           AND claim.transaction_hash = record.transaction_hash",
-    )
-    .execute(&database.pool)
-    .await?;
     // A claim with no name write in its transaction (`claim(owner)`) records no name.
     let (block, hash): (i64, String) = sqlx::query_as(
         "SELECT block_number, block_hash FROM bigname_phase.chain_lineage
