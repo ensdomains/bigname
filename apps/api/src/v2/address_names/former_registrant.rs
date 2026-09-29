@@ -25,6 +25,7 @@ use crate::v2::{
     list_cursor::{ListCursor, ListPosition},
     name_record::lapsed_registration,
     name_rows_error,
+    params::format_timestamp_bound,
     vocab::Authority,
 };
 
@@ -39,7 +40,8 @@ const ORDER_FILTER_KEY: &str = "order";
 const EXPIRES_AT_CURSOR_KEY: &str = "expires_at";
 const NAME_CURSOR_KEY: &str = "name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
-const NONE_VALUE: &str = "";
+// A position field must be nonempty; this cannot be confused with an RFC 3339 timestamp.
+const NO_EXPIRY_CURSOR_VALUE: &str = "none";
 const POSITION_KEYS: [&str; 4] = [
     EXPIRES_AT_CURSOR_KEY,
     NAMESPACE_FILTER_KEY,
@@ -201,13 +203,13 @@ fn former_row(row: &NameCurrentRow, primary_name: Option<&str>) -> AddressName {
 }
 
 fn timestamp_filter(value: Option<OffsetDateTime>) -> String {
-    value.map_or_else(|| NONE_VALUE.to_owned(), format_timestamp)
+    value.map_or_else(String::new, format_timestamp_bound)
 }
 
 fn position(cursor: &NameCurrentListCursor) -> ListPosition {
     let expires_at = match cursor.sort_value {
         NameCurrentListCursorValue::Timestamp(Some(at)) => format_timestamp(at),
-        _ => NONE_VALUE.to_owned(),
+        _ => NO_EXPIRY_CURSOR_VALUE.to_owned(),
     };
     ListPosition::new([
         (EXPIRES_AT_CURSOR_KEY, expires_at),
@@ -219,7 +221,7 @@ fn position(cursor: &NameCurrentListCursor) -> ListPosition {
 
 fn storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
     let expires_at = match position.get(EXPIRES_AT_CURSOR_KEY)? {
-        "" => None,
+        NO_EXPIRY_CURSOR_VALUE => None,
         value => Some(
             bigname_storage::parse_rfc3339_utc_timestamp(value)
                 .map_err(|_| invalid_cursor_error())?,

@@ -289,7 +289,7 @@ fn parse_timestamp_bound(
 
 /// Canonical RFC 3339 UTC form; fractional seconds are kept only when present so
 /// whole-second inputs keep the same shape as row timestamps.
-fn format_timestamp_bound(value: OffsetDateTime) -> String {
+pub(super) fn format_timestamp_bound(value: OffsetDateTime) -> String {
     let value = value.to_offset(sqlx::types::time::UtcOffset::UTC);
     let mut formatted = format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
