@@ -47,9 +47,9 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- -
 ```
 
 The default gate requires the exact library-test summary `95 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shard 1 requires `46 passed; 0 failed; 2
-ignored; 50 filtered out`, and shard 2 requires `49 passed; 0 failed; 1
-ignored; 48 filtered out`. The gate checks both Cargo's exit status and every
+3 ignored; 0 filtered out`. CI shards 1 and 2 each require `32 passed; 0 failed; 1
+ignored; 65 filtered out`, and shard 3 requires `31 passed; 0 failed; 1
+ignored; 66 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.
 
@@ -242,8 +242,8 @@ Together with the two [pre-surface](../../docs/glossary.md#pre-surface) resolver
 scenarios, the two zero-address resolver scenarios, registry-operator lifecycle,
 API shutdown scenario, eleven-log migration scenario, and subregistry-replacement
 scenario, these three connected scenarios produce 98 tests: 95 runnable and 3
-ignored, split as 46 runnable plus 2 ignored on shard 1 and 49 runnable plus 1
-ignored on shard 2. This coverage changes no production rollout,
+ignored, split as 32 runnable plus 1 ignored on each of shards 1 and 2, and
+31 runnable plus 1 ignored on shard 3. This coverage changes no production rollout,
 deployment file, Docker configuration, environment file, checked-in manifest,
 or interpreter source.
 
@@ -254,7 +254,7 @@ runnable e2e scenario claims deleted checkpoint or completeness semantics.
 ## CI shape
 
 The e2e builder in `.github/workflows/ci.yml` builds one shared
-`phase-runner` artifact. Two explicit scenario shards independently provision
+`phase-runner` artifact. Three scenario shards independently provision
 PostgreSQL and Foundry, verify that artifact, and run `tests/e2e/run-gate` with
 eight test threads. A result-only `test (e2e)` job rejects any builder or shard
 result other than success, and the aggregate `test` job continues to require
@@ -262,9 +262,9 @@ that result.
 
 ## Shard assignment and refresh
 
-`tests/e2e/run-gate` checks in two duration-balanced lists of full test names.
+`tests/e2e/run-gate` checks in three balanced lists of full test names.
 Before executing scenarios, each shard discovers the complete library-test set
-and ignored subset, then proves that the two lists have no duplicates or
+and ignored subset, then proves that the three lists have no duplicates or
 intersection and that their union exactly equals discovery. Any added, removed,
 renamed, or newly ignored test therefore fails closed before scenario execution.
 
@@ -293,30 +293,27 @@ scripts/test-db -- bash -euo pipefail -c '
 '
 ```
 
-Sort durations descending, seed shard 1 with
-`scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
-and shard 2 with the second-longest scenario by measured duration. Assign names
-to the lower predicted load subject to the required final capacities, except
-for an explicitly documented scenario-family grouping. The current inventory
-uses one such grouping: the standalone connected ENSv1→ENSv2 migration facts
-scenario is on shard 1 and both connected `cross_protocol` reachability
-scenarios and the eleven-log migration scenario are on shard 2. The current runnable split is 46 on shard 1 and 49 on
-shard 2. Break
-equal-duration or equal-load ties by full test name, keep at most five of the
-measured top ten on either shard, and keep two ignored tests on shard 1 and one
-on shard 2.
-Update the lists, expected ignored-name set, counts, and predicted totals
-together in the block at the top of `run-gate`, then run its default, shard 1,
-and shard 2 modes. The explicit root-workspace build above removes a one-time
-canonical `phase-runner` compile from the first measured scenario while leaving
+Sort durations descending and assign each name to the shard with the lowest
+accumulated duration, breaking ties by shard number and full test name. Keep
+runnable counts within one test of each other and put one of the three ignored
+tests on each shard. Update the lists, expected ignored-name set, and counts
+together at the top of `run-gate`, then run its default and all three shard
+modes. The explicit root-workspace build above removes a one-time canonical
+`phase-runner` compile from the first measured scenario while leaving
 scenario-specific generated builds in the timing sample.
 
-The OPS-OWNER-01 measurements on the warm server used one compiler worker and
-one test thread. All 89 runnable names passed; their measured total was
-2569.389 seconds. The resulting shard predictions are 1288.036 seconds for
-shard 1 and 1281.353 seconds for shard 2, with five of the measured top ten
-on each shard. These historical forecasts exclude the registry-operator lifecycle, API shutdown,
-eleven-log migration, subregistry-replacement and two zero-address scenarios; the documented family grouping is unchanged.
+The current assignment uses run `36642410569` as a starting point. For its 34
+long tests, elapsed estimates come from libtest's 60-second warning and completion
+timestamps. Short scenarios receive a 30-second balancing weight and harness
+unit tests a one-second weight. These are assignment weights, not predictions
+of a shard's elapsed time: tests run concurrently and may share build work.
+Actual shard timings remain in each job's `e2e gate timing` output and summary.
+
+The API suite runs separately in two Nextest hash partitions, each with its own
+PostgreSQL service and the existing API JIT setting. `test (api)` succeeds only
+when both partitions succeed, and the final `test` job requires that aggregate
+alongside `test (e2e)`. Nextest discovers new API tests automatically; hash
+partitioning assigns every discovered test to exactly one API job.
 
 ## Coverage ledger
 

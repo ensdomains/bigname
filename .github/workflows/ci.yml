@@ -233,12 +233,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: api
-            packages: "-p bigname-api"
-            # JIT stays on, as on production API connections. The tests that
-            # asserted plans stay under the JIT threshold were GraphQL's and
-            # left with it; no remaining API test depends on this setting.
-            postgres_initdb_args: ""
           - name: core
             packages: >-
               -p bigname-domain
@@ -295,6 +289,82 @@ jobs:
 
       - name: cargo test
         run: cargo test ${{ matrix.packages }} --features bigname-adapters/test-activation,bigname-storage/test-support
+
+  api_shard:
+    name: test (api shard ${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+          # Preserve the production-like JIT setting used by the API suite.
+          POSTGRES_INITDB_ARGS: ""
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+
+      # Only main saves this cache (see the cache note at the top). Pull requests
+      # and merge queue runs restore main's entry, falling back to main's entry
+      # for an older Cargo.lock, and save nothing: their copies were invisible
+      # to every other run and pushed main's entries out of the 10 GB limit.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: cargo nextest (API partition)
+        run: >-
+          cargo nextest run --locked -p bigname-api
+          --features bigname-adapters/test-activation,bigname-storage/test-support
+          --no-fail-fast
+          --partition hash:${{ matrix.shard }}/2
+
+  api:
+    name: test (api)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - api_shard
+    if: always()
+    steps:
+      - name: Check API shards
+        run: |
+          if [ "${{ needs.api_shard.result }}" != "success" ]; then
+            echo "API shards finished with result: ${{ needs.api_shard.result }}"
+            exit 1
+          fi
 
   phase_runner_shard_1:
     name: test (phase-runner shard 1/3)
@@ -781,12 +851,16 @@ jobs:
             echo "- Action digest: \`${{ steps.artifact_upload.outputs.artifact-digest }}\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
-  e2e_shard_1:
-    name: test (e2e shard 1/2)
+  e2e_shard:
+    name: test (e2e shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     # 25 minutes covers a shard whose dependency cache restored. The extra 15 cover
     # the cold phase-runner build below, which only runs when the restore missed.
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     needs:
       - e2e_build
     # Start after the artifact and cache build; e2e results remain independently aggregated.
@@ -809,7 +883,7 @@ jobs:
     env:
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_TEST_THREADS: "8"
-      BIGNAME_E2E_SHARD: "1"
+      BIGNAME_E2E_SHARD: "${{ matrix.shard }}"
       CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
@@ -911,140 +985,7 @@ jobs:
         if: steps.phase_runner_cache.outputs.cache-hit != 'true'
         run: cargo build --locked --package phase-runner --bin phase-runner
 
-      - name: Run e2e shard 1/2
-        run: tests/e2e/run-gate
-
-  e2e_shard_2:
-    name: test (e2e shard 2/2)
-    runs-on: ubuntu-24.04
-    # 25 minutes covers a shard whose dependency cache restored. The extra 15 cover
-    # the cold phase-runner build below, which only runs when the restore missed.
-    timeout-minutes: 40
-    needs:
-      - e2e_build
-    # Start after the artifact and cache build; e2e results remain independently aggregated.
-    if: ${{ !cancelled() && needs.e2e_build.result == 'success' }}
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: bigname
-          POSTGRES_USER: bigname
-          POSTGRES_PASSWORD: bigname
-          POSTGRES_INITDB_ARGS: "--set=max_connections=300 --set=jit=off"
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bigname -d bigname"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
-      BIGNAME_E2E_TEST_THREADS: "8"
-      BIGNAME_E2E_SHARD: "2"
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev
-
-      - name: Compute phase-runner dependency-cache key
-        id: phase_runner_cache_key
-        run: |
-          root_lock_sha="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          e2e_lock_sha="$(sha256sum tests/e2e/Cargo.lock | cut -d' ' -f1)"
-          prefix="v1-rust-${RUST_VERSION}-${root_lock_sha}-${e2e_lock_sha}"
-          runner_arch="$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
-          primary="${prefix}-phase-runner-${RUNNER_OS}-${runner_arch}"
-          echo "prefix=$prefix" >>"$GITHUB_OUTPUT"
-          echo "primary=$primary" >>"$GITHUB_OUTPUT"
-          echo "phase-runner dependency-cache primary key: $primary"
-
-      - name: Restore e2e phase-runner Cargo dependencies
-        id: phase_runner_cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: ${{ steps.phase_runner_cache_key.outputs.prefix }}
-          shared-key: phase-runner
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          workspaces: ". -> target"
-          cache-workspace-crates: false
-          save-if: false
-
-      - name: Report phase-runner dependency cache
-        env:
-          CACHE_HIT: ${{ steps.phase_runner_cache.outputs.cache-hit }}
-          CACHE_PRIMARY_KEY: ${{ steps.phase_runner_cache_key.outputs.primary }}
-        run: |
-          echo "phase-runner dependency-cache primary key: $CACHE_PRIMARY_KEY"
-          echo "phase-runner dependency-cache hit: $CACHE_HIT"
-          {
-            echo "### phase-runner dependency cache"
-            echo
-            echo "- Primary key: \`$CACHE_PRIMARY_KEY\`"
-            echo "- Exact hit: \`$CACHE_HIT\`"
-          } >>"$GITHUB_STEP_SUMMARY"
-
-      - name: Install foundry (anvil)
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: ${{ env.FOUNDRY_VERSION }}
-
-      - name: Sync pinned upstream checkouts
-        run: |
-          scripts/sync-refs
-          scripts/sync-refs --check
-
-      - name: Download phase-runner artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ needs.e2e_build.outputs.artifact-name }}
-          path: target/bigname-e2e-download
-          digest-mismatch: error
-
-      - name: Verify phase-runner artifact
-        run: |
-          artifact_dir="$GITHUB_WORKSPACE/target/bigname-e2e-artifact"
-          mkdir -p "$artifact_dir"
-          tar -xf target/bigname-e2e-download/phase-runner-e2e.tar -C "$artifact_dir"
-          (
-            cd "$artifact_dir"
-            sha256sum -c SHA256SUMS
-            grep -Fx "source SHA: $GITHUB_SHA" BUILD-METADATA
-            test -x phase-runner
-            file phase-runner
-            ldd phase-runner | tee dynamic-dependencies.txt
-            if grep -F "not found" dynamic-dependencies.txt; then
-              echo "phase-runner artifact has a missing dynamic dependency" >&2
-              exit 1
-            fi
-          )
-          echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
-
-      # The harness builds phase-runner under BIGNAME_E2E_COMMAND_TIMEOUT_SECS (600s).
-      # With restored dependencies that build compiles only this workspace's crates.
-      # When the builder could not save the cache (run 35203124311 hit a cache API
-      # rate limit), the harness build compiles every dependency, Reth included,
-      # which takes about 600s even on an idle runner (612s in that run's builder)
-      # and overran the deadline here. Build once outside the deadline instead, with
-      # the harness's own command, profile and target directory, so the timed build
-      # stays incremental.
-      - name: Build phase-runner dependencies after a cache miss
-        if: steps.phase_runner_cache.outputs.cache-hit != 'true'
-        run: cargo build --locked --package phase-runner --bin phase-runner
-
-      - name: Run e2e shard 2/2
+      - name: Run e2e shard ${{ matrix.shard }}/3
         run: tests/e2e/run-gate
 
   api_container_shutdown:
@@ -1196,21 +1137,18 @@ jobs:
     timeout-minutes: 5
     needs:
       - e2e_build
-      - e2e_shard_1
-      - e2e_shard_2
+      - e2e_shard
       - api_container_shutdown
     if: always()
     steps:
       - name: Check e2e builder and shards
         run: |
           if [ "${{ needs.e2e_build.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard_1.result }}" != "success" ] ||
-             [ "${{ needs.e2e_shard_2.result }}" != "success" ] ||
+             [ "${{ needs.e2e_shard.result }}" != "success" ] ||
              [ "${{ needs.api_container_shutdown.result }}" != "success" ]; then
             echo "API container: ${{ needs.api_container_shutdown.result }}"
             echo "e2e builder:   ${{ needs.e2e_build.result }}"
-            echo "e2e shard 1/2: ${{ needs.e2e_shard_1.result }}"
-            echo "e2e shard 2/2: ${{ needs.e2e_shard_2.result }}"
+            echo "e2e shards:   ${{ needs.e2e_shard.result }}"
             exit 1
           fi
 
@@ -1221,6 +1159,7 @@ jobs:
     needs:
       - schema_v2
       - test_shard
+      - api
       - phase_runner
       - e2e
       - site
@@ -1234,6 +1173,10 @@ jobs:
           fi
           if [ "${{ needs.test_shard.result }}" != "success" ]; then
             echo "test shards finished with result: ${{ needs.test_shard.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.api.result }}" != "success" ]; then
+            echo "API tests finished with result: ${{ needs.api.result }}"
             exit 1
           fi
           if [ "${{ needs.phase_runner.result }}" != "success" ]; then
