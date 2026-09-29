@@ -23,22 +23,49 @@ const CONTRACT_FIXTURE: &str = r#"
     ANALYZE chain_lineage;
 "#;
 
+// Mirrors the sorted product_history_event_kinds() result in apps/api/src/v2/history.rs:
+// the public default does not use a single-kind equality predicate.
+const PRODUCT_KINDS: &[&str] = &[
+    "AuthorityEpochChanged",
+    "AuthorityTransferred",
+    "EACRolesChanged",
+    "ExpiryChanged",
+    "LabelRegistered",
+    "MigrationApplied",
+    "PermissionChanged",
+    "PermissionScopeChanged",
+    "RecordChanged",
+    "RecordVersionChanged",
+    "RegistrationGranted",
+    "RegistrationReleased",
+    "RegistrationRenewed",
+    "ResolverChanged",
+    "ReverseChanged",
+    "RolesChanged",
+    "SubregistryChanged",
+    "TokenControlTransferred",
+];
+const RECORD_KINDS: &[&str] = &["RecordChanged", "RecordVersionChanged"];
+
 #[tokio::test]
 async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<()> {
     let database = phase_database("history_contract_count", CONTRACT_FIXTURE).await?;
     let result = async {
         let mut connection = database.pool().acquire().await?;
         for mode in [PlanMode::Unprepared, PlanMode::Generic] {
-            for (key, kind, count) in [
-                (None, "RecordChanged", 12000),
-                (Some("addr:60"), "RecordChanged", 6000),
-                (Some("absent"), "RecordChanged", 0),
-                (None, "RecordVersionChanged", 0),
+            for (case, key, kinds, count) in [
+                ("public-default", None, PRODUCT_KINDS, 12000),
+                ("record-key-default", Some("addr:60"), RECORD_KINDS, 6000),
+                ("missing-key-default", Some("absent"), RECORD_KINDS, 0),
+                ("explicit-write-kind", None, &["RecordChanged"][..], 12000),
+                ("explicit-write-key", Some("addr:60"), &["RecordChanged"][..], 6000),
+                ("explicit-missing-key", Some("absent"), &["RecordChanged"][..], 0),
+                ("explicit-missing-kind", None, &["RecordVersionChanged"][..], 0),
             ] {
                 let filter = EventHistoryReadFilter {
                     namespace: Some("ens".into()),
                     contract_address: Some("0x0000000000000000000000000000000000000076".into()),
-                    event_kinds: vec![kind.into()],
+                    event_kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
                     record_key: key.map(str::to_owned),
                     block_window: Some(window(&[("ethereum-mainnet", None, Some(11200))])),
                     ..Default::default()
@@ -54,17 +81,24 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 push_history_page_query(&mut page, &filter, true, None, false, 21);
                 let page_plan = explain_page(&mut connection, page, mode).await?;
                 for (label, plan) in [("count", count_plan), ("page", page_plan)] {
+                    // Preserve the complete per-node evidence, including auxiliary subplans.
+                    eprintln!("contract_plan {}", serde_json::json!({
+                        "mode": format!("{mode:?}"), "case": case, "operation": label,
+                        "record_key": key, "kinds": kinds, "expected_count": count, "plan": plan,
+                    }));
                     let mut scans = Vec::new();
                     page_scans(&plan[0]["Plan"], &mut scans);
                     ensure!(scans.len() == 1, "{label} {mode:?}: {plan}");
                     let scan = scans[0];
+                    // This metric is only the principal normalized-event scan. It excludes
+                    // auxiliary subplans, joins, and work outside this SQL statement.
                     let visited = (scan["Actual Rows"].as_f64().unwrap_or(0.0)
                         + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
                         * scan["Actual Loops"].as_f64().unwrap_or(1.0);
                     let encoded = plan.to_string();
                     ensure!(encoded.contains("normalized_events_emitter_history_idx") || (count == 0 && visited == 0.0), "{label} {mode:?}: {plan}");
                     ensure!(visited <= 12000.0, "{label} scanned unrelated history: {plan}");
-                    eprintln!("contract {label} {mode:?} key={key:?} kind={kind}: count={count}; visited={visited}; execution_ms={}; shared_hit_blocks={}", plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"]);
+                    eprintln!("contract {label} {mode:?} case={case}: count={count}; principal_event_rows_visited={visited}; execution_ms={}; shared_hit_blocks={}", plan[0]["Execution Time"], plan[0]["Plan"]["Shared Hit Blocks"]);
                 }
             }
         }
