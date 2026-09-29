@@ -52,7 +52,7 @@ pub async fn measure_walks(
     .await?;
     let expiring_filter = NameCurrentExpiringFilter {
         namespace: namespace.to_owned(),
-        expires_after: Some(OffsetDateTime::UNIX_EPOCH),
+        expires_after: Some(OffsetDateTime::UNIX_EPOCH.into()),
         expires_before: None,
     };
     let expiring = walk(max_pages, |cursor| {
