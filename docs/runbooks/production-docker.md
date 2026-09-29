@@ -1184,10 +1184,12 @@ in the same step.
    redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or
    use one for another redo. Do not use the unattended `run` path for an attestation.
-   If the previous release left a Project redo unfinished, for example stopped
-   between phases before this deploy, the Interpret redo that starts the new
-   interpreter content hash supersedes it: that Project redo's progress was
-   written under the prior hash and is invalid. In the transaction that starts
+   If the previous release had started a Project redo and left it unfinished,
+   for example killed mid-way before this deploy, the Interpret redo that starts
+   the new interpreter content hash supersedes it: that Project redo's progress
+   was written under the prior hash and is invalid. (A stamped Project redo that
+   never started, or whose stop the runner recorded, already lets Interpret run
+   and is widened when Interpret completes.) In the transaction that starts
    the Interpret redo, the runner restores the Project row the way a finished
    redo restores it and logs a warning naming the superseded hash and range;
    the Interpret redo's completion then stamps the Project redo again under the

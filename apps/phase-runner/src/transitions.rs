@@ -344,7 +344,7 @@ fn require_prerequisite(
     Ok(())
 }
 
-fn is_pending_required_downstream_redo(row: &PhaseStateRow) -> bool {
+pub(crate) fn is_pending_required_downstream_redo(row: &PhaseStateRow) -> bool {
     row.redo_in_progress
         && row
             .last_error

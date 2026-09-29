@@ -6572,6 +6572,77 @@ async fn a_refused_new_hash_interpret_redo_keeps_the_prior_project_redo() -> Res
     scratch.cleanup().await
 }
 
+// A stamped Project redo that never began, or whose stop was recorded, already lets Interpret
+// start. It is not superseded, so it needs no Project lock: Interpret runs even while a Project
+// runner holds it, and its completion keeps the stamp for the new hash's Project redo.
+#[tokio::test]
+async fn a_pending_prior_hash_project_stamp_is_left_to_the_interpret_redo() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_supersede_pending").await?;
+    let chain_id = "supersede-pending";
+    seed_hash_epoch(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    leave_project_redo_active(scratch.pool(), chain_id, PRIOR_RELEASE_HASH).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET last_error = 'required downstream redo: interpret redo completed'
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+    let project_lock = PhaseLock::acquire(
+        scratch.writer_connect_options(),
+        chain_id,
+        PhaseName::Project,
+    )
+    .await?;
+    let runner = runner(
+        scratch.runner(),
+        PhaseSet::loopback(),
+        available_capacity(),
+        "supersede-pending-runner",
+    )?;
+
+    let error = runner
+        .redo(
+            &chain(chain_id)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, 9)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the follow-on Project redo waits for the held lock");
+    project_lock.release().await?;
+    assert_eq!(error.kind(), ErrorKind::LockHeld, "{error}");
+    let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT phase_name, phase_status, redo_in_progress, input_content_hash
+         FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')
+         ORDER BY phase_name",
+    )
+    .bind(chain_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "interpret".into(),
+                "completed".into(),
+                false,
+                Some(phase_runner::INTERPRETER_CONTENT_HASH.to_owned())
+            ),
+            (
+                "project".into(),
+                "running".into(),
+                true,
+                Some(PRIOR_RELEASE_HASH.to_owned())
+            ),
+        ],
+        "Interpret ran under the new hash and the Project stamp is kept"
+    );
+    scratch.cleanup().await
+}
+
 /// Ingest completed through block 9; Interpret and Project completed at block 9 under `hash`.
 async fn seed_hash_epoch(pool: &sqlx::PgPool, chain_id: &str, hash: &str) -> Result<()> {
     PhaseStore::new(pool.clone())

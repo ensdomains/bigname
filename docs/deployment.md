@@ -665,8 +665,8 @@ an interrupted attempt keeps the live-extended range. When that interruption
 belongs to an attested Interpret redo from the prior interpreter content hash,
 restart the same audited range with its token; the range restarts from its
 beginning rather than resuming the cursor written under the prior interpreter
-content hash. A Project redo the prior binary left unfinished is likewise
-invalid under the new hash and would otherwise block the new Interpret redo:
+content hash. A Project redo the prior binary started and left unfinished is
+likewise invalid under the new hash and would otherwise block the new Interpret redo:
 the Interpret redo that starts the new hash supersedes it in its own start
 transaction, restoring the Project row as a finished redo would, provided no
 runner holds the Project lock, and its completion stamps the Project redo

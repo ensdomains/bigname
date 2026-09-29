@@ -12,11 +12,13 @@ use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{PhaseName, RunMode},
     state::PhaseStatus,
-    transitions::{PhaseStateRow, row_for},
+    transitions::{PhaseStateRow, is_pending_required_downstream_redo, row_for},
 };
 
 /// The Project row an Interpret redo starting a new hash epoch supersedes, if any: a Project redo
-/// in progress under another hash, while Interpret itself still records another hash.
+/// that began under another hash, while Interpret itself still records another hash. A stamped
+/// Project redo that has not begun (or whose stop was recorded) already lets Interpret start and
+/// is widened by Interpret's completion, so it is left alone.
 pub(crate) fn superseded_project_redo<'a>(
     rows: &'a [PhaseStateRow],
     phase: PhaseName,
@@ -33,7 +35,11 @@ pub(crate) fn superseded_project_redo<'a>(
         project.status()?,
         PhaseStatus::Running | PhaseStatus::Paused
     );
-    Ok((running && project.redo_in_progress && other_hash(project)).then_some(project))
+    Ok((running
+        && project.redo_in_progress
+        && !is_pending_required_downstream_redo(project)
+        && other_hash(project))
+    .then_some(project))
 }
 
 fn other_hash(row: &PhaseStateRow) -> bool {

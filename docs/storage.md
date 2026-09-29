@@ -1769,7 +1769,7 @@ to the finite ingest handoff. If an interrupted attested Interpret redo spans
 the hash rotation, its token remains valid only for that exact range. The new
 binary clears the redo cursor written under the prior interpreter content hash
 and walks the range from its beginning while retaining the durable audit
-association. An unfinished Project redo from the prior hash is superseded when
+association. A Project redo the prior hash started and left unfinished is superseded when
 the new hash's Interpret redo starts, in the same transaction, and stamped again
 when that redo completes. Moving a covered semantic source without updating the covered set
 fails the build rather than silently narrowing the fingerprint.
