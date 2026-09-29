@@ -74,6 +74,31 @@ impl Run<'_> {
         .await
     }
 
+    /// Carry the rebuild an interrupted attempt of the same redo left over to `attempt`, fenced on
+    /// the marker and on the record the run planned from, and return the record as it now stands.
+    pub(super) async fn adopt_rebuild(
+        &self,
+        family: &FamilyMarker,
+        record: &Record,
+        attempt: i64,
+    ) -> Result<Record> {
+        self.transition(family, record, Transition::Adopt(attempt))
+            .await?;
+        tracing::info!(
+            target: "bigname_project::families",
+            chain_id = self.chain_id,
+            from_attempt = record.attempt,
+            attempt,
+            marker = ?family.current,
+            "the rerun redo resumes the rebuild its interrupted attempt left"
+        );
+        repair::read(self.pool, self.chain_id)
+            .await?
+            .ok_or_else(|| {
+                ProjectError::transient(format!("chain {} lost its repair record", self.chain_id))
+            })
+    }
+
     /// Populate from `family` to the target, visiting only the blocks that carry family work
     /// and then the target itself, so the marker ends at the target. The target's block
     /// completes the record. `reset_sequence` is the marker generation the rebuild's reset wrote,
@@ -295,6 +320,9 @@ impl Run<'_> {
             Transition::Reopen(target) => {
                 repair::reopen_undo(&mut transaction, self.chain_id, target).await?;
             }
+            Transition::Adopt(attempt) => {
+                repair::adopt_rebuild(&mut transaction, self.chain_id, attempt).await?;
+            }
             Transition::Complete => {
                 let published = locked.current.as_ref().ok_or_else(|| {
                     ProjectError::transient("a repair cannot complete without a marker")
@@ -319,6 +347,7 @@ impl Run<'_> {
 pub(super) enum Transition {
     LowerTarget(i64),
     Reopen(i64),
+    Adopt(i64),
     Complete,
 }
 
