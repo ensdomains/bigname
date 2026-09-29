@@ -233,23 +233,40 @@ async fn v2_unix_timestamps_preserve_large_user_registry_grants_and_renewals() -
         }
     }
 
+    assert_history_submicrosecond_bounds(&database).await?;
+
     // The same finite word survives each shared public name-record builder and event detail.
     let name = "maximum.numbers.eth";
-    let search = unix_expiry_response(&database,
-        &format!("/v1/search?q={name}&namespace=ens")).await?;
+    let search =
+        unix_expiry_response(&database, &format!("/v1/search?q={name}&namespace=ens")).await?;
     assert_unix_expiry_record(&search["data"][0], name, u64::MAX);
-    let lookup = v2_lookup_json(&database,
-        json!({"profile": "detail", "inputs": [{"name": name}]})).await?;
+    let lookup = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": name}]}),
+    )
+    .await?;
     assert_unix_expiry_record(&lookup["data"][0]["record"], name, u64::MAX);
     let address = unix_expiry_response(&database,
         &format!("/v1/addresses/{UNIX_EXPIRY_HOLDER}/names?namespace=ens&relation=registrant&sort=expires_at&order=desc&page_size=1")).await?;
     assert_unix_expiry_record(&address["data"][0], name, u64::MAX);
-    let history = unix_expiry_response(&database,
-        &format!("/v1/names/{name}/history?include=data")).await?;
-    let registration = history["data"].as_array().unwrap().iter()
-        .find(|row| row["data"].get("expires_at").is_some()).expect("registration history");
-    assert_eq!(registration["data"]["expires_at"], json!(u64::MAX.to_string()), "{history:#}");
-    assert_eq!(registration["timestamp"], json!("1700000201"), "{history:#}");
+    let history =
+        unix_expiry_response(&database, &format!("/v1/names/{name}/history?include=data")).await?;
+    let registration = history["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["data"].get("expires_at").is_some())
+        .expect("registration history");
+    assert_eq!(
+        registration["data"]["expires_at"],
+        json!(u64::MAX.to_string()),
+        "{history:#}"
+    );
+    assert_eq!(
+        registration["timestamp"],
+        json!("1700000201"),
+        "{history:#}"
+    );
 
     // These keys deliberately span different decimal widths. Each continuation changes the
     // lower bound's spelling while preserving its instant, proving equivalent cursor filters.
@@ -287,18 +304,93 @@ async fn v2_unix_timestamps_preserve_large_user_registry_grants_and_renewals() -
     database.cleanup().await
 }
 
+// Whole-second chain events must not leak into a window one nanosecond after them.
+async fn assert_history_submicrosecond_bounds(database: &TestDatabase) -> Result<()> {
+    let route = "/v1/names/ordinary.numbers.eth/history";
+    let bounds = ["1700000201.000000001", "2023-11-14T22:16:41.000000001Z"];
+    let mut point_windows = Vec::new();
+    for bound in bounds {
+        let body = unix_expiry_response(
+            database,
+            &format!("{route}?from_timestamp={bound}&to_timestamp={bound}&include=data"),
+        )
+        .await?;
+        point_windows.push(body["data"].clone());
+    }
+    assert_eq!(
+        point_windows,
+        [json!([]), json!([])],
+        "neither spelling may include the earlier registration"
+    );
+    for bound in bounds {
+        let body = unix_expiry_response(
+            database,
+            &format!("{route}?from_timestamp={bound}&include=data"),
+        )
+        .await?;
+        let events = body["data"].as_array().expect("history events");
+        assert!(
+            !events.is_empty(),
+            "later renewal remains eligible: {body:#}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["timestamp"] == "1700000210"),
+            "{body:#}"
+        );
+    }
+    let precise = bounds[0]
+        .parse::<bigname_storage::UnixSeconds>()
+        .expect("precise bound")
+        .to_datetime()
+        .expect("clock bound");
+    let point = bigname_storage::resolve_chain_block_ranges(
+        &database.pool,
+        &[FAMILY_CHAIN],
+        Some(precise),
+        Some(precise),
+    )
+    .await?;
+    assert!(
+        point.is_empty(),
+        "no lineage block exists at this instant: {point:?}"
+    );
+    let lower = bigname_storage::resolve_chain_block_ranges(
+        &database.pool,
+        &[FAMILY_CHAIN],
+        Some(precise),
+        None,
+    )
+    .await?;
+    assert_eq!(lower.len(), 1);
+    assert_eq!(lower[0].from_block, Some(202));
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_unix_timestamps_wrapper_keeps_finite_values_and_classifies_sentinels() -> Result<()> {
-    for (expiry, reason) in [(9_007_199_254_740_993_u64, None), (u64::MAX - 1, None),
-        (u64::MAX, Some("no_expiry")), (0, Some("not_set"))] {
+    for (expiry, reason) in [
+        (9_007_199_254_740_993_u64, None),
+        (u64::MAX - 1, None),
+        (u64::MAX, Some("no_expiry")),
+        (0, Some("not_set")),
+    ] {
         let database = TestDatabase::new_migrated().await?;
         seed_v2_permissions_fixture(&database).await?;
         let wrapper = Uuid::from_u128(0x6670);
         let name = "child.perms.eth";
         seed_wrapped_subname_inputs(&database, name, wrapper).await?;
-        let event = permission_fixture_event(&format!("exact-wrapper-{expiry}"), None, Some(wrapper),
-            "ExpiryChanged", "ens_v1_wrapper_l1", 124, 0,
-            json!({"source_event": "ExpiryExtended", "expiry": expiry}));
+        let event = permission_fixture_event(
+            &format!("exact-wrapper-{expiry}"),
+            None,
+            Some(wrapper),
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            124,
+            0,
+            json!({"source_event": "ExpiryExtended", "expiry": expiry}),
+        );
         bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
         rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
         let body = unix_expiry_response(&database, &format!("/v1/names/{name}")).await?;
@@ -306,12 +398,25 @@ async fn v2_unix_timestamps_wrapper_keeps_finite_values_and_classifies_sentinels
         let expected = reason.map_or_else(|| json!(expiry.to_string()), |_| Value::Null);
         assert_eq!(record["expires_at"], expected, "{body:#}");
         assert_eq!(record["expires_at_reason"], json!(reason), "{body:#}");
-        let permissions = v2_permissions_payload_for_database(&database,
-            &format!("/v1/permissions?registration_id={wrapper}")).await?;
-        assert_eq!(permissions["restrictions"]["wrapper_expires_at"], expected, "{permissions:#}");
-        assert_eq!(permissions["restrictions"]["wrapper_expires_at_reason"], json!(reason), "{permissions:#}");
+        let permissions = v2_permissions_payload_for_database(
+            &database,
+            &format!("/v1/permissions?registration_id={wrapper}"),
+        )
+        .await?;
+        assert_eq!(
+            permissions["restrictions"]["wrapper_expires_at"], expected,
+            "{permissions:#}"
+        );
+        assert_eq!(
+            permissions["restrictions"]["wrapper_expires_at_reason"],
+            json!(reason),
+            "{permissions:#}"
+        );
         if reason.is_some() {
-            assert!(record.get("expires_at").is_some(), "classified expiry must be explicit null");
+            assert!(
+                record.get("expires_at").is_some(),
+                "classified expiry must be explicit null"
+            );
             assert_eq!(record["grace_ends_at"], Value::Null);
         }
         database.cleanup().await?;

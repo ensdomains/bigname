@@ -291,7 +291,11 @@ async fn a_live_grant_sent_to_the_graveyard_is_served_as_the_chain_holds_it() ->
     let sent = summary(pool, &logical_name_id).await?;
     assert_eq!(sent["registration"]["status"], "active", "{sent:#}");
     assert_eq!(sent["registration"]["registrant"], GRAVEYARD, "{sent:#}");
-    assert_eq!(sent["registration"]["expiry"], expires, "{sent:#}");
+    assert_eq!(
+        sent["registration"]["expiry"],
+        expires.to_string(),
+        "{sent:#}"
+    );
     // No `reclaim`: the registry record stays the owner's.
     assert_eq!(sent["control"]["registry_owner"], OWNER, "{sent:#}");
 

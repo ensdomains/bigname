@@ -50,6 +50,9 @@ async fn first_readable_block_at_or_after(
     chain_id: &str,
     at: OffsetDateTime,
 ) -> Result<Option<i64>> {
+    let Some(parameter) = microsecond_bound(at, true) else {
+        return Ok(None);
+    };
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT block_number
@@ -66,7 +69,7 @@ async fn first_readable_block_at_or_after(
         "#,
     )
     .bind(chain_id)
-    .bind(at)
+    .bind(parameter)
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to resolve the first block at or after {at} on {chain_id}"))
@@ -77,6 +80,9 @@ async fn last_readable_block_at_or_before(
     chain_id: &str,
     at: OffsetDateTime,
 ) -> Result<Option<i64>> {
+    let Some(parameter) = microsecond_bound(at, false) else {
+        return Ok(None);
+    };
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT block_number
@@ -93,8 +99,58 @@ async fn last_readable_block_at_or_before(
         "#,
     )
     .bind(chain_id)
-    .bind(at)
+    .bind(parameter)
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to resolve the last block at or before {at} on {chain_id}"))
+}
+
+// PostgreSQL stores microseconds, while accepted clock bounds retain nanoseconds. SQLx's
+// implicit truncation would admit an earlier block at a precise inclusive lower bound.
+// Round only the SQL parameter inward; request and cursor identities keep the original instant.
+fn microsecond_bound(at: OffsetDateTime, round_up: bool) -> Option<OffsetDateTime> {
+    let nanos = at.unix_timestamp_nanos();
+    let floor = nanos.checked_sub(nanos.rem_euclid(1_000))?;
+    let rounded = if round_up && floor != nanos {
+        floor.checked_add(1_000)?
+    } else {
+        floor
+    };
+    OffsetDateTime::from_unix_timestamp_nanos(rounded).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::types::time::PrimitiveDateTime;
+
+    #[test]
+    fn precise_bounds_round_inward_on_both_sides_of_the_database_epoch() {
+        for nanos in [1_700_000_201_000_000_001, 946_684_799_999_999_999, -1] {
+            let at = OffsetDateTime::from_unix_timestamp_nanos(nanos).unwrap();
+            let lower = microsecond_bound(at, true).unwrap().unix_timestamp_nanos();
+            let upper = microsecond_bound(at, false).unwrap().unix_timestamp_nanos();
+            assert!(lower >= nanos && lower - nanos < 1_000);
+            assert!(upper <= nanos && nanos - upper < 1_000);
+            assert_eq!((lower.rem_euclid(1_000), upper.rem_euclid(1_000)), (0, 0));
+        }
+    }
+
+    #[test]
+    fn microsecond_bounds_handle_supported_clock_endpoints_without_overflow() {
+        let first = PrimitiveDateTime::MIN.assume_utc();
+        assert_eq!(microsecond_bound(first, true), Some(first));
+        assert_eq!(microsecond_bound(first, false), Some(first));
+        let last = PrimitiveDateTime::MAX.assume_utc();
+        assert_eq!(microsecond_bound(last, true), None);
+        let last_microsecond = microsecond_bound(last, false).unwrap();
+        assert_eq!(
+            last.unix_timestamp_nanos() - last_microsecond.unix_timestamp_nanos(),
+            999
+        );
+        assert_eq!(
+            microsecond_bound(last_microsecond, true),
+            Some(last_microsecond)
+        );
+    }
 }

@@ -1572,7 +1572,7 @@ A registration with a classified absent expiry serves `expires_at: null` and
 | --- | --- |
 | `no_expiry` | A contract-specific maximum sentinel treated as having no expiry, such as the NameWrapper maximum or the declared ENSv2 root entries. |
 | `not_set` | The NameWrapper entry has zero expiry: no expiry has been set. |
-| `released` | An explicit ENSv2 unregister ended the registration without a retained renewal deadline. |
+| `released` | A non-expiry release ended the registration without a retained renewal deadline, including an explicit ENSv2 unregister. |
 
 Its `grace_ends_at` is also `null`; the same `expires_at_reason` explains both
 fields. A finite expiry omits the reason. A row without a registration context
