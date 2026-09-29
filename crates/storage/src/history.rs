@@ -41,7 +41,7 @@ use read_filter::{EventHistoryReadFilter, event_history_read_filter};
 use selectors::{name_history_selector, resource_history_selector};
 
 pub(crate) use attribution::load_attribution_map;
-pub use attribution::{load_bounded_record_attribution, load_positional_record_names};
+pub use attribution::load_bounded_record_attribution;
 pub use block_window::resolve_chain_block_ranges;
 #[cfg(any(test, feature = "test-support"))]
 pub use child_registrations::explain_name_history_page_with_child_registrations_for_test;

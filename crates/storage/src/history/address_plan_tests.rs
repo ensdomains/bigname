@@ -13,8 +13,7 @@ use uuid::Uuid;
 
 use super::super::attribution::{
     push_empty_mirror_writes_for_test, push_exact_node_mirror_writes_for_test,
-    push_pointer_window_attribution_for_test, push_positional_candidate_resources_for_test,
-    push_positional_names_for_test,
+    push_pointer_window_attribution_for_test,
 };
 use super::super::{
     EventHistoryReadFilter,
@@ -58,11 +57,6 @@ async fn address_history_anchor_plan_uses_address_match_indexes() -> Result<()> 
 #[tokio::test]
 async fn bounded_record_attribution_plans_do_not_scan_normalized_events() -> Result<()> {
     with_fixture("bounded_attribution_plan", check_attribution_plans).await
-}
-
-#[tokio::test]
-async fn positional_record_name_plans_do_not_scan_normalized_events() -> Result<()> {
-    with_fixture("positional_record_name_plan", check_positional_name_plans).await
 }
 
 #[tokio::test]
@@ -253,76 +247,6 @@ async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
     ensure!(
         plan_failures.is_empty(),
         "bounded attribution plans:\n{}",
-        plan_failures.join("\n\n")
-    );
-    Ok(())
-}
-
-/// The two statements that name a page's record writes at their positions (the events feed's
-/// `name`): the candidate resources, then the names over their pointers. Neither may read
-/// `normalized_events` sequentially. The target's write lies before its pointer, so its name
-/// history attributes it but it is written for no name; an unrelated write after its name's
-/// pointer (same block and log, later by identity) is written for that name.
-async fn check_positional_name_plans(connection: &mut PgConnection) -> Result<()> {
-    let event_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM normalized_events
-         WHERE event_identity IN ('target:record', 'unrelated:record:7')
-         ORDER BY event_identity",
-    )
-    .fetch_all(&mut *connection)
-    .await?;
-    ensure!(event_ids.len() == 2, "fixture writes: {event_ids:?}");
-    let event_ids: &'static [i64] = Box::leak(event_ids.into_boxed_slice());
-    let mut plan_failures = Vec::new();
-    let push_candidates = |builder: &mut QueryBuilder<'static, Postgres>| {
-        push_positional_candidate_resources_for_test(builder, event_ids);
-    };
-    for plan in explain_both(connection, push_candidates).await? {
-        if let Err(error) = assert_no_event_seq_scan("positional candidates", &plan) {
-            plan_failures.push(error.to_string());
-        }
-    }
-    let mut candidates = QueryBuilder::<Postgres>::new("");
-    push_candidates(&mut candidates);
-    let resource_ids: Vec<Uuid> = candidates
-        .build_query_scalar()
-        .fetch_all(&mut *connection)
-        .await?;
-    ensure!(
-        resource_ids.iter().collect::<BTreeSet<_>>()
-            == BTreeSet::from([&target_resource(), &Uuid::from_u128(7)]),
-        "candidate resources: {resource_ids:?}"
-    );
-    let resource_ids: &'static [Uuid] = Box::leak(resource_ids.into_boxed_slice());
-    let push_names = |builder: &mut QueryBuilder<'static, Postgres>| {
-        push_positional_names_for_test(builder, resource_ids, event_ids);
-    };
-    for plan in explain_both(connection, push_names).await? {
-        if let Err(error) = assert_no_event_seq_scan("positional names", &plan) {
-            plan_failures.push(error.to_string());
-        }
-    }
-    let mut names = QueryBuilder::<Postgres>::new("");
-    push_names(&mut names);
-    let named = names
-        .build()
-        .fetch_all(&mut *connection)
-        .await?
-        .into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get::<i64, _>("normalized_event_id")?,
-                row.try_get::<String, _>("logical_name_id")?,
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    ensure!(
-        named == [(event_ids[1], format!("ens:0x{:064x}", 7))],
-        "positional names: {named:?}"
-    );
-    ensure!(
-        plan_failures.is_empty(),
-        "positional name plans:\n{}",
         plan_failures.join("\n\n")
     );
     Ok(())

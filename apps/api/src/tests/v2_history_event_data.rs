@@ -1,6 +1,6 @@
-// History event data (TYR-77, TYR-78, TYR-79, TYR-80): confirmed ENSv1→ENSv2 migrations as their
-// own rows, the name a primary-name event recorded, the registration action a grant row belongs
-// to, and the name a resolver record write was made for at its position.
+// History event data (TYR-77, TYR-78, TYR-79): confirmed ENSv1→ENSv2 migrations as their own
+// rows, the name a primary-name event recorded, the registration action a grant row belongs to,
+// and the locator of a resolver record write.
 
 const EVENT_DATA_CHAIN: &str = "ethereum-mainnet";
 
@@ -521,12 +521,11 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     database.cleanup().await
 }
 
-// TYR-80. A record write names the name whose resolver pointer and, on a record-ID resolver,
-// whose record link selected the written record at the write's position. A write nobody's links
-// selected then, a record several names shared, the zero-node default record and an unknown node
-// stay unnamed, and every write carries the resolver and its node or record ID.
+// Record rows on the events feed and address history carry no name: a resolver write is keyed by
+// node or record ID. Under `include=data` each carries its resolver and node or record ID, and
+// name history is where a name's record changes are listed under that name.
 #[tokio::test]
-async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
+async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     const RECORD_RESOLVER: &str = "0x0c47bc813361aeb3d0ad84f8f642bcce0e34b7f4";
     const NODE_RESOLVER: &str = "0x0000000000000000000000000000000000080a11";
     const DEFAULT_NODE: &str =
@@ -541,7 +540,7 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
         let logical = seed_event_data_name(&database, name, 499, resource).await?;
         names.insert(name, (logical, Uuid::from_u128(resource)));
     }
-    seed_v2_history_blocks(&database, 499..=513).await?;
+    seed_v2_history_blocks(&database, 499..=511).await?;
     let node = |name: &str| bigname_lookup::ens_namehash_hex(name).expect("namehash");
     let mut events = Vec::new();
     let mut pointer = |name: &str, resolver: &str, block: i64, log: i64| {
@@ -634,44 +633,7 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
         record_write(5, 509, 0),
         record_write(6, 509, 1),
     ]);
-    // mr-freshy.eth is wrapped at 510: the authority transition records the resolver it keeps on
-    // the wrapper resource, and the owner then points the name at another resolver on that
-    // resource. The registrar resource's pointer to the first resolver is never cleared, but the
-    // registry no longer selects that resolver, so a later write to it is not mr-freshy.eth's.
-    const OTHER_RESOLVER: &str = "0x0000000000000000000000000000000000080a12";
-    let wrapper = Uuid::from_u128(0x8f01);
-    sqlx::query(
-        "INSERT INTO bigname_phase.resources (resource_id, chain_id, block_hash, block_number,
-             canonicality_state)
-         VALUES ($1, $2, '0xhistory510', 510, 'canonical')",
-    )
-    .bind(wrapper)
-    .bind(EVENT_DATA_CHAIN)
-    .execute(&database.pool)
-    .await?;
-    let freshy = names["mr-freshy.eth"].0.clone();
-    let wrapped_pointer = |identity: &str, family: &str, resolver: &str, log: i64| {
-        event_data_event(
-            identity,
-            Some(&freshy),
-            Some(wrapper),
-            "ResolverChanged",
-            family,
-            510,
-            "0xtx510",
-            log,
-            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
-            json!({"source_event": "NewResolver", "node": node("mr-freshy.eth"),
-                   "resolver": resolver}),
-        )
-    };
-    events.extend([
-        wrapped_pointer("wrap:mr-freshy.eth", "ens_v1_wrapper_l1", NODE_RESOLVER, 0),
-        node_write(&node("mr-freshy.eth"), 510, 1),
-        wrapped_pointer("repoint:mr-freshy.eth", "ens_v1_registry_l1", OTHER_RESOLVER, 2),
-        node_write(&node("mr-freshy.eth"), 512, 0),
-    ]);
-    publish_event_data(&database, &events, 513).await?;
+    publish_event_data(&database, &events, 511).await?;
 
     let rows = event_data_rows(
         &event_data_payload(&database, "/v1/events?type=record&include=data&order=asc&page_size=50")
@@ -683,18 +645,19 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
             .unwrap_or_else(|| panic!("record row {block}/{log}: {rows:?}"))
             .clone()
     };
-    let name_at = |block: i64, log: i64| at(block, log).get("name").cloned();
-    assert_eq!(name_at(501, 0), Some(json!("mr-freshy.eth")), "pointer set earlier");
-    assert_eq!(name_at(501, 1), None, "unknown node");
-    assert_eq!(name_at(502, 0), None, "written before any name linked record 8");
-    assert_eq!(name_at(504, 0), Some(json!("legal.eth")));
-    assert_eq!(name_at(504, 1), None, "the zero-node default record");
-    assert_eq!(name_at(505, 4), Some(json!("shaird.eth")), "link and pointer earlier in the transaction");
-    assert_eq!(name_at(507, 0), None, "record 8 shared by three names");
-    assert_eq!(name_at(509, 0), None, "record 5 after shaird.eth relinked away");
-    assert_eq!(name_at(509, 1), Some(json!("shaird.eth")));
-    assert_eq!(name_at(510, 1), Some(json!("mr-freshy.eth")), "wrapped, same resolver");
-    assert_eq!(name_at(512, 0), None, "the registry selects another resolver since 510");
+    assert_eq!(rows.len(), 9, "{rows:?}");
+    assert!(rows.iter().all(|row| row.get("name").is_none()), "{rows:?}");
+    assert_eq!(
+        at(504, 0)["data"],
+        json!({"key": "text:description", "value": "record 8 at 504",
+               "resolver": {"chain_id": 1, "address": RECORD_RESOLVER}, "record_id": "8"})
+    );
+    assert_eq!(
+        at(501, 0)["data"],
+        json!({"key": "text:avatar", "value": "avatar",
+               "resolver": {"chain_id": 1, "address": NODE_RESOLVER},
+               "node": node("mr-freshy.eth")})
+    );
 
     let resolver = json!({"chain_id": 1, "address": RECORD_RESOLVER});
     assert_eq!(
@@ -708,8 +671,7 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
                "resolver": {"chain_id": 1, "address": NODE_RESOLVER}, "node": unknown_node})
     );
 
-    // A name-filtered read returns the name's inherited writes too; each row keeps the name it
-    // was written for, so the pre-link and shared writes stay unnamed there as well.
+    // A name-filtered read returns the name-history row set, still without a name per row.
     let legal = event_data_rows(
         &event_data_payload(&database, "/v1/events?name=legal.eth&type=record&order=asc").await?,
     );
@@ -718,11 +680,7 @@ async fn record_events_name_the_name_linked_at_their_position() -> Result<()> {
             .iter()
             .map(|row| (row["block_number"].clone(), row.get("name").cloned()))
             .collect::<Vec<_>>(),
-        [
-            (json!(502), None),
-            (json!(504), Some(json!("legal.eth"))),
-            (json!(507), None),
-        ]
+        [(json!(502), None), (json!(504), None), (json!(507), None)]
     );
     // Name history keeps the requested name on every row.
     let history = event_data_rows(

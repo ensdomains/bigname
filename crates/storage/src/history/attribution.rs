@@ -60,25 +60,6 @@ pub(in crate::history) fn push_exact_node_mirror_writes_for_test(
     );
 }
 
-/// The positional naming statements for `event_ids`, for plan tests: the candidate resources and
-/// the names over `resource_ids`.
-#[cfg(test)]
-pub(in crate::history) fn push_positional_candidate_resources_for_test<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    event_ids: &'a [i64],
-) {
-    sql::push_positional_candidate_resources(builder, event_ids);
-}
-
-#[cfg(test)]
-pub(in crate::history) fn push_positional_names_for_test<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    resource_ids: &'a [Uuid],
-    event_ids: &'a [i64],
-) {
-    sql::push_positional_names(builder, resource_ids, event_ids);
-}
-
 /// The attributed writes of a read's candidate resources, as `(resource, event)` pairs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::history) struct AttributedRecords {
@@ -200,60 +181,6 @@ pub(crate) async fn load_attribution_map(
     }
     attributed.retain(|_, event_ids| !event_ids.is_empty());
     Ok(attributed)
-}
-
-/// The names each of `event_ids` was written for, judged at the write's own position.
-///
-/// Only resolver record writes that carry no name of their own (`RecordChanged` and
-/// `RecordVersionChanged` with no logical name) are considered. A write is written for a name when
-/// that name's resolver pointer selected the write's resolver at the write's position and, on a
-/// record-ID resolver, the name's exact link selected the written record there (see
-/// `sql::push_positional_names`). A pointer's window ends at the name's next pointer on that
-/// registry, whichever resource carries it, so a pointer on a successor resource (after wrapping)
-/// closes the predecessor's. The arms are the producer's attribution arms restricted to pointers
-/// and links recorded before the write, and a name is dropped for a resource whose latest pointer
-/// is an unfollowable mirror, which name history attributes nothing to; so a name returned here
-/// also attributes the write in its own history, while a pointer or link recorded after the write
-/// never names it. Callers name a write only when exactly one name is returned.
-pub async fn load_positional_record_names(
-    pool: &sqlx::PgPool,
-    event_ids: &[i64],
-) -> Result<BTreeMap<i64, BTreeSet<String>>> {
-    let mut names = BTreeMap::<i64, BTreeSet<String>>::new();
-    if event_ids.is_empty() {
-        return Ok(names);
-    }
-    let mut snapshot = super::paging::begin_history_snapshot(pool, "record names").await?;
-    let mut candidates = QueryBuilder::<Postgres>::new("");
-    sql::push_positional_candidate_resources(&mut candidates, event_ids);
-    let resource_ids: Vec<Uuid> = candidates
-        .build_query_scalar()
-        .fetch_all(&mut *snapshot)
-        .await
-        .context("failed to load the resources whose pointers can name record writes")?;
-    if !resource_ids.is_empty() {
-        ensure_classification_publications(&mut snapshot, &resource_ids, None).await?;
-        let unfollowable =
-            mirror::load_unfollowable_mirror_resources(&mut snapshot, &resource_ids, None).await?;
-        let mut builder = QueryBuilder::<Postgres>::new("");
-        sql::push_positional_names(&mut builder, &resource_ids, event_ids);
-        for row in builder
-            .build()
-            .fetch_all(&mut *snapshot)
-            .await
-            .context("failed to load the names record writes were made for")?
-        {
-            if unfollowable.contains(&row.try_get::<Uuid, _>("resource_id")?) {
-                continue;
-            }
-            names
-                .entry(row.try_get("normalized_event_id")?)
-                .or_default()
-                .insert(row.try_get("logical_name_id")?);
-        }
-    }
-    snapshot.commit().await?;
-    Ok(names)
 }
 
 /// Classification is published current state even when the pointer walk is bounded history.

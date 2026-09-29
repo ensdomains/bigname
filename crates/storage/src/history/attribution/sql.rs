@@ -110,49 +110,16 @@ pub(super) fn position(alias: &str) -> String {
 /// `WITH pointer_rows, pointer_windows, pointers`: every readable `ResolverChanged` of the
 /// resources whose name surface is readable, each with the position of the pointer after it
 /// (`end_position`, null on the latest), and the subset that selects a resolver. Clears take part
-/// in the windows, so a clear closes the window before it and opens none. A pointer's window runs
-/// to the next pointer of its resource: the producer's attribution, where each resource keeps the
-/// writes its own pointers selected.
+/// in the windows, so a clear closes the window before it and opens none.
 pub(super) fn push_pointer_ctes<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) {
-    push_pointer_ctes_in(builder, resource_ids, published, "chain_id, resource_id");
-}
-
-/// The pointer CTEs with each window running to the next pointer of the same name on the same
-/// registry, whichever resource carries it. An ENSv1 or Basenames registry keeps one resolver per
-/// node, and a pointer recorded on a successor resource (after wrapping, or on the registry-read
-/// anchor) replaces the resolver the predecessor resource's pointer selected. ENSv2 pointers are a
-/// separate stream, since an ENSv2 registry entry does not replace the ENSv1 registry's resolver.
-/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137-L141 @ ens_v1@91c966f)
-fn push_name_pointer_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, resource_ids: &'a [Uuid]) {
-    push_pointer_ctes_in(
-        builder,
-        resource_ids,
-        None,
-        &format!(
-            "chain_id, logical_name_id,
-                       CASE WHEN pointer_source_family IN {ENS_V1_POINTER_FAMILIES} THEN 'ens_v1'
-                            WHEN pointer_source_family IN {ENS_V2_POINTER_FAMILIES} THEN 'ens_v2'
-                            ELSE pointer_source_family END"
-        ),
-    );
-}
-
-fn push_pointer_ctes_in<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    resource_ids: &'a [Uuid],
-    published: Option<&BTreeMap<String, i64>>,
-    partition: &str,
-) {
     builder.push(format!(
         "WITH pointer_rows AS (
             SELECT pointer.chain_id,
                    pointer.resource_id,
-                   pointer.logical_name_id,
                    pointer.normalized_event_id AS pointer_event_id,
                    pointer.namespace AS pointer_namespace,
                    pointer.source_family AS pointer_source_family,
@@ -183,7 +150,7 @@ fn push_pointer_ctes_in<'a>(
         pointer_windows AS (
             SELECT pointer_rows.*,
                    lead(event_position) OVER (
-                       PARTITION BY {partition} ORDER BY event_position
+                       PARTITION BY chain_id, resource_id ORDER BY event_position
                    ) AS end_position
             FROM pointer_rows
         ),
@@ -200,42 +167,6 @@ fn inside(window: &str) -> String {
         "({window}.end_position IS NULL OR {} < {window}.end_position)",
         position("record")
     )
-}
-
-/// Which writes an arm returns. `Attribution` is the producer's attribution: every write a pointer
-/// or link attributes to a resource, including writes made before the pointer or link existed,
-/// which the name then serves. `Positional` keeps only the writes, among `event_ids`, made after
-/// the pointer (and on a record-ID resolver after the exact link) that selected them, and returns
-/// the name of each, so a later link never names an earlier write.
-#[derive(Clone, Copy)]
-pub(super) enum Arm<'a> {
-    Attribution,
-    Positional(&'a [i64]),
-}
-
-impl<'a> Arm<'a> {
-    /// `SELECT <columns>` of one arm, from `window` (a pointer or link selection).
-    fn select(self, window: &str) -> String {
-        match self {
-            Self::Attribution => format!("SELECT {window}.resource_id, record.normalized_event_id"),
-            Self::Positional(_) => format!(
-                "SELECT record.normalized_event_id, {window}.logical_name_id, {window}.resource_id"
-            ),
-        }
-    }
-
-    /// The positional restriction: the write is one of the requested ones and lies after the
-    /// start of `window`.
-    fn push_restriction(self, builder: &mut QueryBuilder<'a, Postgres>, window: &str) {
-        if let Self::Positional(event_ids) = self {
-            builder.push(" AND record.normalized_event_id = ANY(");
-            builder.push_bind(event_ids);
-            builder.push(format!(
-                "::bigint[]) AND {window}.event_position < {}",
-                position("record")
-            ));
-        }
-    }
 }
 
 /// `record` is a node-keyed write on `pointer`'s resolver for `pointer`'s name.
@@ -261,85 +192,6 @@ pub(super) fn push_pointer_window_attribution<'a>(
 ) {
     push_pointer_ctes(builder, resource_ids, published);
     push_record_link_ctes(builder, published);
-    push_arms(builder, published, Arm::Attribution);
-}
-
-/// `SELECT normalized_event_id, logical_name_id, resource_id` for each of `event_ids` and each
-/// name whose pointer, among the pointers of `resource_ids`, selected it at the write's position:
-/// the write lies after the pointer and before the name's next pointer on that registry, whichever
-/// resource carries it, and on a record-ID resolver after the exact link that selected the record
-/// and before the next link change. A write to a record the resolver's zero-node default link also
-/// selected at that position is shared with every name without its own link, so no exact link
-/// names it. Mirror substitution adds no name: it serves ENSv1 writes to an ENSv2 name whose ENSv1
-/// pointer already covers them by node.
-pub(super) fn push_positional_names<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    resource_ids: &'a [Uuid],
-    event_ids: &'a [i64],
-) {
-    push_name_pointer_ctes(builder, resource_ids);
-    push_record_link_ctes(builder, None);
-    push_arms(builder, None, Arm::Positional(event_ids));
-}
-
-/// `SELECT resource_id` of every resource whose pointers can name one of `event_ids`: for a
-/// node-keyed write, the resources the name whose namehash is the node pointed with; for a
-/// record-ID write, every resource of every name that pointed at its resolver. All pointers of
-/// those names are then read, since a later pointer, on any of the name's resources, closes an
-/// earlier window. The arms read the name and the resolver pointer indexes.
-pub(super) fn push_positional_candidate_resources<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    event_ids: &'a [i64],
-) {
-    builder.push(
-        "SELECT pointer.resource_id
-         FROM bigname_phase.normalized_events record
-         JOIN bigname_phase.normalized_events pointer
-           ON pointer.logical_name_id = record.namespace || ':' || lower(record.after_state ->> 'node')
-          AND pointer.chain_id = record.chain_id
-          AND pointer.event_kind = 'ResolverChanged'
-          AND pointer.resource_id IS NOT NULL
-         WHERE record.normalized_event_id = ANY(",
-    );
-    builder.push_bind(event_ids);
-    builder.push(
-        "::bigint[])
-           AND record.logical_name_id IS NULL
-           AND record.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-           AND record.after_state ->> 'storage_model' IS DISTINCT FROM 'resolver_record_id'
-         UNION
-         SELECT sibling.resource_id
-         FROM bigname_phase.normalized_events record
-         JOIN bigname_phase.normalized_events pointer
-           ON pointer.chain_id = record.chain_id
-          AND lower(pointer.after_state ->> 'resolver') = lower(record.after_state ->> 'resolver')
-          AND pointer.event_kind = 'ResolverChanged'
-          AND pointer.logical_name_id IS NOT NULL
-          AND pointer.resource_id IS NOT NULL
-          AND pointer.after_state ->> 'resolver' IS NOT NULL
-          AND pointer.after_state ->> 'resolver' <> ''
-         JOIN bigname_phase.normalized_events sibling
-           ON sibling.logical_name_id = pointer.logical_name_id
-          AND sibling.chain_id = pointer.chain_id
-          AND sibling.event_kind = 'ResolverChanged'
-          AND sibling.resource_id IS NOT NULL
-          AND sibling.canonicality_state IN ('canonical', 'safe', 'finalized')
-         WHERE record.normalized_event_id = ANY(",
-    );
-    builder.push_bind(event_ids);
-    builder.push(
-        "::bigint[])
-           AND record.logical_name_id IS NULL
-           AND record.event_kind = 'RecordChanged'
-           AND record.after_state ->> 'storage_model' = 'resolver_record_id'",
-    );
-}
-
-fn push_arms<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    published: Option<&BTreeMap<String, i64>>,
-    arm: Arm<'a>,
-) {
     // ENSv1 and Basenames: a registry-side pointer attributes the node-keyed writes on its
     // resolver made before the next pointer; the latest pointer is open-ended. Each arm names its
     // source family literally so it matches that family's node and resolver index.
@@ -357,24 +209,22 @@ fn push_arms<'a>(
     ] {
         builder.push(format!(
             "
-        {}
+        SELECT pointer.resource_id, record.normalized_event_id
         FROM pointers pointer
         JOIN bigname_phase.normalized_events record
           ON {}
          AND record.source_family = '{record_family}'
         WHERE pointer.pointer_source_family IN {pointer_families}
           AND {}",
-            arm.select("pointer"),
             node_keyed_on("pointer"),
             inside("pointer"),
         ));
-        arm.push_restriction(builder, "pointer");
         push_readable_event(builder, "record", published);
         builder.push("\n        UNION");
     }
-    push_declared_resolver_arm(builder, published, arm);
+    push_declared_resolver_arm(builder, published);
     builder.push("\n        UNION");
-    push_record_link_arm(builder, published, arm);
+    push_record_link_arm(builder, published);
 }
 
 /// ENSv2-origin writes: an ENSv2 registry or root pointer attributes the node-keyed writes of a
@@ -382,14 +232,13 @@ fn push_arms<'a>(
 /// `public_resolver_v2`, when the declaring manifest is in the pointer's namespace. The
 /// classification is read from F3 through `resolver_classification_relation` in the
 /// same selected database snapshot.
-fn push_declared_resolver_arm<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
+fn push_declared_resolver_arm(
+    builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
-    arm: Arm<'a>,
 ) {
-    builder.push(format!("\n        {}", arm.select("pointer")));
     builder.push(
         "
+        SELECT pointer.resource_id, record.normalized_event_id
         FROM pointers pointer
         JOIN __family_resolver_classification__ resolver
           ON resolver.chain_id = pointer.chain_id
@@ -430,7 +279,6 @@ fn push_declared_resolver_arm<'a>(
         node_keyed_on("pointer"),
         inside("pointer"),
     ));
-    arm.push_restriction(builder, "pointer");
     push_readable_event(builder, "record", published);
 }
 
@@ -475,8 +323,8 @@ fn push_record_link_ctes(
              AND (pointer.end_position IS NULL OR link.event_position < pointer.end_position)
         ),
         link_spans AS (
-            SELECT pointer.chain_id, pointer.resource_id, pointer.logical_name_id,
-                   pointer.resolver_address, pointer.namehash, boundary.event_position,
+            SELECT pointer.chain_id, pointer.resource_id, pointer.resolver_address,
+                   pointer.namehash, boundary.event_position,
                    COALESCE(lead(boundary.event_position) OVER (
                        PARTITION BY boundary.pointer_event_id ORDER BY boundary.event_position
                    ), pointer.end_position) AS end_position
@@ -489,8 +337,7 @@ fn push_record_link_ctes(
                         ELSE defaults.record_id END AS record_id,
                    exact.normalized_event_id AS exact_link_event_id,
                    CASE WHEN COALESCE(exact.record_id, '0') = '0'
-                        THEN defaults.normalized_event_id END AS default_link_event_id,
-                   defaults.record_id AS default_record_id
+                        THEN defaults.normalized_event_id END AS default_link_event_id
             FROM link_spans span
             LEFT JOIN LATERAL (
                 SELECT link.* FROM links link
@@ -514,14 +361,13 @@ fn push_record_link_ctes(
 
 /// A selected record contributes its writes made before its span ends, and the selecting links
 /// are attributed too, as the producer retains them.
-fn push_record_link_arm<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
+fn push_record_link_arm(
+    builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
-    arm: Arm<'a>,
 ) {
     builder.push(format!(
         "
-        {}
+        SELECT selection.resource_id, record.normalized_event_id
         FROM link_selections selection
         JOIN bigname_phase.normalized_events record
           ON record.chain_id = selection.chain_id
@@ -531,20 +377,8 @@ fn push_record_link_arm<'a>(
          AND record.event_kind = 'RecordChanged'
         WHERE selection.record_id IS NOT NULL
           AND {}",
-        arm.select("selection"),
         inside("selection"),
     ));
-    arm.push_restriction(builder, "selection");
-    if matches!(arm, Arm::Positional(_)) {
-        // Only an exact link names a write, and not while the default link selects the same
-        // record for every name without its own link.
-        builder.push(
-            " AND selection.default_link_event_id IS NULL
-              AND selection.default_record_id IS DISTINCT FROM selection.record_id",
-        );
-        push_readable_event(builder, "record", published);
-        return;
-    }
     push_readable_event(builder, "record", published);
     builder.push(
         "

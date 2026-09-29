@@ -18,18 +18,19 @@
 //!   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
 //!   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
 //!   (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L29 @ ens_v1@91c966f)
-//!   The claim's name write is the first `NameChanged` on the claimed reverse node after the claim
-//!   in its transaction, and it counts only when the retained evidence places it in that call: it
-//!   is at most four logs after the claim (the claim, the registry's up to three writes, the name),
-//!   no other claim of the node lies between, and it was emitted by the resolver the registry
-//!   selected for the reverse node at that point. Otherwise none is returned: a later write,
-//!   another resolver's write, or a write outside that span never stands in. Logs carry no call
-//!   boundaries, so a separate call that writes the claim's resolver inside that span cannot be
-//!   told apart from `setNameForAddr`; the name it wrote is then the name the claimed reverse
-//!   record held once the claim's call sequence ended.
+//!   The returned name is the first `NameChanged` on the claimed reverse node after the claim in
+//!   its transaction, and only when it meets this evidence rule: it is at most four logs after
+//!   the claim (the standard call's registry writes, then the name), no other claim of the node
+//!   lies between, and it was emitted by the resolver the registry selected for the reverse node
+//!   at that point. Otherwise none is returned, and a later write never stands in. The four-log
+//!   bound fits the standard `setNameForAddr` call with a resolver that emits only `NameChanged`;
+//!   a resolver that logs more before it gives no name. Logs carry no call boundaries, so the
+//!   rule does not prove which call made the write: a separate call that writes the claim's
+//!   resolver inside that span meets it too.
 //!
-//! Nothing outside the claim's transaction is read, so a later name write or the address's current
-//! primary name never stands in for the value an event recorded.
+//! No name value is taken from outside the claim's transaction, so a later name write or the
+//! address's current primary name never stands in for the value an event recorded. Only the
+//! resolver selection may come from an earlier block.
 
 use std::collections::BTreeMap;
 

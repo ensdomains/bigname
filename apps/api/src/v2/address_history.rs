@@ -151,7 +151,6 @@ pub(crate) async fn get_address_history(
         .rows
         .iter()
         .filter_map(|row| row.logical_name_id.clone())
-        .chain(context.record_logical_name_ids().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -178,8 +177,7 @@ pub(crate) async fn get_address_history(
         .filter_map(|row| {
             let name = row
                 .logical_name_id
-                .as_deref()
-                .or_else(|| context.record_name(row))
+                .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
                 .map(|row| row.normalized_name.as_str());
             build_event(row, name, include, &context)
