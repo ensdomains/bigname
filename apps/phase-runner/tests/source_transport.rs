@@ -61,7 +61,13 @@ async fn direct_reader_without_a_datadir_is_refused_and_changes_nothing() -> Res
     .await
     .expect_err("an empty directory is not a Reth datadir");
 
-    assert!(format!("{error:#}").contains("is missing"), "{error:#}");
+    // Standard builds refuse the unavailable reader; opt-in builds reject the datadir.
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("is missing")
+            || message.contains("Reth DB support was not compiled; enable the reth-db feature"),
+        "{message}"
+    );
     assert_eq!(before, snapshot(db.pool()).await?);
     server.abort();
     std::fs::remove_dir_all(datadir)?;
