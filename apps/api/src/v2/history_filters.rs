@@ -47,6 +47,11 @@ impl HistoryFilters {
         if record_key.as_deref() == Some("") {
             return Err(V2Error::invalid_input("record_key must not be empty"));
         }
+        if record_key.as_deref().is_some_and(|key| key.contains('\0')) {
+            return Err(V2Error::invalid_input(
+                "record_key must not contain NUL bytes",
+            ));
+        }
         Ok(Self {
             excluded_types,
             kinds,
