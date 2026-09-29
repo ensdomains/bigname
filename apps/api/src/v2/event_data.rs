@@ -13,6 +13,7 @@ use bigname_storage::HistoryEvent as StorageHistoryEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::history_context::HistoryRowContext;
 use super::slug_to_numeric;
 use super::{HistoryEventType, V2Error, V2Result, permission_powers_value};
 
@@ -74,15 +75,20 @@ pub(crate) fn raw_event_kind(row: &StorageHistoryEvent, include: HistoryInclude)
 pub(crate) fn build_event_detail(
     row: &StorageHistoryEvent,
     event_type: HistoryEventType,
+    context: &HistoryRowContext,
 ) -> EventDetail {
     EventDetail {
         contract_address: string_field(&row.raw_fact_ref, "emitting_address")
             .map(|address| address.to_ascii_lowercase()),
-        data: build_event_data(row, event_type),
+        data: build_event_data(row, event_type, context),
     }
 }
 
-fn build_event_data(row: &StorageHistoryEvent, event_type: HistoryEventType) -> Map<String, Value> {
+fn build_event_data(
+    row: &StorageHistoryEvent,
+    event_type: HistoryEventType,
+    context: &HistoryRowContext,
+) -> Map<String, Value> {
     let after = &row.after_state;
     let before = &row.before_state;
     let mut data = Map::new();
@@ -97,6 +103,10 @@ fn build_event_data(row: &StorageHistoryEvent, event_type: HistoryEventType) -> 
                 "subregistry",
                 contract_ref(row, after, "subregistry"),
             );
+            if let Some((action_id, role)) = registration_action(row) {
+                data.insert("action_id".to_owned(), Value::String(action_id));
+                data.insert("action_role".to_owned(), Value::String(role.to_owned()));
+            }
         }
         HistoryEventType::Renewal | HistoryEventType::Release => {
             insert(&mut data, "expires_at", timestamp_field(after, "expiry"));
@@ -139,10 +149,38 @@ fn build_event_data(row: &StorageHistoryEvent, event_type: HistoryEventType) -> 
             );
             insert(&mut data, "key", key.map(Value::String));
             insert(&mut data, "value", present(after.get("value")).cloned());
+            // Where the record lives, so a write no single name can be given for stays
+            // identifiable: the resolver, and its node or its record ID.
+            insert(&mut data, "resolver", record_resolver(row));
+            if string_field(after, "storage_model").as_deref() == Some("resolver_record_id") {
+                insert(
+                    &mut data,
+                    "record_id",
+                    string_field(after, "resolver_record_id").map(Value::String),
+                );
+            } else {
+                // A `NameForAddrChanged` companion row keeps the reverse node it names under
+                // `reverse_node` (crates/adapters/src/schema_v2/protocol/v1/reverse.rs).
+                let node = string_field(after, "node").or_else(|| {
+                    (string_field(after, "source_event").as_deref() == Some("NameForAddrChanged"))
+                        .then(|| string_field(after, "reverse_node"))
+                        .flatten()
+                });
+                insert(
+                    &mut data,
+                    "node",
+                    node.map(|node| Value::String(node.to_ascii_lowercase())),
+                );
+            }
         }
         HistoryEventType::PrimaryName => {
             insert(&mut data, "address", address_field(after, "address"));
             insert(&mut data, "coin_type", unsigned_field(after, "coin_type"));
+            if let Some(recorded) = context.recorded_primary_name(row) {
+                let (name, status) = recorded_primary_name(recorded);
+                insert(&mut data, "name", name.map(Value::String));
+                data.insert("name_status".to_owned(), Value::String(status.to_owned()));
+            }
         }
         HistoryEventType::Permission => {
             insert(&mut data, "address", address_field(after, "subject"));
@@ -162,8 +200,98 @@ fn build_event_data(row: &StorageHistoryEvent, event_type: HistoryEventType) -> 
                 contract_ref(row, after, "subregistry"),
             );
         }
+        HistoryEventType::Migration => {
+            insert(
+                &mut data,
+                "migration_path",
+                string_field(after, "migration_path").map(Value::String),
+            );
+        }
     }
     data
+}
+
+/// The registration action a `registration` row belongs to, and what the row is within it.
+///
+/// One ENSv2 registration stores a grant at the registry's `LabelRegistered` log and a copy at the
+/// `TokenResource` log the same `register` call emits once the token has its resource. That
+/// action is the registration of one token by one contract in one transaction: the transaction
+/// hash, the emitting contract and the token (its `token_id`, else its `labelhash`, else the row's
+/// name). Several registrations in one transaction differ by token.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L491-L498 @ ens_v2_sepolia_20260916@366de741)
+///
+/// A grant is also stored each time an already registered label becomes reachable under a name.
+/// One parent `SubregistryUpdated` can make a whole subtree reachable, and every resulting grant
+/// carries the parent's log, so the emitter and token do not tell two descendant registries apart.
+/// A reachability action is therefore one grant: the triggering log (transaction and log index),
+/// the registry that holds the label, the token, and the name it became reachable under.
+///
+/// Rows with no transaction or emitting contract (derived from interpreter state) have no action.
+fn registration_action(row: &StorageHistoryEvent) -> Option<(String, &'static str)> {
+    use sha2::{Digest, Sha256};
+
+    let transaction = row.transaction_hash.as_deref()?.to_ascii_lowercase();
+    let chain = row.chain_id.as_deref()?;
+    let emitter = string_field(&row.raw_fact_ref, "emitting_address")?.to_ascii_lowercase();
+    let token = string_field(&row.after_state, "token_id")
+        .or_else(|| string_field(&row.after_state, "labelhash"))
+        .or_else(|| row.logical_name_id.clone())?
+        .to_ascii_lowercase();
+    let (key, role) = if let Some((_, reachable)) = row
+        .event_identity
+        .split_once(":RegistrationGranted:topology:")
+    {
+        // The identity suffix is `{registry}:{token}` followed by the ordinal.
+        let registry = reachable.split(':').next().unwrap_or_default();
+        let log_index = row.log_index?;
+        let name = row.logical_name_id.as_deref().unwrap_or_default();
+        (
+            format!(
+                "reachability-action\0{chain}\0{transaction}\0{log_index}\0{}\0{token}\0{name}",
+                registry.to_ascii_lowercase()
+            ),
+            "reachable",
+        )
+    } else {
+        let role = if row.event_identity.contains(":RegistrationGranted:linked:") {
+            "linked"
+        } else {
+            "registered"
+        };
+        (
+            format!("registration-action\0{chain}\0{transaction}\0{emitter}\0{token}"),
+            role,
+        )
+    };
+    Some((hex::encode(Sha256::digest(key.as_bytes())), role))
+}
+
+/// The name a primary-name event recorded and whether it set, cleared or recorded no name. An
+/// empty name clears the reverse record; bytes that are not valid UTF-8, or contain NUL, set a
+/// name that cannot be shown as text, so only the status is returned.
+fn recorded_primary_name(recorded: Option<&Value>) -> (Option<String>, &'static str) {
+    match recorded {
+        None => (None, "unknown"),
+        Some(Value::String(name)) if name.is_empty() => (None, "cleared"),
+        Some(Value::String(name)) => (Some(name.clone()), "set"),
+        Some(bytes) => match bytes.get("bytes").and_then(Value::as_str) {
+            Some("0x" | "") => (None, "cleared"),
+            _ => (None, "set"),
+        },
+    }
+}
+
+/// `{chain_id, address}` of the resolver holding a record: the address the write names, else the
+/// emitting contract.
+fn record_resolver(row: &StorageHistoryEvent) -> Option<Value> {
+    let address = string_field(&row.after_state, "resolver")
+        .or_else(|| string_field(&row.raw_fact_ref, "emitting_address"))?
+        .to_ascii_lowercase();
+    if address == ZERO_ADDRESS {
+        return None;
+    }
+    let chain_id = slug_to_numeric(row.chain_id.as_deref()?)?;
+    Some(json!({ "chain_id": chain_id, "address": address }))
 }
 
 fn insert(data: &mut Map<String, Value>, key: &str, value: Option<Value>) {
@@ -217,305 +345,4 @@ fn timestamp_field(state: &Value, key: &str) -> Option<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use bigname_storage::CanonicalityState;
-    use serde_json::json;
-
-    use super::*;
-
-    fn row(event_kind: &str, before: Value, after: Value) -> StorageHistoryEvent {
-        StorageHistoryEvent {
-            normalized_event_id: 1,
-            event_identity: "event:1".to_owned(),
-            namespace: "ens".to_owned(),
-            logical_name_id: Some("ens:alice.eth".to_owned()),
-            resource_id: None,
-            registration_id: None,
-            event_kind: event_kind.to_owned(),
-            source_family: "ens_v1_registry_l1".to_owned(),
-            manifest_version: 1,
-            source_manifest_id: None,
-            chain_id: Some("ethereum-mainnet".to_owned()),
-            block_number: Some(100),
-            block_hash: Some("0xblock".to_owned()),
-            block_timestamp: None,
-            transaction_hash: Some("0xtx".to_owned()),
-            transaction_index: Some(0),
-            log_index: Some(0),
-            raw_fact_ref: json!({
-                "kind": "raw_log",
-                "emitting_address": "0x00000000000000000000000000000000000000AA",
-            }),
-            derivation_kind: "direct".to_owned(),
-            canonicality_state: CanonicalityState::Canonical,
-            before_state: before,
-            after_state: after,
-            migration_correlation_ids: Vec::new(),
-            consumer_visibility: "activated".to_owned(),
-            migration_associations: json!([]),
-            provenance: json!({}),
-            coverage: json!({}),
-        }
-    }
-
-    #[test]
-    fn expiry_timestamps_follow_the_shared_range_rule() {
-        for (expiry, expected) in [
-            (json!(-1), None),
-            (json!("-1"), None),
-            (json!(0), Some("1970-01-01T00:00:00Z")),
-            (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
-            (json!(253_402_300_800_u64), None),
-            (json!(1_735_689_600.5), Some("2025-01-01T00:00:00Z")),
-            (json!("1735689600.5"), Some("2025-01-01T00:00:00Z")),
-        ] {
-            assert_eq!(
-                timestamp_field(&json!({ "expiry": expiry }), "expiry"),
-                expected.map(Value::from),
-                "{expiry}"
-            );
-        }
-    }
-
-    #[test]
-    fn include_accepts_only_data_and_raw_in_any_order() {
-        assert_eq!(
-            history_include(&[]).expect("empty include is valid"),
-            HistoryInclude::default()
-        );
-        assert_eq!(
-            history_include(&["data".to_owned()]).expect("data is valid"),
-            HistoryInclude::DATA
-        );
-        assert_eq!(
-            history_include(&["raw".to_owned()]).expect("raw is valid"),
-            HistoryInclude::RAW
-        );
-        let both = HistoryInclude {
-            data: true,
-            raw: true,
-        };
-        assert_eq!(
-            history_include(&["data".to_owned(), "raw".to_owned()]).expect("both are valid"),
-            both
-        );
-        assert_eq!(
-            history_include(&["raw".to_owned(), "data".to_owned()]).expect("both are valid"),
-            both
-        );
-        assert!(history_include(&["bogus".to_owned()]).is_err());
-        assert!(history_include(&["kind".to_owned()]).is_err());
-        assert!(history_include(&["data".to_owned(), "events".to_owned()]).is_err());
-    }
-
-    #[test]
-    fn raw_kind_is_exposed_only_behind_include_raw() {
-        let row = row("RegistrationRenewed", json!({}), json!({}));
-        assert_eq!(raw_event_kind(&row, HistoryInclude::default()), None);
-        assert_eq!(raw_event_kind(&row, HistoryInclude::DATA), None);
-        assert_eq!(
-            raw_event_kind(&row, HistoryInclude::RAW),
-            Some("RegistrationRenewed".to_owned())
-        );
-    }
-
-    #[test]
-    fn detail_exposes_lower_cased_emitter_without_the_raw_kind() {
-        let detail = build_event_detail(
-            &row(
-                "RegistrationRenewed",
-                json!({}),
-                json!({ "expiry": 1_950_000_000_i64 }),
-            ),
-            HistoryEventType::Renewal,
-        );
-        assert_eq!(
-            detail.contract_address,
-            Some("0x00000000000000000000000000000000000000aa".to_owned())
-        );
-        assert!(
-            serde_json::to_value(&detail)
-                .expect("detail must serialize")
-                .get("kind")
-                .is_none()
-        );
-        assert_eq!(
-            Value::Object(detail.data),
-            json!({ "expires_at": "2031-10-17T10:40:00Z" })
-        );
-
-        let mut state_derived = row("ExpiryChanged", json!({}), json!({ "expiry": null }));
-        state_derived.raw_fact_ref = json!({ "kind": "interpreter_state" });
-        let detail = build_event_detail(&state_derived, HistoryEventType::Expiry);
-        assert_eq!(detail.contract_address, None);
-        assert!(detail.data.is_empty());
-    }
-
-    #[test]
-    fn registration_and_pointer_types_use_dictionary_shapes() {
-        let detail = build_event_detail(
-            &row(
-                "RegistrationGranted",
-                json!({}),
-                json!({
-                    "owner": "0x00000000000000000000000000000000000000BB",
-                    "expiry": "1900000000",
-                    "resolver": "0x0000000000000000000000000000000000000abc",
-                    "subregistry": ZERO_ADDRESS,
-                }),
-            ),
-            HistoryEventType::Registration,
-        );
-        assert_eq!(
-            Value::Object(detail.data),
-            json!({
-                "owner": "0x00000000000000000000000000000000000000bb",
-                "expires_at": "2030-03-17T17:46:40Z",
-                "resolver": {
-                    "chain_id": 1,
-                    "address": "0x0000000000000000000000000000000000000abc",
-                },
-            })
-        );
-
-        let cleared = build_event_detail(
-            &row(
-                "ResolverChanged",
-                json!({ "resolver": "0x0000000000000000000000000000000000000abc" }),
-                json!({ "resolver": ZERO_ADDRESS }),
-            ),
-            HistoryEventType::Resolver,
-        );
-        assert!(cleared.data.is_empty());
-
-        let mut unknown_chain = row(
-            "SubregistryChanged",
-            json!({}),
-            json!({ "subregistry": "0x0000000000000000000000000000000000000abc" }),
-        );
-        unknown_chain.chain_id = Some("unknown-chain".to_owned());
-        assert!(
-            build_event_detail(&unknown_chain, HistoryEventType::Subregistry)
-                .data
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn transfer_authority_record_primary_name_and_permission_payloads() {
-        let transfer = build_event_detail(
-            &row(
-                "TokenControlTransferred",
-                json!({ "from": "0x00000000000000000000000000000000000000AA" }),
-                json!({ "to": "0x00000000000000000000000000000000000000bb", "fuses": 65537 }),
-            ),
-            HistoryEventType::Transfer,
-        );
-        assert_eq!(
-            Value::Object(transfer.data),
-            json!({
-                "from": "0x00000000000000000000000000000000000000aa",
-                "to": "0x00000000000000000000000000000000000000bb",
-                "fuses": 65537,
-            })
-        );
-
-        let authority = build_event_detail(
-            &row(
-                "AuthorityEpochChanged",
-                json!({ "registry_owner": "0x00000000000000000000000000000000000000aa" }),
-                json!({ "registry_owner": "0x00000000000000000000000000000000000000cc" }),
-            ),
-            HistoryEventType::Authority,
-        );
-        assert_eq!(
-            Value::Object(authority.data),
-            json!({
-                "owner": "0x00000000000000000000000000000000000000cc",
-                "from": "0x00000000000000000000000000000000000000aa",
-            })
-        );
-
-        let record = build_event_detail(
-            &row(
-                "RecordChanged",
-                json!({}),
-                json!({
-                    "record_key": "text:avatar",
-                    "record_family": "text",
-                    "value": "ipfs://avatar",
-                    "value_retained": true,
-                }),
-            ),
-            HistoryEventType::Record,
-        );
-        assert_eq!(
-            Value::Object(record.data),
-            json!({ "key": "text:avatar", "value": "ipfs://avatar" })
-        );
-        let unretained = build_event_detail(
-            &row(
-                "RecordChanged",
-                json!({}),
-                json!({ "record_key": "addr:2147483658", "coin_type": "2147483658" }),
-            ),
-            HistoryEventType::Record,
-        );
-        assert_eq!(
-            Value::Object(unretained.data),
-            json!({ "key": "addr:2147483658", "coin_type": 2_147_483_658_u64 })
-        );
-        let version = build_event_detail(
-            &row("RecordVersionChanged", json!({}), json!({ "version": 2 })),
-            HistoryEventType::Record,
-        );
-        assert!(version.data.is_empty());
-
-        let primary = build_event_detail(
-            &row(
-                "ReverseChanged",
-                json!({}),
-                json!({
-                    "address": "0x00000000000000000000000000000000000000AA",
-                    "coin_type": "60",
-                    "reverse_name": "aa.addr.reverse",
-                }),
-            ),
-            HistoryEventType::PrimaryName,
-        );
-        assert_eq!(
-            Value::Object(primary.data),
-            json!({ "address": "0x00000000000000000000000000000000000000aa", "coin_type": 60 })
-        );
-
-        let permission = build_event_detail(
-            &row(
-                "EACRolesChanged",
-                json!({}),
-                json!({
-                    "subject": "0x00000000000000000000000000000000000000DD",
-                    "effective_powers": ["resource_control", "set_resolver"],
-                    "scope": { "kind": "resolver" },
-                    "role_bitmap": "0x1",
-                }),
-            ),
-            HistoryEventType::Permission,
-        );
-        assert_eq!(
-            Value::Object(permission.data),
-            json!({
-                "address": "0x00000000000000000000000000000000000000dd",
-                "powers": ["registration_control", "set_resolver"],
-            })
-        );
-        let fuses = build_event_detail(
-            &row(
-                "PermissionScopeChanged",
-                json!({ "fuses": 0 }),
-                json!({ "fuses": 196609, "wrapper_state": "locked" }),
-            ),
-            HistoryEventType::Permission,
-        );
-        assert_eq!(Value::Object(fuses.data), json!({ "fuses": 196609 }));
-    }
-}
+mod tests;

@@ -1789,16 +1789,17 @@ Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
 | --- | --- |
-| `registration` | `registrant`, `owner`, `expires_at`, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}` |
+| `registration` | `registrant`, `owner`, `expires_at`, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
 | `renewal`, `release` | `expires_at` |
 | `expiry` | `expires_at`, `fuses` (uint32 word when the change came through NameWrapper) |
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
-| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no fields. |
-| `primary_name` | `address`, `coin_type` (number) |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
+| `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
 | `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
+| `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
 Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
 
@@ -1813,7 +1814,13 @@ Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
   "transaction_hash": "0x...",
   "log_index": 12,
   "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
-  "data": { "key": "addr:60", "coin_type": 60, "value": "0x..." }
+  "data": {
+    "key": "addr:60",
+    "coin_type": 60,
+    "value": "0x...",
+    "resolver": { "chain_id": 1, "address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63" },
+    "node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+  }
 }
 ```
 
@@ -1823,6 +1830,122 @@ carries the lean fields plus `"kind": "RecordChanged"` and no
 
 `data` never exposes before/after state, raw fact references, or other
 pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
+
+#### Migrations
+
+A `migration` row is a confirmed [ENSv1→ENSv2 migration](glossary.md#migration-boundary)
+of the row's name: the activated `MigrationApplied` event of a complete
+[migration correlation group](glossary.md#migration-correlation-group). It
+sits at the position of the ENSv2 `LabelRegistered` log the migration
+registered (same block, transaction and log); rows at one position follow the
+history order's final key, the stored event identity, which `id` does not
+reveal. Its `registration_id` is the ENSv2 registration the group's validated
+successor binding holds, the one the registry's `TokenResource` copy of the
+grant carries, even when the grant at the `LabelRegistered` log has no
+registration yet; `GET /v1/events?registration_id=` returns the row with that
+registration. A name has one row per confirmed migration. A native ENSv2
+registration, an authority change, and a `MigrationApplied` whose group never
+completed (`consumer_visibility=candidate`) produce none, and the migration
+adds no `registration` row: the registration keeps the rows described under
+[registration actions](#registration-actions). The row is the same evidence
+`migrated_at` reads, and it follows that evidence: a redo or a reorg that
+retracts the migration removes the row with it.
+
+#### Registration actions
+
+One registration can store several `registration` rows. An ENSv2 registry's
+`register` emits `LabelRegistered` and, once the token has its resource,
+`TokenResource` in the same call, and bigname keeps a grant at each; a grant is
+also kept each time an already registered label becomes reachable under a name
+(`include=child_registrations` lists these).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L491-L498 @ ens_v2_sepolia_20260916@366de741)
+With `include=data`, every `registration` row that came from a log carries:
+
+- `action_id`: an opaque 64-character identifier of the registration action.
+  A registration is the registration of one token by one contract in one
+  transaction (derived from the transaction hash, the emitting contract, and
+  the token ID, else the labelhash, else the name); its `registered` and
+  `linked` rows share the id. A reachability grant is its own action: one
+  parent `SubregistryUpdated` can make a whole subtree reachable, and every
+  grant it causes carries the parent's log, so its id is derived from that log
+  (transaction and log index), the registry holding the label, the token and
+  the name it became reachable under. Rows of one action share the id on every
+  history route and page; rows of different registrations, in one transaction
+  or from one parent update, do not. Unlike `id` it is not per row, and it does
+  not change across a re-derivation boundary.
+- `action_role`: what the row is within the action. `registered` is the grant
+  at the registration log itself. `linked` is the grant repeated at the
+  registry's `TokenResource` log; it carries the `registration_id` the
+  registered row may not have yet. `reachable` is a grant stored when the label
+  became reachable under a name, emitted at the parent registry's log.
+
+Rows derived from interpreter state, with no transaction or emitting contract,
+carry neither field. To show one entry per registration, group rows by
+`action_id`. The rows of one action can fall on different pages; a client
+merges them across pages. `page.total_count` counts rows, not actions, and
+there is no action count.
+
+#### Record event names
+
+A resolver record write is keyed by node or by record ID, not by name. On
+`GET /v1/events` and `GET /v1/addresses/{address}/history`, a `record` row
+carries `name` only when the written node was already linked to a known name
+when the write was indexed: an ENSv1 or Basenames write to a node whose name
+surface existed, or an ENSv2 write whose node the indexer maps to a name. That
+name is the one whose node the write addresses; it does not say the name's
+resolver pointer selected that resolver. Any other record row, including every
+record-ID write, has no `name` field and is identified only by its locator:
+under `include=data`, `resolver`, and `node` or `record_id`. No name is derived
+for such a row at read time, and a row is never duplicated per name or dropped.
+
+[Name history](#get-v1namesnamehistory) is where a name's record changes are
+shown: it lists the writes the name's resolver pointers and record links
+attribute to it, with the requested name on every row.
+`GET /v1/events?name=...` returns that same row set; each of its record rows
+carries `name` under the rule above, so a write attributed to the name only
+through a pointer or link has none.
+
+#### Primary-name values
+
+A `primary_name` row's `data` returns the name its event recorded:
+
+- `name_status=set` with `name`: the name as the reverse record stored it,
+  unnormalized. A `NameForAddrChanged` carries the name in its own log.
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L31 @ ens_v1@91c966f)
+  A `ReverseClaimed` carries none. The reverse registrar's `setNameForAddr`
+  emits `ReverseClaimed`, has the registry write the reverse node's owner and
+  resolver (`NewOwner`, and `NewResolver` and `NewTTL` only when they change),
+  then calls `setName` on that resolver, which emits `NameChanged` for the
+  reverse node. The recorded name is the first `NameChanged` on the reverse
+  node after the claim in its transaction, and only when it meets this
+  evidence rule: at most four logs after the claim, with no other claim of the
+  node between, emitted by the resolver the registry selected for the reverse
+  node at that point.
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74-L84 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L29 @ ens_v1@91c966f)
+  The four-log bound fits the standard `setNameForAddr` call with a resolver
+  that emits only `NameChanged`. Extra logs before the write give `unknown`
+  only when they push the first `NameChanged` past the claim plus four logs. Logs carry no call boundaries, so the rule does not prove which
+  call made the write: a separate call that writes the claim's resolver inside
+  that span meets it too. A later write in the same span never replaces the
+  first one.
+  `name` is omitted when the stored bytes are not valid UTF-8 or contain NUL.
+- `name_status=cleared`: the event set an empty name.
+- `name_status=unknown`: the event's transaction retains no name write the
+  evidence above ties to the claim: a `claim` that only took ownership of the
+  reverse node, a first name write on another resolver or outside the claim's
+  span, or a resolver the index retains no selection for.
+
+No name value is taken from outside the event's transaction: a later name
+write or the address's current primary name never stands in for a historical
+value. Only the resolver selection may come from an earlier block. The
+value is the claim the reverse record made, not a verified primary name; it
+does not imply that the name resolves forward to the address. A name set
+directly on the reverse node's resolver without a claim is a `record` row
+(`key` `name`), not a `primary_name` row.
 
 ### `GET /v1/names/{name}/history`
 
@@ -1859,7 +1982,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   and with those flags they carry exactly the documented fields. Friendly
   `type` vocabulary: `registration`, `renewal`, `release`, `expiry`,
   `transfer`, `authority`, `resolver`, `record`, `primary_name`, `permission`,
-  `subregistry` (an ENSv2 registration's subregistry link set or cleared).
+  `subregistry` (an ENSv2 registration's subregistry link set or cleared),
+  `migration` (a confirmed ENSv1→ENSv2 migration; see
+  [migrations](#migrations)).
   Raw upstream or pipeline event kinds are not emitted by this product route
   except as the `kind` field behind the explicit `include=raw` opt-in; the
   diagnostics events route remains the raw surface. Slice 1 excludes every correlation-dependent normalized
@@ -2048,7 +2173,8 @@ A label registered before its registry was reachable under this name appears
 at the position where it became reachable; its original grant keeps its own
 position and the name it had then. `total_count` counts rows, so it can exceed
 the number of distinct children or of registration transactions, and grouping
-rows by transaction does not reproduce it.
+rows by transaction does not reproduce it. Rows of one registration share
+`data.action_id`; see [registration actions](#registration-actions).
 
 Row shape with the option:
 
@@ -3139,9 +3265,9 @@ For a registrar lease first identified by a later readable observation, registra
   renewal transaction contains two `renewal` rows — the renewal-bridge arm and
   the ENSv1-registrar arm — and two `expiry` rows. Reservation-scoped state
   changes remain reservation/resource facts and do not produce registration
-  renewal rows; no synthetic collapsed renewal is created. The candidate
-  `MigrationApplied` and
-  `ContractDiscovered` kinds have no product event type. During slice 1, every
+  renewal rows; no synthetic collapsed renewal is created. An activated
+  `MigrationApplied` maps to `migration` (see [migrations](#migrations)); a
+  candidate one, and `ContractDiscovered`, have no product row. During slice 1, every
   correlation-dependent row carrying `consumer_visibility=candidate` is excluded
   even if its familiar event kind would otherwise map above or its source family
   is `ens_v2_registry_l1`. An event admitted independently by an existing family

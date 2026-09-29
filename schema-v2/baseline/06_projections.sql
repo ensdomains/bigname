@@ -1114,6 +1114,9 @@ CREATE TABLE IF NOT EXISTS project_resource_pointer (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 CREATE INDEX IF NOT EXISTS project_resource_pointer_resolver_idx ON project_resource_pointer (chain_id, resolver_address, resource_id);
+CREATE INDEX IF NOT EXISTS project_resource_pointer_root_node_idx
+    ON project_resource_pointer (chain_id, namespace, namehash)
+    WHERE source_family = 'ens_v2_root_l1';
 COMMENT ON TABLE project_resource_pointer IS
     'Project-owned resource resolver pointer of family F5: the current pointer with clears, the latest non-zero pointer and the record version boundary of a resource.';
 COMMENT ON COLUMN project_resource_pointer.chain_id IS

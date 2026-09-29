@@ -208,7 +208,12 @@ fn history_event_type_filters_non_product_kinds() {
     );
     assert_eq!(history_event_type("SurfaceBound"), None);
     assert_eq!(history_event_type("PreimageObserved"), None);
-    assert_eq!(history_event_type("MigrationApplied"), None);
+    // A confirmed migration is its own product type; candidate rows never reach the builders
+    // because storage reads only activated rows.
+    assert_eq!(
+        history_event_type("MigrationApplied"),
+        Some(HistoryEventType::Migration)
+    );
     assert_eq!(history_event_type("ContractDiscovered"), None);
 }
 

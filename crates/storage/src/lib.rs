@@ -78,7 +78,7 @@ pub use history::{
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
     load_history_events_by_ids, load_name_history, load_name_history_head, load_name_history_page,
-    load_name_history_page_with_child_registrations,
+    load_name_history_page_with_child_registrations, load_recorded_primary_names,
     load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
     resolve_chain_block_ranges, revalidate_interpret_redo_fence,

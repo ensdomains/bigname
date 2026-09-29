@@ -375,7 +375,15 @@ pub(crate) fn build_history_event(
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),
         log_index: row.log_index,
-        detail: include.data.then(|| build_event_detail(row, event_type)),
+        // Primary-name rows carry no name or resource, so they never reach name history; no
+        // row context is needed.
+        detail: include.data.then(|| {
+            build_event_detail(
+                row,
+                event_type,
+                &super::history_context::HistoryRowContext::default(),
+            )
+        }),
         kind: raw_event_kind(row, include),
     })
 }

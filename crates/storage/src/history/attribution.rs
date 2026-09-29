@@ -13,6 +13,8 @@
 mod mirror;
 mod sql;
 
+pub(in crate::history) use sql::ENS_V1_POINTER_FAMILIES;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
