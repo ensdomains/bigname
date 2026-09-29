@@ -277,8 +277,7 @@ pub fn event_allows_empty_emitter_roles(
         || (source_family == "ens_v2_resolver_l1"
             && matches!(
                 event,
-                "ABIChanged"
-                    | "AddressChanged"
+                "AddressChanged"
                     | "TextChanged"
                     | "ContenthashChanged"
                     | "NameChanged"

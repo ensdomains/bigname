@@ -55,15 +55,16 @@ pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str>
     }
 }
 
-/// Keeps rows whose exact-name row in `names` serves the public `authority` value, as
-/// [`name_current_public_authority`] maps it. One primary-key probe per candidate row. `names` is
-/// `bigname_phase.name_current`, or a relation with its `logical_name_id` and `provenance`
-/// columns (the composed name rows of a family read).
-pub(crate) fn push_public_authority_filter_in<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
+/// Keeps rows whose exact-name row in `names` serves one of the public `authorities` values, as
+/// [`name_current_public_authority`] maps it: a row matches when its value is any listed one.
+/// One primary-key probe per candidate row. `names` is `bigname_phase.name_current`, or a
+/// relation with its `logical_name_id` and `provenance` columns (the composed name rows of a
+/// family read).
+pub(crate) fn push_public_authority_filter_in(
+    builder: &mut QueryBuilder<'_, Postgres>,
     names: &str,
     logical_name_id: &str,
-    authority: &'a str,
+    authorities: &[&str],
 ) {
     builder.push(format!(
         r#" AND EXISTS (
@@ -78,10 +79,15 @@ pub(crate) fn push_public_authority_filter_in<'a>(
                                        #>> '{{authority_selection,registry_generation}}' = 'old'
                                   THEN 'ens_v0' ELSE 'ens_v1' END
                           WHEN 'ens_v2' THEN 'ens_v2'
-                      END = "#
+                      END = ANY("#
     ));
-    builder.push_bind(authority);
-    builder.push(")");
+    builder.push_bind(
+        authorities
+            .iter()
+            .map(|authority| (*authority).to_owned())
+            .collect::<Vec<_>>(),
+    );
+    builder.push("))");
 }
 
 #[cfg(test)]

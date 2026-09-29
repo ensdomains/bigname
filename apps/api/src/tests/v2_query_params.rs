@@ -37,7 +37,8 @@ async fn v2_routes_reject_known_but_inapplicable_query_params() -> Result<()> {
         ),
         ("/v1/names/alice.eth?q=x", "unknown query parameter: q"),
         (
-            "/v1/addresses/0x00000000000000000000000000000000000000aa/names?match=contains",
+            // `match` belongs to search and the two name-list routes (address names, subnames).
+            "/v1/registries/1/0x00000000000000000000000000000000000000aa/labels?match=contains",
             "unknown query parameter: match",
         ),
         (

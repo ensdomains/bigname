@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// the node yet) and `ens_v1`
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Authority {
     EnsV0,
@@ -40,11 +40,65 @@ impl Authority {
     }
 }
 
+/// A non-empty `authority` filter: the rows whose served `authority` is any listed value. Held
+/// in dictionary order (`ens_v0`, `ens_v1`, `ens_v2`) without repeats, so equal sets spell and
+/// bind a cursor the same way whatever order the request listed them in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthoritySet {
+    authorities: Vec<Authority>,
+}
+
+impl AuthoritySet {
+    /// `None` when `authorities` is empty.
+    pub(crate) fn from_authorities(
+        authorities: impl IntoIterator<Item = Authority>,
+    ) -> Option<Self> {
+        let mut authorities = authorities.into_iter().collect::<Vec<_>>();
+        authorities.sort_unstable();
+        authorities.dedup();
+        (!authorities.is_empty()).then_some(Self { authorities })
+    }
+
+    /// The wire values, in dictionary order.
+    pub(crate) fn wire_values(&self) -> Vec<&'static str> {
+        self.authorities
+            .iter()
+            .map(|authority| authority.as_str())
+            .collect()
+    }
+
+    /// The comma-joined wire values a cursor binds; one value spells as before sets existed.
+    pub(crate) fn canonical_value(&self) -> String {
+        self.wire_values().join(",")
+    }
+}
+
+impl From<Authority> for AuthoritySet {
+    fn from(value: Authority) -> Self {
+        Self {
+            authorities: vec![value],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::Authority;
+    use super::{Authority, AuthoritySet};
+
+    #[test]
+    fn authority_sets_are_ordered_and_deduplicated() {
+        let set =
+            AuthoritySet::from_authorities([Authority::EnsV2, Authority::EnsV0, Authority::EnsV2])
+                .expect("non-empty set");
+        assert_eq!(set.canonical_value(), "ens_v0,ens_v2");
+        assert_eq!(
+            AuthoritySet::from(Authority::EnsV1).canonical_value(),
+            "ens_v1"
+        );
+        assert_eq!(AuthoritySet::from_authorities([]), None);
+    }
 
     #[test]
     fn authority_wire_values_round_trip() {

@@ -1314,3 +1314,26 @@ redo publishes on Sepolia, `eth` and `reverse`, the only rows that carried
 unsupported reason; their selected authority and projected values do not
 change. Before the release is recorded, confirm that no published name still
 carries that reason at the published Project target.
+
+### Name-list contains match, created_at sort and authority sets
+
+The build that adds `match=contains` to the `q` of
+[`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames)
+and [`GET /v1/names/{name}/subnames`](api-v1-routes.md#get-v1namesnamesubnames),
+`sort=created_at` and `authority` sets to address names, changes only API read
+paths, but some of those reads live in hashed storage sources:
+`crates/storage/src/address_names/query.rs` and the family readers under
+`crates/storage/src/families` (`crates/content-hash/src/compute.rs`). It
+therefore rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. An existing deployment runs the new binary for both the phase
+runner and the API, and finishes the full-history Interpret redo and the
+Project redo it installs before the matching API serves, as for any rotation;
+an API upgraded alone refuses the old build's family publication with
+`409 stale`. It ships inside the TYR-61 batch, whose single Interpret redo and
+Project rebuild discharge this obligation. The rebuild publishes a new Project
+generation, so every collection cursor that binds the publication, including
+address-name and subname cursors, returns `409 stale` after the switch and
+clients restart pagination without it. No cursor compatibility is carried
+across this deploy.

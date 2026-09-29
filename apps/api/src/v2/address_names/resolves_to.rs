@@ -27,7 +27,8 @@ use crate::v2::{
 };
 
 use super::cursor::{
-    ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, cursor_last_item, cursor_sort_value, option_filter,
+    ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, authority_filter_value, cursor_last_item,
+    cursor_sort_value, insert_match_filter, option_filter,
 };
 use super::resolves_to_evm::{
     ResolvesToCoins, ResolvesToMatches, ResolvesToRow, evm_primary_flags, parse_resolves_to_coins,
@@ -37,8 +38,9 @@ use super::{
     AddressName, address_names_include, build_address_name_role_summary, dedupe_to_storage,
     load_address_name_record_counts, name_registration_fields, order_to_storage, sort_to_storage,
 };
+use crate::v2::name_filter::NameMatch;
 use crate::v2::name_record::{load_migrated_at, registration_id};
-use crate::v2::vocab::Authority;
+use crate::v2::vocab::{Authority, AuthoritySet};
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const RELATION_FILTER_KEY: &str = "relation";
@@ -96,8 +98,12 @@ pub(super) async fn get_address_resolves_to(
     let normalized_q = params
         .q
         .as_deref()
-        .map(super::normalize_name_prefix)
+        .map(|q| params.name_match.normalize(q))
         .transpose()?;
+    let storage_q = normalized_q
+        .as_deref()
+        .map(|q| params.name_match.to_storage(q));
+    let authorities = params.authority.as_ref().map(AuthoritySet::wire_values);
     let namespaces = params
         .namespace
         .as_ref()
@@ -110,7 +116,8 @@ pub(super) async fn get_address_resolves_to(
         coin_type: coins.cursor_value(),
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
-        authority: params.authority,
+        name_match: params.name_match,
+        authority: params.authority.as_ref(),
         sort: params.sort,
         order,
     };
@@ -151,8 +158,8 @@ pub(super) async fn get_address_resolves_to(
                 coin_type,
                 namespaces.as_deref(),
                 dedupe_to_storage(params.dedupe),
-                normalized_q.as_deref(),
-                params.authority.map(Authority::as_str),
+                storage_q,
+                authorities.as_deref(),
                 sort_to_storage(params.sort),
                 order_to_storage(order),
                 storage_cursor.as_ref(),
@@ -172,8 +179,8 @@ pub(super) async fn get_address_resolves_to(
                 normalized_address,
                 namespaces.as_deref(),
                 dedupe_to_storage(params.dedupe),
-                normalized_q.as_deref(),
-                params.authority.map(Authority::as_str),
+                storage_q,
+                authorities.as_deref(),
                 sort_to_storage(params.sort),
                 order_to_storage(order),
                 storage_cursor.as_ref(),
@@ -437,13 +444,14 @@ pub(crate) struct ResolvesToCursorBinding<'a> {
     pub(crate) coin_type: &'a str,
     pub(crate) dedupe: AddressNamesDedupe,
     pub(crate) q: Option<&'a str>,
-    pub(crate) authority: Option<Authority>,
+    pub(crate) name_match: NameMatch,
+    pub(crate) authority: Option<&'a AuthoritySet>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
 
 fn cursor_filters(binding: &ResolvesToCursorBinding<'_>) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut filters = BTreeMap::from([
         (ADDRESS_FILTER_KEY.to_owned(), binding.address.to_owned()),
         (
             NAMESPACE_FILTER_KEY.to_owned(),
@@ -464,13 +472,15 @@ fn cursor_filters(binding: &ResolvesToCursorBinding<'_>) -> BTreeMap<String, Str
         (Q_FILTER_KEY.to_owned(), option_filter(binding.q)),
         (
             AUTHORITY_FILTER_KEY.to_owned(),
-            option_filter(binding.authority.map(Authority::as_str)),
+            authority_filter_value(binding.authority),
         ),
         (
             ORDER_FILTER_KEY.to_owned(),
             binding.order.as_str().to_owned(),
         ),
-    ])
+    ]);
+    insert_match_filter(&mut filters, binding.q, binding.name_match);
+    filters
 }
 
 pub(crate) fn resolves_to_cursor_payload(

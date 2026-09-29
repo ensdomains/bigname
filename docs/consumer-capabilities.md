@@ -58,10 +58,13 @@ source pin or successful decode alone is not replacement evidence.
 For an owned local chain or the [official Sepolia deployment](sepolia-deployment.md), the exact `public_resolver_v2` declaration described in
 [`manifests.md`](manifests.md#direct-publicresolverv2-declarations-on-an-owned-local-chain)
 permits the existing record reads to use canonical address, text, and contenthash
-observations plus node record-version boundaries, the ABI content-type
-inventory to use its `ABIChanged` observations, and a reverse claim to use its
-`NameChanged` observations when it is a reverse node's resolver. Attribution requires the
-current ENSv2 pointer, matching namespace, node, and exact resolver emitter.
+observations plus node record-version boundaries, and the ABI content-type
+inventory to use its `ABIChanged` observations. Attribution for those record and
+inventory reads requires the current ENSv2 pointer, matching namespace, node, and
+exact resolver emitter. Separately, a reverse claim uses the declared resolver's
+`NameChanged` observations when it is the reverse node's current registry
+resolver: the claim is matched by namespace, chain, reverse node, and that exact
+resolver, and does not depend on the record-inventory classification.
 A supported record classification does not prove exhaustive selector history,
 resolver binding enumeration, aliases, or permission-holder enumeration;
 coverage remains limited to the retained observations and admitted capabilities.
