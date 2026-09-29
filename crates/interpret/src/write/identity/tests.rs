@@ -1899,7 +1899,10 @@ mod numeric_short_lease_connected {
             summary["control"]["registry_owner"],
             expected["expected_owner"]
         );
-        assert_eq!(summary["registration"]["expiry"], expected["v1_expiry"]);
+        assert_eq!(
+            summary["registration"]["expiry"],
+            expected["v1_expiry"].to_string()
+        );
         assert_eq!(
             summary
                 .pointer("/resolver/address")
@@ -2138,7 +2141,10 @@ mod numeric_short_lease_connected {
                         Some(&serde_json::json!("ens_v2"))
                     );
                     let current = summary(pool, &logical).await?;
-                    assert_eq!(current["registration"]["expiry"], expected["v2_expiry"]);
+                    assert_eq!(
+                        current["registration"]["expiry"],
+                        expected["v2_expiry"].to_string()
+                    );
                     summaries.push(current);
                     let closed: bool = sqlx::query_scalar("SELECT bool_and(active_to IS NOT NULL) FROM surface_bindings WHERE resource_id=$1 AND authority_arm='ens_v1'")
                         .bind(registrar_resource).fetch_one(pool).await?;

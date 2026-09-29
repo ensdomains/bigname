@@ -5369,7 +5369,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
             served["registration"]["status"].as_str(),
             served["registration"]["latest_event_kind"].as_str(),
             served["registration"]["released_at"].as_i64(),
-            served["registration"]["expiry"].as_i64(),
+            served["registration"]["expiry"].as_str(),
             served["control"]["status"].as_str(),
         ),
         (
@@ -5378,7 +5378,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
             Some("released"),
             Some("RegistrationReleased"),
             Some(3),
-            Some(3),
+            Some("3"),
             Some("unregistered"),
         ),
         "{served}"
@@ -5435,6 +5435,7 @@ async fn detached_child_resumed_then_rebuilt(
     assert_eq!(at_lapse, (1, 0, 0, 0), "block {lapse}");
     let served = served_after_each_batch(pool, chain, targets, &leaf).await?;
     let (resource_text, binding_text) = (resource.to_string(), binding.to_string());
+    let expiry = lapse.to_string();
     let tombstone = (
         Some("ens_v2"),
         Some(resource_text.as_str()),
@@ -5442,7 +5443,7 @@ async fn detached_child_resumed_then_rebuilt(
         Some("released"),
         Some("unregistered"),
         Some(lapse),
-        Some(lapse),
+        Some(expiry.as_str()),
     );
     let first = targets
         .iter()
@@ -5490,7 +5491,7 @@ type DetachedChildServed<'a> = (
     Option<&'a str>,
     Option<&'a str>,
     Option<i64>,
-    Option<i64>,
+    Option<&'a str>,
 );
 
 fn detached_child_served(served: &Value) -> DetachedChildServed<'_> {
@@ -5501,7 +5502,7 @@ fn detached_child_served(served: &Value) -> DetachedChildServed<'_> {
         served["registration"]["status"].as_str(),
         served["control"]["status"].as_str(),
         served["registration"]["released_at"].as_i64(),
-        served["registration"]["expiry"].as_i64(),
+        served["registration"]["expiry"].as_str(),
     )
 }
 
@@ -5640,7 +5641,7 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
                 Some("released"),
                 Some("unregistered"),
                 Some(3),
-                Some(3),
+                Some("3"),
             ),
             "right after the batch at {target}: {fields}"
         );
@@ -5693,7 +5694,7 @@ async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> 
             served["resource_id"].as_str(),
             served["registration"]["status"].as_str(),
             served["registration"]["released_at"].as_i64(),
-            served["registration"]["expiry"].as_i64(),
+            served["registration"]["expiry"].as_str(),
             served["control"]["status"].as_str(),
         ),
         (
@@ -5701,7 +5702,7 @@ async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> 
             Some(resource.to_string().as_str()),
             Some("released"),
             Some(30),
-            Some(30),
+            Some("30"),
             Some("unregistered"),
         ),
         "{served}"
@@ -5750,9 +5751,9 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
     assert_eq!(
         (
             lapsed[2]["registration"]["released_at"].as_i64(),
-            lapsed[2]["registration"]["expiry"].as_i64(),
+            lapsed[2]["registration"]["expiry"].as_str(),
         ),
-        (Some(3), Some(3)),
+        (Some(3), Some("3")),
         "{}",
         lapsed[2]
     );
@@ -5945,7 +5946,7 @@ async fn a_redo_rebuilds_a_name_whose_deciding_release_is_no_longer_activated() 
         (
             redone["registration"]["status"].as_str(),
             redone["registration"]["released_at"].as_i64(),
-            redone["registration"]["expiry"].as_i64(),
+            redone["registration"]["expiry"].as_str(),
         ),
         (Some("released"), None, None),
         "{redone}"
