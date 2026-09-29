@@ -159,6 +159,34 @@ async fn a_stopped_full_history_project_redo_resumes_its_rebuild() -> Result<()>
     scratch.cleanup().await
 }
 
+// A redo whose range ends below the families' published block rebuilds to that block. Stopped
+// after the reset, its rerun must still rebuild to it, not to the stopped rebuild's marker or the
+// range end, or the redo completes with the families behind what Project had published.
+#[tokio::test]
+async fn a_stopped_redo_below_the_published_block_rebuilds_to_it_on_rerun() -> Result<()> {
+    let scratch = ready("families_redo_short_range").await?;
+    let head = head_marker(&scratch, HEAD).await?;
+    let project = ProjectPhase::new(scratch.pool().clone());
+    let outcome = project.run_batch(context(&head, None)).await?;
+    ensure!(
+        matches!(outcome, PhaseBatchOutcome::Complete(_)),
+        "{outcome:?}"
+    );
+    ensure!(marker(&scratch).await? == Some(HEAD));
+    let range = BlockRange::new(0, 20)?;
+    stop_after_one_batch(&scratch, range).await?;
+
+    redo_range(&scratch, budgeted(), range).await?;
+    ensure!(project_state(&scratch).await? == ("completed".into(), Some(HEAD), false));
+    ensure!(
+        marker(&scratch).await? == Some(HEAD),
+        "the rerun rebuilt the families to the block they were published at, not {:?}",
+        marker(&scratch).await?
+    );
+    ensure!(repair_completed(&scratch).await?);
+    scratch.cleanup().await
+}
+
 // A rerun over a different range starts the rebuild again, even though the first attempt left one.
 #[tokio::test]
 async fn a_project_redo_rerun_over_another_range_rebuilds_from_the_start() -> Result<()> {
