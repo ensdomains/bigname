@@ -2728,8 +2728,12 @@ introduces it rebuilds Project from full history before serving the option; see
   namespace, both bounds and order, and holds the last row's position, as on
   `GET /v1/names`. An app looking for names still renewable in grace asks for
   `expires_after` at `now` minus the longest grace and checks `grace_ends_at`
-  and the contract's own renewal rules: an unregistered ENSv2 name cannot be
-  renewed.
+  and the contract's own renewal rules: an explicitly unregistered ENSv2
+  name cannot be renewed through the ETHRegistrar, whose grace renewal requires
+  a retained latest owner; unregister burns that owner and advances the token
+  version.
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20260916@366de741)
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
   from the address-to-record family indexes rather than the authority
@@ -2800,7 +2804,8 @@ introduces it rebuilds Project from full history before serving the option; see
   and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, `registrant`, and `role_holder` that matched,
-  or `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
+  or `["resolves_to"]` / `["former_registrant"]` on the corresponding relation read.
+  A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
   `addr:2147483648` when the ENSIP-19 default EVM address answered). On a
