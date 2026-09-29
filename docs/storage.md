@@ -1206,9 +1206,12 @@ During one active Ingest redo attempt, the runner prepares persisted manifest an
 discovery [watch intervals](glossary.md#watch-plan--watched-tuple) once, then clips
 them to each fetch window. The existing phase exclusion and manifest-sync locks
 keep those inputs stable. This process-local plan is keyed by chain, attempt
-generation, and redo range; a new or resumed attempt reloads it, and completion
-or failure discards it. Canonical creation announcements are still read for each
-window, and same-window announcements still expand the fetch before it commits.
+generation, and redo range; a new or resumed attempt reloads it. A completed
+outcome or error from redo batch execution discards the matching entry.
+Interruption or failure elsewhere in the runner may retain an entry until it is
+replaced or the engine is dropped. A subsequent attempt cannot reuse that entry
+because its generation changes. Canonical creation announcements are still read
+for each window, and same-window announcements still expand the fetch before it commits.
 Normal Ingest, Live, and uncoordinated library calls retain their per-window
 planning. Redo batch size, provider reads, and fork checks are unchanged.
 
