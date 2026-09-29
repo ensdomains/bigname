@@ -159,11 +159,17 @@ fn build_event_data(
                     string_field(after, "resolver_record_id").map(Value::String),
                 );
             } else {
+                // A `NameForAddrChanged` companion row keeps the reverse node it names under
+                // `reverse_node` (crates/adapters/src/schema_v2/protocol/v1/reverse.rs).
+                let node = string_field(after, "node").or_else(|| {
+                    (string_field(after, "source_event").as_deref() == Some("NameForAddrChanged"))
+                        .then(|| string_field(after, "reverse_node"))
+                        .flatten()
+                });
                 insert(
                     &mut data,
                     "node",
-                    string_field(after, "node")
-                        .map(|node| Value::String(node.to_ascii_lowercase())),
+                    node.map(|node| Value::String(node.to_ascii_lowercase())),
                 );
             }
         }
@@ -208,14 +214,19 @@ fn build_event_data(
 /// The registration action a `registration` row belongs to, and what the row is within it.
 ///
 /// One ENSv2 registration stores a grant at the registry's `LabelRegistered` log and a copy at the
-/// `TokenResource` log the same `register` call emits once the token has its resource; a grant is
-/// also stored each time an already registered label becomes reachable under a name. The action
-/// is the registration of one token by one contract in one transaction: the transaction hash, the
-/// emitting contract and the token (its `token_id`, else its `labelhash`, else the row's name).
-/// Several registrations in one transaction differ by token, and a reachability grant is emitted
-/// by the parent registry that linked the label, so it is its own action. Rows with no
-/// transaction or emitting contract (derived from interpreter state) have no action.
+/// `TokenResource` log the same `register` call emits once the token has its resource. That
+/// action is the registration of one token by one contract in one transaction: the transaction
+/// hash, the emitting contract and the token (its `token_id`, else its `labelhash`, else the row's
+/// name). Several registrations in one transaction differ by token.
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L491-L498 @ ens_v2_sepolia_20260916@366de741)
+///
+/// A grant is also stored each time an already registered label becomes reachable under a name.
+/// One parent `SubregistryUpdated` can make a whole subtree reachable, and every resulting grant
+/// carries the parent's log, so the emitter and token do not tell two descendant registries apart.
+/// A reachability action is therefore one grant: the triggering log (transaction and log index),
+/// the registry that holds the label, the token, and the name it became reachable under.
+///
+/// Rows with no transaction or emitting contract (derived from interpreter state) have no action.
 fn registration_action(row: &StorageHistoryEvent) -> Option<(String, &'static str)> {
     use sha2::{Digest, Sha256};
 
@@ -226,23 +237,38 @@ fn registration_action(row: &StorageHistoryEvent) -> Option<(String, &'static st
         .or_else(|| string_field(&row.after_state, "labelhash"))
         .or_else(|| row.logical_name_id.clone())?
         .to_ascii_lowercase();
-    let role = if row.event_identity.contains(":RegistrationGranted:linked:") {
-        "linked"
-    } else if row
+    let (key, role) = if let Some((_, reachable)) = row
         .event_identity
-        .contains(":RegistrationGranted:topology:")
+        .split_once(":RegistrationGranted:topology:")
     {
-        "reachable"
+        // The identity suffix is `{registry}:{token}` followed by the ordinal.
+        let registry = reachable.split(':').next().unwrap_or_default();
+        let log_index = row.log_index?;
+        let name = row.logical_name_id.as_deref().unwrap_or_default();
+        (
+            format!(
+                "reachability-action\0{chain}\0{transaction}\0{log_index}\0{}\0{token}\0{name}",
+                registry.to_ascii_lowercase()
+            ),
+            "reachable",
+        )
     } else {
-        "registered"
+        let role = if row.event_identity.contains(":RegistrationGranted:linked:") {
+            "linked"
+        } else {
+            "registered"
+        };
+        (
+            format!("registration-action\0{chain}\0{transaction}\0{emitter}\0{token}"),
+            role,
+        )
     };
-    let key = format!("registration-action\0{chain}\0{transaction}\0{emitter}\0{token}");
     Some((hex::encode(Sha256::digest(key.as_bytes())), role))
 }
 
 /// The name a primary-name event recorded and whether it set, cleared or recorded no name. An
-/// empty name clears the reverse record; bytes that are not valid UTF-8 set a name that cannot be
-/// shown as text, so only the status is returned.
+/// empty name clears the reverse record; bytes that are not valid UTF-8, or contain NUL, set a
+/// name that cannot be shown as text, so only the status is returned.
 fn recorded_primary_name(recorded: Option<&Value>) -> (Option<String>, &'static str) {
     match recorded {
         None => (None, "unknown"),

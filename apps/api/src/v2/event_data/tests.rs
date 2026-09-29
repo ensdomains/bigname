@@ -242,6 +242,41 @@ fn registration_action_groups_by_transaction_contract_and_token() {
     assert_eq!(reachable.1, "reachable");
     assert_ne!(reachable.0, registered.0);
     assert_eq!(action(&grant("x:state", registry, "0x01", None)), None);
+
+    // One parent `SubregistryUpdated` makes two descendant registries reachable; both grants carry
+    // the parent's log and the same token, and each is its own action.
+    let descendant = |registry: &str, name: &str| {
+        let mut row = grant(
+            &format!("x:0xtx3:7:RegistrationGranted:topology:{registry}:0x01:0"),
+            parent,
+            "0x01",
+            Some("0xtx3"),
+        );
+        row.log_index = Some(7);
+        row.logical_name_id = Some(name.to_owned());
+        action(&row).expect("reachable grant")
+    };
+    let first = descendant(
+        "0x00000000000000000000000000000000000000c1",
+        "ens:a.sub.eth",
+    );
+    let second = descendant(
+        "0x00000000000000000000000000000000000000c2",
+        "ens:a.other.eth",
+    );
+    let relinked = descendant(
+        "0x00000000000000000000000000000000000000c1",
+        "ens:a.more.eth",
+    );
+    assert_ne!(first.0, second.0);
+    assert_ne!(first.0, relinked.0);
+    assert_eq!(
+        first,
+        descendant(
+            "0x00000000000000000000000000000000000000C1",
+            "ens:a.sub.eth"
+        )
+    );
 }
 
 #[test]
