@@ -499,7 +499,9 @@ from the served permission rows of the resource (the F8 grants with registry
 scope after the read-time masks `GET /v1/permissions` applies), not from the
 address index: the candidate names are the names bound to a resource on which
 the address has such a grant, and the composed name keeps the holder only
-while that resource is its selected resource. A role held on the registry root
+while that resource is its selected resource. Only the requested address's
+grants are read, so an untrusted subregistry that grants roles on one
+registration to many accounts adds no work to another address's read. A role held on the registry root
 reaches every name in the registry, and an ENSv2 registry operator approved
 with `setApprovalForAll` is not a permission row, so neither adds names to an
 address's collection. Reverse lookup does not serve this relation.

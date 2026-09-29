@@ -17,7 +17,8 @@
 //! registry operators are not permission rows and add none either.
 //!
 //! The grants are read at request time, so the relation follows the published grant rows with
-//! no Project index of its own. The candidate names come from the grant's resource through the
+//! no Project index of its own. Only the requested address's grants are read
+//! ([`RoleHolderLoad`]), so other holders on the same registration add no work. The candidate names come from the grant's resource through the
 //! F1 binding candidates; the composed name keeps a holder only while that resource is its
 //! selected resource.
 use std::collections::BTreeMap;
@@ -67,28 +68,50 @@ pub(super) async fn role_name_candidates(
     .with_context(|| format!("failed to load the registry role names of {address}"))
 }
 
-/// The role holders of each resource at `clock_seconds`, as the permission read serves them.
+/// Whose registry roles a relations load reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RoleHolderLoad<'a> {
+    /// Only this address's grants. The address-name and address-history reads relate one
+    /// address, so the grants of every other subject on the same resources are never read: an
+    /// untrusted subregistry can grant roles to any number of accounts on one registration.
+    Subject(&'a str),
+    /// No grants. Identity composition serves reverse lookup, which does not serve
+    /// `role_holder`, so it composes no role holders.
+    Skip,
+}
+
+/// The registry-scope grants of one subject on a batch of resources. The primary key
+/// `(chain_id, resource_id, subject, scope)` answers it with one probe per resource.
+pub(crate) const ROLE_GRANTS_SQL: &str = "/* storage:families.records.address_role_grants */
+     SELECT to_jsonb(grant_row)
+     FROM bigname_phase.project_grant grant_row
+     WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])
+       AND grant_row.subject = lower($3)
+       AND grant_row.scope_kind = 'registry' AND NOT grant_row.revoked";
+
+/// The role holders of each resource at `clock_seconds` among the subjects `load` names, as
+/// the permission read serves them.
 pub(super) async fn role_holders(
     conn: &mut PgConnection,
     chain_id: &str,
     resources: &[String],
     wrappers: &BTreeMap<String, WrapperRow>,
     clock_seconds: i64,
+    load: RoleHolderLoad<'_>,
 ) -> Result<BTreeMap<String, Vec<RoleHolder>>> {
+    let RoleHolderLoad::Subject(subject) = load else {
+        return Ok(BTreeMap::new());
+    };
     if resources.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let grants: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.records.address_role_grants */ SELECT to_jsonb(grant_row)
-         FROM bigname_phase.project_grant grant_row
-         WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])
-           AND grant_row.scope_kind = 'registry' AND NOT grant_row.revoked",
-    )
-    .bind(chain_id)
-    .bind(resources)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the registry role grants")?;
+    let grants: Vec<Value> = sqlx::query_scalar(ROLE_GRANTS_SQL)
+        .bind(chain_id)
+        .bind(resources)
+        .bind(subject)
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| format!("failed to load the registry role grants of {subject}"))?;
     let mut by_resource: BTreeMap<String, Vec<GrantRow>> = BTreeMap::new();
     for grant in grants.iter().filter_map(GrantRow::from_row) {
         by_resource
@@ -115,28 +138,30 @@ pub(super) async fn role_holders(
     .collect();
     let mut out = BTreeMap::new();
     for (resource, grants) in &by_resource {
-        let served = masked_grants(
-            grants,
-            wrappers.get(resource),
-            key_states.get(resource),
-            clock_seconds,
-        );
-        let mut holders: Vec<RoleHolder> = served
+        // Each grant is masked on its own, as `masked_grants` masks every grant independently,
+        // so the served row keeps its grant's position without a search.
+        let mut holders: Vec<RoleHolder> = grants
             .iter()
-            .filter(|grant| grant.scope_kind.as_deref() == Some("registry") && holds_role(grant))
-            .filter_map(|grant| {
-                let row = grants
-                    .iter()
-                    .find(|row| row.subject == grant.subject && row.scope == grant.scope)?;
-                Some(RoleHolder {
-                    subject: grant.subject.to_ascii_lowercase(),
-                    position: FamilyPosition {
-                        block_number: row.position.block_number,
-                        transaction_index: row.position.transaction_index,
-                        log_index: row.position.log_index,
-                        event_identity: row.position.event_identity.clone(),
-                    },
+            .filter(|grant| {
+                masked_grants(
+                    std::slice::from_ref(*grant),
+                    wrappers.get(resource),
+                    key_states.get(resource),
+                    clock_seconds,
+                )
+                .first()
+                .is_some_and(|served| {
+                    served.scope_kind.as_deref() == Some("registry") && holds_role(served)
                 })
+            })
+            .map(|grant| RoleHolder {
+                subject: grant.subject.to_ascii_lowercase(),
+                position: FamilyPosition {
+                    block_number: grant.position.block_number,
+                    transaction_index: grant.position.transaction_index,
+                    log_index: grant.position.log_index,
+                    event_identity: grant.position.event_identity.clone(),
+                },
             })
             .collect();
         holders.sort_by(|left, right| left.subject.cmp(&right.subject));
@@ -157,3 +182,7 @@ fn holds_role(grant: &ServedGrant) -> bool {
         .filter_map(Value::as_str)
         .any(|power| power != MARKER)
 }
+
+#[cfg(test)]
+#[path = "address_roles_tests.rs"]
+mod tests;

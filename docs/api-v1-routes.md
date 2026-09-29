@@ -1636,7 +1636,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
-  cites for it lies at or below the published block. The name's attachment to
+  cites for it lies at or below the published block. A `role_holder` row is
+  read from the address's current registry-scope grant on the name's selected
+  resource instead and cites the event that last changed that grant. The name's attachment to
   the row's resource is judged at or below the published block too: the row is
   admitted only when some [surface binding](glossary.md#surface-binding) of
   that name to that resource on the row's chain was written at or below the
@@ -1719,6 +1721,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   `SurfaceBound` that restored it, above the published block. Wrapper grace-period and expiry transitions have no
   cited event of their own, so a relation row gated by them can appear or
   vanish between pages of the same read.
+- Known limitation: the `role_holder` relation has no historical shape. It is
+  read only from the address's current registry-scope grant rows, and the
+  ownership matcher reproduces no permission grant, so a role revoked after the
+  published block, or held on a registration that stopped being the name's
+  selected one after it, drops that name's events from the read. A grant
+  changed after the published block, for example by a role added to one the
+  address already held, cites the newer event and is not admitted either,
+  although the address held a role at the published block. The same-holder
+  transfer rule above does not apply to it.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
@@ -1980,7 +1991,10 @@ ENSv1, Basenames and NameWrapper permission rows are derived from ownership,
 registration and wrapper events that state no previous permission set, so
 they omit both lists rather than report an unobserved previous set; their
 `powers` is still the resulting set, and an empty `powers` marks a
-revocation. A NameWrapper fuse change carries `fuses` only.
+revocation. A NameWrapper fuse change carries `fuses` only. A role change on
+an ENSv2 registry's root resource is stored as `RootPermissionChanged`, which
+is not a `permission` row and carries none of these fields, even though its
+log states the previous roles too.
 
 ### `GET /v1/names/{name}/history`
 

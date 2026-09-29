@@ -290,3 +290,45 @@ async fn v2_address_history_follows_a_role_held_name() -> Result<()> {
     assert_eq!(history("manager").await?["data"], json!([]));
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_address_names_list_one_holder_among_many_on_a_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = seed_role_holder(&database, json!(["renew"])).await?;
+    // Sixty other accounts hold roles on the same registration.
+    let (block, hash) = address_fixture_head(&database).await?;
+    let name = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
+    let others: Vec<String> = (1..=60).map(|n| format!("0x{n:040x}")).collect();
+    let events: Vec<_> = others
+        .iter()
+        .map(|other| {
+            address_role_event(Some(&name), resource, other, false, json!(["set_resolver"]), block, &hash)
+        })
+        .collect();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_address_fixture(&database).await?;
+    for holder in [ROLE_HOLDER, others[0].as_str(), others[59].as_str()] {
+        let payload = v2_address_names_payload_for_database(
+            &database,
+            &format!("/v1/addresses/{holder}/names?relation=any"),
+        )
+        .await?;
+        assert_eq!(
+            row_names_and_relations(&payload),
+            vec![("beta.eth".to_owned(), json!(["role_holder"]))],
+            "{holder}: {payload}"
+        );
+    }
+    // The owner's row is unchanged by the other holders.
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?q=beta"),
+    )
+    .await?;
+    assert_eq!(
+        row_names_and_relations(&payload),
+        vec![("beta.eth".to_owned(), json!(["registrant", "owner", "manager"]))],
+        "{payload}"
+    );
+    database.cleanup().await
+}

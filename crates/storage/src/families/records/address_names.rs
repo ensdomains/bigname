@@ -26,7 +26,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use super::{
     FamilyPosition,
     address_relations::{ControllerCandidate, NameRelationsInput, relations},
-    address_roles::{RoleHolder, role_holders},
+    address_roles::{RoleHolder, RoleHolderLoad, role_holders},
 };
 use crate::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
@@ -143,7 +143,9 @@ pub(crate) async fn compose_address_name_rows(
         let ids: Vec<String> = ids.into_iter().collect();
         let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
         let clock_seconds = publication.timestamp_seconds();
-        let inputs = ChainInputs::load(conn, &chain_id, composed.values(), clock_seconds).await?;
+        let roles = RoleHolderLoad::Subject(address);
+        let inputs =
+            ChainInputs::load(conn, &chain_id, composed.values(), clock_seconds, roles).await?;
         for row in composed.values() {
             let input = inputs.input(row, clock_seconds);
             let mut listed = false;
@@ -243,6 +245,7 @@ impl ChainInputs {
         chain_id: &str,
         composed: impl IntoIterator<Item = &'a NameCurrentRow>,
         clock_seconds: i64,
+        roles: RoleHolderLoad<'_>,
     ) -> Result<Self> {
         let composed: Vec<&NameCurrentRow> = composed.into_iter().collect();
         let ids: Vec<String> = composed
@@ -307,8 +310,15 @@ impl ChainInputs {
             .into_iter()
             .map(|wrapper| (wrapper.resource_id.clone(), wrapper))
             .collect();
-        let role_holders =
-            role_holders(&mut *conn, chain_id, &resources, &wrappers, clock_seconds).await?;
+        let role_holders = role_holders(
+            &mut *conn,
+            chain_id,
+            &resources,
+            &wrappers,
+            clock_seconds,
+            roles,
+        )
+        .await?;
         Ok(Self {
             candidates,
             bindings,
@@ -345,7 +355,8 @@ impl ChainInputs {
     }
 }
 
-/// Address relations for composed names on the caller's snapshot, used by batch lookup.
+/// Address relations for composed names on the caller's snapshot, used by batch lookup. They
+/// hold no `role_holder` relations: reverse lookup does not serve it ([`RoleHolderLoad::Skip`]).
 pub(crate) async fn name_relations_on(
     conn: &mut PgConnection,
     composed: &BTreeMap<String, NameCurrentRow>,
@@ -361,7 +372,9 @@ pub(crate) async fn name_relations_on(
     for (chain, names) in chains {
         let publication = servable_publication(conn, &chain).await?;
         let clock_seconds = publication.timestamp_seconds();
-        let inputs = ChainInputs::load(conn, &chain, names.iter().copied(), clock_seconds).await?;
+        let roles = RoleHolderLoad::Skip;
+        let inputs =
+            ChainInputs::load(conn, &chain, names.iter().copied(), clock_seconds, roles).await?;
         for row in names {
             let input = inputs.input(row, clock_seconds);
             let related = relations(&input)
