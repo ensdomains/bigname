@@ -4,7 +4,9 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_storage::{ChildrenCurrentKeysetCursor, ChildrenCurrentSortValue};
+use bigname_storage::{
+    ChildrenCurrentKeysetCursor, ChildrenCurrentSortValue, RegistryLabelOwnerFilter,
+};
 use serde::Serialize;
 
 use super::super::cursor::{cursor_value, invalid_cursor_error};
@@ -19,13 +21,23 @@ use crate::AppState;
 
 const LABELS_SORT: &str = "display_name_asc";
 const REGISTRY_FILTER_KEY: &str = "registry";
+const OWNER_FILTER_KEY: &str = "owner";
+const EXCLUDE_OWNER_FILTER_KEY: &str = "exclude_owner";
 const DISPLAY_NAME_CURSOR_KEY: &str = "display_name";
 const CHILD_ID_CURSOR_KEY: &str = "child_id";
 
 pub(crate) struct RegistryLabelsQueryParams;
 
 impl QueryParamAllowlist for RegistryLabelsQueryParams {
-    const ALLOWED: &'static [&'static str] = &["at", "finality", "include", "cursor", "page_size"];
+    const ALLOWED: &'static [&'static str] = &[
+        "at",
+        "finality",
+        "include",
+        "owner",
+        "exclude_owner",
+        "cursor",
+        "page_size",
+    ];
 }
 
 pub(crate) type RegistryLabelsQuery = StrictQueryParams<RegistryLabelsQueryParams>;
@@ -39,7 +51,9 @@ pub(crate) struct RegistryLabel {
 }
 
 /// The labels one ENSv2 registry currently holds: the direct subnames of the name it serves
-/// whose registration that registry emitted, in the subname row shape.
+/// whose registration that registry emitted, in the subname row shape. `owner` keeps the labels
+/// served with that owner; `exclude_owner` keeps every other label, the ownerless ones included.
+/// Both narrow the collection before paging and `total_count`.
 pub(crate) async fn get_registry_labels(
     Path((chain_id, address)): Path<(String, String)>,
     params: RegistryLabelsQuery,
@@ -50,6 +64,7 @@ pub(crate) async fn get_registry_labels(
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let include_counts = labels_include_counts(&params.include)?;
+    let owner = labels_owner_filter(params.owner.as_deref(), params.exclude_owner.as_deref())?;
     let collection = super::super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),
@@ -90,7 +105,7 @@ pub(crate) async fn get_registry_labels(
         .map(|cursor| {
             let payload = decode(cursor)?;
             collection.validate_cursor(&payload)?;
-            labels_storage_cursor(&payload, numeric_chain_id, &normalized_address)
+            labels_storage_cursor(&payload, numeric_chain_id, &normalized_address, owner)
         })
         .transpose()?;
     let serving = bigname_storage::load_registry_serving_pointer(
@@ -119,6 +134,7 @@ pub(crate) async fn get_registry_labels(
         &state.pool,
         &serving.logical_name_id,
         &normalized_address,
+        owner,
         storage_cursor.as_ref(),
         params.page_size,
     )
@@ -175,6 +191,7 @@ pub(crate) async fn get_registry_labels(
             cursor,
             numeric_chain_id,
             &normalized_address,
+            owner,
         )))
     });
     let data = storage_page
@@ -225,21 +242,57 @@ fn labels_include_counts(include: &[String]) -> V2Result<bool> {
     Ok(include_counts)
 }
 
+/// The owner filter of a labels request; `owner` and `exclude_owner` together are refused.
+fn labels_owner_filter<'a>(
+    owner: Option<&'a str>,
+    exclude_owner: Option<&'a str>,
+) -> V2Result<Option<RegistryLabelOwnerFilter<'a>>> {
+    match (owner, exclude_owner) {
+        (Some(_), Some(_)) => Err(V2Error::invalid_input(
+            "owner and exclude_owner cannot be combined",
+        )),
+        (Some(owner), None) => Ok(Some(RegistryLabelOwnerFilter::Owner(owner))),
+        (None, Some(owner)) => Ok(Some(RegistryLabelOwnerFilter::ExcludeOwner(owner))),
+        (None, None) => Ok(None),
+    }
+}
+
 fn registry_filter_value(chain_id: u64, address: &str) -> String {
     format!("{chain_id}:{address}")
+}
+
+/// Everything a labels cursor binds besides its position: the registry, and the owner filter
+/// when there is one, so an unfiltered cursor keeps its earlier shape.
+fn labels_cursor_filters(
+    chain_id: u64,
+    address: &str,
+    owner: Option<RegistryLabelOwnerFilter<'_>>,
+) -> BTreeMap<String, String> {
+    let mut filters = BTreeMap::from([(
+        REGISTRY_FILTER_KEY.to_owned(),
+        registry_filter_value(chain_id, address),
+    )]);
+    match owner {
+        Some(RegistryLabelOwnerFilter::Owner(owner)) => {
+            filters.insert(OWNER_FILTER_KEY.to_owned(), owner.to_owned());
+        }
+        Some(RegistryLabelOwnerFilter::ExcludeOwner(owner)) => {
+            filters.insert(EXCLUDE_OWNER_FILTER_KEY.to_owned(), owner.to_owned());
+        }
+        None => {}
+    }
+    filters
 }
 
 pub(crate) fn labels_cursor_payload(
     cursor: &ChildrenCurrentKeysetCursor,
     chain_id: u64,
     address: &str,
+    owner: Option<RegistryLabelOwnerFilter<'_>>,
 ) -> CursorPayload {
     CursorPayload::new(
         LABELS_SORT,
-        BTreeMap::from([(
-            REGISTRY_FILTER_KEY.to_owned(),
-            registry_filter_value(chain_id, address),
-        )]),
+        labels_cursor_filters(chain_id, address, owner),
         BTreeMap::from([
             (
                 DISPLAY_NAME_CURSOR_KEY.to_owned(),
@@ -258,11 +311,10 @@ pub(crate) fn labels_storage_cursor(
     payload: &CursorPayload,
     chain_id: u64,
     address: &str,
+    owner: Option<RegistryLabelOwnerFilter<'_>>,
 ) -> V2Result<ChildrenCurrentKeysetCursor> {
     if payload.sort != LABELS_SORT
-        || payload.filters.len() != 1
-        || payload.filters.get(REGISTRY_FILTER_KEY).map(String::as_str)
-            != Some(registry_filter_value(chain_id, address).as_str())
+        || payload.filters != labels_cursor_filters(chain_id, address, owner)
         || payload.last_item.len() != 2
     {
         return Err(invalid_cursor_error());
@@ -291,19 +343,81 @@ mod tests {
             canonical_display_name: "one.alpha.eth".to_owned(),
             child_logical_name_id: "ens:0xone".to_owned(),
         };
-        let payload = labels_cursor_payload(&cursor, 1, REGISTRY);
+        let payload = labels_cursor_payload(&cursor, 1, REGISTRY, None);
         assert_eq!(
             payload.filters,
             BTreeMap::from([("registry".to_owned(), format!("1:{REGISTRY}"))])
         );
         assert_eq!(
-            labels_storage_cursor(&payload, 1, REGISTRY).expect("cursor must decode"),
+            labels_storage_cursor(&payload, 1, REGISTRY, None).expect("cursor must decode"),
             cursor
         );
-        assert!(labels_storage_cursor(&payload, 8453, REGISTRY).is_err());
+        assert!(labels_storage_cursor(&payload, 8453, REGISTRY, None).is_err());
         assert!(
-            labels_storage_cursor(&payload, 1, "0x00000000000000000000000000000000000000ac")
-                .is_err()
+            labels_storage_cursor(
+                &payload,
+                1,
+                "0x00000000000000000000000000000000000000ac",
+                None
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn labels_cursor_binds_the_owner_filter() {
+        const OWNER: &str = "0x00000000000000000000000000000000000000a1";
+        const OTHER: &str = "0x00000000000000000000000000000000000000a2";
+        let cursor = ChildrenCurrentKeysetCursor {
+            sort_value: ChildrenCurrentSortValue::Name,
+            canonical_display_name: "one.alpha.eth".to_owned(),
+            child_logical_name_id: "ens:0xone".to_owned(),
+        };
+        let filters = [
+            None,
+            Some(RegistryLabelOwnerFilter::Owner(OWNER)),
+            Some(RegistryLabelOwnerFilter::Owner(OTHER)),
+            Some(RegistryLabelOwnerFilter::ExcludeOwner(OWNER)),
+            Some(RegistryLabelOwnerFilter::ExcludeOwner(OTHER)),
+        ];
+        for issued in filters {
+            let payload = labels_cursor_payload(&cursor, 1, REGISTRY, issued);
+            for presented in filters {
+                let decoded = labels_storage_cursor(&payload, 1, REGISTRY, presented);
+                if issued == presented {
+                    assert_eq!(decoded.expect("the same filter continues"), cursor);
+                } else {
+                    assert!(decoded.is_err(), "{issued:?} cursor under {presented:?}");
+                }
+            }
+        }
+        assert_eq!(
+            labels_cursor_payload(
+                &cursor,
+                1,
+                REGISTRY,
+                Some(RegistryLabelOwnerFilter::ExcludeOwner(OWNER))
+            )
+            .filters,
+            BTreeMap::from([
+                ("exclude_owner".to_owned(), OWNER.to_owned()),
+                ("registry".to_owned(), format!("1:{REGISTRY}")),
+            ])
+        );
+    }
+
+    #[test]
+    fn labels_owner_filters_do_not_combine() {
+        const OWNER: &str = "0x00000000000000000000000000000000000000a1";
+        assert_eq!(labels_owner_filter(None, None).expect("no filter"), None);
+        assert_eq!(
+            labels_owner_filter(Some(OWNER), None).expect("owner"),
+            Some(RegistryLabelOwnerFilter::Owner(OWNER))
+        );
+        assert_eq!(
+            labels_owner_filter(None, Some(OWNER)).expect("exclude_owner"),
+            Some(RegistryLabelOwnerFilter::ExcludeOwner(OWNER))
+        );
+        assert!(labels_owner_filter(Some(OWNER), Some(OWNER)).is_err());
     }
 }

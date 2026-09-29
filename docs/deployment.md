@@ -1337,3 +1337,24 @@ generation, so every collection cursor that binds the publication, including
 address-name and subname cursors, returns `409 stale` after the switch and
 clients restart pagination without it. No cursor compatibility is carried
 across this deploy.
+
+### Registry label owner filters
+
+The build that adds `owner` and `exclude_owner` to
+[`GET /v1/registries/{chain_id}/{address}/labels`](api-v1-routes.md#get-v1registrieschain_idaddresslabels)
+stores the owner each name serves in the [name summary](glossary.md#name-summary),
+so it needs `20260929170000_project_name_summary_owner.sql`, which adds
+`project_name_summary.owner`. On a database without the column it also resets
+every owned key family and the [family marker](glossary.md#family-marker), as
+the name-summary schema-migration above does, so the next family run rebuilds
+them and writes every name's owner; fenced routes answer `409 stale` until that
+rebuild finishes. Apply it before starting the release: the family writer
+inserts summary rows by column name, so without the column that release's
+summaries silently lose their owner and the filtered label reads fail. The
+composition that fills it lives in hashed storage sources
+(`crates/storage/src/families`), so the build rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) and its first
+family run rebuilds the families anyway; the reset adds no second rebuild when
+the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
+redo and Project rebuild discharge this, and collection cursors restart as
+described above.

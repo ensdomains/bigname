@@ -1,14 +1,15 @@
 //! The subnames page, the registry labels page and the child counts over the family child
 //! relation, with the page semantics of crates/storage/src/children/page.rs and reads.rs: the
 //! optional prefix or substring filter, the expiry fence with its null treatment, the name and timestamp sorts, the
-//! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds. The total
+//! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds, optionally
+//! narrowed by the owner each serves (`project_name_summary.owner`). The total
 //! is an exact count over the same filtered relation, taken in the same statement as the page;
 //! there is no maintained child count, because eligibility depends on the parent's current
 //! state. The expiry fence reads the family marker's block timestamp unless the caller fixes
 //! `evaluated_at`, never the database's transaction time.
 //!
-//! The registration and expiry times the timestamp sorts and the fence use, and the released
-//! status the fence checks, are the child's name summary (`project_name_summary`), which the
+//! The registration and expiry times the timestamp sorts and the fence use, the released
+//! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
 //! family step writes from the child's composed `declared_summary`.
 use std::collections::BTreeMap;
 
@@ -19,7 +20,8 @@ use sqlx::{
 
 use crate::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentSort, ChildrenCurrentSortValue, families::name::ensure_published,
+    ChildrenCurrentSort, ChildrenCurrentSortValue, RegistryLabelOwnerFilter,
+    families::name::ensure_published,
 };
 
 use super::{
@@ -40,6 +42,14 @@ pub struct FamilyChildRow {
     pub labelhash: Option<String>,
     pub owner: Option<String>,
     pub registrant: Option<String>,
+}
+
+/// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
+/// the owner each serves when `owner` is given.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RegistryLabels<'a> {
+    pub(crate) registry: &'a str,
+    pub(crate) owner: Option<RegistryLabelOwnerFilter<'a>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,7 +146,10 @@ pub(crate) async fn count(
         &mut builder,
         Parents::One(parent_logical_name_id),
         &ChildrenCurrentPageFilter::default(),
-        registry,
+        registry.map(|registry| RegistryLabels {
+            registry,
+            owner: None,
+        }),
     );
     builder.push(") SELECT count(*) FROM children");
     let count: i64 = builder
@@ -186,7 +199,7 @@ pub(crate) async fn page(
     conn: &mut PgConnection,
     parent_logical_name_id: &str,
     filter: &ChildrenCurrentPageFilter<'_>,
-    registry: Option<&str>,
+    registry: Option<RegistryLabels<'_>>,
     cursor: Option<&ChildrenCurrentKeysetCursor>,
     page_size: u64,
 ) -> Result<FamilyChildrenPage> {
@@ -266,12 +279,12 @@ pub(crate) async fn page(
 
 /// The selected children CTEs and the `children` relation (left open, closed by the caller)
 /// after the read filter, the prefix, the expiry fence and, for a registry's labels, the registry
-/// filter, with each child's served fields and `sort_timestamp`.
+/// and owner filters, with each child's served fields and `sort_timestamp`.
 fn push_children<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     filter: &ChildrenCurrentPageFilter<'a>,
-    registry: Option<&'a str>,
+    registry: Option<RegistryLabels<'a>>,
 ) {
     push_selected(builder, parents);
     let sort_timestamp = match filter.sort {
@@ -293,9 +306,23 @@ fn push_children<'a>(
             {CHILD_SUMMARY_JOIN}
             WHERE selected.pair_rank = 1{CHILD_SURFACE_FILTER}"
     ));
-    if let Some(registry) = registry {
+    if let Some(labels) = registry {
         builder.push(" AND selected.registry_address = ");
-        builder.push_bind(registry);
+        builder.push_bind(labels.registry);
+        // The owner a label serves is its composed name row's (apps/api/src/v2/subnames.rs,
+        // `build_subname`); the ENSv2 arm's child row carries none, so a label without a summary
+        // or a summary owner is ownerless and only the exclusion admits it.
+        match labels.owner {
+            Some(RegistryLabelOwnerFilter::Owner(owner)) => {
+                builder.push(" AND summary.owner = ");
+                builder.push_bind(owner);
+            }
+            Some(RegistryLabelOwnerFilter::ExcludeOwner(owner)) => {
+                builder.push(" AND summary.owner IS DISTINCT FROM ");
+                builder.push_bind(owner);
+            }
+            None => {}
+        }
     }
     if let Some(q) = filter.q {
         builder.push(format!(" AND {CHILD_DISPLAY_NAME} LIKE "));

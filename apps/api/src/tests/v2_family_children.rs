@@ -321,7 +321,12 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
             unavailable(
                 "registry labels page",
                 bigname_storage::load_registry_children_current_page(
-                    pool, parent, registry, None, 5,
+                    pool,
+                    parent,
+                    registry,
+                    Some(bigname_storage::RegistryLabelOwnerFilter::ExcludeOwner(CHILD_OWNER)),
+                    None,
+                    5,
                 )
                 .await
                 .map(drop),
