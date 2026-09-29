@@ -3415,7 +3415,10 @@ For a registrar lease first identified by a later readable observation, registra
   any letter case and matches case-insensitively. A label keeps its owner
   after its expiry until its registration is released (a released label is
   not a label of the registry), so an expired, unreleased label counts as held
-  by that owner. The two parameters cannot be combined. The filter is the
+  by that owner. The two parameters cannot be combined. A blank value, empty or
+  only whitespace, counts as absent, as for the other optional address
+  parameters: `owner=&exclude_owner=<address>` is an `exclude_owner` request and
+  `owner=` alone is unfiltered. The filter is the
   row's own `owner`: for each address, the `owner` and `exclude_owner` results
   partition the unfiltered labels.
 - Response shape: `data` is an array of rows using the `GET
@@ -3453,8 +3456,8 @@ For a registrar lease first identified by a later readable observation, registra
   empty `data` and `total_count` `0`, a complete answer for the reported
   publication. A publication that cannot be served returns `409 stale`, filtered
   or not, never an empty page. Malformed `chain_id`, `address`, `include`,
-  `owner`, `exclude_owner` or cursor values, and `owner` together with
-  `exclude_owner`, return `400 invalid_input`.
+  `owner`, `exclude_owner` or cursor values, and nonblank `owner` together
+  with nonblank `exclude_owner`, return `400 invalid_input`.
 - Replaces (v1): none; new in F1.
 
 ### `GET /v1/namespaces/{namespace}`

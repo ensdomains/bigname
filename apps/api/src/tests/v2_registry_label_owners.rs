@@ -267,6 +267,27 @@ async fn v2_registry_labels_filter_by_owner() -> Result<()> {
         assert!(text.contains(message), "{query}: {body:#}");
     }
 
+    // A blank owner or exclude_owner counts as absent, as for every optional address parameter.
+    for (query, expected) in [
+        (
+            format!("owner=&exclude_owner={LABEL_OWNER_A}&page_size=50"),
+            &excluded,
+        ),
+        (
+            format!("owner=%20&exclude_owner={LABEL_OWNER_A}&page_size=50"),
+            &excluded,
+        ),
+        (
+            format!("owner={LABEL_OWNER_B}&exclude_owner=&page_size=50"),
+            &vec![("basil.alpha.eth".to_owned(), Some(LABEL_OWNER_B.to_owned()))],
+        ),
+        ("owner=%20&page_size=50".to_owned(), &all),
+        ("owner=&exclude_owner=&page_size=50".to_owned(), &all),
+    ] {
+        let (rows, _) = walk_labels(&database, &query).await?;
+        assert_eq!(&rows, expected, "{query}");
+    }
+
     // A cursor continues only the filter it was issued for.
     let (_, first) = read_family_response(
         &database,
