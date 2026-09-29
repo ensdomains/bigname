@@ -6,28 +6,31 @@ pub(super) fn push_name_current_list_cursor_after<'a>(
 ) {
     match sort {
         NameCurrentListSort::Name => {
-            let NameCurrentListCursorValue::Name(sort_value) = &cursor.sort_value else {
+            // The name order is the normalized name; the cursor's display name only goes back to
+            // the client, since a display form can sort apart from its normalized name.
+            let NameCurrentListCursorValue::Name(_) = &cursor.sort_value else {
                 return;
             };
+            let sort_value = cursor.normalized_name.as_str();
             match order {
                 NameCurrentListOrder::Asc => {
                     builder.push(
                         r#"
                         AND (
-                            canonical_display_name > "#,
+                            normalized_name > "#,
                     );
                     builder.push_bind(sort_value);
-                    push_name_tie_after(builder, "canonical_display_name", sort_value, cursor);
+                    push_name_tie_after(builder, "normalized_name", sort_value, cursor);
                     builder.push(")");
                 }
                 NameCurrentListOrder::Desc => {
                     builder.push(
                         r#"
                         AND (
-                            canonical_display_name < "#,
+                            normalized_name < "#,
                     );
                     builder.push_bind(sort_value);
-                    push_name_tie_after(builder, "canonical_display_name", sort_value, cursor);
+                    push_name_tie_after(builder, "normalized_name", sort_value, cursor);
                     builder.push(")");
                 }
             }
@@ -141,7 +144,7 @@ pub(super) fn push_name_current_list_order(
 ) {
     match sort {
         NameCurrentListSort::Name => {
-            builder.push(" ORDER BY canonical_display_name ");
+            builder.push(" ORDER BY normalized_name ");
             builder.push(match order {
                 NameCurrentListOrder::Asc => "ASC",
                 NameCurrentListOrder::Desc => "DESC",
@@ -199,7 +202,7 @@ fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&s
 
 fn timestamp_sort_column(sort: NameCurrentListSort) -> &'static str {
     match sort {
-        NameCurrentListSort::Name => "canonical_display_name",
+        NameCurrentListSort::Name => "normalized_name",
         NameCurrentListSort::ExpiryDate => "expiry_date",
         NameCurrentListSort::RegistrationDate => "registration_date",
         NameCurrentListSort::CreatedAt => "created_at",

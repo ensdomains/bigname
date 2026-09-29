@@ -450,8 +450,11 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         // The one-shot command does not retry a family failure of any kind: each retry would run
         // the served redo again, and a persistent failure such as Interpret being in redo would
         // never exit. The supervised runner, its required redos included, retries them all.
+        // It also runs without the hydration RPC URL: a redo undoes and replays, which never
+        // reads RPC, and the supervised runner refreshes the overlays it leaves empty.
         project_families: FamilySettings {
             retry_family_failures: false,
+            require_hydration_url: false,
             ..args.project_families.into()
         },
     })

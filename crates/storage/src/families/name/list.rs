@@ -51,6 +51,7 @@ pub(super) fn source_row(row: &NameCurrentRow) -> Value {
         "logical_name_id": row.logical_name_id,
         "namespace": row.namespace,
         "raw_name": row.normalized_name,
+        "display_name": row.canonical_display_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
         "resource_id": row.resource_id,
@@ -106,13 +107,11 @@ pub async fn load_family_search_page(
     );
     let order = (NameCurrentListSort::Name, NameCurrentListOrder::Asc);
     let batch = batch_size(page_size);
+    // The page sorts by normalized name, the surfaces' order; the cursor's display name is only
+    // echoed back to the client.
     let mut after = cursor.map(|cursor| {
-        let name = match &cursor.sort_value {
-            NameCurrentListCursorValue::Name(name) => name.clone(),
-            NameCurrentListCursorValue::Timestamp(_) => cursor.normalized_name.clone(),
-        };
         (
-            name,
+            cursor.normalized_name.clone(),
             cursor.namespace.clone(),
             cursor.normalized_name.clone(),
             cursor.namehash.clone(),
