@@ -6,8 +6,6 @@ use tokio::sync::Mutex;
 use crate::{
     IngestError, Result,
     coinbase_sql::CoinbaseSqlSource,
-    fetching::estimated_write_bytes,
-    manifest::load_watch_filter,
     plan::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
         redo_source_target, sort_sources, target_number, validate_request,
@@ -24,11 +22,13 @@ mod source_floor;
 
 pub use live_plan::{LiveContinuation, admit_ingest_checkpoint_heads, plan_live_continuation};
 pub use source_floor::admit_source_floor;
+mod watch_plan;
 mod window;
 
-use prefetch::{Prefetcher, RangeLogCache};
+use prefetch::RangeLogCache;
+#[cfg(test)]
 use redo::LoadedWindow;
-use window::WindowReader;
+use watch_plan::RedoWatchPlan;
 
 const BLOCKS_PER_BATCH: i64 = 256;
 const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
@@ -112,6 +112,7 @@ pub struct Engine {
     providers: Mutex<BTreeMap<String, SharedProvider>>,
     coinbase_sources: Mutex<BTreeMap<String, Arc<CoinbaseSqlSource>>>,
     range_logs: Mutex<RangeLogCache>,
+    redo_watch_plans: Mutex<BTreeMap<String, RedoWatchPlan>>,
 }
 
 impl Engine {
@@ -121,6 +122,7 @@ impl Engine {
             providers: Mutex::new(BTreeMap::new()),
             coinbase_sources: Mutex::new(BTreeMap::new()),
             range_logs: Mutex::new(RangeLogCache::default()),
+            redo_watch_plans: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -426,70 +428,6 @@ impl Engine {
             heads: None,
             sources: progress,
             estimated_write_bytes: written_bytes,
-        })
-    }
-
-    async fn load_window(
-        &self,
-        chain_id: &str,
-        source: &SourceDescriptor,
-        all_sources: &[SourceDescriptor],
-        from: i64,
-        to: i64,
-        prefetch_ceiling: Option<i64>,
-    ) -> Result<LoadedWindow> {
-        let provider = self.resolver(chain_id, source, all_sources).await?;
-        let filter = load_watch_filter(&self.pool, chain_id, from, to).await?;
-        let coinbase = normalized_kind(&source.kind) == ProviderKind::Coinbase;
-        let coinbase_source = if coinbase {
-            Some(self.coinbase_source(chain_id, source).await?)
-        } else {
-            None
-        };
-        let prefetcher = prefetch_ceiling.filter(|_| !coinbase).map(|ceiling| {
-            Prefetcher::new(&self.range_logs, provider_key(chain_id, source), ceiling)
-        });
-        let window::FetchedWindow {
-            resolved,
-            facts,
-            selected,
-            queries,
-        } = WindowReader {
-            provider: &provider,
-            coinbase: coinbase_source.as_deref(),
-            prefetch: prefetcher.as_ref(),
-            filter: &filter,
-        }
-        .fetch(from, to)
-        .await?;
-        let estimated_write_bytes = estimated_write_bytes(&facts);
-        self.enforce_window_floor(chain_id, source, from, to)
-            .await?;
-        crate::write::store(
-            &self.pool,
-            chain_id,
-            &facts,
-            coinbase.then_some((from, to, selected.as_slice(), queries.as_slice())),
-        )
-        .await?;
-        let last = resolved
-            .last()
-            .ok_or_else(|| IngestError::data_integrity("ingest window resolved no blocks"))?;
-        let first = &resolved[0];
-        Ok(LoadedWindow {
-            first: Marker {
-                number: first.number,
-                hash: first.hash.clone(),
-            },
-            marker: Marker {
-                number: last.number,
-                hash: last.hash.clone(),
-            },
-            first_parent_hash: facts
-                .blocks
-                .first()
-                .and_then(|block| block.parent_hash.clone()),
-            estimated_write_bytes,
         })
     }
 

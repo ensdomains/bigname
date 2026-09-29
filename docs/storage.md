@@ -1202,6 +1202,16 @@ full range under those inputs. Existing active redo rows receive no backfill,
 so their first post-upgrade resume fails closed and requires that full-range
 reload.
 
+During one active Ingest redo attempt, the runner prepares persisted manifest and
+discovery [watch intervals](glossary.md#watch-plan--watched-tuple) once, then clips
+them to each fetch window. The existing phase exclusion and manifest-sync locks
+keep those inputs stable. This process-local plan is keyed by chain, attempt
+generation, and redo range; a new or resumed attempt reloads it, and completion
+or failure discards it. Canonical creation announcements are still read for each
+window, and same-window announcements still expand the fetch before it commits.
+Normal Ingest, Live, and uncoordinated library calls retain their per-window
+planning. Redo batch size, provider reads, and fork checks are unchanged.
+
 `chain_phase_state.redo_attempt_generation` has this contract: This nonnegative, row-local counter increments when an explicit redo begins, when the phase runner installs or extends a required redo stamp for a downstream phase (Interpret/Project), and when the shared required-Ingest installer records genuinely new manifest or discovery demand. New same-range demand advances the generation because an older attempt may already have passed those blocks under a narrower filter. Repeated observation of an unchanged discovery-watch admission never calls the installer and therefore does not advance the generation.
 A batch carries that generation together with the persisted redo mode and the actual execution
 range chosen at begin time. Its pool-backed progress update, including the

@@ -7,6 +7,7 @@ mod announcements;
 mod ranges;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use crate::{
     ErrorKind, IngestError, Result,
@@ -251,16 +252,9 @@ pub async fn load_watch_filter(
     to_block: i64,
 ) -> Result<WatchFilter> {
     let mut filter = load_persisted_watch_filter(pool, chain_id, from_block, to_block).await?;
-    for announcement_topic0 in filter.creation_topic0s() {
-        let announcements =
-            announcements::canonical(pool, chain_id, to_block, &announcement_topic0).await?;
-        filter.admit_creation_announcements(
-            &announcement_topic0,
-            announcements,
-            from_block,
-            to_block,
-        );
-    }
+    filter
+        .supplement_creation_announcements(pool, chain_id, from_block, to_block)
+        .await?;
     Ok(filter)
 }
 

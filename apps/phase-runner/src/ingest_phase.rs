@@ -48,6 +48,7 @@ impl Phase for IngestPhase {
                     ),
                 ));
             }
+            let redo_attempt = context.redo_attempt;
             let request = BatchRequest {
                 chain_id: context.chain_id,
                 sources: context
@@ -83,7 +84,15 @@ impl Phase for IngestPhase {
                 },
                 resume_current: context.resume.current.as_ref().map(ingest_marker),
             };
-            let outcome = self.engine.run_batch(request).await.map_err(runner_error)?;
+            let outcome = match redo_attempt {
+                Some(attempt) => {
+                    self.engine
+                        .run_redo_attempt_batch(request, attempt.generation)
+                        .await
+                }
+                None => self.engine.run_batch(request).await,
+            }
+            .map_err(runner_error)?;
             let progress = PhaseProgress {
                 current: Some(runner_marker(outcome.current)?),
                 target: Some(runner_marker(outcome.target)?),
