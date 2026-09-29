@@ -26,7 +26,11 @@ fn address_role_event(
         &format!("address-role-{resource}-{subject}-{ordinal}"),
         name,
         Some(resource),
-        if root { "RootPermissionChanged" } else { "PermissionChanged" },
+        if root {
+            "RootPermissionChanged"
+        } else {
+            "PermissionChanged"
+        },
         "ens_v2_registry_l1",
         block,
         hash,
@@ -52,10 +56,22 @@ async fn seed_role_holder(database: &TestDatabase, powers: Value) -> Result<Uuid
     Ok(resource)
 }
 
-async fn set_role_holder_powers(database: &TestDatabase, resource: Uuid, powers: Value) -> Result<()> {
+async fn set_role_holder_powers(
+    database: &TestDatabase,
+    resource: Uuid,
+    powers: Value,
+) -> Result<()> {
     let (block, hash) = address_fixture_head(database).await?;
     let name = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
-    let event = address_role_event(Some(&name), resource, ROLE_HOLDER, false, powers, block, &hash);
+    let event = address_role_event(
+        Some(&name),
+        resource,
+        ROLE_HOLDER,
+        false,
+        powers,
+        block,
+        &hash,
+    );
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
     rebuild_address_fixture(database).await
 }
@@ -73,7 +89,12 @@ fn row_names_and_relations(payload: &Value) -> Vec<(String, Value)> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| (row["name"].as_str().unwrap().to_owned(), row["relations"].clone()))
+        .map(|row| {
+            (
+                row["name"].as_str().unwrap().to_owned(),
+                row["relations"].clone(),
+            )
+        })
         .collect()
 }
 
@@ -143,7 +164,10 @@ async fn v2_address_names_list_any_registry_role_but_not_the_reservation_marker(
     // `was_reserved` marks a registration made from a reservation; it is not a role.
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["was_reserved"])).await?;
-    assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
+    assert_eq!(
+        role_holder_names(&database, "any").await?["data"],
+        json!([])
+    );
     database.cleanup().await
 }
 
@@ -157,7 +181,10 @@ async fn v2_address_names_drop_a_role_holder_once_every_role_is_revoked() -> Res
         vec![("beta.eth".to_owned(), json!(["role_holder"]))]
     );
     set_role_holder_powers(&database, resource, json!([])).await?;
-    assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
+    assert_eq!(
+        role_holder_names(&database, "any").await?["data"],
+        json!([])
+    );
     database.cleanup().await
 }
 
@@ -189,7 +216,10 @@ async fn v2_address_names_omit_registry_root_role_holders() -> Result<()> {
     );
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[root]).await?;
     rebuild_address_fixture(&database).await?;
-    assert_eq!(role_holder_names(&database, "any").await?["data"], json!([]));
+    assert_eq!(
+        role_holder_names(&database, "any").await?["data"],
+        json!([])
+    );
     database.cleanup().await
 }
 
@@ -281,7 +311,10 @@ async fn v2_address_history_follows_a_role_held_name() -> Result<()> {
     };
     let payload = history("role_holder").await?;
     let rows = payload["data"].as_array().unwrap();
-    assert!(rows.iter().all(|row| row["name"] == json!("beta.eth")), "{payload}");
+    assert!(
+        rows.iter().all(|row| row["name"] == json!("beta.eth")),
+        "{payload}"
+    );
     assert!(
         rows.iter().any(|row| row["type"] == json!("permission")),
         "the role grant itself is in the holder's history: {payload}"
@@ -302,7 +335,15 @@ async fn v2_address_names_list_one_holder_among_many_on_a_registration() -> Resu
     let events: Vec<_> = others
         .iter()
         .map(|other| {
-            address_role_event(Some(&name), resource, other, false, json!(["set_resolver"]), block, &hash)
+            address_role_event(
+                Some(&name),
+                resource,
+                other,
+                false,
+                json!(["set_resolver"]),
+                block,
+                &hash,
+            )
         })
         .collect();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
@@ -327,8 +368,71 @@ async fn v2_address_names_list_one_holder_among_many_on_a_registration() -> Resu
     .await?;
     assert_eq!(
         row_names_and_relations(&payload),
-        vec![("beta.eth".to_owned(), json!(["registrant", "owner", "manager"]))],
+        vec![(
+            "beta.eth".to_owned(),
+            json!(["registrant", "owner", "manager"])
+        )],
         "{payload}"
     );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> Result<()> {
+    use bigname_storage::families::records::seams::with_role_read_counter;
+    use std::sync::{Arc, Mutex};
+
+    let database = TestDatabase::new_migrated().await?;
+    seed_role_holder(&database, json!(["renew"])).await?;
+    // ROLE_HOLDER has only role evidence. V2_ADDRESS has ordinary ownership evidence too,
+    // so the second address proves the grant load is skipped even when names are composed.
+    for address in [ROLE_HOLDER, V2_ADDRESS] {
+        for route in ["names", "history"] {
+            for relation in ["owner", "manager", "registrant", "owner,manager,registrant"] {
+                let reads = Arc::new(Mutex::new(Vec::new()));
+                let payload = with_role_read_counter(
+                    reads.clone(),
+                    v2_address_names_payload_for_database(
+                        &database,
+                        &format!("/v1/addresses/{address}/{route}?relation={relation}"),
+                    ),
+                )
+                .await?;
+                assert!(
+                    reads.lock().unwrap().is_empty(),
+                    "{address}/{route}/{relation}: {:?}",
+                    reads.lock().unwrap()
+                );
+                if address == ROLE_HOLDER {
+                    assert_eq!(payload["data"], json!([]), "{payload}");
+                } else {
+                    assert!(
+                        !payload["data"].as_array().unwrap().is_empty(),
+                        "ownership rows were lost: {payload}"
+                    );
+                }
+            }
+        }
+    }
+    // Both an explicit any and the unfiltered request retain role membership work.
+    for route in ["names", "history"] {
+        for query in ["", "?relation=any", "?relation=owner,role_holder"] {
+            let reads = Arc::new(Mutex::new(Vec::new()));
+            let payload = with_role_read_counter(
+                reads.clone(),
+                v2_address_names_payload_for_database(
+                    &database,
+                    &format!("/v1/addresses/{ROLE_HOLDER}/{route}{query}"),
+                ),
+            )
+            .await?;
+            assert_eq!(
+                *reads.lock().unwrap(),
+                ["candidates", "grants"],
+                "{route}{query}"
+            );
+            assert!(!payload["data"].as_array().unwrap().is_empty(), "{payload}");
+        }
+    }
     database.cleanup().await
 }
