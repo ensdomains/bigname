@@ -20,6 +20,10 @@
 //!   rule (its node's latest Transfer), so this field keeps the child list's own attribution:
 //!   the Transfers are the registry owner events (`project_registry_owner_event`), and the named
 //!   events that link a resource are read from the readable interpreted events;
+//! - `owner`: the owner the name row serves, `declared_summary.control.owner`, else
+//!   `control.registry_owner`, lower-cased, null when the first present one is blank or the name
+//!   composes no row (apps/api/src/v2/name_record/declared.rs, `declared_owner`); the registry
+//!   labels' `owner` and `exclude_owner` filters read it;
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
 //!   expiry or grace boundary), in Unix seconds, since a NameWrapper expiry can lie past the last
@@ -150,7 +154,7 @@ pub async fn compose_name_summary_publication(
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,
-                nc.recompose_at) summary",
+                nc.recompose_at, {SERVED_OWNER} AS owner) summary",
         zero_owner()
     ));
     let rows: Vec<(String, Value)> = builder
@@ -163,6 +167,15 @@ pub async fn compose_name_summary_publication(
         null_resolver_names,
     })
 }
+
+/// The owner the composed name row serves: the first of `control.owner` and
+/// `control.registry_owner` that is present, lower-cased; null when that one is blank, when
+/// neither is present and when the name composes no row.
+const SERVED_OWNER: &str = "(SELECT CASE WHEN btrim(served.owner) = '' THEN NULL
+                 ELSE lower(served.owner) END
+         FROM (SELECT COALESCE(nc.declared_summary #>> '{control,owner}',
+                               nc.declared_summary #>> '{control,registry_owner}') AS owner)
+              served)";
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of
 /// the summary statement): its candidate Transfers are those naming it, the unnamed ones at its

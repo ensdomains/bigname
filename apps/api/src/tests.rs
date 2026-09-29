@@ -421,6 +421,8 @@ mod v2_address_name_queries;
 mod v2_authority_ens_v0;
 #[path = "tests/v2_authority_ens_v0_produced.rs"]
 mod v2_authority_ens_v0_produced;
+#[path = "tests/v2_registry_label_owners.rs"]
+mod v2_registry_label_owners;
 include!("tests/v2_permissions.rs");
 #[path = "tests/site_pages.rs"]
 mod site_pages;
