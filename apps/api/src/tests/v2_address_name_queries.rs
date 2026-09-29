@@ -501,18 +501,12 @@ async fn v2_subnames_match_contains_filters_before_paging_and_counting() -> Resu
         ),
         ("q=o", vec!["one.alpha.eth"]),
         ("q=ar&match=contains", vec!["carol.alpha.eth"]),
-        (
-            "q=e.alpha&match=contains",
-            vec!["dave.alpha.eth", "one.alpha.eth"],
-        ),
+        // dave's registry record was moved to the zero owner, so it has no owner and is not
+        // listed (`seed_family_children_fixture`).
+        ("q=e.alpha&match=contains", vec!["one.alpha.eth"]),
         (
             "q=.alpha.eth&match=contains",
-            vec![
-                "carol.alpha.eth",
-                "dave.alpha.eth",
-                "one.alpha.eth",
-                "two.alpha.eth",
-            ],
+            vec!["carol.alpha.eth", "one.alpha.eth", "two.alpha.eth"],
         ),
         ("q=_&match=contains", vec![]),
         // Undated carol sorts first descending, as without `match`.
