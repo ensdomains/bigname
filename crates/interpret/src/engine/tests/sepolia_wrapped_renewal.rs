@@ -72,10 +72,11 @@ async fn sepolia_wrapped_controller_renewal_moves_the_wrapper_expiry() -> TestRe
     let wrapper: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM normalized_events
          WHERE chain_id = $1 AND logical_name_id = $2
-           AND source_family = 'ens_v1_wrapper_l1' AND event_kind = 'SurfaceBound'",
+           AND source_family = 'ens_v1_wrapper_l1' AND event_kind = $3",
     )
     .bind(CHAIN)
     .bind(&logical_name_id)
+    .bind(bigname_adapters::schema_v2::seam::SURFACE_BOUND_EVENT_KIND)
     .fetch_one(pool)
     .await?;
     stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
