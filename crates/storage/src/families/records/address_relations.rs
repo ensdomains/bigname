@@ -14,7 +14,8 @@
 //!   registrant's recipient before an owner lapse. The lapse also removes wrapper_state, so both
 //!   readers then withhold the token-holder relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder or
-//!   registrant, where the mask allows.
+//!   registrant, where the mask allows. Each holder of an ENSv2 registry management role on the
+//!   name's selected resource is an effective controller as well (`address_roles.rs`).
 //!
 //! The mask reads the NameWrapper row of the name's resource: whether a PermissionScopeChanged
 //! ever set it (`scope_modifiers`), the composed `wrapper_state`, and the grace test at the
@@ -23,7 +24,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::FamilyPosition;
+use super::{FamilyPosition, address_roles::RoleManager};
 use crate::{
     NameCurrentRow,
     families::control::{
@@ -51,12 +52,14 @@ pub(super) struct ControllerCandidate {
 /// What one name's relations are computed from.
 pub(super) struct NameRelationsInput<'a> {
     pub(super) row: &'a NameCurrentRow,
-    pub(super) candidates: &'a [&'a ControllerCandidate],
+    pub(super) candidates: &'a [ControllerCandidate],
     /// The selected binding's F1 candidate row.
     pub(super) binding: Option<&'a BindingCandidate>,
     /// The NameWrapper row of the name's resource.
     pub(super) wrapper: Option<&'a WrapperRow>,
     pub(super) clock_seconds: i64,
+    /// The ENSv2 registry management role holders of the name's selected resource.
+    pub(super) role_managers: &'a [RoleManager],
 }
 
 /// The relation names, in the served relation rank order.
@@ -106,10 +109,15 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         };
         out.push((effective, EFFECTIVE_CONTROLLER));
     }
+    for manager in input.role_managers {
+        out.push((Some(manager.subject.clone()), EFFECTIVE_CONTROLLER));
+    }
+    let mut seen = BTreeSet::new();
     out.into_iter()
         .filter_map(|(address, relation)| {
             let address = address?.to_ascii_lowercase();
-            (address != ZERO).then_some((address, relation))
+            (address != ZERO && seen.insert((address.clone(), relation)))
+                .then_some((address, relation))
         })
         .collect()
 }
@@ -170,7 +178,6 @@ fn controller(
     let mut events: Vec<&ControllerCandidate> = input
         .candidates
         .iter()
-        .copied()
         .filter(|candidate| admitted(candidate) || in_window(candidate))
         .filter(|candidate| seen.insert(candidate.position.event_identity.clone()))
         .collect();
@@ -237,11 +244,12 @@ fn registry_only_window(
 #[path = "address_relations_tests.rs"]
 mod tests;
 
-/// The actual event that supplied a current relation, for bounded history attribution.
-/// Reuses the controller fold and the registration fold's selected event; it does not infer
-/// an acquisition time from the publication time.
+/// The actual event that supplied `address`'s current relation, for bounded history
+/// attribution. Reuses the controller fold, the role holder's grant and the registration fold's
+/// selected event; it does not infer an acquisition time from the publication time.
 pub(super) fn relation_position(
     input: &NameRelationsInput<'_>,
+    address: &str,
     relation: &str,
 ) -> Option<FamilyPosition> {
     if relation == EFFECTIVE_CONTROLLER {
@@ -255,7 +263,21 @@ pub(super) fn relation_position(
         let open = modifier.is_none()
             || (matches!(wrapper_state, Some("wrapped" | "emancipated"))
                 && in_grace == Some(false));
-        if let Some((_, position)) = controller(input, open) {
+        let controller = controller(input, open);
+        if let Some((_, position)) = controller
+            .as_ref()
+            .filter(|(controller, _)| controller.eq_ignore_ascii_case(address))
+        {
+            return Some(position.clone());
+        }
+        if let Some(manager) = input
+            .role_managers
+            .iter()
+            .find(|manager| manager.subject.eq_ignore_ascii_case(address))
+        {
+            return Some(manager.position.clone());
+        }
+        if let Some((_, position)) = controller {
             return Some(position);
         }
     }

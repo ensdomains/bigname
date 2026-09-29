@@ -483,7 +483,25 @@ whether or not a surface names the node. A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
-the node's registry-only resource, and with no surface binding. Raw unbounded diagnostic address history separately includes retained
+the node's registry-only resource, and with no surface binding.
+
+A holder of an ENSv2 registry `set_resolver` or `set_subregistry` role on a
+name's selected registration resource is an `effective_controller` of the name
+too: `PermissionedRegistry` lets that account change the name's resolver or
+subregistry without owning the token.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142-L155 @ ens_v2@a971bd64)
+The read takes these holders from the served permission rows of the resource
+(the F8 grants after the read-time masks `GET /v1/permissions` applies), not
+from the address index: the candidate names are the names bound to a resource
+on which the address has such a grant, and the composed name keeps the holder
+only while that resource is its selected resource. No other role adds a name.
+Renewing, unregistering and the `admin_*` roles do not change how the name
+resolves. A role held on the registry root reaches every name in the registry,
+and an ENSv2 registry operator approved with `setApprovalForAll` is not a
+permission row, so neither adds names to an address's collection.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+
+Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
 in [the audit route contract](api-v1-routes.md).
 

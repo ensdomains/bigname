@@ -299,7 +299,9 @@ collection route carry neither header.
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
   accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
   is the normalized all-three set. Reverse rows match when any listed relation
-  matches. `relation=resolves_to` stands alone and answers the names whose
+  matches, with the same meaning as on `GET /v1/addresses/{address}/names`,
+  including `manager` through an ENSv2 registry `set_resolver` or
+  `set_subregistry` role. `relation=resolves_to` stands alone and answers the names whose
   current `addr:<coin_type>` resolver record resolves to the input address for
   the input `coin_type`, with the same matching rule, ENSIP-19 default-address
   fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`
@@ -2623,7 +2625,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
   Rows match when any listed relation matches. The storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and
-  registrant -> `registrant`. `dedupe=name` groups by name surface and is the
+  registrant -> `registrant`. `manager` also matches an address holding the
+  ENSv2 registry `set_resolver` or `set_subregistry` role on the name's current
+  registration, as served by `GET /v1/permissions`; other roles, roles held on
+  the registry root, and ENSv2 registry operators do not make an address a
+  `manager` (see [address collections](projections.md#address-and-child-collections)).
+  A page that omits a name therefore does not prove the address holds no
+  permission on it. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
