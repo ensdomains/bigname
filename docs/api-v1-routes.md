@@ -2630,7 +2630,8 @@ introduces it rebuilds Project from full history before serving the option; see
   Rows match when any listed relation matches. The storage relations map as
   token-holder -> `owner`, effective-controller -> `manager`, and
   registrant -> `registrant`. `dedupe=name` groups by name surface and is the
-  default; `dedupe=registration` groups by registration resource.
+  default; `dedupe=registration` groups by registration resource on the authority
+  and `resolves_to` listings.
   `relation=former_registrant` lists the released names whose ended
   registration the path address last held, for renewal reminders: an ENSv1
   lease that lapsed past its grace, or an ENSv2 registration that expired or was
@@ -2649,7 +2650,10 @@ introduces it rebuilds Project from full history before serving the option; see
   `400 invalid_input`), ties broken by namespace, name and namehash, with rows
   without an expiry last ascending and first descending. `coin_type`,
   `authority`, `is_migrated`, `q` and `include` return `400 invalid_input` with
-  it, and `page.total_count` is `null`. Its cursor binds the address,
+  it. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
+  are equivalent; `dedupe=registration` returns `400 invalid_input`, including
+  with a continuation cursor. Released names have no current registration resource
+  by which this relation can group them. `page.total_count` is `null`. Its cursor binds the address,
   namespace, both bounds and order, and holds the last row's position, as on
   `GET /v1/names`. An app looking for names still renewable in grace asks for
   `expires_after` at `now` minus the longest grace and checks `grace_ends_at`

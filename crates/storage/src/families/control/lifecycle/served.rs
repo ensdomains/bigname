@@ -354,9 +354,21 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let latest_event_kind =
         latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref())?;
 
-    let released_at = selected
-        .event
-        .map_or(Value::Null, |event| event.released_at.clone());
+    let released_at = selected.event.map_or(Value::Null, |event| {
+        if is_v2
+            && event.event_kind == "RegistrationReleased"
+            && event.source_event.as_deref() == Some("LabelUnregistered")
+        {
+            // The unregister payload has no release time; use the event's canonical block,
+            // already loaded with these lifecycle facts, rather than the publication clock.
+            facts
+                .block_seconds
+                .get(&event.position.block_number)
+                .map_or(Value::Null, |seconds| json!(seconds))
+        } else {
+            event.released_at.clone()
+        }
+    });
     let status = if selection.ownerless_registry {
         json!("unregistered")
     } else {
@@ -423,15 +435,28 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         if !path {
             registration.insert("expiry".into(), Value::Null);
         }
-        // The registry token's holder when the registration ended (TYR-63): the latest grant,
-        // transfer or release registrant on the key. A path-expired registration stays
-        // renewable by it through the grace period; an unregistered one does not.
-        registration.insert(
-            "lapsed_registration".into(),
-            json!({"registrant": registrant, "released_at": released_at,
-                   "held_through": "registry",
-                   "release_kind": if path { "expired" } else { "unregistered" }}),
-        );
+        let release_kind = match selected
+            .event
+            .and_then(|event| event.source_event.as_deref())
+        {
+            Some("RegistryPathExpired") => Some("expired"),
+            Some("LabelUnregistered") => Some("unregistered"),
+            _ => None,
+        };
+        // The .eth registrar permits grace renewal while the registry retains its latest
+        // owner; unregister burns that token. This does not grant powers to the former holder.
+        // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
+        // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+        // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741)
+        // Other terminal causes (for example a displaced TokenRegenerated registration)
+        // remain released but are not classified as expiry or explicit unregister.
+        if let Some(release_kind) = release_kind {
+            registration.insert(
+                "lapsed_registration".into(),
+                json!({"registrant": registrant, "released_at": released_at,
+                       "held_through": "registry", "release_kind": release_kind}),
+            );
+        }
     }
 
     registration.insert(

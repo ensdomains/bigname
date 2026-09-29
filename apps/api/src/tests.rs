@@ -443,6 +443,8 @@ include!("tests/v2_history_event_data.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_former_registrant_cursors.rs");
+#[path = "tests/v2_former_registrant_produced.rs"]
+mod v2_former_registrant_produced;
 include!("tests/v2_query_params.rs");
 include!("tests/v2_status.rs");
 include!("tests/v2_namespaces_sepolia.rs");

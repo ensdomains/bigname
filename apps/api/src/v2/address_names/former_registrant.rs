@@ -18,7 +18,8 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::AppState;
 use crate::v2::{
-    AddressNamesSort, Envelope, Page, QueryParams, Relation, SortOrder, V2Error, V2Result,
+    AddressNamesDedupe, AddressNamesSort, Envelope, Page, QueryParams, Relation, SortOrder,
+    V2Error, V2Result,
     collection_snapshot::CollectionSnapshot,
     cursor::invalid_cursor_error,
     format_timestamp,
@@ -149,6 +150,11 @@ pub(super) async fn get_address_former_registrants(
 
 /// The parameters of the authority listing this relation does not take.
 fn reject_unsupported(params: &QueryParams) -> V2Result<()> {
+    if params.dedupe == AddressNamesDedupe::Registration {
+        return Err(V2Error::invalid_input(
+            "dedupe=registration is not supported with relation=former_registrant",
+        ));
+    }
     let unsupported = [
         ("coin_type", params.coin_type.is_some()),
         ("authority", params.authority.is_some()),

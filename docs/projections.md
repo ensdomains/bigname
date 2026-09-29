@@ -423,7 +423,8 @@ restores all of them.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
 
 A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
-`registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at}`:
+`registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at,
+release_kind: "expired"}`:
 the holder selected by the registrant fold at the release, and the authority the released
 lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
 while wrapped). The registrar's `RegistrationReleased` row names the BaseRegistrar token owner
@@ -441,12 +442,36 @@ period. The API serves `authority_kind` as `lapsed_registration.held_through`, o
 values `registrar` and `wrapper`, and does not serve `authority_key`.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L127 @ ens_v1@91c966f) `registration.registrant`, `authority_kind` and
 `authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
-permissions, counts) sees the lapsed holder. No other row carries the block.
+permissions, counts) sees the lapsed holder.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L265 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
+
+An ENSv2 selected `RegistrationReleased` also carries `lapsed_registration` when its
+`source_event` is `RegistryPathExpired` or `LabelUnregistered`. Its exact shape is
+`{registrant, held_through: "registry", released_at, release_kind}`: the last registry
+token holder on the selected lifecycle key, from its grant, transfer or release.
+For `RegistryPathExpired`, `release_kind` is `expired`; the registration keeps its expiry
+and applicable grace, and `released_at` is the retained path-release time. For
+`LabelUnregistered`, `release_kind` is `unregistered`; expiry and grace are null, and
+`released_at` comes from that event's canonical block timestamp, already loaded with the
+lifecycle facts. The unregister payload itself does not contain that time. Fields remain
+null when their retained evidence is unavailable.
+
+The distinction reflects `.eth` renewal eligibility: the registrar admits an expired
+registration in grace only while the registry retains its latest owner; unregister burns
+the token. This is not a grant of renewal powers to the former holder.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741)
+Other ENSv2 release causes, including a displaced registration released by the
+`TokenRegenerated` decoder, remain released without a `lapsed_registration` block. Bigname
+does not classify those releases as an explicit unregister or expose them through
+`relation=former_registrant`. No active row carries the block; a later registration removes
+it. The former relation reads this block only and does not restore any current authority
+relation or permission.
 
 
 

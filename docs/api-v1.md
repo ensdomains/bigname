@@ -1576,9 +1576,11 @@ does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-
 
 ### Lapsed registration
 
-A released name also carries `lapsed_registration`, the holder its registration
-had when it ended: an ENSv1 lease that lapsed past its grace, or an ENSv2
-registration that passed its expiry or was unregistered. It is a separate block
+A released name carries `lapsed_registration` when it is an ENSv1 lease that lapsed
+past its grace, or an ENSv2 registration released by `RegistryPathExpired` or
+`LabelUnregistered`. Other release causes, such as a registration displaced during
+token regeneration, carry no block and do not enter `relation=former_registrant`.
+The block identifies the holder when the registration ended. It is separate
 so that nobody reads it as current state:
 
 ```json
@@ -1607,13 +1609,13 @@ is `registrar` or `wrapper`, the contract the lapsed lease was held through, or
 `registry` for an ENSv2 registration, and is omitted for any other value; the top-level `authority` field is a different
 thing and names the `ens_v0`, `ens_v1` or `ens_v2` side. `released_at` is the time of the
 block at which Bigname recorded the release. That is the first block whose
-timestamp is after `expires_at` plus the 90-day grace period, so it is always
+timestamp is after `expires_at` plus the 90-day grace period for an ENSv1 lease, so it is always
 later than `expires_at` plus 90 days and never equal to it. For an ENSv2
 registration it is the block that recorded the unregister, or the first block
 at or past its expiry. `release_kind` is `expired` for a lapsed ENSv1 lease and
-an ENSv2 registration past its expiry, which keeps its `expires_at` and can
-still be renewed until `grace_ends_at` because the registry remembers its last
-owner, and `unregistered` for an explicit ENSv2 unregister, which burns the
+an ENSv2 registration past its expiry, which keeps its `expires_at`; the `.eth`
+registrar still permits renewal during its grace while the registry remembers its last
+owner. `unregistered` identifies an explicit ENSv2 unregister, which burns the
 token, leaves no `expires_at` and cannot be renewed. Each field is omitted when unknown.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
