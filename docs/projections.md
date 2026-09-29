@@ -816,7 +816,11 @@ not the zero owner of `registry_self`, and it does not make the registry ownerle
 (TYR-100): any other registry write that moves a wrapped subname away from the NameWrapper, such
 as its unwrapped parent's owner calling `setSubnodeOwner`, keeps the NameWrapper binding
 selected, so the stale token's holder is still served as owner; only the Graveyard's write is
-handled here. Only the
+handled here. The same gap has a Graveyard variant: after the Graveyard clears the record of a
+subname wrapped without `PARENT_CANNOT_CONTROL`, a holder who sends the surviving NameWrapper
+token to the Graveyard makes it the holder of that still-selected binding, and its holder grant
+lists the Graveyard as the subname's `manager` in `GET /v1/addresses/{address}/names`, although
+the served owner stays null. Only the
 admitted Graveyard counts; the Graveyards of superseded Sepolia deployments are not declared
 and their records are served as the chain holds them. A registrant that sends a live `.eth`
 token to the Graveyard keeps the lease running, since the name cannot be registered again

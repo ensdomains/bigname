@@ -503,6 +503,65 @@ async fn a_surfaced_subname_the_graveyard_cleared_is_not_listed_under_the_gravey
     Ok(())
 }
 
+/// Known gap, deferred to TYR-100 (a registry write away from the NameWrapper keeps the wrapper
+/// authority). The Graveyard clears the registry record of a subname wrapped without
+/// `PARENT_CANNOT_CONTROL`, and the holder then sends the surviving token to the Graveyard, which
+/// accepts ERC1155 tokens. The binding stays the NameWrapper's, so the holder grant lists the
+/// Graveyard as the subname's manager (effective controller) while its served owner stays null.
+/// This pins today's behaviour: the TYR-100 fix should make the Graveyard not a manager here and
+/// flip the second assertion.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L25 @ ens_v2_sepolia_20260916@366de741)
+#[tokio::test]
+async fn known_gap_tyr100_a_surviving_wrapper_token_sent_to_the_graveyard_lists_it_as_manager()
+-> TestResult {
+    let database = family_database("interpret_graveyard_token_back").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    run(pool, SETUP_BLOCK, MIGRATION_BLOCK, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    let claimed_at = fixture.claim(pool, LATER_BLOCK).await?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    insert_lineage(pool, LATER_BLOCK + 1, claimed_at + 12).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, NAME_WRAPPER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        NAME_WRAPPER,
+        TransferSingle {
+            operator: sub_owner,
+            from: sub_owner,
+            to: GRAVEYARD.parse::<Address>()?,
+            id: fixture.sub_token(),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    run(pool, LATER_BLOCK, LATER_BLOCK + 1, Some(MIGRATION_BLOCK)).await?;
+    for mode in [FamilyMode::Normal, FamilyMode::Rebuild] {
+        let run = format!("{mode:?}");
+        publish(pool, LATER_BLOCK + 1, mode).await?;
+        let served = summary(pool, &fixture.sub_id).await?;
+        assert_eq!(
+            served["control"]["registry_owner"],
+            Value::Null,
+            "{run}: {served:#}"
+        );
+        let relations = address_relations(pool, GRAVEYARD, &fixture.sub_id).await?;
+        assert!(
+            relations.contains(&bigname_storage::AddressNameRelation::EffectiveController),
+            "{run}: known gap TYR-100 no longer lists the Graveyard as manager; flip this \
+             assertion to its absence: {relations:?}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// `claimed-name.eth`, wrapped then unwrapped back to `OWNER`, with a subname `sub` whose
 /// registry record `OWNER` holds; the Graveyard can claim the parent once its lease lapses.
 struct ClearedSubname {
@@ -688,6 +747,36 @@ async fn address_names(pool: &PgPool, address: &str) -> TestResult<Vec<String>> 
         .entries
         .into_iter()
         .map(|entry| entry.logical_name_id)
+        .collect())
+}
+
+/// The relations the address-names read lists `address` under for `logical_name_id`.
+async fn address_relations(
+    pool: &PgPool,
+    address: &str,
+    logical_name_id: &str,
+) -> TestResult<Vec<bigname_storage::AddressNameRelation>> {
+    let page = bigname_storage::load_address_names_current_page_filtered(
+        pool,
+        address,
+        Some("ens"),
+        None,
+        bigname_storage::AddressNamesCurrentDedupe::Surface,
+        None,
+        None,
+        None,
+        bigname_storage::AddressNamesCurrentSort::Name,
+        bigname_storage::AddressNamesCurrentOrder::Asc,
+        None,
+        None,
+        50,
+    )
+    .await?;
+    Ok(page
+        .entries
+        .into_iter()
+        .filter(|entry| entry.logical_name_id == logical_name_id)
+        .flat_map(|entry| entry.relations)
         .collect())
 }
 

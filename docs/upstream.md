@@ -191,7 +191,10 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > outlives the clear. Superseded Sepolia Graveyards are not declared and are served as the chain
 > holds them. A live token sent to the Graveyard keeps its lease and is served as the chain holds
 > it. Known gap (TYR-100): other registry writes that move a wrapped subname away from the
-> NameWrapper still serve the stale token's holder. See [projections](projections.md).
+> NameWrapper still serve the stale token's holder. In its Graveyard variant, a holder who sends
+> the surviving wrapper token of a cleared subname (wrapped without `PARENT_CANNOT_CONTROL`) to
+> the Graveyard gets the Graveyard listed as that subname's `manager` in address lists, while its
+> served owner stays null. See [projections](projections.md).
 > **Since**: `2026-09-29`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
