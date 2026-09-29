@@ -760,6 +760,7 @@ async fn live_writer_then_crash_orphaned_required_ingest_redo_recovers_after_rew
             Some(RedoAttemptFence {
                 generation: active.2,
                 execution_range: redo_range,
+                resumes_interrupted: false,
             }),
             &PhaseProgress::default(),
         )

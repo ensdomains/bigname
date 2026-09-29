@@ -199,6 +199,10 @@ pub struct FamilyOptions {
     pub max_range_blocks: u64,
     /// Events one rebuild range applies at most, unless its first block alone holds more.
     pub max_range_events: u64,
+    /// The redo this run serves resumes an interrupted redo of the same range under the same
+    /// interpreter content hash (the runner kept its saved progress). A rebuild the interrupted
+    /// attempt left then resumes rather than starting again.
+    pub resumes_interrupted_redo: bool,
 }
 
 impl FamilyOptions {
@@ -211,7 +215,13 @@ impl FamilyOptions {
             rebuild_ranges: RebuildRanges::BelowSafe,
             max_range_blocks: MAX_RANGE_BLOCKS,
             max_range_events: MAX_RANGE_EVENTS,
+            resumes_interrupted_redo: false,
         }
+    }
+
+    pub fn with_resumed_redo(mut self, resumes: bool) -> Self {
+        self.resumes_interrupted_redo = resumes;
+        self
     }
 
     pub fn with_rebuild_ranges(mut self, ranges: RebuildRanges) -> Self {
