@@ -27,6 +27,7 @@ pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
         include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
         include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
         include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
         include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
     ] {
         raw_sql(script).execute(&mut *tx).await?;
