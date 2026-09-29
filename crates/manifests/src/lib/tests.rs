@@ -1397,10 +1397,32 @@ fn sepolia_manifests_admit_all_four_ens_v1_families() -> Result<()> {
     );
 
     let registrar = family("ens_v1_registrar_l1").expect("Sepolia ENSv1 registrar family");
+    // BaseRegistrar, plus the receipt-backed wrapped controller for its renewals only; the
+    // unwrapped and legacy controllers stay deferred (#515 option (b)).
     assert_eq!(
-        registrar.contracts.len(),
-        1,
-        "#515 option (b) admits only BaseRegistrar; Sepolia registrar controllers stay deferred"
+        registrar
+            .contracts
+            .iter()
+            .map(|contract| {
+                (
+                    contract.role.as_str(),
+                    normalize_address(&contract.address),
+                    contract.start_block,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "registrar",
+                "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85".to_owned(),
+                Some(3_702_731)
+            ),
+            (
+                "wrapped_registrar_controller",
+                "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72".to_owned(),
+                Some(3_790_244)
+            ),
+        ]
     );
     assert_eq!(registrar.contracts[0].role, "registrar");
     assert_eq!(registrar.contracts[0].start_block, Some(3_702_731));
@@ -1697,6 +1719,7 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
             "ControllerAdded|event ControllerAdded(address indexed controller)|registrar|PermissionChanged",
             "ControllerRemoved|event ControllerRemoved(address indexed controller)|registrar|PermissionChanged",
             "NameRegistered|event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)|registrar|RegistrationGranted,ExpiryChanged,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged,RegistrationReleased",
+            "NameRenewed|event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)|wrapped_registrar_controller|ExpiryChanged,PreimageObserved",
             "NameRenewed|event NameRenewed(uint256 indexed id, uint256 expires)|registrar|RegistrationGranted,RegistrationRenewed,ExpiryChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
             "Transfer|event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)|registrar|TokenControlTransferred,PermissionChanged,SurfaceUnbound,SurfaceBound,AuthorityEpochChanged,ResolverChanged",
         ]

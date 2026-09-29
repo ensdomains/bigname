@@ -78,6 +78,9 @@ mod registry_only_handoff;
 #[path = "tests/mainnet_wrapped_registration.rs"]
 mod mainnet_wrapped_registration;
 
+#[path = "tests/sepolia_wrapped_renewal.rs"]
+mod sepolia_wrapped_renewal;
+
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
 

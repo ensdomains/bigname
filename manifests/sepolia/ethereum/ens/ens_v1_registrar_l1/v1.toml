@@ -1,5 +1,7 @@
-# Sepolia ENSv1 .eth BaseRegistrar. Registrar-controller addresses remain
-# unadmitted; only the authoritative token contract is watched.
+# Sepolia ENSv1 .eth BaseRegistrar, plus the receipt-backed wrapped registrar
+# controller for its label-bearing renewals only. The unwrapped and legacy
+# registrar controllers, and a second NameWrapper-enabled wrapped controller with no
+# pinned deployment artifact, remain unadmitted.
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_registrar_l1"
@@ -30,6 +32,23 @@ proxy_kind = "none"
 # Start block is reference-only metadata; see the root declaration above.
 # (upstream: .refs/ens_subgraph/networks.json:L47-L49 @ ens_subgraph@723f1b6)
 start_block = 3702731
+
+# WrappedETHRegistrarController. Its deployment artifact, pinned with the Basenames
+# ens-contracts checkout, records the address and a successful creation receipt at
+# block 3790244, with the canonical Sepolia NameWrapper and ENS registry as
+# constructor arguments. The NameWrapper enabled it as a controller at block 3790246
+# and never disabled it; it renews through `NameWrapper.renew`, which is
+# `onlyController`.
+# (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L2 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L604 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L654-L656 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L665-L668 @ basenames@1809bbc)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L315 @ ens_v1@91c966f)
+[[contracts]]
+role = "wrapped_registrar_controller"
+address = "0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72"
+proxy_kind = "none"
+start_block = 3790244
 
 # BaseRegistrar ERC-721 transfer admission follows the deployed ABI.
 # (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L188-L206 @ ens_v1@91c966f)
@@ -65,8 +84,19 @@ fragment = "event NameRenewed(uint256 indexed id, uint256 expires)"
 emitter_roles = ["registrar"]
 normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged"]
 
+# Wrapped-controller renewals are admitted for their label and the wrapper expiry
+# NameWrapper.renew writes without an event; they declare no RegistrationGranted, so
+# they take the enrichment path and never open a registrar registration.
+# (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L164-L192 @ basenames@1809bbc)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)"
+emitter_roles = ["wrapped_registrar_controller"]
+normalized_events = ["ExpiryChanged", "PreimageObserved"]
+
 # BaseRegistrar authorization checks both ERC-721 token approvals and
-# owner-wide operators; only the registrar is declared on Sepolia.
+# owner-wide operators; the registrar is their only emitter on Sepolia.
 # (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L20-L68 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L35-L50 @ ens_v1@91c966f)
 # (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).

@@ -3358,7 +3358,7 @@ For a registrar lease first identified by a later readable observation, registra
   omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
   profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
   declaration is supported while the admitted ENSv1 registrar declaration is
-  shadow because registrar-controller label coverage is absent.
+  shadow because registrar-controller registration label coverage is absent.
 - Capabilities from manifest flags: `subnames`, `name_profile`, and
   `name_history` aggregate the active manifests' capability flags (`full` when
   every declaring manifest is supported, `partial` when some are, otherwise
