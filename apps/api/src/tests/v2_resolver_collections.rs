@@ -599,7 +599,7 @@ async fn seed_permissioned_collection_inputs(database: &TestDatabase) -> Result<
     database
         .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
         "chain_id":"ethereum-mainnet", "block_number":block, "block_hash":hash,
-        "timestamp":crate::v2::format_timestamp(at)}}))
+        "timestamp":bigname_storage::UnixSeconds::from(at).internal_string()}}))
         .await?;
     let implementation = "0x0000000000000000000000000000000000000fed";
     let payload = json!({"contracts":[],

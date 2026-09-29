@@ -711,7 +711,8 @@ for migration_file in \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929160000_remove_served_projections.sql" \
     "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
-    "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql"
+    "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
+    "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1039,7 +1040,9 @@ for migration_file in \
     "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929170000_project_name_summary_owner.sql" \
     "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
-    "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql"
+    "$ROOT/migrations/20260929180000_project_resource_pointer_root_node_index.sql" \
+    "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \
+    "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

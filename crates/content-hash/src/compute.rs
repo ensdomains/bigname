@@ -72,6 +72,10 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // families root) takes its `expires_at` and `registered_at` from. The rest of the address-names
     // code serves reads only.
     "crates/storage/src/address_names/query.rs",
+    "crates/storage/src/address_names/query/timestamps.rs",
+    // Exact expiry decoding and contract sentinel classification also decide stored summaries.
+    "crates/storage/src/unix_seconds.rs",
+    "crates/storage/src/expiry.rs",
 ];
 
 #[allow(dead_code)]

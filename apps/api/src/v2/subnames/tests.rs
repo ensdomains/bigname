@@ -74,7 +74,8 @@ fn subname_cursor_round_trips_timestamp_sorts() {
     let dated = ChildrenCurrentKeysetCursor {
         sort_value: ChildrenCurrentSortValue::Timestamp(Some(
             bigname_storage::parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z")
-                .expect("timestamp must parse"),
+                .expect("timestamp must parse")
+                .into(),
         )),
         canonical_display_name: "alice.eth".to_owned(),
         child_logical_name_id: "ens:alice.eth".to_owned(),

@@ -582,12 +582,15 @@ collection route carry neither header.
   `namespace` is required: the listing is one namespace's index scan, and a
   missing namespace returns `400 invalid_input`; an unsupported one returns
   `404 not_found`. At least one of `expires_after` and `expires_before` is
-  required so the request can never be an unbounded scan; both are RFC 3339 UTC
-  timestamps. `expires_after` is inclusive and `expires_before` exclusive, so
+  required so the request can never be an unbounded scan; both accept decimal
+  Unix seconds or RFC 3339 timestamps, including offsets and fractional
+  seconds. `expires_after` is inclusive and `expires_before` exclusive, so
   consecutive windows tile without overlap or gap; `expires_after` must be
   earlier than `expires_before`. `sort` defaults to `expires_at` and accepts
-  nothing else; `order` defaults to `asc`. Any other value, a non-RFC 3339
-  bound, or an equal or inverted pair returns `400 invalid_input`.
+  nothing else; `order` defaults to `asc`. Any other value, an invalid timestamp
+  bound, or an equal or inverted pair returns `400 invalid_input`. Finite
+  expiry bounds are exact numeric seconds, including beyond year 9999; public
+  whole-second formatting does not round an RFC 3339 filter boundary.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
   `owner`, `registrant`, `registration_status`, `registered_at`, `created_at`,
@@ -599,27 +602,30 @@ collection route carry neither header.
   whose exact-name authority is unsupported is omitted, as on search, because
   a listing row carries no `unsupported_reason`.
 - Coverage: the listing serves [composed name rows](glossary.md#composed-name-row)
-  whose `declared_summary.registration.expiry` is the numeric lease expiry
-  (unix seconds) that composition gives registrar leases, ENSv2 registrations,
-  and wrapped subnames. It finds them by walking the retained lifecycle events
+  whose registration has a finite numeric expiry in Unix seconds, including
+  registrar leases, ENSv2 registrations, and wrapped subnames. The public
+  `expires_at` is a decimal string; the index and comparisons use exact numeric
+  seconds, never floating point or lexicographic string order. It finds them by
+  walking the retained lifecycle events
   and NameWrapper states by expiry through `project_lifecycle_event_expiry_idx`,
   `project_lifecycle_event_inexact_expiry_idx` and
-  `project_wrapper_state_expiry_idx` (migration
-  `20260928140000_project_families_expiry_indexes.sql`). A row whose only expiry is stored
-  in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
-  is outside this listing by design; `GET /v1/names/{name}` still serves its
-  `expires_at`. A negative numeric expiry, or one after 9999-12-31T23:59:59Z,
-  is outside this listing too and has no `expires_at` on any route; Project
-  writes no formatted `control.expiry` for it, so no fallback revives it.
+  `project_wrapper_state_expiry_idx`. These indexes were introduced by
+  `20260928140000_project_families_expiry_indexes.sql`; their current expiry
+  keys use exact numeric storage. A row with no finite registration expiry is outside this
+  listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
+  remain eligible and keep every digit through filtering, sorting and paging.
+  A negative or malformed stored expiry is not a no-expiry sentinel.
   The Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
-  Search and address collections treat such an expiry, or the same value as a
-  quoted number, as unknown the same way: the row has no `expires_at` and
-  address names with `sort=expires_at` place it with the other unknown expiries, last ascending
-  and first descending.
+  Such contract-specific no-expiry registrations serve `expires_at: null`,
+  `expires_at_reason: "no_expiry"` and `grace_ends_at: null` across detail,
+  lookup and collections. Null expiry never matches a window; collections with
+  `sort=expires_at` place nulls last ascending and first descending. A row
+  without a registration context omits these fields. See
+  [Timestamp format and absent expiry](api-v1.md#timestamp-format-and-absent-expiry).
 - Released names: the listing means "registrations whose expiry falls in this
   window", whether the registration is live, in grace or released. A released
   name keeps the lapsed registration's expiry, so it appears in every window
@@ -627,7 +633,8 @@ collection route carry neither header.
   registration that lapsed by path expiry, whose registry entry still holds
   the expiry. An ENSv2 registration ended by an explicit release loses its
   expiry with the entry, so it is outside every window; `GET /v1/names/{name}`
-  serves it as `released` without `expires_at`. A released row has
+  serves it as `released` with `expires_at: null`,
+  `expires_at_reason: "released"` and `grace_ends_at: null`. A released row has
   `registration_status: released`, its old `expires_at`, and
   no `owner` or `registrant`, and carries the
   [`lapsed_registration`](api-v1.md#lapsed-registration) block with the ended
@@ -700,8 +707,11 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
   Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
   `MAX_EXPIRY` therefore keeps the lifecycle value active at representable
-  served block timestamps even when `expires_at` is omitted because that public
-  timestamp cannot be represented.
+  served block timestamps. Its wrapper expiry is publicly `null` with
+  `wrapper_expires_at_reason: "no_expiry"` inside restrictions; when that
+  wrapper entry also supplies the registration expiry, `expires_at` is `null`
+  with `expires_at_reason: "no_expiry"`. This is sentinel classification,
+  independent of the representability of a finite timestamp.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
@@ -731,7 +741,7 @@ collection route carry neither header.
   `status=unsupported` identity-only object. A zero registry owner does not
   remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
   `authority` and the name's history retains an activated `MigrationApplied`
-  [migration boundary](glossary.md#migration-boundary): it is the RFC 3339 block
+  [migration boundary](glossary.md#migration-boundary): it is the decimal Unix-seconds block
   time of that migration event, read through the event's block in the chain
   lineage. The migration is history, not the reason for the selection; a
   migrated name whose selection changes to ENSv1 omits it. A name first
@@ -1642,8 +1652,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   This filter adds no child-registration rows, reconstructs no effective
   resolution, and changes no resolver attribution. All these filters apply
   before pagination and existing counts, and all bind the cursor.
-- `from_timestamp` and `to_timestamp` are inclusive RFC 3339 bounds (`Z` or a
-  numeric offset; fractional seconds allowed). They are resolved to block
+- `from_timestamp` and `to_timestamp` are inclusive bounds accepting decimal
+  Unix seconds or RFC 3339 (`Z` or a numeric offset; fractional seconds
+  allowed and retained for filtering). They are resolved to block
   ranges from readable chain lineage, never through RPC: for every chain the
   deployment can serve, `from_timestamp` maps to the first readable block whose
   timestamp is at or after the bound and `to_timestamp` to the last readable
@@ -1652,8 +1663,8 @@ A recognized namespace with no available publication returns retryable `409 stal
   block satisfying a bound contributes no rows, so a window entirely after the
   last indexed block matches nothing and returns `200` with empty `data`. Rows
   without a chain position never match a timestamp window. `from_timestamp`
-  greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
-  invalid_input`. On `/v1/events` the resolved window intersects an explicit
+  greater than `to_timestamp`, or an invalid or out-of-range clock value,
+  returns `400 invalid_input`. On `/v1/events` the resolved window intersects an explicit
   `from_block`/`to_block` range.
 - History anchor expansion is bounded to the captured publication too:
   bindings, NameWrapper links, registrar grants, historical ownership matches,
@@ -1824,13 +1835,17 @@ every id, so it is a merge key, not a durable reference to store.
 - `data`: an object derived from the stored normalized event's before/after
   state, translated into dictionary vocabulary. Only fields the row actually
   carries are present; absent or null source values are omitted rather than
-  serialized as `null`, so `data` may be `{}`. Addresses are lower-cased.
+  serialized as `null`, so `data` may be `{}`. The exception is an expiry
+  classified from the event’s contract and registration context: it carries
+  `expires_at: null` plus `expires_at_reason`. Addresses are lower-cased.
   Contract pointers use the `{chain_id, address}` shape with the row's own
   numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
   a `resolver` row whose `data` has no `resolver` records a clearing. Unix
-  expiry values become RFC 3339 `expires_at` under the same rule as every
-  other route: a value before 1970 or after 9999-12-31T23:59:59Z is omitted,
-  and a value inside that range keeps its whole seconds.
+  expiry values become decimal Unix-second strings under the same rule as
+  every other route: finite values keep every digit, including beyond year
+  9999 and the signed integer range. Contextual `no_expiry`, `not_set` and
+  `released` reasons explain classified null expiry; absent raw fields alone
+  do not invent a registration context or an expiry reason.
 
 `include=raw` is a separate, explicit opt-in for explorer and diagnostic use.
 It adds one field:
@@ -1847,9 +1862,9 @@ Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
 | --- | --- |
-| `registration` | `registrant`, `owner`, `expires_at`, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
-| `renewal`, `release` | `expires_at` |
-| `expiry` | `expires_at`, `fuses` (uint32 word when the change came through NameWrapper) |
+| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
+| `renewal`, `release` | `expires_at`, `expires_at_reason` when null |
+| `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper) |
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
@@ -1868,7 +1883,7 @@ Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
   "namespace": "ens",
   "registration_id": null,
   "block_number": 19000106,
-  "timestamp": "2026-06-10T00:00:06Z",
+  "timestamp": "1781049606",
   "transaction_hash": "0x...",
   "log_index": 12,
   "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
@@ -2728,12 +2743,15 @@ introduces it rebuilds Project from full history before serving the option; see
   it. Rows carry `relations: ["former_registrant"]`, `registration_status:
   released`, the ended registration's `expires_at` and `grace_ends_at`, and the
   `lapsed_registration` block, and no current `owner` or `registrant`. The read
-  takes `expires_after` (inclusive) and `expires_before` (exclusive) as RFC 3339
-  UTC bounds on `expires_at`, which only this relation accepts; a row without
-  an expiry (an unregistered ENSv2 name) is outside every window. It sorts by
+  takes `expires_after` (inclusive) and `expires_before` (exclusive) as decimal
+  Unix-seconds or RFC 3339 bounds on `expires_at`, which only this relation
+  accepts; a row without a finite expiry (an explicitly unregistered ENSv2 name serves null with
+  reason `released`) is outside every window. It sorts by
   `expires_at` only (`sort=expires_at` is the default here; any other value is
-  `400 invalid_input`), ties broken by namespace, name and namehash, with rows
-  without an expiry last ascending and first descending. `coin_type`,
+  `400 invalid_input`), ties broken by namespace, name and namehash, with null
+  expiry last ascending and first descending. Finite values and cursor
+  positions compare numerically without calendar or safe-integer caps.
+  `coin_type`,
   `authority`, `is_migrated`, `q` and `include` return `400 invalid_input` with
   it, and `page.total_count` is `null`. Its cursor binds the address,
   namespace, both bounds and order, and holds the last row's position, as on
@@ -3624,7 +3642,7 @@ For a registrar lease first identified by a later readable observation, registra
     "display_name": "shared.eth",
     "link_event": {
       "block_number": 11710004,
-      "timestamp": "2026-09-16T10:04:12Z",
+      "timestamp": "1789553052",
       "transaction_hash": "0xlink…",
       "log_index": 1
     }

@@ -100,7 +100,7 @@ async fn hk_publish_block(database: &TestDatabase, block: i64, with_row: bool) -
         &database.pool,
         block,
         &hash,
-        &crate::v2::format_timestamp(timestamp),
+        &bigname_storage::UnixSeconds::from(timestamp).internal_string(),
     )
     .await?;
     rebuild_fixture_families(&database.pool, HK_CHAIN, block, &hash).await

@@ -138,7 +138,17 @@ pub(super) fn declared_created_at(summary: &Value) -> Option<String> {
     )
 }
 
-pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
+pub(super) fn declared_expires_at(
+    summary: &Value,
+) -> Option<crate::v2::timestamps::ExpiryTimestamp> {
+    use crate::v2::timestamps::ExpiryTimestamp;
+    if summary
+        .pointer("/registration/expires_at_reason")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Some(ExpiryTimestamp::NoExpiry);
+    }
     json_timestamp_at_paths(
         summary,
         &[
@@ -150,14 +160,26 @@ pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
             &["control", "expiry"],
         ],
     )
+    .map(ExpiryTimestamp::Seconds)
 }
 
 /// When the registration's renewal grace ends: its expiry plus the grace period of the registrar
 /// the expiry comes from (90 days for an ENSv1 `.eth` lease and a Basenames name, the ENSv2
 /// `ETHRegistrar` grace for an ENSv2 `.eth` entry), or the expiry itself where no registrar grace
 /// applies.
-pub(super) fn declared_grace_ends_at(summary: &Value) -> Option<String> {
+pub(super) fn declared_grace_ends_at(
+    summary: &Value,
+) -> Option<crate::v2::timestamps::ExpiryTimestamp> {
+    use crate::v2::timestamps::ExpiryTimestamp;
+    if summary
+        .pointer("/registration/expires_at_reason")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Some(ExpiryTimestamp::NoExpiry);
+    }
     json_timestamp_at_paths(summary, &[&["registration", "grace_ends_at"]])
+        .map(ExpiryTimestamp::Seconds)
 }
 
 pub(super) fn chain_positions_created_at(chain_positions: &Value) -> Option<String> {
@@ -166,5 +188,5 @@ pub(super) fn chain_positions_created_at(chain_positions: &Value) -> Option<Stri
         .into_iter()
         .flatten()
         .filter_map(|(_, position)| json_timestamp_at_paths(position, &[&["timestamp"]]))
-        .min()
+        .min_by_key(|value| value.parse::<bigname_storage::UnixSeconds>().ok())
 }

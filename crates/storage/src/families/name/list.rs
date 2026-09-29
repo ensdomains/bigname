@@ -21,13 +21,13 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row};
 
 use super::{CoverageShape, batch};
 use crate::{
     NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
-    NameCurrentRow,
+    NameCurrentRow, UnixSeconds,
     name_current::{escape_like_pattern, expiring_page_from, list_page_from},
     name_current_list_cursor_from_row,
 };
@@ -243,10 +243,10 @@ pub async fn load_family_expiring_page(
         NameCurrentListCursorValue::Timestamp(Some(at)) => Some(at.unix_timestamp()),
         _ => None,
     });
-    let mut low = filter.expires_after.map(OffsetDateTime::unix_timestamp);
+    let mut low = filter.expires_after.map(UnixSeconds::unix_timestamp);
     let mut high = filter
         .expires_before
-        .map(|at| at.unix_timestamp() + i64::from(at.nanosecond() != 0));
+        .map(|at| at.unix_timestamp() + i128::from(at.nanosecond() != 0));
     if let Some(second) = cursor_second {
         if ascending {
             low = Some(low.map_or(second, |low| low.max(second)));
@@ -293,7 +293,7 @@ pub async fn load_family_expiring_page(
         let settled = page.rows.len() as u64 > page_size
             && match (page.rows.last().and_then(|row| row.expiry_date), &position) {
                 (Some(last), Some((walked, _))) => {
-                    let last = i128::from(last.unix_timestamp());
+                    let last = last.unix_timestamp();
                     if ascending {
                         last < *walked
                     } else {
@@ -385,7 +385,7 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
 async fn expiry_pairs(
     conn: &mut PgConnection,
     namespace: &str,
-    (low, high): (Option<i64>, Option<i64>),
+    (low, high): (Option<i128>, Option<i128>),
     ascending: bool,
     after: Option<&(i128, String)>,
     limit: usize,
@@ -405,15 +405,15 @@ async fn expiry_pairs(
                     event.original_logical_name_id, event.decoded_logical_name_id
              FROM bigname_phase.project_lifecycle_event event
              WHERE event.expiry_seconds IS NOT NULL
-               AND ($1::bigint IS NULL OR event.expiry_seconds >= $1)
-               AND ($2::bigint IS NULL OR event.expiry_seconds < $2)
+               AND ($1::numeric IS NULL OR event.expiry_seconds >= $1::numeric)
+               AND ($2::numeric IS NULL OR event.expiry_seconds < $2::numeric)
              UNION ALL
              SELECT wrapper.chain_id, FLOOR(wrapper.expiry_seconds), 'resource',
                     wrapper.resource_id::text, wrapper.resource_id, wrapper.logical_name_id, NULL
              FROM bigname_phase.project_wrapper_state wrapper
              WHERE wrapper.expiry_seconds IS NOT NULL
-               AND ($1::bigint IS NULL OR wrapper.expiry_seconds >= $1)
-               AND ($2::bigint IS NULL OR wrapper.expiry_seconds < $2)
+               AND ($1::numeric IS NULL OR wrapper.expiry_seconds >= $1::numeric)
+               AND ($2::numeric IS NULL OR wrapper.expiry_seconds < $2::numeric)
          ), pairs AS (
              SELECT DISTINCT hits.at, name.logical_name_id
              FROM hits{names}
@@ -424,9 +424,11 @@ async fn expiry_pairs(
          LIMIT $5",
         names = EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$6")
     );
+    // Decimal strings keep the i128 bounds exact. SQLx binds them as TEXT, so every
+    // numeric comparison above casts its parameter, not only the null guard.
     let rows = sqlx::query(&sql)
-        .bind(low)
-        .bind(high)
+        .bind(low.map(|value| value.to_string()))
+        .bind(high.map(|value| value.to_string()))
         .bind(after.map(|(at, _)| at.to_string()))
         .bind(after.map(|(_, name)| name.as_str()))
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)

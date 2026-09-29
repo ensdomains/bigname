@@ -113,7 +113,7 @@ fn push_name_tie_after<'a>(
 fn push_timestamp_tie_after<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     column: &str,
-    value: Option<OffsetDateTime>,
+    value: Option<UnixSeconds>,
     cursor: &'a NameCurrentListCursor,
 ) {
     match value {
@@ -169,43 +169,12 @@ pub(super) fn push_name_current_list_order(
     }
 }
 
-fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {
-    let path_literal = format!("'{{{}}}'", path.join(","));
-    builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    // A seconds value outside 1970..=9999 (the ENSv2 root registry's uint64 max expiry) reads as
-    // unknown instead of failing the whole query. The range check reads the full value; a value
-    // inside it keeps whole seconds, as Project's formatted `control.expiry` presents it.
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
-    builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC BETWEEN 0 AND 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    builder.push(") = 'string' AND nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN CASE WHEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC <= 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    builder.push(") = 'string' AND nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' THEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::TIMESTAMPTZ ELSE NULL END");
-}
-
 fn timestamp_sort_column(sort: NameCurrentListSort) -> &'static str {
     match sort {
         NameCurrentListSort::Name => "normalized_name",
         NameCurrentListSort::ExpiryDate => "expiry_date",
-        NameCurrentListSort::RegistrationDate => "registration_date",
-        NameCurrentListSort::CreatedAt => "created_at",
+        NameCurrentListSort::RegistrationDate => "EXTRACT(EPOCH FROM registration_date)",
+        NameCurrentListSort::CreatedAt => "EXTRACT(EPOCH FROM created_at)",
     }
 }
 
@@ -220,7 +189,7 @@ fn timestamp_rank_expr(column: &str, order: NameCurrentListOrder) -> String {
     }
 }
 
-fn timestamp_null_rank(value: Option<OffsetDateTime>, order: NameCurrentListOrder) -> i32 {
+fn timestamp_null_rank(value: Option<UnixSeconds>, order: NameCurrentListOrder) -> i32 {
     match (value.is_none(), order) {
         (true, NameCurrentListOrder::Asc) => 1,
         (false, NameCurrentListOrder::Asc) => 0,
@@ -266,9 +235,11 @@ pub fn name_current_list_cursor_from_row(
                 NameCurrentListCursorValue::Timestamp(row.expiry_date)
             }
             NameCurrentListSort::RegistrationDate => {
-                NameCurrentListCursorValue::Timestamp(row.registration_date)
+                NameCurrentListCursorValue::Timestamp(row.registration_date.map(Into::into))
             }
-            NameCurrentListSort::CreatedAt => NameCurrentListCursorValue::Timestamp(row.created_at),
+            NameCurrentListSort::CreatedAt => {
+                NameCurrentListCursorValue::Timestamp(row.created_at.map(Into::into))
+            }
         },
         namespace: row.row.namespace.clone(),
         normalized_name: row.row.normalized_name.clone(),
@@ -282,4 +253,3 @@ pub(crate) fn escape_like_pattern(value: &str) -> String {
         .replace('%', r"\%")
         .replace('_', r"\_")
 }
-

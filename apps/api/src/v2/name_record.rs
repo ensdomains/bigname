@@ -47,8 +47,8 @@ use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
     identity_row_has_current_registration, identity_row_serves_resolver, json_string_at_paths,
-    network_from_parts, row_has_current_registration, row_serves_resolver, seconds_timestamp,
-    string_field, value_to_string,
+    network_from_parts, row_has_current_registration, row_serves_resolver, string_field,
+    value_to_string,
 };
 use values::{
     has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,
@@ -78,9 +78,11 @@ pub(crate) struct NameRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_at: Option<String>,
+    pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) grace_ends_at: Option<String>,
+    pub(crate) expires_at_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,7 +254,7 @@ pub(crate) async fn get_name_record(
     }))
 }
 
-/// RFC 3339 `migrated_at` per logical name for names whose current ENSv2 authority was proven by
+/// Decimal Unix-second `migrated_at` per logical name for names whose current ENSv2 authority was proven by
 /// an ENSv1→ENSv2 migration transition; other names are absent.
 pub(crate) async fn load_migrated_at(
     pool: &sqlx::PgPool,
@@ -337,6 +339,7 @@ pub(crate) fn build_name_record(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         registration_status: Some(registration.registration_status),
         wrapper_state,
@@ -383,8 +386,9 @@ pub(super) struct NameRegistrationFields {
     pub(super) registrant: Option<String>,
     pub(super) registered_at: Option<String>,
     pub(super) created_at: Option<String>,
-    pub(super) expires_at: Option<String>,
-    pub(super) grace_ends_at: Option<String>,
+    pub(super) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
+    pub(super) expires_at_reason: Option<String>,
+    pub(super) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     pub(super) registration_status: RegistrationStatus,
 }
 
@@ -427,6 +431,7 @@ fn empty_registration_fields(namespace: &str) -> NameRegistrationFields {
         registered_at: None,
         created_at: None,
         expires_at: None,
+        expires_at_reason: None,
         grace_ends_at: None,
         registration_status: classify_registration_status(namespace, None, None, false),
     }
@@ -447,6 +452,10 @@ fn registration_fields_from_parts(
         created_at: declared_created_at(declared_summary)
             .or_else(|| chain_positions_created_at(chain_positions)),
         expires_at: declared_expires_at(declared_summary),
+        expires_at_reason: declared_summary
+            .pointer("/registration/expires_at_reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         grace_ends_at: declared_grace_ends_at(declared_summary),
         registration_status: classify_registration_status(
             namespace,

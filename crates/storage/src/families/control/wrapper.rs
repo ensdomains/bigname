@@ -96,12 +96,10 @@ pub fn clock_boundaries(row: &WrapperRow, clock_seconds: i64) -> impl Iterator<I
         .filter_map(|boundary| i64::try_from(boundary).ok())
 }
 
-/// The wrapper expiry a wrapped name with no registrar lease serves: an integral word between
-/// 1 and 253402300799.
-pub fn servable_expiry(row: &WrapperRow) -> Option<i64> {
-    expiry(row)
-        .filter(|expiry| (1..=253_402_300_799).contains(expiry))
-        .map(|expiry| expiry as i64)
+/// The exact wrapper expiry a wrapped name with no registrar lease serves. Zero and the
+/// maximum word are classified with their registration context during composition.
+pub fn servable_expiry(row: &WrapperRow) -> Option<crate::UnixSeconds> {
+    expiry(row).and_then(crate::UnixSeconds::from_seconds)
 }
 
 /// The wrapper restriction block the permission resource summary serves for a wrapper resource
@@ -207,7 +205,13 @@ mod tests {
         let mut unknown = row("wrapped", 1, 10);
         unknown.expiry_seconds = None;
         assert_eq!(effective_wrapper(&unknown, 0), EffectiveWrapper::default());
-        assert_eq!(servable_expiry(&row("wrapped", 0, 0)), None);
-        assert_eq!(servable_expiry(&row("wrapped", 0, 5)), Some(5));
+        assert_eq!(
+            servable_expiry(&row("wrapped", 0, 0)),
+            crate::UnixSeconds::from_seconds(0)
+        );
+        assert_eq!(
+            servable_expiry(&row("wrapped", 0, 5)),
+            crate::UnixSeconds::from_seconds(5)
+        );
     }
 }

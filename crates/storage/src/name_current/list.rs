@@ -3,7 +3,8 @@ use sqlx::{PgExecutor, Postgres, QueryBuilder, postgres::PgRow, types::time::Off
 
 use super::{NameCurrentRow, decode_name_current_row};
 use crate::{
-    AddressNameRelation,
+    AddressNameRelation, UnixSeconds,
+    address_names::push_json_timestamp_expr,
     projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize},
 };
 
@@ -91,7 +92,7 @@ pub struct NameCurrentListFilter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NameCurrentListCursorValue {
     Name(String),
-    Timestamp(Option<OffsetDateTime>),
+    Timestamp(Option<UnixSeconds>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,7 +112,7 @@ pub struct NameCurrentListRow {
     pub registrant: Option<String>,
     pub created_at: Option<OffsetDateTime>,
     pub registration_date: Option<OffsetDateTime>,
-    pub expiry_date: Option<OffsetDateTime>,
+    pub expiry_date: Option<UnixSeconds>,
     pub resolver_address: Option<String>,
 }
 
@@ -296,22 +297,18 @@ pub(super) fn push_filtered_name_list_cte<'a>(
     push_json_timestamp_expr(builder, &["registration", "registration_date"]);
     builder.push(", ");
     push_json_timestamp_expr(builder, &["registration", "registered_at"]);
-    builder.push(
-        r#"
-                ) AS registration_date,
-                COALESCE(
-                    "#,
+    builder.push(") AS registration_date, ");
+    crate::address_names::push_expiry_paths_expr(
+        builder,
+        &[
+            &["registration", "expiry_date"],
+            &["registration", "expiry"],
+            &["control", "expiry_date"],
+            &["control", "expiry"],
+        ],
     );
-    push_json_timestamp_expr(builder, &["registration", "expiry_date"]);
-    builder.push(", ");
-    push_json_timestamp_expr(builder, &["registration", "expiry"]);
-    builder.push(", ");
-    push_json_timestamp_expr(builder, &["control", "expiry_date"]);
-    builder.push(", ");
-    push_json_timestamp_expr(builder, &["control", "expiry"]);
     builder.push(
-        r#"
-                ) AS expiry_date,
+        r#" AS expiry_date,
                 NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
         "#,
     );

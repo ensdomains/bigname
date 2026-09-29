@@ -59,5 +59,3 @@ pub(crate) use reverse_identity::test_hooks as identity_facade_count_test_hooks;
 pub(crate) use reverse_identity::*;
 pub(crate) use snapshot_disclosure::*;
 pub(crate) use snapshots::*;
-
-use super::format_timestamp;

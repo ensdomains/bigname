@@ -52,7 +52,7 @@ pub struct LifecycleEvent {
     pub registrant: Option<String>,
     pub before_registrant: Option<String>,
     pub expiry: Value,
-    pub expiry_seconds: Option<i64>,
+    pub expiry_seconds: Option<crate::UnixSeconds>,
     pub status: Option<String>,
     pub released_at: Value,
     pub source_event: Option<String>,
@@ -91,7 +91,9 @@ impl LifecycleEvent {
             registrant: lower(row, "registrant"),
             before_registrant: lower(row, "before_registrant"),
             expiry: json(row, "expiry"),
-            expiry_seconds: row.get("expiry_seconds").and_then(Value::as_i64),
+            expiry_seconds: row
+                .get("expiry_seconds")
+                .and_then(crate::UnixSeconds::from_json),
             status: text(row, "status"),
             released_at: json(row, "released_at"),
             source_event: text(row, "source_event"),

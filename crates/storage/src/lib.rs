@@ -14,6 +14,7 @@ mod address_names;
 mod api_preflight;
 mod children;
 mod evm_primitives;
+mod expiry;
 pub mod families;
 mod history;
 mod identity;
@@ -33,6 +34,9 @@ mod resolver;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
+mod unix_seconds;
+pub use expiry::contract_expiry_reason;
+pub use unix_seconds::UnixSeconds;
 
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,

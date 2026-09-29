@@ -83,8 +83,8 @@ pub(crate) struct QueryParams {
     pub(crate) to_block: Option<i64>,
     pub(crate) from_timestamp: Option<TimestampBound>,
     pub(crate) to_timestamp: Option<TimestampBound>,
-    pub(crate) expires_after: Option<OffsetDateTime>,
-    pub(crate) expires_before: Option<OffsetDateTime>,
+    pub(crate) expires_after: Option<bigname_storage::UnixSeconds>,
+    pub(crate) expires_before: Option<bigname_storage::UnixSeconds>,
     pub(crate) q: Option<String>,
     /// How a list route's `q` matches; routes that do not allowlist `match` never see
     /// anything but the default.
@@ -207,8 +207,16 @@ fn parse_at(value: &str) -> V2Result<AtSelector> {
         return Err(invalid_parameter("at"));
     }
 
-    if bigname_storage::parse_rfc3339_utc_timestamp(value).is_ok() {
-        return Ok(AtSelector::Timestamp(value.to_owned()));
+    if let Some(timestamp) = super::timestamps::clock_input(value) {
+        return Ok(AtSelector::Timestamp(
+            bigname_storage::UnixSeconds::from(timestamp).internal_string(),
+        ));
+    }
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+    {
+        return Err(invalid_parameter("at"));
     }
 
     if is_url_safe_opaque_token(value) {
@@ -297,8 +305,10 @@ fn parse_timestamp_bound(
     let Some(value) = trim_to_option(value) else {
         return Ok(None);
     };
-    let parsed = bigname_storage::parse_rfc3339_utc_timestamp(&value).map_err(|_| {
-        V2Error::invalid_input(format!("{field_name} must be an RFC 3339 timestamp"))
+    let parsed = super::timestamps::clock_input(&value).ok_or_else(|| {
+        V2Error::invalid_input(format!(
+            "{field_name} must be Unix seconds or an RFC 3339 timestamp"
+        ))
     })?;
     Ok(Some(TimestampBound {
         canonical: format_timestamp_bound(parsed),
@@ -459,16 +469,17 @@ fn parse_block_bound(value: Option<String>, field_name: &'static str) -> V2Resul
 fn parse_expiry_bound(
     value: Option<String>,
     field_name: &'static str,
-) -> V2Result<Option<OffsetDateTime>> {
+) -> V2Result<Option<bigname_storage::UnixSeconds>> {
     let Some(value) = trim_to_option(value) else {
         return Ok(None);
     };
 
-    bigname_storage::parse_rfc3339_utc_timestamp(&value)
+    value
+        .parse::<bigname_storage::UnixSeconds>()
         .map(Some)
         .map_err(|_| {
             V2Error::invalid_input(format!(
-                "{field_name} must be an RFC 3339 UTC timestamp such as 2026-01-02T03:04:05Z"
+                "{field_name} must be Unix seconds or an RFC 3339 UTC timestamp"
             ))
         })
 }

@@ -228,7 +228,7 @@ pub(crate) async fn load_address_names_page_from(
     if sort.is_timestamp() {
         builder.push("sort_timestamp");
     } else {
-        builder.push("NULL::TIMESTAMPTZ AS sort_timestamp");
+        builder.push("NULL::NUMERIC AS sort_timestamp");
     }
     builder.push(" FROM ");
     builder.push(if sort.is_timestamp() {

@@ -580,7 +580,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_event (
     registrant text,
     before_registrant text,
     expiry jsonb,
-    expiry_seconds bigint,
+    expiry_seconds numeric,
     status text,
     released_at jsonb,
     source_event text,
@@ -642,7 +642,7 @@ COMMENT ON COLUMN project_lifecycle_event.before_registrant IS
 COMMENT ON COLUMN project_lifecycle_event.expiry IS
     'This value is the after-state expiry as the event carries it.';
 COMMENT ON COLUMN project_lifecycle_event.expiry_seconds IS
-    'This value is that expiry as seconds when it is an integral JSON number within the served range, else null.';
+    'This value is the exact integral expiry in Unix seconds, including the full uint64 range; null when no integral expiry is present.';
 COMMENT ON COLUMN project_lifecycle_event.status IS
     'This value is the after-state status.';
 COMMENT ON COLUMN project_lifecycle_event.released_at IS
@@ -2227,7 +2227,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     authority_arm text,
     serving boolean NOT NULL,
     registration_status text,
-    expires_at timestamptz,
+    expires_at numeric,
     registered_at timestamptz,
     zero_owner boolean NOT NULL,
     recompose_at bigint,
@@ -2249,7 +2249,7 @@ COMMENT ON COLUMN project_name_summary.serving IS
 COMMENT ON COLUMN project_name_summary.registration_status IS
     'This value is declared_summary.registration.status; the subnames expiry fence drops a released child.';
 COMMENT ON COLUMN project_name_summary.expires_at IS
-    'This value is the expiry the subnames expiry sort and fence read: the first timestamp of the registration and control expiry fields, as address_names/query.rs reads it.';
+    'This value is the exact finite expiry in Unix seconds the subnames expiry sort and fence read; contextual no-expiry values are null.';
 COMMENT ON COLUMN project_name_summary.registered_at IS
     'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.';
 COMMENT ON COLUMN project_name_summary.zero_owner IS

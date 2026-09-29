@@ -297,20 +297,14 @@ fn child_row(rows: &mut RowSet, key: Row, event: &BlockEvent) -> Result<()> {
     put(rows, table, row, event)
 }
 
-/// The expiry as build.sql:493-501 converts it: an integral JSON number in range, else null.
+/// Exact integral expiry seconds from the retained event. Calendar range is a presentation
+/// concern, not a bound on a contract's uint64 word.
 fn expiry_seconds(after: &Value) -> Value {
-    let Some(Value::Number(number)) = after.get("expiry") else {
-        return Value::Null;
-    };
-    let seconds = number.as_i64().or_else(|| {
-        number
-            .as_f64()
-            .filter(|value| value.fract() == 0.0 && value.abs() < 1e15)
-            .map(|value| value as i64)
-    });
-    seconds
-        .filter(|value| (-377_705_116_800..=253_402_300_799).contains(value))
-        .map_or(Value::Null, Value::from)
+    after
+        .get("expiry")
+        .and_then(bigname_storage::UnixSeconds::from_json)
+        .filter(|value| value.nanosecond() == 0)
+        .map_or(Value::Null, |value| json!(value))
 }
 
 fn retained_columns(row: &mut Map<String, Value>, event: &BlockEvent) {

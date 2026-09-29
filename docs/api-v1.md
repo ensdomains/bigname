@@ -52,20 +52,21 @@ step-3-gate vocabulary needed by the route schemas:
 | `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, `role_holder`, `resolves_to`, and `former_registrant` values | `relation_facets`, role-specific match arrays |
 | `resolution` | on a `resolves_to` row read for one decimal coin type only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)) | subgraph `resolver.coinTypes` |
 | `resolutions` | on a `resolves_to` row read with `coin_type=evm` only: `[{coin_type, record_key}]`, one entry per EVM coin type (`60`, or `2147483648` through `4294967295`, the set ENSIP-19 treats as EVM (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)) whose stored resolver record matched the address, ascending by coin type, each with the stored record key that matched. The ENSIP-19 default record appears once, as coin type `2147483648` (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f). A row carries at most 100 entries; a row that matched more returns `422 unsupported` for the whole request; read one decimal `coin_type` at a time instead. It lists matches only, not every coin type the resolver has records for; see the [known divergence](upstream.md#resolves-to-matched-coin-types) | subgraph `resolver.coinTypes`, which lists every coin type the resolver has observed whatever its value (upstream: .refs/ens_subgraph/schema.graphql:L294-L295 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/resolver.ts:L59-L79 @ ens_subgraph@723f1b6) |
-| `expires_at` | expiry, RFC 3339: for a `.eth` second-level name with a live ENSv2 entry, that entry's expiry once the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), whichever arm holds authority (see [Expiry and grace](#expiry-and-grace)); otherwise the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted). A seconds value before 1970-01-01T00:00:00Z or after 9999-12-31T23:59:59Z, stored as a number or a quoted number, is an unknown expiry: every route omits the field and expiry sorting places the row with the other unknown expiries | `expiry_date`, `expiration` (unix), `expiry` |
-| `grace_ends_at` | when the renewal grace of `expires_at` ends, RFC 3339: `expires_at` plus 90 days for an ENSv1 `.eth` lease or a Basenames name, plus 28 days (the ENSv2 `.eth` registrar's grace period) for a `.eth` name that serves an ENSv2 expiry, and equal to `expires_at` for a name with no registrar grace, such as a subname; present exactly when `expires_at` is (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
+| `expires_at` | expiry as a decimal string of Unix seconds: for a `.eth` second-level name with a live ENSv2 entry, that entry's expiry once the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), whichever arm holds authority (see [Expiry and grace](#expiry-and-grace)); otherwise the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none). Finite values retain every digit, including after year 9999 or above JavaScript’s safe integer range. In a registration context, a classified absent expiry is `null` with `expires_at_reason`; see [Timestamp format and absent expiry](#timestamp-format-and-absent-expiry) | `expiry_date`, `expiration` (unix), `expiry` |
+| `expires_at_reason` | present exactly when a registration’s `expires_at` is `null`: `no_expiry`, `not_set`, or `released`; omitted for finite expiry and for a row with no registration context | new in v2 |
+| `grace_ends_at` | when the renewal grace of `expires_at` ends, as a decimal string of Unix seconds: `expires_at` plus 90 days for an ENSv1 `.eth` lease or a Basenames name, plus 28 days (the ENSv2 `.eth` registrar's grace period) for a `.eth` name that serves an ENSv2 expiry, and equal to `expires_at` for a name with no registrar grace, such as a subname; finite exactly when `expires_at` is finite, and `null` alongside a classified null expiry, whose `expires_at_reason` also explains the absent grace deadline (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
 | `unresolvable_reason` | on name detail and lookup: why a name resolves to nothing although its authority records a resolver. `no_live_ens_v2_entry`: the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1 decides the name, and neither it nor its `.eth` second-level ancestor has a live ENSv2 entry. The resolver and records are then withheld (see [Expiry and grace](#expiry-and-grace)) | new in v2 |
-| `registered_at` | current registration start, RFC 3339 | `registration_date` |
-| `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
+| `registered_at` | current registration start, as a decimal string of Unix seconds | `registration_date` |
+| `created_at` | first observation of the name, as a decimal string of Unix seconds | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
 | `wrapper_state` | bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
 | `fuses` | uint32 fuse word nested in `wrapper_fuses`; it is zero after wrapper expiry even though normalized events retain their expiry-unadjusted interpreted word | raw NameWrapper fuse bitmap |
-| `restrictions` | the [resource restrictions](glossary.md#resource-restrictions) of a registration, constraints that bind the registration itself rather than any one account: `{registration_id, kind, ...}` where `kind` is `ens_v1_wrapper` (with `wrapper_state`, `wrapper_fuses`, `wrapper_expires_at`) or `ens_v2_registry` (with `locked_roles`); see [resource restrictions](#resource-restrictions) | new in v2 |
-| `wrapper_expires_at` | RFC 3339 NameWrapper entry expiry inside an `ens_v1_wrapper` `restrictions` object; for a wrapped `.eth` second-level name it is the registrar expiry plus the 90-day grace period NameWrapper stores, so it is later than that name's `expires_at` | `expiry` on NameWrapper events |
+| `restrictions` | the [resource restrictions](glossary.md#resource-restrictions) of a registration, constraints that bind the registration itself rather than any one account: `{registration_id, kind, ...}` where `kind` is `ens_v1_wrapper` (with `wrapper_state`, `wrapper_fuses`, `wrapper_expires_at`, and conditional `wrapper_expires_at_reason`) or `ens_v2_registry` (with `locked_roles`); see [resource restrictions](#resource-restrictions) | new in v2 |
+| `wrapper_expires_at` | decimal string of Unix seconds for the NameWrapper entry expiry, or `null` with `wrapper_expires_at_reason` (`no_expiry` or `not_set`) inside an `ens_v1_wrapper` `restrictions` object; for a wrapped `.eth` second-level name it is the registrar expiry plus the 90-day grace period NameWrapper stores, so it is later than that name's `expires_at` | `expiry` on NameWrapper events |
 | `locked_roles` | inside an `ens_v2_registry` `restrictions` object: the token-scoped registry roles whose assignment can no longer change because no account holds the corresponding admin role on the registration or its registry root | new in v2 |
 | `authority` | where the chain reads the row's current registration and control fields from: `ens_v2`, `ens_v1`, or `ens_v0`. `ens_v2` and `ens_v1` name the selected [authority epoch](glossary.md#authority-epoch) arm. `ens_v0` is an ENSv1 name whose registry record is still read from the 2017 ENS registry, because the current ENSv1 registry has no ownership record for the node yet (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f) ([registry generation](glossary.md#registry-generation)); it becomes `ens_v1` at the node's first current-registry `NewOwner` or `Transfer`, the only writes that create that record (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f). `ens_v0` changes no other field: registration, control, `registration_id` and permission handles are derived as for `ens_v1`. Omitted when the projection selected no ENSv1/ENSv2 arm (Basenames names have no era split), on an ownerless ENSv1 or Basenames registry row, whose owner the registry reports as zero, and on an `unsupported` name detail object, which carries no registration fields. In the current ENSv1 fallback registry a zero-owner write is stored as the registry's own address and read back as zero (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f). The ownerless omission applies only to a supported, unregistered row with no selected binding: a zero registry owner does not remove `authority` supplied by a retained registrar binding | new in v2; the zigens `Domain.protocol` / `isMigrated` concept |
-| `migrated_at` | RFC 3339 block time of the name's latest activated `MigrationApplied` [migration boundary](glossary.md#migration-boundary), the ENSv1→ENSv2 [migration authority transition](glossary.md#migration-authority-transition) kept as history. It records when the name migrated, not why it has its current authority: the current ENSv2 registration decides that as it would for any name. Present only with `authority=ens_v2`, so a migrated name whose ENSv2 registration was later released keeps it (it stays released under ENSv2). A later ENSv2 reservation hands the name to ENSv1 only while the reservation is live, and the field is omitted only during that ENSv1 selection; it returns when the reservation ends and the released ENSv2 tombstone returns. It is also omitted for a name registered directly in ENSv2 and one on `ens_v1` or `ens_v0` | new in v2 |
+| `migrated_at` | decimal string of Unix seconds for the block time of the name's latest activated `MigrationApplied` [migration boundary](glossary.md#migration-boundary), the ENSv1→ENSv2 [migration authority transition](glossary.md#migration-authority-transition) kept as history. It records when the name migrated, not why it has its current authority: the current ENSv2 registration decides that as it would for any name. Present only with `authority=ens_v2`, so a migrated name whose ENSv2 registration was later released keeps it (it stays released under ENSv2). A later ENSv2 reservation hands the name to ENSv1 only while the reservation is live, and the field is omitted only during that ENSv1 selection; it returns when the reservation ends and the released ENSv2 tombstone returns. It is also omitted for a name registered directly in ENSv2 and one on `ens_v1` or `ens_v0` | new in v2 |
 | `primary_name` | primary name selected or claimed for an address/coin tuple | `claimed_primary_name`, `verified_primary_name` when surfaced as the selected name |
 | `primary_address` | primary/default address value for a name | `primary_address` (unchanged) |
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
@@ -124,15 +125,15 @@ step-3-gate vocabulary needed by the route schemas:
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
 | `block_hash` | EVM block hash | block-hash fields inside chain-position objects |
-| `timestamp` | RFC 3339 event or block timestamp | event timestamps and chain-position timestamps |
+| `timestamp` | decimal string of Unix seconds for an event or block timestamp | event timestamps and chain-position timestamps |
 | `transaction_hash` | EVM transaction hash | `transaction_hash` (unchanged) |
 | `log_index` | EVM log index within a transaction | `log_index` (unchanged) |
 | `from_block` | inclusive lower block-number filter | `from_block` (unchanged) |
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
-| `from_timestamp` | inclusive lower RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
-| `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
-| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_after` (new) |
-| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_before` (new) |
+| `from_timestamp` | inclusive lower Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the first readable lineage block at or after it | new in v2 |
+| `to_timestamp` | inclusive upper Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
+| `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` and `relation=former_registrant` (Unix seconds or RFC 3339) | `expires_after` (new) |
+| `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` and `relation=former_registrant` (Unix seconds or RFC 3339) | `expires_before` (new) |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -356,7 +357,7 @@ adds to them and does not replace them.
   "kind": "ens_v1_wrapper",
   "wrapper_state": "locked",
   "wrapper_fuses": { "fuses": 196609, "cannot_unwrap": true, "…": "…" },
-  "wrapper_expires_at": "2027-03-01T00:00:00Z"
+  "wrapper_expires_at": "1803859200"
 }
 ```
 
@@ -364,7 +365,11 @@ adds to them and does not replace them.
   atomic, [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word)
   contract as name detail; a burnt fuse removes the matching power from every
   holder, operator, and delegate row of the registration. `wrapper_expires_at`
-  is the NameWrapper entry expiry. For a wrapped `.eth` second-level name it is
+  is the NameWrapper entry expiry as a decimal string of Unix seconds. Its
+  contract-specific maximum is `null` with
+  `wrapper_expires_at_reason: "no_expiry"`; a zero with no expiry set is `null`
+  with reason `not_set`.
+  Finite values omit the reason. For a wrapped `.eth` second-level name it is
   the registrar expiry plus `GRACE_PERIOD`, and the holder's modification
   powers already stop at the earlier grace boundary.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L268-L277 @ ens_v1@91c966f)
@@ -518,7 +523,7 @@ vocabulary that the API refuses to serve.
 
 Rules:
 
-- Timestamps are RFC 3339 UTC everywhere, including the lookup route.
+- Every public timestamp is a decimal string of Unix seconds, including lookup, history, metadata, diagnostics, status, and health responses. Clock times are floored to whole seconds; finite expiry and grace values retain every digit. See [Timestamp format and absent expiry](#timestamp-format-and-absent-expiry).
 - JSON map keys are strings (`"60"`, `"8453"`); `chain_id` as an object field
   is a JSON number.
 - `token_id` stays a decimal string.
@@ -547,7 +552,7 @@ One success shape applies to every route:
       "1": {
         "block_number": 19000000,
         "block_hash": "0x...",
-        "timestamp": "2026-06-10T00:00:00Z"
+        "timestamp": "1781049600"
       }
     },
     "as_of_completeness": {
@@ -988,15 +993,15 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 single-resource snapshot reads: names, records, and resolver overview; diagnostics exact-name snapshot/explain routes. Top-level collection routes recognize `at` only to return the temporary latest-state limitation error. Lookup, status, primary-name, and namespace metadata do not accept it. | RFC 3339 timestamp, or the URL-safe opaque snapshot token from `meta.as_of_token` |
+| `at` | Tier-2 single-resource snapshot reads: names, records, and resolver overview; diagnostics exact-name snapshot/explain routes. Top-level collection routes recognize `at` only to return the temporary latest-state limitation error. Lookup, status, primary-name, and namespace metadata do not accept it. | Decimal Unix seconds, an RFC 3339 timestamp, or the URL-safe opaque snapshot token from `meta.as_of_token` |
 | `finality` | Single-resource snapshot reads and diagnostics exact-name snapshot/explain routes accept `latest` (default), `safe`, and `finalized`. Top-level collection routes accept only omitted or explicit `latest`. Lookup, status, primary-name, and namespace metadata do not accept it. | `latest` (default), `safe`, `finalized` where supported |
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
 | `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
-| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v1-routes.md#history-collection-filters)) |
-| `expires_after`, `expires_before` | `GET /v1/names` | RFC 3339 UTC window over `expires_at`; at least one is required, `expires_after` inclusive, `expires_before` exclusive |
+| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive Unix-seconds or RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v1-routes.md#history-collection-filters)) |
+| `expires_after`, `expires_before` | `GET /v1/names` and `relation=former_registrant` | Unix-seconds or RFC 3339 window over `expires_at`; at least one is required on `/v1/names`, `expires_after` inclusive, `expires_before` exclusive |
 | `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
@@ -1220,18 +1225,21 @@ request, the target route's served snapshot scope can be narrower than that
 chain scope; every additional in-scope chain is reported under
 `meta.as_of_completeness` and is not added to the token.
 
-Chain-position timestamps are RFC 3339 instants. Inputs and stored projection
-positions may use `Z` or a numeric UTC offset (`+HH:MM` or `-HH:MM`) and may
-carry one to nine fractional-second digits; readers normalize the instant to
-UTC before comparison. Because `+` is decoded as a space in query strings,
+Public chain-position timestamps are decimal strings of whole Unix seconds.
+Snapshot inputs accept decimal Unix seconds or RFC 3339; stored projection
+positions and opaque snapshot tokens keep RFC 3339 instants. RFC 3339 values
+may use `Z` or a numeric UTC offset (`+HH:MM` or `-HH:MM`) and may carry one
+to nine fractional-second digits; readers normalize the instant to UTC before
+comparison without losing that precision. Because `+` is decoded as a space in query strings,
 clients must percent-encode it as `%2B` in an `at=` query value. For example,
 `at=2025-06-15T17:37:42%2B02:30` selects the same instant as
 `at=2025-06-15T15:07:42Z`. Different accepted spellings of the same instant do
 not make a projection stale.
 
-Successful v2 metadata and snapshot tokens serialize timestamps in UTC with
-`Z`. They retain non-zero fractional seconds; whole-second timestamps keep the
-existing `YYYY-MM-DDTHH:MM:SSZ` spelling.
+Public `meta.as_of.*.timestamp` values use whole Unix seconds. Opaque snapshot
+tokens keep their internal UTC `Z` serialization and non-zero fractional
+seconds, as do cursor positions where needed. Public formatting does not
+change snapshot identity, filter boundaries, or keyset continuation.
 
 The API selects current `latest`, `safe`, and `finalized` positions from
 `bigname_phase.chain_heads` and obtains their timestamps from readable
@@ -1535,6 +1543,63 @@ it runs and returns the rows that sort after that position:
   publication, or readiness change and `409 stale` when an Interpret redo is
   involved (see [`GET /v1/search`](api-v1-routes.md#get-v1search)).
 
+### Timestamp format and absent expiry
+
+Every public timestamp keeps its existing field name and is a decimal string
+of Unix seconds, for example `"1803965433"`. This includes registration,
+creation, migration and release dates, `timestamp` on events and chain
+positions, resolver grant timestamps, `network_head_observed_at`, and health
+`started_at` / `heartbeat_at`. Clock times are floored to whole seconds. Expiry
+and grace are exact integers, including finite values beyond year 9999,
+`2^53 - 1`, and `i64::MAX`; `"18446744073709551614"` remains finite. Consumers
+must use an exact integer representation when comparing large values.
+
+The output format changes together across all routes, with no parallel date
+fields or optional UTC output. Timestamp query inputs (`at`,
+`from_timestamp`, `to_timestamp`, `expires_after`, `expires_before`) accept
+decimal Unix seconds and RFC 3339. Decimal input is seconds, never guessed to
+be milliseconds. RFC 3339 offsets and fractional seconds retain their input
+precision for selection and filtering. Equivalent spellings select the same
+instant and bind the same cursor filter. Clock selectors outside their
+supported instant range return `400 invalid_input`; a decimal clock value
+is not treated as an opaque token. Expiry bounds compare exact numeric seconds
+and can select finite expiry beyond the calendar range.
+
+A registration with a classified absent expiry serves `expires_at: null` and
+`expires_at_reason`:
+
+| Reason | Meaning |
+| --- | --- |
+| `no_expiry` | A contract-specific maximum sentinel treated as having no expiry, such as the NameWrapper maximum or the declared ENSv2 root entries. |
+| `not_set` | The NameWrapper entry has zero expiry: no expiry has been set. |
+| `released` | An explicit ENSv2 unregister ended the registration without a retained renewal deadline. |
+
+Its `grace_ends_at` is also `null`; the same `expires_at_reason` explains both
+fields. A finite expiry omits the reason. A row without a registration context
+omits these fields; missing or malformed evidence is not a no-expiry sentinel.
+Inside wrapper `restrictions`, `wrapper_expires_at` follows the same finite
+string / classified-null rule with its own sibling
+`wrapper_expires_at_reason` (`no_expiry` or `not_set`). This does not change the
+conditions under which the restrictions object itself is present.
+
+Null expiry is outside every expiry window. Collections that sort by expiry
+compare finite values numerically and put nulls last ascending, first
+descending. A registration that expired naturally retains its finite expiry;
+an explicit unregister is distinct from expiry.
+
+Classification follows the contract and retained registration state, not a
+global zero or maximum check. NameWrapper defines a maximum and caps child
+expiry to its parent; ENSv2 registration accepts `uint64` and can use a zero
+argument to inherit the live reservation's expiry. ENSv2 compares the retained
+integer expiry against block time; the null/reason shape is Bigname's public
+presentation, not a Solidity timestamp type.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68-L75 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978-L990 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L206-L219 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L479 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L663-L665 @ ens_v2_sepolia_20260916@366de741)
+
 ### Expiry and grace
 
 A `.eth` second-level name can hold an ENSv1 BaseRegistrar lease and an ENSv2
@@ -1586,11 +1651,11 @@ so that nobody reads it as current state:
   "name": "example.eth",
   "registration_status": "released",
   "registration_id": "…",
-  "expires_at": "2024-05-01T00:00:00Z",
+  "expires_at": "1714521600",
   "lapsed_registration": {
     "registrant": "0x…",
     "held_through": "wrapper",
-    "released_at": "2024-07-30T00:00:12Z",
+    "released_at": "1722297612",
     "release_kind": "expired"
   }
 }
@@ -1614,7 +1679,8 @@ at or past its expiry. `release_kind` is `expired` for a lapsed ENSv1 lease and
 an ENSv2 registration past its expiry, which keeps its `expires_at` and can
 still be renewed until `grace_ends_at` because the registry remembers its last
 owner, and `unregistered` for an explicit ENSv2 unregister, which burns the
-token, leaves no `expires_at` and cannot be renewed. Each field is omitted when unknown.
+token, serves `expires_at: null`, `expires_at_reason: "released"` and
+`grace_ends_at: null`, and cannot be renewed. Other fields are omitted when unknown.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741) The top-level `registrant`, `owner` and `manager` stay

@@ -91,7 +91,7 @@ async fn assert_matches_served(fixture: &Fixture, logical_name_id: &str) -> Resu
         .await?
         .expect("composed name");
     let expiry: Option<i64> = sqlx::query_scalar(
-        "SELECT extract(epoch FROM expires_at)::bigint FROM project_name_summary
+        "SELECT expires_at::bigint FROM project_name_summary
          WHERE chain_id = $1 AND logical_name_id = $2",
     )
     .bind(CHAIN)

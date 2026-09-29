@@ -99,7 +99,7 @@ async fn publish_event_data(database: &TestDatabase, events: &[NormalizedEvent],
         &database.pool,
         end,
         &format!("0xhistory{end}"),
-        &crate::v2::format_timestamp(timestamp),
+        &bigname_storage::UnixSeconds::from(timestamp).internal_string(),
     )
     .await?;
     rebuild_fixture_families(&database.pool, EVENT_DATA_CHAIN, end, &format!("0xhistory{end}")).await

@@ -33,7 +33,7 @@ async fn publish_bounded_membership_at(database: &TestDatabase, block: i64) -> R
         &database.pool,
         block,
         &format!("0xhistory{block}"),
-        &crate::v2::format_timestamp(timestamp),
+        &bigname_storage::UnixSeconds::from(timestamp).internal_string(),
     )
     .await
 }

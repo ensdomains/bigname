@@ -187,7 +187,7 @@ async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
 
 async fn summary_expiry(fixture: &Fixture, logical_name_id: &str) -> Result<Option<i64>> {
     Ok(sqlx::query_scalar(
-        "SELECT extract(epoch FROM expires_at)::bigint FROM project_name_summary
+        "SELECT expires_at::bigint FROM project_name_summary
          WHERE chain_id = $1 AND logical_name_id = $2",
     )
     .bind(CHAIN)
@@ -199,8 +199,8 @@ async fn summary_expiry(fixture: &Fixture, logical_name_id: &str) -> Result<Opti
 fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&str>) -> Value {
     json!({
         "arm": "ens_v1",
-        "expiry": expiry,
-        "grace_ends_at": expiry + grace_days * DAY,
+        "expiry": expiry.to_string(),
+        "grace_ends_at": (expiry + grace_days * DAY).to_string(),
         "resolver": resolver,
         "unresolvable_reason": reason,
     })
@@ -364,8 +364,8 @@ async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_an
     let row = served(&fixture, &carol).await?;
     ensure!(
         row["arm"] == json!("ens_v2")
-            && row["expiry"] == json!(RESERVED_EXPIRY)
-            && row["grace_ends_at"] == json!(RESERVED_EXPIRY + 28 * DAY),
+            && row["expiry"] == json!(RESERVED_EXPIRY.to_string())
+            && row["grace_ends_at"] == json!((RESERVED_EXPIRY + 28 * DAY).to_string()),
         "{row}"
     );
     fixture.cleanup().await

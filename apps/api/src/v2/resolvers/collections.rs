@@ -260,6 +260,7 @@ pub(super) fn bind_publication(
     cursor
         .last_item
         .insert("publication".to_owned(), snapshot.token().to_owned());
-    cursor.evaluated_at = Some(crate::v2::format_timestamp(snapshot.evaluated_at()));
+    cursor.evaluated_at =
+        Some(bigname_storage::UnixSeconds::from(snapshot.evaluated_at()).internal_string());
     cursor
 }

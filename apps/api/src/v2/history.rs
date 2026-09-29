@@ -9,10 +9,7 @@ use bigname_storage::{
     HistorySummary, HistorySummaryMode, SnapshotAt, SnapshotSelectionScope,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::types::{
-    Uuid,
-    time::{OffsetDateTime, UtcOffset},
-};
+use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use crate::AppState;
 
@@ -502,16 +499,7 @@ fn v2_snapshot_scope_at_selector(at: &AtSelector) -> V2Result<Option<String>> {
 }
 
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
-    let value = value.to_offset(UtcOffset::UTC);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        value.year(),
-        value.month() as u8,
-        value.day(),
-        value.hour(),
-        value.minute(),
-        value.second()
-    )
+    value.unix_timestamp().to_string()
 }
 
 mod children;

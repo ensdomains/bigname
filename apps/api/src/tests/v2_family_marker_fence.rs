@@ -122,7 +122,7 @@ async fn v2_collection_expiry_clock_is_the_published_block_time() -> Result<()> 
         Default::default(),
         None,
     ));
-    payload.evaluated_at = Some(crate::v2::format_timestamp(carried));
+    payload.evaluated_at = Some(bigname_storage::UnixSeconds::from(carried).internal_string());
     let cursor = crate::v2::encode(&payload);
     let continued = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,

@@ -10,18 +10,17 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
+use bigname_storage::UnixSeconds;
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
     families::records::{FormerRegistrantFilter, load_family_former_registrant_page},
 };
-use sqlx::types::time::OffsetDateTime;
 
 use crate::AppState;
 use crate::v2::{
     AddressNamesSort, Envelope, Page, QueryParams, Relation, SortOrder, V2Error, V2Result,
     collection_snapshot::CollectionSnapshot,
     cursor::invalid_cursor_error,
-    format_timestamp,
     list_cursor::{ListCursor, ListPosition},
     name_record::lapsed_registration,
     name_rows_error,
@@ -185,6 +184,7 @@ fn former_row(row: &NameCurrentRow, primary_name: Option<&str>) -> AddressName {
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         authority: Authority::from_provenance(&row.provenance),
         migrated_at: None,
@@ -200,13 +200,13 @@ fn former_row(row: &NameCurrentRow, primary_name: Option<&str>) -> AddressName {
     }
 }
 
-fn timestamp_filter(value: Option<OffsetDateTime>) -> String {
-    value.map_or_else(|| NONE_VALUE.to_owned(), format_timestamp)
+fn timestamp_filter(value: Option<UnixSeconds>) -> String {
+    value.map_or_else(|| NONE_VALUE.to_owned(), |value| value.to_string())
 }
 
 fn position(cursor: &NameCurrentListCursor) -> ListPosition {
     let expires_at = match cursor.sort_value {
-        NameCurrentListCursorValue::Timestamp(Some(at)) => format_timestamp(at),
+        NameCurrentListCursorValue::Timestamp(Some(at)) => at.internal_string(),
         _ => NONE_VALUE.to_owned(),
     };
     ListPosition::new([
@@ -221,7 +221,8 @@ fn storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
     let expires_at = match position.get(EXPIRES_AT_CURSOR_KEY)? {
         "" => None,
         value => Some(
-            bigname_storage::parse_rfc3339_utc_timestamp(value)
+            value
+                .parse::<UnixSeconds>()
                 .map_err(|_| invalid_cursor_error())?,
         ),
     };

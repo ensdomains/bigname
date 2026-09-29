@@ -1624,8 +1624,10 @@ fn assert_as_of_shape(route: &V2ConformanceRoute, as_of: &Value) {
             route.label
         );
         assert!(
-            position["timestamp"].is_string(),
-            "{} meta.as_of[{chain_id}].timestamp must be a string",
+            position["timestamp"]
+                .as_str()
+                .is_some_and(|value| value.parse::<i64>().is_ok()),
+            "{} meta.as_of[{chain_id}].timestamp must be decimal Unix seconds as a string",
             route.label
         );
     }

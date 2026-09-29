@@ -2,7 +2,11 @@
 #[path = "query_tests.rs"]
 mod tests;
 
-use sqlx::types::time::OffsetDateTime;
+#[path = "query/timestamps.rs"]
+mod timestamps;
+pub(crate) use timestamps::{push_expiry_paths_expr, push_json_timestamp_expr};
+
+use crate::UnixSeconds;
 use sqlx::{Postgres, QueryBuilder};
 
 use super::source::RowSource;
@@ -456,7 +460,7 @@ fn push_address_names_current_name_tie_after<'a>(
 
 fn push_address_names_current_timestamp_tie_after<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
-    value: Option<OffsetDateTime>,
+    value: Option<UnixSeconds>,
     cursor: &'a AddressNamesCurrentSortedCursor,
 ) {
     match value {
@@ -489,19 +493,26 @@ fn push_address_names_current_sort_timestamp_expr(
 ) {
     match sort {
         AddressNamesCurrentSort::Name => {
-            builder.push("NULL::TIMESTAMPTZ");
+            builder.push("NULL::NUMERIC");
         }
         AddressNamesCurrentSort::ExpiresAt => push_expires_at_timestamp_expr(builder),
-        AddressNamesCurrentSort::RegisteredAt => push_registered_at_timestamp_expr(builder),
-        AddressNamesCurrentSort::CreatedAt => push_created_at_timestamp_expr(builder),
+        AddressNamesCurrentSort::RegisteredAt => {
+            builder.push("EXTRACT(EPOCH FROM ");
+            push_registered_at_timestamp_expr(builder);
+            builder.push(")");
+        }
+        AddressNamesCurrentSort::CreatedAt => {
+            builder.push("EXTRACT(EPOCH FROM ");
+            push_created_at_timestamp_expr(builder);
+            builder.push(")");
+        }
     };
 }
 
-/// Push the expiry timestamp read of a `name_current` row aliased `nc`: the same COALESCE over
-/// `declared_summary` paths that `sort=expires_at` orders by, shared with the children page so
-/// both collections agree on which expiry a name has.
+/// Push exact expiry seconds from a composed name aliased `nc`. The summary writer and
+/// collection sorts use the same priority and preserve an explicitly absent registration expiry.
 pub(crate) fn push_expires_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
-    push_json_timestamp_coalesce_expr(
+    push_expiry_paths_expr(
         builder,
         &[
             &["registration", "expires_at"],
@@ -545,40 +556,6 @@ fn push_json_timestamp_coalesce_expr(builder: &mut QueryBuilder<'_, Postgres>, p
     builder.push(")");
 }
 
-fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) {
-    let path_literal = format!("'{{{}}}'", path.join(","));
-    builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    // A seconds value outside 1970..=9999 (the ENSv2 root registry's uint64 max expiry) reads as
-    // unknown instead of failing the whole query. The range check reads the full value; a value
-    // inside it keeps whole seconds, as Project's formatted `control.expiry` presents it.
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
-    builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(
-        ")::NUMERIC BETWEEN 0 AND 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ",
-    );
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    builder.push(") = 'string' AND nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN CASE WHEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC <= 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
-    builder.push(path_literal.as_str());
-    builder.push(") = 'string' AND nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    // Lifecycle timestamps serialized by PostgreSQL include a UTC offset, and may include fractions.
-    builder.push(" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN (nc.declared_summary #>> ");
-    builder.push(path_literal.as_str());
-    builder.push(")::TIMESTAMPTZ ELSE NULL END");
-}
-
 fn timestamp_rank_expr(column: &str, order: AddressNamesCurrentOrder) -> String {
     match order {
         AddressNamesCurrentOrder::Asc => {
@@ -590,7 +567,7 @@ fn timestamp_rank_expr(column: &str, order: AddressNamesCurrentOrder) -> String 
     }
 }
 
-fn timestamp_null_rank(value: Option<OffsetDateTime>, order: AddressNamesCurrentOrder) -> i32 {
+fn timestamp_null_rank(value: Option<UnixSeconds>, order: AddressNamesCurrentOrder) -> i32 {
     match (value.is_none(), order) {
         (true, AddressNamesCurrentOrder::Asc) => 1,
         (false, AddressNamesCurrentOrder::Asc) => 0,

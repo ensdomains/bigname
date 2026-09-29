@@ -269,7 +269,7 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
                 "chain_id": CHAIN,
                 "block_number": block,
                 "block_hash": format!("0xhistory{block}"),
-                "timestamp": crate::v2::format_timestamp(timestamp(1_700_000_000 + block)),
+                "timestamp": bigname_storage::UnixSeconds::from(timestamp(1_700_000_000 + block)).internal_string(),
             }}))
             .await?;
         let selections = authority_selections(&database.pool).await?;

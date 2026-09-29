@@ -318,7 +318,7 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         &database.pool,
         125,
         "0xhistory125",
-        &crate::v2::format_timestamp(timestamp(1_700_000_125)),
+        &bigname_storage::UnixSeconds::from(timestamp(1_700_000_125)).internal_string(),
     )
     .await?;
 
@@ -632,7 +632,7 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
         &database.pool,
         127,
         "0xhistory127",
-        &crate::v2::format_timestamp(timestamp(1_700_000_127)),
+        &bigname_storage::UnixSeconds::from(timestamp(1_700_000_127)).internal_string(),
     )
     .await?;
     upsert_test_resources(
@@ -3137,7 +3137,7 @@ async fn publish_registration_history_fixture(database: &TestDatabase) -> Result
     database
         .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
             "chain_id":"ethereum-mainnet", "block_number":block, "block_hash":hash,
-            "timestamp":crate::v2::format_timestamp(at)
+            "timestamp":bigname_storage::UnixSeconds::from(at).internal_string()
         }}))
         .await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await

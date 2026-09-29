@@ -57,7 +57,7 @@ pub(crate) async fn execute_resolution_lookup(
             chain_id: position.chain_id.clone(),
             block_number: position.block_number,
             block_hash: position.block_hash.clone(),
-            timestamp: format_timestamp(position.timestamp),
+            timestamp: bigname_storage::UnixSeconds::from(position.timestamp).internal_string(),
         })
         .collect::<Vec<_>>();
     let response =

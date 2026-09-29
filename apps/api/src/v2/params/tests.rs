@@ -81,7 +81,7 @@ fn address_name_controls_default_and_parse_wire_values() {
 }
 
 #[test]
-fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
+fn expiry_bounds_parse_unix_seconds_and_rfc3339() {
     let params = parse(RawQueryParams {
         expires_after: Some(" 2026-01-02T03:04:05Z ".to_owned()),
         expires_before: Some("2026-02-02T03:04:05Z".to_owned()),
@@ -94,6 +94,7 @@ fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
         Some(
             bigname_storage::parse_rfc3339_utc_timestamp("2026-01-02T03:04:05Z")
                 .expect("timestamp must parse")
+                .into()
         )
     );
     assert_eq!(
@@ -101,9 +102,20 @@ fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
         Some(
             bigname_storage::parse_rfc3339_utc_timestamp("2026-02-02T03:04:05Z")
                 .expect("timestamp must parse")
+                .into()
         )
     );
     assert_eq!(params.sort_wire.as_deref(), Some("expires_at"));
+    let exact = parse(RawQueryParams {
+        expires_after: Some("18446744073709551614.000000001".into()),
+        expires_before: Some("18446744073709551615".into()),
+        ..RawQueryParams::default()
+    })
+    .expect("finite exact expiry bounds");
+    assert_eq!(
+        exact.expires_after.unwrap().to_string(),
+        "18446744073709551614.000000001"
+    );
 
     for raw in [
         RawQueryParams {
@@ -111,11 +123,11 @@ fn expiry_bounds_parse_rfc3339_and_reject_other_values() {
             ..RawQueryParams::default()
         },
         RawQueryParams {
-            expires_before: Some("1767322445".to_owned()),
+            expires_before: Some("not-a-time".to_owned()),
             ..RawQueryParams::default()
         },
     ] {
-        let error = parse(raw).expect_err("non-RFC 3339 expiry bound must fail");
+        let error = parse(raw).expect_err("malformed expiry bound must fail");
         assert_eq!(error.code(), ErrorCode::InvalidInput);
     }
 }

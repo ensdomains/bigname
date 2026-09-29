@@ -174,7 +174,7 @@ pub(super) fn push_page_statement<'a>(
     if sort.is_timestamp() {
         builder.push("sort_timestamp");
     } else {
-        builder.push("NULL::TIMESTAMPTZ AS sort_timestamp");
+        builder.push("NULL::NUMERIC AS sort_timestamp");
     }
     builder.push(" FROM ");
     builder.push(if sort.is_timestamp() {
@@ -482,7 +482,7 @@ fn ensure_cursor_matches_sort(
 
 pub(super) struct SortedEntry {
     pub(super) entry: AddressRecordCurrentEntry,
-    sort_timestamp: Option<OffsetDateTime>,
+    sort_timestamp: Option<crate::UnixSeconds>,
     pub(super) evm: Option<EvmFacets>,
 }
 
@@ -502,7 +502,7 @@ fn decode_sorted_entry(
     };
     let sort_timestamp = sort
         .is_timestamp()
-        .then(|| crate::sql_row::get::<Option<OffsetDateTime>>(&row, "sort_timestamp"))
+        .then(|| crate::sql_row::get::<Option<crate::UnixSeconds>>(&row, "sort_timestamp"))
         .transpose()?
         .flatten();
     let binding_kind = crate::sql_row::get(&row, "binding_kind")?;

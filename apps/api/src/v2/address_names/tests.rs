@@ -61,7 +61,8 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
     );
 
     let value = bigname_storage::parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z")
-        .expect("timestamp must parse");
+        .expect("timestamp must parse")
+        .into();
     let value_cursor = AddressNamesCurrentSortedCursor {
         sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(Some(value)),
         logical_name_id: "ens:alice.eth".to_owned(),
@@ -131,7 +132,8 @@ fn address_names_cursor_rejects_cross_timestamp_sort_reuse() {
     let cursor = AddressNamesCurrentSortedCursor {
         sort_value: AddressNamesCurrentSortedCursorValue::Timestamp(Some(
             bigname_storage::parse_rfc3339_utc_timestamp("2027-01-02T03:04:05Z")
-                .expect("timestamp must parse"),
+                .expect("timestamp must parse")
+                .into(),
         )),
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),

@@ -4,7 +4,8 @@
 //! With `include=data`, each friendly `type` exposes only the fields its stored
 //! normalized event actually carries, translated into dictionary vocabulary
 //! (`expires_at`, `resolver: {chain_id, address}`, `powers`, ...). Absent or
-//! null source fields are omitted rather than serialized as `null`. The raw
+//! null source fields are omitted. Classified no-expiry values instead carry `null` plus
+//! `expires_at_reason`. The raw
 //! storage event kind is deliberately not part of that payload; it is the one
 //! documented pipeline term the product tier exposes, and only behind the
 //! separate `include=raw` opt-in, as `kind`.
@@ -96,7 +97,7 @@ fn build_event_data(
         HistoryEventType::Registration => {
             insert(&mut data, "registrant", address_field(after, "registrant"));
             insert(&mut data, "owner", address_field(after, "owner"));
-            insert(&mut data, "expires_at", timestamp_field(after, "expiry"));
+            insert_expiry(&mut data, row);
             insert(&mut data, "resolver", contract_ref(row, after, "resolver"));
             insert(
                 &mut data,
@@ -109,10 +110,10 @@ fn build_event_data(
             }
         }
         HistoryEventType::Renewal | HistoryEventType::Release => {
-            insert(&mut data, "expires_at", timestamp_field(after, "expiry"));
+            insert_expiry(&mut data, row);
         }
         HistoryEventType::Expiry => {
-            insert(&mut data, "expires_at", timestamp_field(after, "expiry"));
+            insert_expiry(&mut data, row);
             insert(&mut data, "fuses", unsigned_field(after, "fuses"));
         }
         HistoryEventType::Transfer => {
@@ -391,10 +392,35 @@ fn unsigned_field(state: &Value, key: &str) -> Option<Value> {
     }
 }
 
-/// Unix-second expiry fields become RFC 3339 `expires_at` values under the rule every expiry read
-/// applies: a value outside 1970..=9999 is omitted, and one inside keeps its whole seconds.
-fn timestamp_field(state: &Value, key: &str) -> Option<Value> {
-    super::name_record::seconds_timestamp(state.get(key)?).map(Value::String)
+/// Friendly event expiries use the same exact seconds and contextual sentinel rule as names.
+fn insert_expiry(data: &mut Map<String, Value>, row: &StorageHistoryEvent) {
+    if row.after_state.get("source_event").and_then(Value::as_str) == Some("LabelUnregistered") {
+        data.insert("expires_at".into(), Value::Null);
+        data.insert("expires_at_reason".into(), json!("released"));
+        return;
+    }
+    let Some(expiry) = row
+        .after_state
+        .get("expiry")
+        .and_then(bigname_storage::UnixSeconds::from_json)
+    else {
+        return;
+    };
+    let namehash = row
+        .logical_name_id
+        .as_deref()
+        .and_then(|name| name.split_once(':').map(|(_, hash)| hash));
+    let reason = bigname_storage::contract_expiry_reason(expiry, &row.source_family, namehash);
+    data.insert(
+        "expires_at".into(),
+        reason.map_or_else(
+            || json!(expiry.unix_timestamp().to_string()),
+            |_| Value::Null,
+        ),
+    );
+    if let Some(reason) = reason {
+        data.insert("expires_at_reason".into(), json!(reason));
+    }
 }
 
 #[cfg(test)]

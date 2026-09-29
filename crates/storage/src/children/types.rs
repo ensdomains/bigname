@@ -1,6 +1,8 @@
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
+use crate::UnixSeconds;
+
 /// Persisted current child-collection row for declared direct children only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentRow {
@@ -83,7 +85,7 @@ impl ChildrenCurrentPageFilter<'_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChildrenCurrentSortValue {
     Name,
-    Timestamp(Option<OffsetDateTime>),
+    Timestamp(Option<UnixSeconds>),
 }
 
 /// Storage-local keyset cursor for declared direct child collection reads. Every sort breaks ties

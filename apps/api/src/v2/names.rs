@@ -9,11 +9,11 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
+use bigname_storage::UnixSeconds;
 use bigname_storage::{
     NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListOrder,
 };
-use sqlx::types::time::OffsetDateTime;
 
 use super::collection_snapshot::CollectionSnapshot;
 use crate::AppState;
@@ -24,7 +24,7 @@ use super::search::{SearchName, build_search_name};
 use super::support::ensure_public_namespace;
 use super::{
     Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, format_timestamp, validate_latest_collection_selectors,
+    api_error_to_v2, validate_latest_collection_selectors,
 };
 
 const NAMES_SORT: &str = "expires_at";
@@ -65,8 +65,8 @@ pub(crate) type NamesQuery = StrictQueryParams<NamesQueryParams>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NamesCursorBinding<'a> {
     pub(crate) namespace: &'a str,
-    pub(crate) expires_after: Option<OffsetDateTime>,
-    pub(crate) expires_before: Option<OffsetDateTime>,
+    pub(crate) expires_after: Option<UnixSeconds>,
+    pub(crate) expires_before: Option<UnixSeconds>,
     pub(crate) order: SortOrder,
 }
 
@@ -199,8 +199,8 @@ fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> 
     ])
 }
 
-fn option_timestamp_filter(value: Option<OffsetDateTime>) -> String {
-    value.map_or_else(|| NONE_FILTER_VALUE.to_owned(), format_timestamp)
+fn option_timestamp_filter(value: Option<UnixSeconds>) -> String {
+    value.map_or_else(|| NONE_FILTER_VALUE.to_owned(), |value| value.to_string())
 }
 
 fn names_list_cursor(binding: &NamesCursorBinding<'_>) -> ListCursor {
@@ -215,7 +215,7 @@ fn names_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
     };
 
     Ok(ListPosition::new([
-        (EXPIRES_AT_CURSOR_KEY, format_timestamp(expires_at)),
+        (EXPIRES_AT_CURSOR_KEY, expires_at.internal_string()),
         (NAMESPACE_FILTER_KEY, cursor.namespace.clone()),
         (NAME_CURSOR_KEY, cursor.normalized_name.clone()),
         (NAMEHASH_CURSOR_KEY, cursor.namehash.clone()),
@@ -223,9 +223,10 @@ fn names_position(cursor: &NameCurrentListCursor) -> V2Result<ListPosition> {
 }
 
 fn names_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCursor> {
-    let expires_at =
-        bigname_storage::parse_rfc3339_utc_timestamp(position.get(EXPIRES_AT_CURSOR_KEY)?)
-            .map_err(|_| invalid_cursor_error())?;
+    let expires_at = position
+        .get(EXPIRES_AT_CURSOR_KEY)?
+        .parse::<UnixSeconds>()
+        .map_err(|_| invalid_cursor_error())?;
 
     Ok(NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Timestamp(Some(expires_at)),
@@ -239,8 +240,8 @@ fn names_storage_cursor(position: &ListPosition) -> V2Result<NameCurrentListCurs
 mod tests {
     use super::*;
 
-    fn timestamp(value: &str) -> OffsetDateTime {
-        bigname_storage::parse_rfc3339_utc_timestamp(value).expect("timestamp must parse")
+    fn timestamp(value: &str) -> UnixSeconds {
+        value.parse::<UnixSeconds>().expect("timestamp must parse")
     }
 
     fn binding<'a>() -> NamesCursorBinding<'a> {

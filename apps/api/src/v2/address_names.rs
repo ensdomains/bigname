@@ -101,9 +101,11 @@ pub(crate) struct AddressName {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_at: Option<String>,
+    pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) grace_ends_at: Option<String>,
+    pub(crate) expires_at_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
     #[serde(skip_serializing_if = "Option::is_none")]

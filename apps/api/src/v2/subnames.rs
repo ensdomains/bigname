@@ -18,7 +18,7 @@ use super::name_filter::NameMatch;
 use super::support::normalize_inferred_route_name;
 use super::{
     AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
-    RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp,
+    RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode, encode,
     load_subregistry_refs, name_record::name_registration_fields,
     validate_latest_collection_selectors,
 };
@@ -81,9 +81,11 @@ pub(crate) struct Subname {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expires_at: Option<String>,
+    pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) grace_ends_at: Option<String>,
+    pub(crate) expires_at_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +314,7 @@ pub(crate) fn build_subname(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         subregistry: None,
         subname_count: include_counts.then(|| {
@@ -397,7 +400,7 @@ pub(crate) fn subname_cursor_payload(
         ChildrenCurrentSortValue::Name => (SORT_KIND_NAME, String::new()),
         ChildrenCurrentSortValue::Timestamp(None) => (SORT_KIND_TIMESTAMP_NULL, String::new()),
         ChildrenCurrentSortValue::Timestamp(Some(value)) => {
-            (SORT_KIND_TIMESTAMP_VALUE, format_timestamp(*value))
+            (SORT_KIND_TIMESTAMP_VALUE, value.internal_string())
         }
     };
     CursorPayload::new(
@@ -451,7 +454,8 @@ pub(crate) fn subname_storage_cursor(
             AddressNamesSort::ExpiresAt | AddressNamesSort::RegisteredAt,
             SORT_KIND_TIMESTAMP_VALUE,
         ) if !sort_value.trim().is_empty() => ChildrenCurrentSortValue::Timestamp(Some(
-            bigname_storage::parse_rfc3339_utc_timestamp(&sort_value)
+            sort_value
+                .parse::<bigname_storage::UnixSeconds>()
                 .map_err(|_| invalid_cursor_error())?,
         )),
         _ => return Err(invalid_cursor_error()),

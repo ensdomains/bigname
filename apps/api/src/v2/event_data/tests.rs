@@ -43,22 +43,23 @@ fn row(event_kind: &str, before: Value, after: Value) -> StorageHistoryEvent {
 }
 
 #[test]
-fn expiry_timestamps_follow_the_shared_range_rule() {
-    for (expiry, expected) in [
-        (json!(-1), None),
-        (json!("-1"), None),
-        (json!(0), Some("1970-01-01T00:00:00Z")),
-        (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
-        (json!(253_402_300_800_u64), None),
-        (json!(1_735_689_600.5), Some("2025-01-01T00:00:00Z")),
-        (json!("1735689600.5"), Some("2025-01-01T00:00:00Z")),
-    ] {
-        assert_eq!(
-            timestamp_field(&json!({ "expiry": expiry }), "expiry"),
-            expected.map(Value::from),
-            "{expiry}"
-        );
+fn expiry_timestamps_preserve_finite_words_and_contextual_nulls() {
+    for expiry in [0_u64, 253_402_300_800, 9_007_199_254_740_993, u64::MAX] {
+        let event = row("RegistrationRenewed", json!({}), json!({"expiry": expiry}));
+        let data = row_detail(&event, HistoryEventType::Renewal).data;
+        assert_eq!(data["expires_at"], expiry.to_string());
+        assert!(!data.contains_key("expires_at_reason"));
     }
+    let mut event = row("ExpiryChanged", json!({}), json!({"expiry": u64::MAX}));
+    event.source_family = "ens_v1_wrapper_l1".into();
+    let data = row_detail(&event, HistoryEventType::Expiry).data;
+    assert_eq!(data["expires_at"], Value::Null);
+    assert_eq!(data["expires_at_reason"], "no_expiry");
+    event.after_state = json!({"expiry": 0, "source_event": "LabelUnregistered"});
+    event.source_family = "ens_v2_registry_l1".into();
+    let data = row_detail(&event, HistoryEventType::Expiry).data;
+    assert_eq!(data["expires_at"], Value::Null);
+    assert_eq!(data["expires_at_reason"], "released");
 }
 
 #[test]
@@ -125,7 +126,7 @@ fn detail_exposes_lower_cased_emitter_without_the_raw_kind() {
     );
     assert_eq!(
         Value::Object(detail.data),
-        json!({ "expires_at": "2031-10-17T10:40:00Z" })
+        json!({ "expires_at": "1950000000" })
     );
 
     let mut state_derived = row("ExpiryChanged", json!({}), json!({ "expiry": null }));
@@ -160,7 +161,7 @@ fn registration_and_pointer_types_use_dictionary_shapes() {
         Value::Object(data),
         json!({
             "owner": "0x00000000000000000000000000000000000000bb",
-            "expires_at": "2030-03-17T17:46:40Z",
+            "expires_at": "1900000000",
             "resolver": {
                 "chain_id": 1,
                 "address": "0x0000000000000000000000000000000000000abc",

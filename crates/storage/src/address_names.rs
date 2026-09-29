@@ -139,3 +139,7 @@ pub const DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS: &str = r#"
     ON token_lineage_lineage.chain_id = token_lineage.chain_id
    AND token_lineage_lineage.block_hash = token_lineage.block_hash
 "#;
+
+pub(crate) use query::push_expiry_paths_expr;
+
+pub(crate) use query::push_json_timestamp_expr;

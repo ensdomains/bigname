@@ -1,6 +1,8 @@
 //! The page's cursor and sorted-row helpers.
 use anyhow::{Result, bail};
-use sqlx::{postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::postgres::PgRow;
+
+use crate::UnixSeconds;
 
 use super::super::{
     decode::decode_address_name_current_entry,
@@ -12,7 +14,7 @@ use super::super::{
 
 pub(super) struct AddressNameCurrentSortedEntry {
     pub(super) entry: AddressNameCurrentEntry,
-    pub(super) sort_timestamp: Option<OffsetDateTime>,
+    pub(super) sort_timestamp: Option<UnixSeconds>,
 }
 
 pub(super) fn decode_address_name_current_sorted_entry(
@@ -21,7 +23,7 @@ pub(super) fn decode_address_name_current_sorted_entry(
 ) -> Result<AddressNameCurrentSortedEntry> {
     let sort_timestamp = sort
         .is_timestamp()
-        .then(|| crate::sql_row::get::<Option<OffsetDateTime>>(&row, "sort_timestamp"))
+        .then(|| crate::sql_row::get::<Option<UnixSeconds>>(&row, "sort_timestamp"))
         .transpose()?
         .flatten();
     let entry = decode_address_name_current_entry(row)?;

@@ -3,7 +3,7 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::SurfaceBindingKind;
+use crate::{SurfaceBindingKind, UnixSeconds};
 
 /// Persisted ENSv1 address-to-surface relation row for current address collections.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,7 +218,7 @@ pub struct AddressNamesCurrentCursor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AddressNamesCurrentSortedCursorValue {
     Name(String),
-    Timestamp(Option<OffsetDateTime>),
+    Timestamp(Option<UnixSeconds>),
 }
 
 /// A continuation whose cursor was issued over registry-child renderings that have since changed

@@ -17,10 +17,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, types::time::OffsetDateTime};
+use sqlx::PgPool;
 
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
+    UnixSeconds,
     families::name::{CoverageShape, load_composed, read_snapshot, servable_publication},
 };
 
@@ -30,9 +31,9 @@ pub struct FormerRegistrantFilter<'a> {
     pub address: &'a str,
     pub namespace: Option<&'a str>,
     /// Inclusive lower bound on the served expiry.
-    pub expires_after: Option<OffsetDateTime>,
+    pub expires_after: Option<UnixSeconds>,
     /// Exclusive upper bound on the served expiry.
-    pub expires_before: Option<OffsetDateTime>,
+    pub expires_before: Option<UnixSeconds>,
 }
 
 /// One page of former-registrant rows and the position after its last row, when more follow.
@@ -45,12 +46,12 @@ pub struct FormerRegistrantPage {
 /// The composed name the address formerly held, with its served expiry.
 struct Held {
     row: NameCurrentRow,
-    expiry: Option<OffsetDateTime>,
+    expiry: Option<UnixSeconds>,
 }
 
 /// The sort key: undated rows after dated ones ascending, then expiry, namespace, name,
 /// namehash.
-type Key = (bool, Option<OffsetDateTime>, String, String, String);
+type Key = (bool, Option<UnixSeconds>, String, String, String);
 
 impl Held {
     fn key(&self) -> Key {
@@ -85,13 +86,11 @@ pub fn lapsed_registrant(row: &NameCurrentRow) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-/// The served registration expiry of a composed row, when it is a whole second in range.
-fn served_expiry(row: &NameCurrentRow) -> Option<OffsetDateTime> {
-    let seconds = row
-        .declared_summary
+/// The served registration expiry, including finite values beyond the calendar range.
+fn served_expiry(row: &NameCurrentRow) -> Option<UnixSeconds> {
+    row.declared_summary
         .pointer("/registration/expiry")
-        .and_then(Value::as_i64)?;
-    OffsetDateTime::from_unix_timestamp(seconds).ok()
+        .and_then(UnixSeconds::from_json)
 }
 
 /// The page of names `filter.address` formerly held.

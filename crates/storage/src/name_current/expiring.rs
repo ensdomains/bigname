@@ -1,17 +1,14 @@
-//! Namespace-wide listing of current names by registration expiry.
+//! Namespace-wide listing of current names by exact registration expiry.
 //!
-//! This is the `sort=expires_at` case of the derived list reader with an expiry window. It exists
-//! as its own entry point because the window must be applied twice: once as the exact bound on the
-//! derived `expiry_date` column the page orders by, and once inside the `filtered_names` CTE as a
-//! sargable predicate on the stored `registration.expiry` number, which is what the
-//! `name_current_registration_expiry_idx` partial index covers
-//! (`schema-v2/baseline/06_projections.sql`). The projection writes `registration.expiry` as a
-//! JSON number of unix seconds (`crates/project/src/builders/name_current/build.sql`); the derived
-//! column also tolerates RFC 3339 strings and `control.expiry`, but the index does not, so a row
-//! whose only expiry is in one of those forms is outside this listing by design.
+//! The family reader walks indexed lifecycle and wrapper expiry candidates before composing a
+//! bounded batch. This statement applies the exact half-open window and keyset order to that
+//! batch. Registration expiry may be a decimal JSON string or number; neither is narrowed to
+//! a calendar timestamp or floating-point value.
 
 use anyhow::{Context, Result, bail};
-use sqlx::{PgExecutor, Postgres, QueryBuilder, types::time::OffsetDateTime};
+use sqlx::{PgExecutor, Postgres, QueryBuilder};
+
+use crate::UnixSeconds;
 
 use super::list::{
     NAME_CURRENT_LIST_SELECT, NameCurrentListCursor, NameCurrentListCursorValue,
@@ -29,8 +26,8 @@ const REGISTRATION_EXPIRY_JSON_PATH: &str = "'{registration,expiry}'";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameCurrentExpiringFilter {
     pub namespace: String,
-    pub expires_after: Option<OffsetDateTime>,
-    pub expires_before: Option<OffsetDateTime>,
+    pub expires_after: Option<UnixSeconds>,
+    pub expires_before: Option<UnixSeconds>,
 }
 
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
@@ -72,32 +69,13 @@ pub(crate) async fn expiring_page_from(
         supported_only: true,
         ..NameCurrentListFilter::default()
     };
-    // Keep the index prefilter conservative: rounding a fractional upper bound to f64
-    // can discard a matching expiry. The timestamp predicates below enforce exact bounds.
-    let after_seconds = filter
-        .expires_after
-        .map(|time| time.unix_timestamp() as f64);
-    let before_seconds = filter
-        .expires_before
-        .map(|time| (time.unix_timestamp() + i64::from(time.nanosecond() != 0)) as f64);
-
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_filtered_name_list_cte(&mut builder, &list_filter, composed, |builder| {
-        builder.push(" AND JSONB_TYPEOF(nc.declared_summary #> ");
+        // Only a finite registration expiry participates in /names. The exact derived-column
+        // predicates below retain the shared alias priority and classified-null behavior.
+        builder.push(" AND (nc.declared_summary #>> ");
         builder.push(REGISTRATION_EXPIRY_JSON_PATH);
-        builder.push(") = 'number'");
-        if let Some(after_seconds) = after_seconds {
-            builder.push(" AND (nc.declared_summary #>> ");
-            builder.push(REGISTRATION_EXPIRY_JSON_PATH);
-            builder.push(")::DOUBLE PRECISION >= ");
-            builder.push_bind(after_seconds);
-        }
-        if let Some(before_seconds) = before_seconds {
-            builder.push(" AND (nc.declared_summary #>> ");
-            builder.push(REGISTRATION_EXPIRY_JSON_PATH);
-            builder.push(")::DOUBLE PRECISION < ");
-            builder.push_bind(before_seconds);
-        }
+        builder.push(") ~ '^-?[0-9]+(\\.[0-9]+)?$'");
     });
     builder.push(NAME_CURRENT_LIST_SELECT);
     builder.push(" WHERE expiry_date IS NOT NULL");

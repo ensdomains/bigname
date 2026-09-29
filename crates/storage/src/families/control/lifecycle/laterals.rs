@@ -48,7 +48,7 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 /// The expiry lateral: the latest admitted grant, or renewal, release or
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
-pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<i64> {
+pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<crate::UnixSeconds> {
     latest(
         in_scope.iter().filter(|tagged| {
             let event = tagged.event;
@@ -407,40 +407,4 @@ pub(super) fn registrar_resource<'a>(
         .max_by(|(left, _), (right, _)| left.cmp(right))
         .and_then(|(_, candidate)| candidate.wrapped_registrar_resource_id.as_deref());
     Some(wrapped.unwrap_or(resource))
-}
-
-/// `to_char(to_timestamp(seconds) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')` for
-/// seconds in 0..=253402300799.
-pub(crate) fn format_utc(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let rest = seconds.rem_euclid(86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let day_of_year = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_utc;
-
-    #[test]
-    fn utc_formatting_matches_to_char() {
-        assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_utc(1_800_000_000), "2027-01-15T08:00:00Z");
-        assert_eq!(format_utc(253_402_300_799), "9999-12-31T23:59:59Z");
-        assert_eq!(format_utc(951_782_400), "2000-02-29T00:00:00Z");
-    }
 }

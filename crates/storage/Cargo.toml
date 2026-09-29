@@ -11,11 +11,12 @@ test-support = []
 [dependencies]
 alloy-primitives.workspace = true
 anyhow.workspace = true
+bigdecimal = "0.4.8"
 clap.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json = "1.0.149"
-sqlx = { workspace = true, features = ["time"] }
+sqlx = { workspace = true, features = ["time", "bigdecimal"] }
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 uuid.workspace = true

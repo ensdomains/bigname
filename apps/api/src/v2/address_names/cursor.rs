@@ -7,7 +7,6 @@ use crate::v2::{
     AddressNamesDedupe, AddressNamesSort, AuthoritySet, CursorPayload, RelationSet, SortOrder,
     V2Result,
     cursor::{cursor_value, invalid_cursor_error},
-    format_timestamp,
     name_filter::NameMatch,
 };
 
@@ -147,7 +146,7 @@ pub(super) fn cursor_last_item(
         }
         AddressNamesCurrentSortedCursorValue::Timestamp(Some(value)) => (
             SORT_KIND_TIMESTAMP_VALUE.to_owned(),
-            format_timestamp(*value),
+            value.internal_string(),
         ),
     };
 
@@ -192,7 +191,8 @@ pub(super) fn cursor_sort_value(
             | AddressNamesSort::CreatedAt,
             SORT_KIND_TIMESTAMP_VALUE,
         ) if !sort_value.trim().is_empty() => {
-            let value = bigname_storage::parse_rfc3339_utc_timestamp(&sort_value)
+            let value = sort_value
+                .parse::<bigname_storage::UnixSeconds>()
                 .map_err(|_| invalid_cursor_error())?;
             Ok(AddressNamesCurrentSortedCursorValue::Timestamp(Some(value)))
         }

@@ -11,10 +11,10 @@ use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, StagedName},
     control::{control_owner, served_owner},
-    expiry::{choose, grace_ends_at, live_entry},
+    expiry::{choose, classify_expiry, grace_ends_at, live_entry},
     laterals::{
-        authority_context, expiry_candidate, format_utc, latest_event_kind, registered_at,
-        registrant, registrar_resource,
+        authority_context, expiry_candidate, latest_event_kind, registered_at, registrant,
+        registrar_resource,
     },
     select::select_v2,
     tombstone::deciding_fact,
@@ -422,6 +422,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             .is_some_and(|event| event.source_event.as_deref() == Some("RegistryPathExpired"));
         if !path {
             registration.insert("expiry".into(), Value::Null);
+            registration.insert("expires_at_reason".into(), json!("released"));
         }
         // The registry token's holder when the registration ended (TYR-63): the latest grant,
         // transfer or release registrant on the key. A path-expired registration stays
@@ -433,6 +434,15 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                    "release_kind": if path { "expired" } else { "unregistered" }}),
         );
     }
+
+    classify_expiry(
+        &mut registration,
+        !is_v2 && expiry_seconds.is_none() && wrapper_fallback.is_some(),
+        selected
+            .event
+            .is_some_and(|event| event.source_family == "ens_v2_root_l1"),
+        &facts.input.namehash,
+    )?;
 
     registration.insert(
         "grace_ends_at".into(),
@@ -471,13 +481,10 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             .and_then(|tagged| tagged.event.status.clone())
             .or_else(|| selected.event.and_then(|event| event.status.clone()))
         };
-        let seconds = expiry_seconds.or(wrapper_fallback);
         control.insert("status".into(), opt_text(status.as_deref()));
         control.insert(
             "expiry".into(),
-            seconds
-                .filter(|seconds| (0..=253_402_300_799).contains(seconds))
-                .map_or(Value::Null, |seconds| json!(format_utc(seconds))),
+            registration.get("expiry").cloned().unwrap_or(Value::Null),
         );
         control.insert(
             "registrant".into(),

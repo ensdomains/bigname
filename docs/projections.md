@@ -1567,7 +1567,15 @@ rebuild range composes once for all its blocks), every name whose surface
 appeared since the family marker's block, and every name whose stored
 `recompose_at` the block's time has reached. A block that changes a Universal
 Resolver proxy row also recomposes every name with an ENSv2 reservation, since
-the cutover moves the expiry those names serve. `recompose_at` is the first second
+the cutover moves the expiry those names serve. Finite lifecycle expiry and
+the summary expiry used for ordering are exact numeric Unix seconds, including
+the full finite ENSv2 `uint64` range. Family readers, expiry indexes, retained
+keys and undo journals preserve the integer without calendar conversion or
+floating-point rounding. Contract-specific absent-expiry classification occurs
+with the selected registration context; a large finite value stays finite. The
+API renders the integer as a decimal string (see
+[the timestamp contract](api-v1.md#timestamp-format-and-absent-expiry)).
+`recompose_at` is the first second
 at which the name's composition can change with no fact changing: a binding
 interval opening or closing, or a NameWrapper expiry or grace boundary. It is
 stored in Unix seconds, since a NameWrapper expiry can lie past the last

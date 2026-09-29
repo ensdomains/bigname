@@ -157,7 +157,8 @@ impl CollectionSnapshot {
 
     pub(crate) fn bind_cursor(&self, mut cursor: CursorPayload) -> CursorPayload {
         cursor.snapshot = Some(self.token.clone());
-        cursor.evaluated_at = Some(super::format_timestamp(self.evaluated_at));
+        cursor.evaluated_at =
+            Some(bigname_storage::UnixSeconds::from(self.evaluated_at).internal_string());
         cursor
     }
 

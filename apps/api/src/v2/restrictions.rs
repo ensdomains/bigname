@@ -1,9 +1,7 @@
 use bigname_storage::PermissionsCurrentResourceSummary;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::types::time::OffsetDateTime;
 
-use super::history::format_timestamp;
 use super::name_record::wrapper_lifecycle_matches_fuses;
 use super::vocab::{WrapperFuses, WrapperState};
 use super::{V2Error, V2Result};
@@ -20,7 +18,9 @@ pub(crate) enum ResourceRestrictions {
         wrapper_state: WrapperState,
         wrapper_fuses: WrapperFuses,
         #[serde(skip_serializing_if = "Option::is_none")]
-        wrapper_expires_at: Option<String>,
+        wrapper_expires_at: Option<super::timestamps::ExpiryTimestamp>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wrapper_expires_at_reason: Option<String>,
     },
     /// The ENSv2 registration whose token-scoped roles can no longer change.
     EnsV2Registry {
@@ -82,36 +82,31 @@ fn wrapper_restrictions(registration_id: String, block: &Value) -> V2Result<Reso
     if !wrapper_lifecycle_matches_fuses(wrapper_state, wrapper_fuses) {
         return Err(invalid_restrictions());
     }
-    let wrapper_expires_at = match block.get("expiry_seconds") {
-        None | Some(Value::Null) => None,
-        Some(expiry) => wrapper_expiry(expiry)?,
+    let (wrapper_expires_at, wrapper_expires_at_reason) = match block.get("expiry_seconds") {
+        None | Some(Value::Null) => (None, None),
+        Some(expiry) => {
+            let seconds =
+                bigname_storage::UnixSeconds::from_json(expiry).ok_or_else(invalid_restrictions)?;
+            let reason =
+                bigname_storage::contract_expiry_reason(seconds, "ens_v1_wrapper_l1", None);
+            let timestamp = reason.map_or_else(
+                || {
+                    super::timestamps::ExpiryTimestamp::Seconds(
+                        seconds.unix_timestamp().to_string(),
+                    )
+                },
+                |_| super::timestamps::ExpiryTimestamp::NoExpiry,
+            );
+            (Some(timestamp), reason.map(str::to_owned))
+        }
     };
     Ok(ResourceRestrictions::EnsV1Wrapper {
         registration_id,
         wrapper_state,
         wrapper_fuses,
         wrapper_expires_at,
+        wrapper_expires_at_reason,
     })
-}
-
-/// NameWrapper expiries are `uint64` seconds; a value with no calendar representation (for
-/// example the `type(uint64).max` sentinel some parents set) is served without a timestamp.
-fn wrapper_expiry(expiry: &Value) -> V2Result<Option<String>> {
-    let seconds = match expiry {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_u64().map(|_| i64::MAX))
-            .or_else(|| number.as_f64().map(|value| value as i64)),
-        Value::String(text) => text
-            .parse::<i64>()
-            .ok()
-            .or_else(|| text.parse::<u64>().ok().map(|_| i64::MAX)),
-        _ => None,
-    }
-    .ok_or_else(invalid_restrictions)?;
-    Ok(OffsetDateTime::from_unix_timestamp(seconds)
-        .ok()
-        .map(format_timestamp))
 }
 
 fn registry_restrictions(registration_id: String, block: &Value) -> V2Result<ResourceRestrictions> {
@@ -225,7 +220,7 @@ mod tests {
             chain_positions: json!({}),
             canonicality_summary: json!({}),
             manifest_version: 1,
-            last_recomputed_at: OffsetDateTime::UNIX_EPOCH,
+            last_recomputed_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
         }
     }
 

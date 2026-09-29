@@ -14,13 +14,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use sqlx::{
-    PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime,
-};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentSort, ChildrenCurrentSortValue, RegistryLabelOwnerFilter,
+    ChildrenCurrentSort, ChildrenCurrentSortValue, RegistryLabelOwnerFilter, UnixSeconds,
     families::name::ensure_published,
 };
 
@@ -288,9 +286,9 @@ pub(super) fn push_children<'a>(
 ) {
     push_selected(builder, parents);
     let sort_timestamp = match filter.sort {
-        ChildrenCurrentSort::Name => "NULL::TIMESTAMPTZ",
+        ChildrenCurrentSort::Name => "NULL::NUMERIC",
         ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
-        ChildrenCurrentSort::RegisteredAt => "summary.registered_at",
+        ChildrenCurrentSort::RegisteredAt => "EXTRACT(EPOCH FROM summary.registered_at)",
     };
     builder.push(format!(
         " children AS (
@@ -337,17 +335,17 @@ pub(super) fn push_children<'a>(
         );
         match filter.evaluated_at {
             Some(evaluated_at) => {
-                builder.push_bind(evaluated_at);
+                builder.push_bind(UnixSeconds::from(evaluated_at));
             }
             None => {
-                builder.push("clock.block_timestamp");
+                builder.push("EXTRACT(EPOCH FROM clock.block_timestamp)");
             }
         }
         builder.push(", TRUE)");
     }
 }
 
-fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<OffsetDateTime>)>> {
+fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> {
     let Some(child_logical_name_id) = row.try_get::<Option<String>, _>("child_logical_name_id")?
     else {
         return Ok(None);

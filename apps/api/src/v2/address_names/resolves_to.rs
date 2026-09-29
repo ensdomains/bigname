@@ -354,6 +354,7 @@ pub(super) async fn get_address_resolves_to(
                 registered_at: registration.registered_at,
                 created_at: registration.created_at,
                 expires_at: registration.expires_at,
+                expires_at_reason: registration.expires_at_reason,
                 grace_ends_at: registration.grace_ends_at,
                 authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
                 migrated_at: migrated_at_by_name.get(&entry.logical_name_id).cloned(),
