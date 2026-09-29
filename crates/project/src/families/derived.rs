@@ -7,6 +7,8 @@
 //! After a block's write the name summaries of the names it touched are composed again
 //! (`summary.rs`); those are journalled, so an undo restores them with the other families.
 mod summary;
+#[cfg(test)]
+mod summary_plan_tests;
 
 use sqlx::{Postgres, Transaction};
 
@@ -16,8 +18,10 @@ use crate::{ProjectError, Result};
 pub(crate) struct Touched {
     /// The block whose journal named the keys.
     number: i64,
-    /// Set by an undo, whose journal restores the name summaries exactly.
-    restoring: bool,
+    /// The family marker's block before the block's write, or -1 with none: the name summaries
+    /// are composed again for the surfaces and registry events after it. `None` on an undo, whose
+    /// journal restores the name summaries exactly.
+    summaries_after: Option<i64>,
     names: Vec<String>,
     node_resolvers: Vec<String>,
     nodes: Vec<String>,
@@ -26,10 +30,13 @@ pub(crate) struct Touched {
 }
 
 /// The names, (resolver, node) pairs and (resolver, record id) pairs block `number` touched.
+/// `summaries_after` is the family marker's block the block's write follows (a rebuild range's
+/// last block follows the marker before the range), -1 with none, or `None` on an undo.
 pub(crate) async fn touched(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
+    summaries_after: Option<i64>,
 ) -> Result<Touched> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "/* project:families.derived.touched */ WITH journal AS (
@@ -90,6 +97,7 @@ pub(crate) async fn touched(
     })?;
     let mut touched = Touched {
         number,
+        summaries_after,
         ..Touched::default()
     };
     for (kind, first, second) in rows {
@@ -106,16 +114,6 @@ pub(crate) async fn touched(
         }
     }
     Ok(touched)
-}
-
-impl Touched {
-    /// The keys of a block an undo is restoring: its name summaries come back from the journal.
-    pub(crate) fn restoring(self) -> Self {
-        Self {
-            restoring: true,
-            ..self
-        }
-    }
 }
 
 /// Delete and derive again the index rows of the touched keys, then, after a block's write,
@@ -140,10 +138,10 @@ pub(crate) async fn refresh(
         run(transaction, RECORD_ID_DELETE, chain_id, pairs.0, pairs.1).await?;
         run(transaction, RECORD_ID_INSERT, chain_id, pairs.0, pairs.1).await?;
     }
-    if touched.restoring {
+    let Some(after) = touched.summaries_after else {
         return Ok(summary::Refreshed::default());
-    }
-    summary::refresh(transaction, chain_id, touched.number).await
+    };
+    summary::refresh(transaction, chain_id, touched.number, after).await
 }
 
 async fn run(
