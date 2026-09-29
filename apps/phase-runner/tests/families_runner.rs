@@ -153,7 +153,7 @@ async fn a_stopped_full_history_project_redo_resumes_its_rebuild() -> Result<()>
     let (state, after) = rebuild_record(&scratch).await?;
     ensure!(
         state == "complete" && after == reset,
-        "the rerun resumed the rebuild instead of resetting it again: reset generation {reset:?} \
+        "the rerun reset the rebuild again instead of resuming it: reset generation {reset:?} \
          became {after:?}"
     );
     scratch.cleanup().await
