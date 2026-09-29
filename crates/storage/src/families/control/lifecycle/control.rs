@@ -147,19 +147,24 @@ pub(super) fn control_owner(
 /// epoch's owner, `NameUnwrapped`'s raw controller argument) or clears it (a release's explicit
 /// null). So the newest write wins over every older fact, and a newer fact overrides it only when
 /// it is such a clear. A NameWrapper-selected name keeps the fold: the owner it serves is the
-/// wrapped token's holder, while the registry names the NameWrapper. ENSv2 names have their own
-/// registry and keep the fold.
+/// wrapped token's holder, while the registry names the NameWrapper. Once the admitted Graveyard
+/// holds its current registry record, though, that record decides even for a NameWrapper-selected
+/// name: a subname wrapped without `PARENT_CANNOT_CONTROL` keeps a transferable token after the
+/// Graveyard clears its record, and no later token transfer gives it an owner again. ENSv2 names
+/// have their own registry and keep the fold.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
 fn newest_registry_write<'a>(
     facts: &'a NameFacts,
     authority: &Authority<'_>,
     is_v2: bool,
 ) -> Option<&'a OwnerEvent> {
-    if is_v2 || wrapper_selected(authority) {
+    if is_v2 {
         return None;
     }
-    facts.registry_node.as_ref()?.latest_transfer()
+    let write = facts.registry_node.as_ref()?.latest_transfer()?;
+    (!wrapper_selected(authority) || write.graveyard_held()).then_some(write)
 }
 
 /// Whether the selected binding is a NameWrapper authority. The binding's authority kind, not

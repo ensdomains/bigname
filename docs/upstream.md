@@ -185,10 +185,13 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > **Our rule / why**: maintainer decision (2026-09-29): the Graveyard is the burn address, so a
 > record it holds is burned. A current-registry owner write naming the Graveyard of the admitted
 > migration manifest, at or after its declared start, is served as no owner (null, not the zero
-> address) on the name and on its parent's subnames page; raw facts and history keep the
-> Graveyard. Superseded Sepolia Graveyards are not declared and are served as the chain holds
-> them. A live token sent to the Graveyard keeps its lease and is served as the chain holds it.
-> See [projections](projections.md).
+> address) on the name, on its parent's subnames page and in address lists, where the Graveyard
+> is not its controller; raw facts and history keep the Graveyard. The record wins over later
+> NameWrapper token transfers of a subname wrapped without `PARENT_CANNOT_CONTROL`, whose token
+> outlives the clear. Superseded Sepolia Graveyards are not declared and are served as the chain
+> holds them. A live token sent to the Graveyard keeps its lease and is served as the chain holds
+> it. Known gap (TYR-100): other registry writes that move a wrapped subname away from the
+> NameWrapper still serve the stale token's holder. See [projections](projections.md).
 > **Since**: `2026-09-29`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —

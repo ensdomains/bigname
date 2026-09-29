@@ -802,8 +802,21 @@ the Graveyard of the migration manifest (same chain and namespace, at or after i
 start block) with `owner_getter_reason` `graveyard`. Its owner word and getter stay as the chain
 wrote them. Every served read then gives that node no owner, as for an unmasked word: the
 control owner is none, the `owner_required` fallback serves none instead of failing, and the
-subnames route serves no owner, so a cleared subname with no name row is not listed. This is
-not the zero owner of `registry_self`, and it does not make the registry ownerless. Only the
+subnames route serves no owner, so a cleared subname with no name row is not listed. The record
+decides even when the name is NameWrapper-selected: a subname wrapped without
+`PARENT_CANNOT_CONTROL` keeps a live, transferable NameWrapper token after the Graveyard clears its
+record, and the owner fold lets the Graveyard-held write win over every later NameWrapper token
+transfer, single or batch, so no owner is served again until a newer registry write. The address
+relations read the same write as naming no controller: the `AuthorityTransferred`, and the
+`resource_control` grant or registry-only binding its own log restates it with, set the zero
+controller, which is never listed, so a cleared subname or claimed name with a surface is not
+listed under the Graveyard in `GET /v1/addresses/{address}/names`. The Graveyard's address is not
+masked: its other relations, such as a live token sent to it, are unchanged. This is
+not the zero owner of `registry_self`, and it does not make the registry ownerless. Known gap
+(TYR-100): any other registry write that moves a wrapped subname away from the NameWrapper, such
+as its unwrapped parent's owner calling `setSubnodeOwner`, keeps the NameWrapper binding
+selected, so the stale token's holder is still served as owner; only the Graveyard's write is
+handled here. Only the
 admitted Graveyard counts; the Graveyards of superseded Sepolia deployments are not declared
 and their records are served as the chain holds them. A registrant that sends a live `.eth`
 token to the Graveyard keeps the lease running, since the name cannot be registered again
@@ -811,6 +824,8 @@ before its expiry and grace period, so that registration is served as the chain 
 Graveyard as registrant, until it lapses.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
 
 An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
 registry record always serves a registry owner, because the registry answers `owner(node)` for

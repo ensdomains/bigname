@@ -14,6 +14,8 @@
 //! keeps. The registrant comes from F2a (the retained rows of the name), not this family's events. The
 //! (address, name, relation) index rows are derived from the candidates and F2a in `derived`,
 //! every possible address of a name included, so read-time masks only ever remove rows.
+use std::collections::HashSet;
+
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -28,6 +30,8 @@ use super::{
 use crate::Result;
 
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
+/// The adapter's `owner_getter_reason` for a registry write naming the admitted Graveyard.
+const GRAVEYARD_OWNER_REASON: &str = "graveyard";
 
 /// The two controller actions, stored by their lower-cased names. The names are spelled through
 /// `Debug` because the statement guard reads any literal that starts with an SQL keyword, as
@@ -87,6 +91,49 @@ fn change(event: &BlockEvent) -> Option<Change> {
     }
 }
 
+/// The raw logs, as (block, transaction index, log index), of the registry writes in `events`
+/// that make the admitted Graveyard a node's registry owner (`owner_getter_reason = graveyard`).
+fn graveyard_writes(events: &[BlockEvent]) -> HashSet<(i64, Option<i64>, Option<i64>)> {
+    events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "AuthorityTransferred"
+                && raw_text(&event.after, "owner_getter_reason").as_deref()
+                    == Some(GRAVEYARD_OWNER_REASON)
+        })
+        .map(log_of)
+        .collect()
+}
+
+fn log_of(event: &BlockEvent) -> (i64, Option<i64>, Option<i64>) {
+    (
+        event.position.block_number,
+        event.position.transaction_index,
+        event.position.log_index,
+    )
+}
+
+/// The change `event` makes, with the controller a Graveyard-held registry write would set read
+/// as the zero subject, which is never listed: that record names no owner (storage
+/// `OwnerEvent::names_no_owner`). This covers the write's AuthorityTransferred and the
+/// `resource_control` grant or registry-only binding the same log restates it with. Other
+/// relations of the Graveyard, such as a live token sent to it, are untouched.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+fn served_change(
+    event: &BlockEvent,
+    graveyard_writes: &HashSet<(i64, Option<i64>, Option<i64>)>,
+) -> Option<Change> {
+    match change(event)? {
+        Change::Controller { set: true, .. } if graveyard_writes.contains(&log_of(event)) => {
+            Some(Change::Controller {
+                set: true,
+                subject: Some(ZERO.to_owned()),
+            })
+        }
+        change => Some(change),
+    }
+}
+
 fn fold_key(chain: &Value, event: &BlockEvent) -> Option<super::store::Row> {
     change(event)?;
     let name = event.logical_name_id.clone()?;
@@ -142,6 +189,7 @@ pub(super) async fn apply(
         .filter_map(|event| candidate_key(&chain, event))
         .collect();
     load_rows(transaction, rows, candidates, candidate_keys).await?;
+    let graveyard_writes = graveyard_writes(events);
     for event in events {
         if let (
             Some(key),
@@ -149,8 +197,10 @@ pub(super) async fn apply(
                 set: control,
                 subject,
             }),
-        ) = (candidate_key(&chain, event), change(event))
-        {
+        ) = (
+            candidate_key(&chain, event),
+            served_change(event, &graveyard_writes),
+        ) {
             let mut row = current(rows, candidates, &key);
             set(
                 &mut row,
@@ -167,7 +217,10 @@ pub(super) async fn apply(
             set(&mut row, "subject", text_or_null(subject));
             put(rows, candidates, row, event)?;
         }
-        let (Some(key), Some(change)) = (fold_key(&chain, event), change(event)) else {
+        let (Some(key), Some(change)) = (
+            fold_key(&chain, event),
+            served_change(event, &graveyard_writes),
+        ) else {
             continue;
         };
         let mut row = current(rows, table, &key);
@@ -213,4 +266,73 @@ pub(super) async fn apply(
         put(rows, table, row, event)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{Change, graveyard_writes, served_change};
+    use crate::families::{input::BlockEvent, position::Position};
+
+    const GRAVEYARD: &str = "0x950b93885b33ce4c7e8571be2c88a1aa93d82f49";
+    const ZERO: &str = "0x0000000000000000000000000000000000000000";
+
+    fn event(kind: &str, log: i64, after: Value) -> BlockEvent {
+        BlockEvent {
+            normalized_event_id: log,
+            position: Position {
+                block_number: 10,
+                transaction_index: Some(0),
+                log_index: Some(log),
+                event_identity: format!("{kind}:{log}"),
+            },
+            namespace: "ens".to_owned(),
+            logical_name_id: Some("ens:0x01".to_owned()),
+            resource_id: Some("resource".to_owned()),
+            event_kind: kind.to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            source_manifest_id: None,
+            transaction_hash: None,
+            before: json!({}),
+            after,
+            raw_fact_ref: json!({}),
+        }
+    }
+
+    fn controller(change: Option<Change>) -> Option<String> {
+        match change {
+            Some(Change::Controller { set: true, subject }) => subject,
+            _ => panic!("expected a controller set"),
+        }
+    }
+
+    /// Only a registry write the adapter marked as Graveyard-held, and the grant its own log
+    /// restates it with, name no controller; the Graveyard address itself is not masked.
+    #[test]
+    fn a_graveyard_held_write_names_no_controller_only_on_its_own_log() {
+        let owner = json!({"owner": GRAVEYARD, "owner_getter": GRAVEYARD});
+        let mut marked = owner.clone();
+        marked["owner_getter_reason"] = json!("graveyard");
+        let grant = json!({
+            "subject": GRAVEYARD,
+            "scope": {"kind": "resource"},
+            "effective_powers": ["resource_control"],
+        });
+        let events = [
+            event("AuthorityTransferred", 1, marked),
+            event("PermissionChanged", 1, grant.clone()),
+            event("PermissionChanged", 2, grant),
+            event("AuthorityTransferred", 3, owner),
+        ];
+        let writes = graveyard_writes(&events);
+        let subjects = events
+            .iter()
+            .map(|event| controller(served_change(event, &writes)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            subjects,
+            [ZERO, ZERO, GRAVEYARD, GRAVEYARD].map(|subject| Some(subject.to_owned()))
+        );
+    }
 }

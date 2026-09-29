@@ -17,6 +17,9 @@ const GRACE_PERIOD: i64 = 90 * 24 * 60 * 60;
 const CLEANUP_EXPIRY: u64 = u64::MAX - GRACE_PERIOD as u64;
 /// The owner a subname of the claimed name is given before the claim.
 const SUB_OWNER: &str = "0x0000000000000000000000000000000000000052";
+/// The holders a wrapped subname's token moves to after the Graveyard cleared it.
+const CAROL: &str = "0x0000000000000000000000000000000000000053";
+const DAVE: &str = "0x0000000000000000000000000000000000000054";
 
 mod ens_v2_registry {
     use alloy_sol_types::sol;
@@ -31,6 +34,14 @@ mod registrar {
 
     sol! {
         event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires);
+    }
+}
+
+mod name_wrapper {
+    use alloy_sol_types::sol;
+
+    sol! {
+        event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
     }
 }
 
@@ -300,6 +311,384 @@ async fn a_live_grant_sent_to_the_graveyard_is_served_as_the_chain_holds_it() ->
 
     database.cleanup().await?;
     Ok(())
+}
+
+/// A subname wrapped without `PARENT_CANNOT_CONTROL` under an unwrapped parent keeps a live
+/// NameWrapper token when the Graveyard claims the lapsed parent and clears the subname's
+/// registry record, and its holder can still transfer that token. The registry record the
+/// Graveyard holds decides: no owner is served after the clear, whatever single or batch
+/// transfer follows, in both normal and rebuild runs.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L155-L197 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L281-L303 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_wrapped_subname_the_graveyard_cleared_serves_no_owner_after_wrapper_transfers()
+-> TestResult {
+    let database = family_database("interpret_graveyard_wrapped_sub").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    // `wrap("sub.claimed-name.eth", SUB_OWNER, 0)`: the registry record moves to the NameWrapper,
+    // which mints the token with no fuses and no expiry.
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    run(pool, SETUP_BLOCK, MIGRATION_BLOCK, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    publish(pool, MIGRATION_BLOCK, FamilyMode::Rebuild).await?;
+    let wrapped = summary(pool, &fixture.sub_id).await?;
+    assert_eq!(
+        wrapped["control"]["registry_owner"],
+        Value::String(SUB_OWNER.to_owned()),
+        "{wrapped:#}"
+    );
+
+    let claimed_at = fixture.claim(pool, LATER_BLOCK).await?;
+    let carol = CAROL.parse::<Address>()?;
+    let dave = DAVE.parse::<Address>()?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    insert_lineage(pool, LATER_BLOCK + 1, claimed_at + 12).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, NAME_WRAPPER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        NAME_WRAPPER,
+        TransferSingle {
+            operator: sub_owner,
+            from: sub_owner,
+            to: carol,
+            id: fixture.sub_token(),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_lineage(pool, LATER_BLOCK + 2, claimed_at + 24).await?;
+    insert_transaction(pool, LATER_BLOCK + 2, NAME_WRAPPER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 2,
+        0,
+        NAME_WRAPPER,
+        name_wrapper::TransferBatch {
+            operator: carol,
+            from: carol,
+            to: dave,
+            ids: vec![fixture.sub_token()],
+            values: vec![U256::from(1)],
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    let mut resume = MIGRATION_BLOCK;
+    for block in [LATER_BLOCK, LATER_BLOCK + 1, LATER_BLOCK + 2] {
+        run(pool, block, block, Some(resume)).await?;
+        resume = block;
+        for mode in [FamilyMode::Normal, FamilyMode::Rebuild] {
+            let run = format!("block {block} {mode:?}");
+            publish(pool, block, mode).await?;
+            let served = summary(pool, &fixture.sub_id).await?;
+            assert_eq!(
+                served["control"]["registry_owner"],
+                Value::Null,
+                "{run}: {served:#}"
+            );
+        }
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A subname that was wrapped, unwrapped and then given to another owner is a registry-only
+/// name with a surface, so it has an ordinary address-names row. Once the Graveyard clears its
+/// registry record it is listed under no one: not under the Graveyard, and no longer under its
+/// earlier owner. The parent the Graveyard claimed is not listed under it either.
+#[tokio::test]
+async fn a_surfaced_subname_the_graveyard_cleared_is_not_listed_under_the_graveyard() -> TestResult
+{
+    let database = family_database("interpret_graveyard_surfaced_sub").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    let carol = CAROL.parse::<Address>()?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    // `unwrap(parent, "sub", SUB_OWNER)`, then SUB_OWNER gives the record to CAROL.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+    insert_lineage(pool, LATER_BLOCK, MIGRATION_BLOCK + 1).await?;
+    insert_transaction(pool, LATER_BLOCK, NAME_WRAPPER).await?;
+    for (log, emitter, encoded) in [
+        (
+            0,
+            NAME_WRAPPER,
+            TransferSingle {
+                operator: sub_owner,
+                from: sub_owner,
+                to: Address::ZERO,
+                id: fixture.sub_token(),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+        ),
+        (
+            1,
+            ENS_REGISTRY,
+            ens_registry::Transfer {
+                node: fixture.sub_node,
+                owner: sub_owner,
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            NAME_WRAPPER,
+            NameUnwrapped {
+                node: fixture.sub_node,
+                owner: sub_owner,
+            }
+            .encode_log_data(),
+        ),
+    ] {
+        insert_log(pool, LATER_BLOCK, log, emitter, encoded).await?;
+    }
+    insert_lineage(pool, LATER_BLOCK + 1, MIGRATION_BLOCK + 2).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, ENS_REGISTRY).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        ENS_REGISTRY,
+        ens_registry::Transfer {
+            node: fixture.sub_node,
+            owner: carol,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    run(pool, SETUP_BLOCK, LATER_BLOCK + 1, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    publish(pool, LATER_BLOCK + 1, FamilyMode::Rebuild).await?;
+    assert!(
+        address_names(pool, CAROL).await?.contains(&fixture.sub_id),
+        "the surfaced subname is listed under its registry owner"
+    );
+
+    fixture.claim(pool, LATER_BLOCK + 2).await?;
+    run(
+        pool,
+        LATER_BLOCK + 2,
+        LATER_BLOCK + 2,
+        Some(LATER_BLOCK + 1),
+    )
+    .await?;
+    for mode in [FamilyMode::Normal, FamilyMode::Rebuild] {
+        let run = format!("{mode:?}");
+        publish(pool, LATER_BLOCK + 2, mode).await?;
+        let served = summary(pool, &fixture.sub_id).await?;
+        assert_eq!(
+            served["control"]["registry_owner"],
+            Value::Null,
+            "{run}: {served:#}"
+        );
+        // Neither the cleared subname nor the claimed parent is listed under the Graveyard.
+        let graveyard_names = address_names(pool, GRAVEYARD).await?;
+        assert!(graveyard_names.is_empty(), "{run}: {graveyard_names:?}");
+        assert!(
+            !address_names(pool, CAROL).await?.contains(&fixture.sub_id),
+            "{run}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// `claimed-name.eth`, wrapped then unwrapped back to `OWNER`, with a subname `sub` whose
+/// registry record `OWNER` holds; the Graveyard can claim the parent once its lease lapses.
+struct ClearedSubname {
+    labelhash: B256,
+    namehash: B256,
+    sub_label: B256,
+    sub_node: B256,
+    sub_id: String,
+    expires: i64,
+}
+
+impl ClearedSubname {
+    async fn seed(pool: &PgPool) -> TestResult<Self> {
+        let label = b"claimed-name";
+        let labelhash = keccak256(label);
+        let namehash = eth_namehash(labelhash);
+        let sub_label = keccak256(b"sub");
+        let sub_node = keccak256([namehash.as_slice(), sub_label.as_slice()].concat());
+        let expires = SETUP_BLOCK + 10;
+        seed_lineage(pool).await?;
+        seed_wrapped_then_unwrapped(pool, label, labelhash, namehash, expires).await?;
+        insert_log(
+            pool,
+            PREDECESSOR_BLOCK,
+            3,
+            ENS_REGISTRY,
+            ens_registry::NewOwner {
+                node: namehash,
+                label: sub_label,
+                owner: OWNER.parse::<Address>()?,
+            }
+            .encode_log_data(),
+        )
+        .await?;
+        Ok(Self {
+            labelhash,
+            namehash,
+            sub_label,
+            sub_node,
+            sub_id: format!("ens:{sub_node:#x}"),
+            expires,
+        })
+    }
+
+    fn sub_token(&self) -> U256 {
+        U256::from_be_bytes(self.sub_node.0)
+    }
+
+    /// `wrap("sub.claimed-name.eth", SUB_OWNER, 0)` by the record's owner at `block`.
+    async fn wrap(&self, pool: &PgPool, block: i64) -> TestResult {
+        let wrapper = NAME_WRAPPER.parse::<Address>()?;
+        let owner = OWNER.parse::<Address>()?;
+        let sub_owner = SUB_OWNER.parse::<Address>()?;
+        insert_transaction(pool, block, NAME_WRAPPER).await?;
+        for (log, emitter, encoded) in [
+            (
+                0,
+                ENS_REGISTRY,
+                ens_registry::Transfer {
+                    node: self.sub_node,
+                    owner: wrapper,
+                }
+                .encode_log_data(),
+            ),
+            (
+                1,
+                NAME_WRAPPER,
+                TransferSingle {
+                    operator: owner,
+                    from: Address::ZERO,
+                    to: sub_owner,
+                    id: self.sub_token(),
+                    value: U256::from(1),
+                }
+                .encode_log_data(),
+            ),
+            (
+                2,
+                NAME_WRAPPER,
+                NameWrapped {
+                    node: self.sub_node,
+                    name: b"\x03sub\x0cclaimed-name\x03eth\0".to_vec().into(),
+                    owner: sub_owner,
+                    fuses: 0,
+                    expiry: 0,
+                }
+                .encode_log_data(),
+            ),
+        ] {
+            insert_log(pool, block, log, emitter, encoded).await?;
+        }
+        Ok(())
+    }
+
+    /// `clear(["sub.claimed-name.eth"])` at `block`, past the parent's grace period: the
+    /// Graveyard claims the parent, then takes the subname's record with `setSubnodeRecord`.
+    /// Returns the block's timestamp.
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+    async fn claim(&self, pool: &PgPool, block: i64) -> TestResult<i64> {
+        let owner = OWNER.parse::<Address>()?;
+        let graveyard = GRAVEYARD.parse::<Address>()?;
+        let token = U256::from_be_bytes(self.labelhash.0);
+        let claimed_at = self.expires + GRACE_PERIOD + 1;
+        insert_lineage(pool, block, claimed_at).await?;
+        insert_transaction(pool, block, GRAVEYARD).await?;
+        for (log, emitter, encoded) in [
+            (
+                0,
+                BASE_REGISTRAR,
+                base_registrar::Transfer {
+                    from: owner,
+                    to: Address::ZERO,
+                    tokenId: token,
+                }
+                .encode_log_data(),
+            ),
+            (
+                1,
+                BASE_REGISTRAR,
+                base_registrar::Transfer {
+                    from: Address::ZERO,
+                    to: graveyard,
+                    tokenId: token,
+                }
+                .encode_log_data(),
+            ),
+            (
+                2,
+                ENS_REGISTRY,
+                ens_registry::NewOwner {
+                    node: eth_node(),
+                    label: self.labelhash,
+                    owner: graveyard,
+                }
+                .encode_log_data(),
+            ),
+            (
+                3,
+                BASE_REGISTRAR,
+                registrar::NameRegistered {
+                    id: token,
+                    owner: graveyard,
+                    expires: U256::from(CLEANUP_EXPIRY),
+                }
+                .encode_log_data(),
+            ),
+            (
+                4,
+                ENS_REGISTRY,
+                ens_registry::NewOwner {
+                    node: self.namehash,
+                    label: self.sub_label,
+                    owner: graveyard,
+                }
+                .encode_log_data(),
+            ),
+        ] {
+            insert_log(pool, block, log, emitter, encoded).await?;
+        }
+        Ok(claimed_at)
+    }
+}
+
+/// The names the address-names read lists for `address` in the `ens` namespace.
+async fn address_names(pool: &PgPool, address: &str) -> TestResult<Vec<String>> {
+    let page = bigname_storage::load_address_names_current_page_filtered(
+        pool,
+        address,
+        Some("ens"),
+        None,
+        bigname_storage::AddressNamesCurrentDedupe::Surface,
+        None,
+        None,
+        None,
+        bigname_storage::AddressNamesCurrentSort::Name,
+        bigname_storage::AddressNamesCurrentOrder::Asc,
+        None,
+        None,
+        50,
+    )
+    .await?;
+    Ok(page
+        .entries
+        .into_iter()
+        .map(|entry| entry.logical_name_id)
+        .collect())
 }
 
 /// Nothing the served row says names the Graveyard or its cleanup expiry.

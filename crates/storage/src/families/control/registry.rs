@@ -83,8 +83,13 @@ impl OwnerEvent {
     /// the records it claims or clears as burned.
     /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
     pub fn names_no_owner(&self) -> bool {
-        self.owner_word_unmasked == Some(true)
-            || self.owner_getter_reason.as_deref() == Some(GRAVEYARD_OWNER_REASON)
+        self.owner_word_unmasked == Some(true) || self.graveyard_held()
+    }
+
+    /// Whether this write makes the admitted Graveyard the node's registry owner
+    /// (`owner_getter_reason = graveyard`).
+    pub fn graveyard_held(&self) -> bool {
+        self.owner_getter_reason.as_deref() == Some(GRAVEYARD_OWNER_REASON)
     }
 
     /// The owner this event reports to the served control block, the registry getter's view of
