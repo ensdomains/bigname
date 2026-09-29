@@ -73,17 +73,24 @@ pub(crate) async fn successor_grant(
             .map(|row| key_of(table, [row["surface_binding_id"].clone()])),
     );
     load_rows(transaction, rows, table, keys.clone()).await?;
+    // The handoffs this grant moves, as they stood before it: a candidate after the grant that
+    // carries one of them over whole (`handoff`) took it from a binding the grant precedes.
+    let mut moved: Vec<Value> = Vec::new();
+    let mut later: Vec<Row> = Vec::new();
     for key in keys {
         let Some(mut row) = rows.get(table, &key).cloned() else {
             continue;
         };
         let predecessor = text_of(&row, "predecessor_resource_id");
-        let applies = row.get("registry_only").and_then(Value::as_bool) == Some(true)
+        let registry_only = row.get("registry_only").and_then(Value::as_bool) == Some(true)
             && text_of(&row, "authority_arm") == "ens_v1"
             && !predecessor.is_empty()
-            && predecessor != resource
-            && Position::of_row(&row).is_some_and(|binding| binding < position);
-        if !applies {
+            && predecessor != resource;
+        if !registry_only {
+            continue;
+        }
+        if Position::of_row(&row).is_none_or(|binding| binding >= position) {
+            later.push(row);
             continue;
         }
         let current_successor = text_of(&row, "lease_resource_id") != predecessor;
@@ -97,11 +104,42 @@ pub(crate) async fn successor_grant(
         {
             continue;
         }
+        moved.push(handoff_of(&row));
         set(&mut row, "lease_resource_id", resource.clone());
         set(&mut row, "lease_position", position.to_json());
         rows.put(table, row).map_err(in_family(table.name))?;
     }
+    // A registry-only binding after the grant whose handoff is one the grant just moved copied
+    // it from a binding before the grant, the grant not yet applied: identity builds a block's
+    // candidates before lifecycle reaches its grants, so a grant earlier in the same block comes
+    // after the copy. It stands for the same lease, so it moves the same way. Its handoff names
+    // that earlier binding's predecessor and lease, which a binding it did not inherit from
+    // cannot carry: that one's predecessor would be the binding in between.
+    for mut row in later {
+        if moved.contains(&handoff_of(&row)) {
+            set(&mut row, "lease_resource_id", resource.clone());
+            set(&mut row, "lease_position", position.to_json());
+            rows.put(table, row).map_err(in_family(table.name))?;
+        }
+    }
     Ok(())
+}
+
+/// The columns `handoff` carries over from a registry-only predecessor that stands for a lease.
+fn handoff_of(row: &Row) -> Value {
+    Value::Array(
+        [
+            "predecessor_resource_id",
+            "predecessor_position",
+            "predecessor_wrapped_registrar_resource_id",
+            "predecessor_node",
+            "lease_resource_id",
+            "lease_position",
+        ]
+        .into_iter()
+        .map(|column| row.get(column).cloned().unwrap_or(Value::Null))
+        .collect(),
+    )
 }
 
 /// Re-read the name's retained registrar grants once an epoch turns an existing candidate

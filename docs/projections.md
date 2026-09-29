@@ -374,7 +374,10 @@ a registry-only binding that stands for a lease, the binding takes that predeces
 handoff (the binding it replaced and its position, the wrapped registrar lease and node that
 binding recorded, and the lease with its position) instead of taking the registry-only
 predecessor itself as its lease. The registration then keeps the lease's `resource_id`,
-`registered_at`, expiry and registrant through any number of such bindings.
+`registered_at`, expiry and registrant through any number of such bindings. A registrar grant
+that moves a registry-only binding's lease (the successor lease above) moves it for every later
+binding that carried that handoff over, including one opened later in the grant's own block,
+which Project builds before it reaches the block's grants.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 

@@ -154,6 +154,18 @@ async fn registry_transfer(
     owner: &str,
     closed_at: Option<i64>,
 ) -> Result<()> {
+    registry_transfer_at(fixture, binding, block, 1, owner, closed_at).await
+}
+
+/// [`registry_transfer`] at log `log` of `block`.
+async fn registry_transfer_at(
+    fixture: &Fixture,
+    binding: u32,
+    block: i64,
+    log: i64,
+    owner: &str,
+    closed_at: Option<i64>,
+) -> Result<()> {
     fixture
         .binding(
             &uuid(binding),
@@ -161,7 +173,7 @@ async fn registry_transfer(
             &registry_only(),
             "ens_v1",
             block,
-            1,
+            log,
             closed_at,
         )
         .await?;
@@ -179,7 +191,7 @@ async fn registry_transfer(
         write(
             fixture,
             block,
-            1,
+            log,
             kind,
             V1_REGISTRY,
             &registry_only(),
@@ -560,5 +572,73 @@ async fn a_reclaim_to_the_registry_itself_serves_the_zero_owner() -> Result<()> 
         row["owner"] == json!(ZERO) && row["status"] == json!("active"),
         "the registry's own address was served as the owner: {row}"
     );
+    fixture.cleanup().await
+}
+
+/// A successor grant earlier in the block of the second registry-only binding. The first
+/// registry-only binding stands for the released lease; in one later block a `registerOnly`
+/// grant on another resource comes first, then a registry transfer opens the second
+/// registry-only binding, which carries the first one's handoff over. Both then stand for the
+/// successor lease and the registration is the successor's, applied block by block, after an
+/// undo, and in a ranged rebuild.
+#[tokio::test]
+async fn a_successor_grant_earlier_in_the_block_reaches_the_inherited_handoff() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_successor_same_block", 20).await?;
+    let successor = uuid(4);
+    let renewed = EXPIRY + 1_000_000;
+    registered(&fixture, 10, ALICE, Some(11)).await?;
+    registry_transfer(&fixture, 101, 11, BOB, Some(13)).await?;
+    write(
+        &fixture,
+        12,
+        1,
+        "RegistrationReleased",
+        V1_REGISTRAR,
+        &lease(),
+        json!({"namehash": node(), "source_event": "RegistrationReleased"}),
+    )
+    .await?;
+    let grant = json!({"authority_kind": "registrar", "authority_key": "successor",
+                       "namehash": node(), "registrant": CAROL, "expiry": renewed,
+                       "source_event": "NameRegistered", "status": "registered"});
+    for kind in ["RegistrationGranted", "ExpiryChanged"] {
+        write(
+            &fixture,
+            13,
+            1,
+            kind,
+            V1_REGISTRAR,
+            &successor,
+            grant.clone(),
+        )
+        .await?;
+    }
+    registry_transfer_at(&fixture, 102, 13, 5, ALICE, None).await?;
+
+    fixture.apply(13, FamilyMode::Normal).await?;
+    let mut leases: Vec<Value> = fixture
+        .rows("project_binding_candidate")
+        .await?
+        .into_iter()
+        .filter(|row| row["registry_only"] == json!(true))
+        .map(|row| json!([row["surface_binding_id"], row["lease_resource_id"]]))
+        .collect();
+    leases.sort_by_key(Value::to_string);
+    ensure!(
+        leases
+            == vec![
+                json!([uuid(101), successor.clone()]),
+                json!([uuid(102), successor.clone()])
+            ],
+        "both registry-only bindings stand for the successor lease: {leases:?}"
+    );
+    let row = served(&fixture).await?;
+    ensure!(
+        row == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
+                      "expiry": renewed, "owner": ALICE}),
+        "the second registry-only binding reads the successor's registration: {row}"
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
