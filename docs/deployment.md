@@ -232,11 +232,11 @@ neither binary reads it, so a value left in `.env.server` has no effect.
 `20260929180000_project_resource_pointer_root_node_index.sql` adds the partial
 index `project_resource_pointer_root_node_idx` that the composed name reader's
 resource pointer lookup can probe for ENSv2 root registry pointers. It builds
-with a plain `CREATE INDEX` inside the migration transaction, which takes a
+with a plain `CREATE INDEX` inside the schema-migration transaction, which takes a
 SHARE lock on the whole of `project_resource_pointer`, every chain and every
-source family, until the migration commits. That blocks every write to the
+source family, until the schema-migration commits. That blocks every write to the
 table and `VACUUM` and `ANALYZE` on it; reads continue. Before the build starts,
-the migration also waits for any transaction already writing the table. Apply
+the schema-migration also waits for any transaction already writing the table. Apply
 it in the same planned window as the 7c removal above, with the phase runner,
 redo processes and API stopped, so nothing waits on it and it waits on nothing.
 It needs no concurrent prebuild in that window.
@@ -254,7 +254,7 @@ PGOPTIONS='-c lock_timeout=10s -c statement_timeout=10min' \
   --target-version 20260929180000
 ```
 
-If it fails on either timeout, the migration's transaction rolls back and
+If it fails on either timeout, the schema-migration's transaction rolls back and
 `_sqlx_migrations` does not record it, so it stays pending. On a lock timeout,
 find the session holding a lock on `bigname_phase.project_resource_pointer` in
 `pg_locks` and `pg_stat_activity`, stop the process that owns it, and run the
