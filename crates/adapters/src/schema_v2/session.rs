@@ -417,13 +417,9 @@ fn interpret_raw(
     let Some(selected) = catalog.select(raw)? else {
         return Ok(false);
     };
-    let mut registrar_context = if selected.source.source_family == "ens_v1_registrar_l1" {
-        super::migration::registrar_context(catalog, &selected, raw)?
-    } else {
-        super::migration::RegistrarContext::default()
-    };
+    let mut registrar_context = super::migration::registrar_context(catalog, &selected, raw)?;
     registrar_context.registry_graveyard =
-        super::migration::registry_graveyard(catalog, &selected, raw)?;
+        super::protocol::v1::registry_graveyard(catalog, &selected, raw)?;
     if let Some((namehash, owner)) =
         super::protocol::v1::registrar_registration_namehash(&selected, raw)?
     {

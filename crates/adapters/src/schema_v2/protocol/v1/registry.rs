@@ -28,6 +28,7 @@ use crate::schema_v2::{
     model::RawLogInput,
     state::{State, V1NameState, V1RegistryReadAnchor},
 };
+pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 pub(super) mod surface;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -37,14 +38,6 @@ sol! {
     event NewResolver(bytes32 indexed node, address resolver);
     event NewTTL(bytes32 indexed node, uint64 ttl);
 }
-
-/// The `owner_getter_reason` of a registry owner write naming the admitted Graveyard. The
-/// Graveyard claims an expired `.eth` name and clears a subname by making itself the node's
-/// registry owner, so the record it holds is burned: the served reads give such a node no owner.
-/// The owner word, the getter and the retained registry state stay as the chain wrote them, which
-/// migration correlation reads.
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
-const GRAVEYARD_OWNER_REASON: &str = "graveyard";
 
 pub(super) fn interpret(
     selected: &Selected,
@@ -144,34 +137,24 @@ pub(super) fn interpret(
                 .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
-    let graveyard_held = |owner: &str| {
-        graveyard.is_some_and(|graveyard| {
-            owner.parse::<alloy_primitives::Address>().ok() == Some(graveyard)
-        })
-    };
-    if let Some(view) = owner_view.as_ref() {
+    // The registry getter's view of the owner word, `owner(node)`, and why it differs from it.
+    let getter_view = owner_view.as_ref().and_then(|view| match view {
+        RegistryOwnerView::Authentic { owner } => {
+            Some((owner.clone(), graveyard::owner_reason(graveyard, owner)))
+        }
+        RegistryOwnerView::ZeroEquivalent { reason } => {
+            Some((ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned())))
+        }
+        RegistryOwnerView::UnavailableUnmasked => None,
+    });
+    if let Some((getter, reason)) = getter_view.as_ref() {
         let object = after.as_object_mut().expect("registry state is an object");
-        match view {
-            RegistryOwnerView::Authentic { owner } => {
-                object.insert("owner_getter".to_owned(), Value::String(owner.clone()));
-                if graveyard_held(owner) {
-                    object.insert(
-                        "owner_getter_reason".to_owned(),
-                        Value::String(GRAVEYARD_OWNER_REASON.to_owned()),
-                    );
-                }
-            }
-            RegistryOwnerView::ZeroEquivalent { reason } => {
-                object.insert(
-                    "owner_getter".to_owned(),
-                    Value::String(ZERO_ADDRESS.to_owned()),
-                );
-                object.insert(
-                    "owner_getter_reason".to_owned(),
-                    Value::String(reason.as_str().to_owned()),
-                );
-            }
-            RegistryOwnerView::UnavailableUnmasked => {}
+        object.insert("owner_getter".to_owned(), Value::String(getter.clone()));
+        if let Some(reason) = reason {
+            object.insert(
+                "owner_getter_reason".to_owned(),
+                Value::String(reason.clone()),
+            );
         }
     }
     let previous_registry_owner_word = owner
@@ -225,17 +208,7 @@ pub(super) fn interpret(
             previous.as_ref(),
         )
     } else {
-        if let (Some(owner), Some(view)) = (owner.as_ref(), owner_view.as_ref()) {
-            let (owner_getter, reason) = match view {
-                RegistryOwnerView::Authentic { owner } => (
-                    owner.clone(),
-                    graveyard_held(owner).then(|| GRAVEYARD_OWNER_REASON.to_owned()),
-                ),
-                RegistryOwnerView::ZeroEquivalent { reason } => {
-                    (ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned()))
-                }
-                RegistryOwnerView::UnavailableUnmasked => unreachable!(),
-            };
+        if let (Some(owner), Some((owner_getter, reason))) = (owner.as_ref(), getter_view) {
             let owner_view_changed = previous_registry_owner_getter
                 .as_deref()
                 .is_none_or(|previous| !previous.eq_ignore_ascii_case(&owner_getter))

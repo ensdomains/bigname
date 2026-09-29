@@ -4,6 +4,7 @@ pub(in crate::schema_v2) mod registrar;
 mod registrar_surface;
 pub(in crate::schema_v2) use registrar_surface::materialize as materialize_registrar_surface;
 mod registry;
+pub(in crate::schema_v2) use registry::graveyard::admitted as registry_graveyard;
 mod resolver;
 pub(super) use resolver::interpret as interpret_node_resolver;
 mod reverse;

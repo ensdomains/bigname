@@ -33,43 +33,7 @@ pub(super) struct RegistrarContext {
     pub(super) migration_enabled: bool,
     pub(super) graveyard_cleanup: bool,
     pub(super) transaction_has_registry_setup: bool,
-    /// For a log of the current ENSv1 registry, the admitted Graveyard when this log is at or
-    /// after its launch-bounded start (`registry_graveyard`).
     pub(super) registry_graveyard: Option<alloy_primitives::Address>,
-}
-
-/// The admitted Graveyard a current ENSv1 registry log can name as a node's owner: the
-/// migration manifest's `graveyard` role on the same chain and namespace, from its declared start
-/// block. Any other log, and a chain or namespace without a migration manifest, has none. The
-/// Graveyard claims and clears names by making itself their registry owner, so a record it
-/// holds is burned (`protocol::v1::registry`).
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L20-L25 @ ens_v2_sepolia_20260916@366de741)
-pub(super) fn registry_graveyard(
-    catalog: &Catalog,
-    selected: &Selected,
-    raw: &super::RawLogInput,
-) -> anyhow::Result<Option<alloy_primitives::Address>> {
-    if selected.source.source_family != "ens_v1_registry_l1"
-        || selected.emitter_role.as_deref() != Some("registry")
-    {
-        return Ok(None);
-    }
-    let Some(migration_source) = catalog.source_for_family(MIGRATION_FAMILY) else {
-        return Ok(None);
-    };
-    if migration_source.namespace != selected.source.namespace
-        || migration_source.chain_id != selected.source.chain_id
-        || catalog
-            .declared_start_block_for_role(MIGRATION_FAMILY, "graveyard")
-            .is_none_or(|start| raw.block_number < start)
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        declared_address(catalog, "graveyard")?
-            .parse()
-            .context("the declared Graveyard address is malformed")?,
-    ))
 }
 
 pub(super) fn registrar_context(
@@ -105,8 +69,7 @@ pub(super) fn registrar_context(
         graveyard_cleanup: super::protocol::migration::is_graveyard_cleanup(
             selected, raw, &graveyard,
         )?,
-        transaction_has_registry_setup: false,
-        registry_graveyard: None,
+        ..RegistrarContext::default()
     })
 }
 
