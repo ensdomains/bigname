@@ -3220,6 +3220,83 @@ fn cross_family_registrar_correlation_keeps_the_graveyard_launch_floor() -> anyh
     Ok(())
 }
 
+/// A current ENSv1 registry owner write naming the admitted Graveyard, at or after its declared
+/// start, keeps its owner and getter and is marked `owner_getter_reason = graveyard`, which the
+/// served reads give no owner. Before the start, and for any other owner, nothing is marked.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+#[test]
+fn a_registry_owner_write_naming_the_admitted_graveyard_is_marked_from_its_launch()
+-> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let addresses = &fixture["addresses"];
+    let registry = "0x0000000000000000000000000000000000000099";
+    let graveyard = address(addresses, "graveyard")?;
+    let node = super::common::namehash(&["claimed".to_owned(), "eth".to_owned()]);
+    let block = fixture["scenarios"]["G-02"]["cleanup_block"]
+        .as_i64()
+        .unwrap();
+    let logs = vec![
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: graveyard,
+            }
+            .encode_log_data(),
+            block,
+            0,
+            0,
+            registry,
+        ),
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node: node.parse()?,
+                owner: Address::from([0x51; 20]),
+            }
+            .encode_log_data(),
+            block,
+            0,
+            1,
+            registry,
+        ),
+    ];
+    for (launch, expected) in [(block, Some("graveyard")), (block + 1, None)] {
+        let mut input = batch(logs.clone(), &fixture, false);
+        admit_v1_registry(&mut input, registry);
+        input
+            .admissions
+            .iter_mut()
+            .find(|admission| admission.role.as_deref() == Some("graveyard"))
+            .expect("migration Graveyard admission")
+            .active_from_block = Some(launch);
+        let output = interpret_test_batch(input)?;
+        let transfers = output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.source_family == "ens_v1_registry_l1"
+                    && event.event_kind == "AuthorityTransferred"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(transfers.len(), 2, "{transfers:#?}");
+        assert_eq!(
+            transfers[0].after_state["owner_getter"],
+            format!("{graveyard:#x}")
+        );
+        assert_eq!(
+            transfers[0].after_state["owner_getter_reason"].as_str(),
+            expected,
+            "launch {launch}"
+        );
+        assert!(
+            transfers[1]
+                .after_state
+                .get("owner_getter_reason")
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn controller_add_remove_share_state_and_restore_through_compaction() -> anyhow::Result<()> {
     let fixture = fixture()?;

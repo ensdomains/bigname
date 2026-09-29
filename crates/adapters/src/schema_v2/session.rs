@@ -422,6 +422,8 @@ fn interpret_raw(
     } else {
         super::migration::RegistrarContext::default()
     };
+    registrar_context.registry_graveyard =
+        super::migration::registry_graveyard(catalog, &selected, raw)?;
     if let Some((namehash, owner)) =
         super::protocol::v1::registrar_registration_namehash(&selected, raw)?
     {

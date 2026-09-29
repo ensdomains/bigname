@@ -787,12 +787,30 @@ an `unwrapETH2LD` to the registry itself; none when the owner word is unmasked; 
 `registry_owner` or `owner` only for a payload written before the getter was recorded. The raw
 owner an epoch restates never decides the owner of a name the rule above covers.
 
+A registry record the admitted Graveyard holds is burned and names no owner. The Graveyard
+claims a lapsed `.eth` name and clears a subname of a name it holds by making itself the node's
+registry owner, so the registry adapter marks a current-registry `NewOwner` or `Transfer` naming
+the Graveyard of the migration manifest (same chain and namespace, at or after its declared
+start block) with `owner_getter_reason` `graveyard`. Its owner word and getter stay as the chain
+wrote them. Every served read then gives that node no owner, as for an unmasked word: the
+control owner is none, the `owner_required` fallback serves none instead of failing, and the
+subnames route serves no owner, so a cleared subname with no name row is not listed. This is
+not the zero owner of `registry_self`, and it does not make the registry ownerless. Only the
+admitted Graveyard counts; the Graveyards of superseded Sepolia deployments are not declared
+and their records are served as the chain holds them. A registrant that sends a live `.eth`
+token to the Graveyard keeps the lease running, since the name cannot be registered again
+before its expiry and grace period, so that registration is served as the chain holds it, the
+Graveyard as registrant, until it lapses.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+
 An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
 registry record always serves a registry owner, because the registry answers `owner(node)` for
 every node. The test is the registration's status and authority kind; it does not look at a
 wrapper, so a wrapped name whose registration authority is the registrar is included. When the fold finds no owner fact, or its latest fact cleared the owner, the
 served owner is the node's latest registry `AuthorityTransferred` kept in
-`project_registry_owner_event` (none when its owner word is unmasked), or the zero address when
+`project_registry_owner_event` (none when its owner word is unmasked or the admitted Graveyard
+holds the record), or the zero address when
 the registry holds no record of the node. A node with a registry record but no owner the
 families kept is a data-integrity failure: Project does not publish the block, like any other
 integrity failure. A rebuild range composes its names at the range's last block, so there the

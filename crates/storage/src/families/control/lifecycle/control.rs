@@ -197,8 +197,9 @@ impl std::error::Error for RequiredOwnerMissing {}
 /// every node, zero when it holds no record. When the fold found no owner fact, or its latest
 /// fact cleared the owner, the owner is the node's latest registry `NewOwner` or `Transfer`
 /// (F2c keeps every one, whatever name it carried), read as the registry getter's view; with no registry record at all it is the
-/// zero address. An unmasked owner word names no owner, on the node or in the fold, and is
-/// served as none. A node that has a registry record but no owner-setting event the families
+/// zero address. An unmasked owner word, or a record the admitted Graveyard holds
+/// (`OwnerEvent::names_no_owner`), names no owner, on the node or in the fold, and is served as
+/// none. A node that has a registry record but no owner-setting event the families
 /// kept is an integrity failure, never an absent owner.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
@@ -212,7 +213,7 @@ pub(super) fn served_owner(
     }
     let node = facts.registry_node.as_ref();
     if let Some(transfer) = node.and_then(|node| node.latest_transfer()) {
-        if transfer.owner_word_unmasked == Some(true) {
+        if transfer.names_no_owner() {
             return Ok(None);
         }
         if let Some(owner) = transfer.reported_owner() {

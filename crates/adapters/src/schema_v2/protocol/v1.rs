@@ -94,7 +94,7 @@ pub(super) fn interpret(
             registrar::interpret(selected, raw, state, registrar_context)
         }
         "ens_v1_registry_l1" | "basenames_base_registry" => {
-            registry::interpret(selected, raw, state)
+            registry::interpret(selected, raw, state, registrar_context.registry_graveyard)
         }
         "ens_v1_resolver_l1" | "basenames_base_resolver" => {
             resolver::interpret(selected, raw, state)

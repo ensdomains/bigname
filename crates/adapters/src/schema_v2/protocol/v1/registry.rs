@@ -38,10 +38,19 @@ sol! {
     event NewTTL(bytes32 indexed node, uint64 ttl);
 }
 
+/// The `owner_getter_reason` of a registry owner write naming the admitted Graveyard. The
+/// Graveyard claims an expired `.eth` name and clears a subname by making itself the node's
+/// registry owner, so the record it holds is burned: the served reads give such a node no owner.
+/// The owner word, the getter and the retained registry state stay as the chain wrote them, which
+/// migration correlation reads.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+const GRAVEYARD_OWNER_REASON: &str = "graveyard";
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
+    graveyard: Option<alloy_primitives::Address>,
 ) -> anyhow::Result<Interpreted> {
     // Only ENSv1 admits the LLL-era unmasked-word tolerance (#361).
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
@@ -135,11 +144,22 @@ pub(super) fn interpret(
                 .eq_ignore_ascii_case(support::LLL_REGISTRY),
         )
     });
+    let graveyard_held = |owner: &str| {
+        graveyard.is_some_and(|graveyard| {
+            owner.parse::<alloy_primitives::Address>().ok() == Some(graveyard)
+        })
+    };
     if let Some(view) = owner_view.as_ref() {
         let object = after.as_object_mut().expect("registry state is an object");
         match view {
             RegistryOwnerView::Authentic { owner } => {
                 object.insert("owner_getter".to_owned(), Value::String(owner.clone()));
+                if graveyard_held(owner) {
+                    object.insert(
+                        "owner_getter_reason".to_owned(),
+                        Value::String(GRAVEYARD_OWNER_REASON.to_owned()),
+                    );
+                }
             }
             RegistryOwnerView::ZeroEquivalent { reason } => {
                 object.insert(
@@ -207,7 +227,10 @@ pub(super) fn interpret(
     } else {
         if let (Some(owner), Some(view)) = (owner.as_ref(), owner_view.as_ref()) {
             let (owner_getter, reason) = match view {
-                RegistryOwnerView::Authentic { owner } => (owner.clone(), None),
+                RegistryOwnerView::Authentic { owner } => (
+                    owner.clone(),
+                    graveyard_held(owner).then(|| GRAVEYARD_OWNER_REASON.to_owned()),
+                ),
                 RegistryOwnerView::ZeroEquivalent { reason } => {
                     (ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned()))
                 }

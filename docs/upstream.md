@@ -177,6 +177,20 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > **Our rule / why**: See [storage semantics](storage.md). The adapter keeps its signed timestamp representation without failing an otherwise valid numeric lifecycle observation. The ENSv1 .eth controller-event decoder saturates the same `uint256` expiry word the same way, so a controller event that repeats an out-of-range expiry no longer fails interpretation of its log. Basenames controller events are unchanged: an out-of-range expiry there still fails.
 > **Since**: `2026-09-10`
 
+> **Registry records the admitted Graveyard holds are served with no owner** — the ENSv2
+> Graveyard claims a lapsed `.eth` name and clears a subname of a name it holds by making
+> itself the node's registry owner, so `owner(node)` returns the Graveyard.
+> **Upstream**: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L20-L25 @ ens_v2_sepolia_20260916@366de741)
+> (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
+> **Our rule / why**: maintainer decision (2026-09-29): the Graveyard is the burn address, so a
+> record it holds is burned. A current-registry owner write naming the Graveyard of the admitted
+> migration manifest, at or after its declared start, is served as no owner (null, not the zero
+> address) on the name and on its parent's subnames page; raw facts and history keep the
+> Graveyard. Superseded Sepolia Graveyards are not declared and are served as the chain holds
+> them. A live token sent to the Graveyard keeps its lease and is served as the chain holds it.
+> See [projections](projections.md).
+> **Since**: `2026-09-29`
+
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
 > `ERC1155Fuse._transfer` runs `_beforeTransfer`, which deletes the per-token
 > approval unless `CANNOT_APPROVE` is burnt, and then returns before emitting

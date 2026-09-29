@@ -166,7 +166,8 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
             -- latest owner-setting registry event (F2c, `project_registry_node_state`), so a
             -- Transfer after the NewOwner moves it. That is the registry's owner getter view
             -- (zero for an owner the registry reads as zero), else the reported owner; an
-            -- unmasked LLL owner word names no owner. The edge's own owner serves only a node
+            -- unmasked LLL owner word, or the admitted Graveyard holding a record it claimed or
+            -- cleared, names no owner. The edge's own owner serves only a node
             -- with no F2c row, which the NewOwner that writes the edge always writes. A zero
             -- owner in the child's name summary (its node's latest registry transfer names the
             -- zero owner) still overrides.
@@ -176,6 +177,7 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                         WHEN node_state.node IS NULL
                             THEN lower(COALESCE(edge.owner_getter, edge.owner))
                         WHEN node_state.owner_word_unmasked THEN NULL
+                        WHEN node_state.owner_getter_reason = 'graveyard' THEN NULL
                         ELSE lower(COALESCE(node_state.owner_getter, node_state.registry_owner,
                                             node_state.owner))
                    END AS served_owner

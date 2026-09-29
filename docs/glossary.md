@@ -1406,6 +1406,11 @@ lease deadline.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L154 @ ens_v1@91c966f)
 
+A registry record the admitted Graveyard holds after such a claim, or after it clears a subname,
+is marked `owner_getter_reason` `graveyard` and served with no owner
+([projections](projections.md)).
+
+
 ## ETHRenewerV1
 
 the only renewal path left for a name that was
