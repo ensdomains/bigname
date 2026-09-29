@@ -3,6 +3,12 @@
 //! through the registry: `expired` for a registration past its expiry, which keeps that expiry
 //! and its ENSv2 grace, and `unregistered` for an explicit unregister, which keeps neither. A
 //! re-registration drops it.
+//! The registry retains expiry and latest owner in its state; its unregister burns an existing
+//! owner token. The `.eth` registrar admits grace renewal while the latest owner remains.
+//! Bigname omits the public expiry and grace fields for explicit unregisters.
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
 #[path = "families_support/mod.rs"]
 mod support;
 

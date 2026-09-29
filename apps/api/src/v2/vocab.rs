@@ -122,6 +122,10 @@ pub(crate) enum Relation {
     /// lease that lapsed past grace, or an ENSv2 registration that expired or was unregistered
     /// (`lapsed_registration.registrant`). Never current authority, never part of `any`, and never
     /// combined with another relation in one set.
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L341-L362 @ ens_v2_sepolia_20260916@366de741)
+    /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
     FormerRegistrant,
 }
 
