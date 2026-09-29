@@ -34,62 +34,57 @@ async fn family_id_lookups_probe_the_id_indexes() -> Result<()> {
 }
 
 async fn check_plans(connection: &mut PgConnection) -> Result<()> {
+    // One id with rows in every table, one id that is only a wrapped registrar resource, one
+    // id with no rows at all. The loaders bind ids as text, as read from uuid columns.
+    let ids = [fixture_id(3), wrapped_id(3), fixture_id(ROWS + 1)].map(|id| id.to_string());
+    let ids_literal = format!("'{{{}}}'", ids.join(","));
     // The two arms of the lease candidates' OR each probe their own index, under a BitmapOr.
     let both = ["resource_id", "wrapped_registrar_resource_id"];
+    // Each statement is prepared with the parameter types the loader binds.
     let statements = [
-        ("resources", RESOURCES_SQL, &["resource_id"][..]),
-        ("wrapper rows", WRAPPER_ROWS_SQL, &["resource_id"][..]),
-        ("lease candidates", LEASE_CANDIDATES_SQL, &both[..]),
+        (
+            "resources",
+            RESOURCES_SQL,
+            "text[], text, bigint",
+            format!("{ids_literal}, '{CHAIN}', {ROWS}"),
+            &["resource_id"][..],
+        ),
+        (
+            "wrapper_rows",
+            WRAPPER_ROWS_SQL,
+            "text, text[]",
+            format!("'{CHAIN}', {ids_literal}"),
+            &["resource_id"][..],
+        ),
+        (
+            "lease_candidates",
+            LEASE_CANDIDATES_SQL,
+            "text, text[]",
+            format!("'{CHAIN}', {ids_literal}"),
+            &both[..],
+        ),
     ];
     let mut failures = Vec::new();
-    for (label, sql, columns) in statements {
-        // The simple query protocol, which EXPLAIN (GENERIC_PLAN) needs for its parameters.
-        let plan = raw_sql(&format!("EXPLAIN (GENERIC_PLAN, COSTS OFF) {sql}"))
+    for (label, sql, types, values, columns) in &statements {
+        raw_sql(&format!("PREPARE {label} ({types}) AS {sql}"))
+            .execute(&mut *connection)
+            .await
+            .with_context(|| format!("prepare {label}"))?;
+        // The generic plan is the one a prepared statement settles on after its first calls;
+        // the custom plan is the one planned for the bound values.
+        for mode in ["force_generic_plan", "force_custom_plan"] {
+            let plan = raw_sql(&format!(
+                "SET plan_cache_mode = {mode}; EXPLAIN (COSTS OFF) EXECUTE {label} ({values})"
+            ))
             .fetch_all(&mut *connection)
             .await
-            .with_context(|| format!("{label} generic plan"))?
+            .with_context(|| format!("{label} {mode}"))?
             .iter()
             .map(|row| row.try_get(0))
             .collect::<Result<Vec<String>, _>>()?;
-        failures.extend(missing_probes(
-            &format!("{label} (generic)"),
-            &plan,
-            columns,
-        ));
+            failures.extend(missing_probes(&format!("{label} ({mode})"), &plan, columns));
+        }
     }
-    ensure!(
-        failures.is_empty(),
-        "family id plans:\n{}",
-        failures.join("\n\n")
-    );
-
-    // One id with rows in every table, one id that is only a wrapped registrar resource, one
-    // id with no rows at all.
-    let ids = vec![fixture_id(3), wrapped_id(3), fixture_id(ROWS + 1)];
-    let explain = |sql: &str| format!("EXPLAIN (COSTS OFF) {sql}");
-    let plan: Vec<String> = sqlx::query_scalar(&explain(RESOURCES_SQL))
-        .bind(&ids)
-        .bind(CHAIN)
-        .bind(ROWS)
-        .fetch_all(&mut *connection)
-        .await?;
-    failures.extend(missing_probes("resources (bound)", &plan, &["resource_id"]));
-    let plan: Vec<String> = sqlx::query_scalar(&explain(WRAPPER_ROWS_SQL))
-        .bind(CHAIN)
-        .bind(&ids)
-        .fetch_all(&mut *connection)
-        .await?;
-    failures.extend(missing_probes(
-        "wrapper rows (bound)",
-        &plan,
-        &["resource_id"],
-    ));
-    let plan: Vec<String> = sqlx::query_scalar(&explain(LEASE_CANDIDATES_SQL))
-        .bind(CHAIN)
-        .bind(&ids)
-        .fetch_all(&mut *connection)
-        .await?;
-    failures.extend(missing_probes("lease candidates (bound)", &plan, &both));
     ensure!(
         failures.is_empty(),
         "family id plans:\n{}",

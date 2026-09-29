@@ -11,7 +11,7 @@ use super::{
     FamilyPublication, NameHistory, compose::Surface, selection::MigrationProof,
     serving::PointerRow,
 };
-use crate::families::{records::FamilyPosition, uuid_ids};
+use crate::families::records::FamilyPosition;
 
 pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<Vec<Surface>> {
     let rows = sqlx::query(
@@ -146,7 +146,7 @@ pub(super) async fn resources(
     resources: &[String],
 ) -> Result<BTreeMap<String, (Option<Uuid>, bool)>> {
     let rows = sqlx::query(RESOURCES_SQL)
-        .bind(uuid_ids(resources))
+        .bind(resources)
         .bind(&publication.chain_id)
         .bind(publication.block_number)
         .fetch_all(&mut *conn)
@@ -208,7 +208,7 @@ pub(super) async fn resource_pointers(
                         SELECT * FROM unnest($3::text[], $4::text[]))))",
     )
     .bind(chain_id)
-    .bind(uuid_ids(resources))
+    .bind(resources)
     .bind(&namespaces)
     .bind(&namehashes)
     .fetch_all(&mut *conn)

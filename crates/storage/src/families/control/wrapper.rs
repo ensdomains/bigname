@@ -7,7 +7,6 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 
 use super::rows::WrapperRow;
-use crate::families::uuid_ids;
 
 /// The fuse the NameWrapper burns on a `.eth` second-level name.
 /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
@@ -140,7 +139,7 @@ pub async fn load_wrapper_rows(
     }
     let rows: Vec<Value> = sqlx::query_scalar(WRAPPER_ROWS_SQL)
         .bind(chain_id)
-        .bind(uuid_ids(resource_ids))
+        .bind(resource_ids)
         .fetch_all(executor)
         .await
         .context("failed to load the wrapper family rows")?;
