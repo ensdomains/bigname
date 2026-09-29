@@ -173,9 +173,7 @@ impl ProjectPhase {
     }
 
     /// Replay to the prior publication or the redo range end, whichever is higher, bounded by
-    /// the readable head. The family marker remains the publication authority. An unfinished
-    /// repair has already moved the marker below the publication it started from, so its replay
-    /// target counts as that publication: a redo rerun after a stop still reaches it.
+    /// the readable head. The family marker remains the publication authority.
     async fn family_redo_target(
         &self,
         chain_id: &str,
@@ -183,10 +181,7 @@ impl ProjectPhase {
         latest: i64,
     ) -> RunnerResult<BlockMarker> {
         let standing: Option<i64> = sqlx::query_scalar(
-            "SELECT GREATEST(
-                 (SELECT current_block_number FROM project_family_marker WHERE chain_id = $1),
-                 (SELECT replay_target_number FROM project_repair_record
-                  WHERE chain_id = $1 AND state <> 'complete'))",
+            "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
         )
         .bind(chain_id)
         .fetch_optional(&self.pool)
