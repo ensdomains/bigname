@@ -27,6 +27,10 @@ pub struct FamilySettings {
     pub retry_family_failures: bool,
     /// Rebuild blocks eligible for bounded range transactions.
     pub rebuild_ranges: RebuildRanges,
+    /// Refuse to run on the hydrated chain without its hydration RPC URL. The supervised runner
+    /// follows the head and needs it; the one-shot redo only undoes and replays, which never
+    /// reads RPC, and leaves the refresh to the runner.
+    pub require_hydration_url: bool,
 }
 
 impl Default for FamilySettings {
@@ -35,6 +39,7 @@ impl Default for FamilySettings {
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
             retry_family_failures: true,
             rebuild_ranges: RebuildRanges::BelowSafe,
+            require_hydration_url: true,
         }
     }
 }

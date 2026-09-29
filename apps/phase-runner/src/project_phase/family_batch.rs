@@ -35,8 +35,10 @@ impl ProjectPhase {
         let chain_id = context.chain_id.as_str();
         // Follow blocks on this chain hydrate from RPC. A configured runner without its URL is
         // stopped before any publication, so a rebuild cannot publish values that the first
-        // follow block would then fail to refresh.
+        // follow block would then fail to refresh. The one-shot redo, which only undoes and
+        // replays, runs without it (`FamilySettings::require_hydration_url`).
         if let Some(rpc_urls) = &self.hydration_rpc_urls
+            && self.families.require_hydration_url
             && chain_id == HYDRATED_CHAIN
             && rpc_urls.url_for(chain_id).is_none()
         {
