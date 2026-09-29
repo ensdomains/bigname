@@ -1013,9 +1013,13 @@ async fn sepolia_manifest_set_admits_exactly_one_ens_v1_registrar_predecessor_so
                 "wrapped_registrar_controller",
                 "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72"
             ),
+            (
+                "wrapped_registrar_controller_4477cac",
+                "0x4477cac137f3353ca35060e01e5aeb777a1ca01b"
+            ),
         ],
         "an activated `.eth` second-level boundary must have one registrar source, beside the \
-         renewal-only wrapped controller"
+         renewal-only wrapped controllers"
     );
     let (_, registrar_address, _) = registrar_sources
         .iter()

@@ -1,7 +1,6 @@
-# Sepolia ENSv1 .eth BaseRegistrar, plus the receipt-backed wrapped registrar
-# controller for its label-bearing renewals only. The unwrapped and legacy
-# registrar controllers, and a second NameWrapper-enabled wrapped controller with no
-# pinned deployment artifact, remain unadmitted.
+# Sepolia ENSv1 .eth BaseRegistrar, plus the two NameWrapper-enabled wrapped
+# registrar controllers for their label-bearing renewals only. The unwrapped and
+# legacy registrar controllers remain unadmitted.
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_registrar_l1"
@@ -50,6 +49,23 @@ address = "0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72"
 proxy_kind = "none"
 start_block = 3790244
 
+# The second WrappedETHRegistrarController. No pinned reference names it, so it is
+# admitted from chain evidence (docs/upstream.md, "Second Sepolia wrapped registrar
+# controller admitted from chain evidence"): created at block 7035077 by transaction
+# 0x42f5bd5cd19b7bb4775a05dd1517deab393abc2f53b4c132f5538c15ed639f18, and enabled by the
+# Sepolia NameWrapper's ControllerChanged(0x4477cAc1…, true) at block 7035078 in
+# transaction 0xcc030c7df411235634713641bc9685c7f0fc6582436adc991eaeac6aff67ef89, never
+# disabled. It emits the same label-bearing NameRenewed as the first controller. The
+# role differs only because contract roles are singleton declaration names; the
+# adapter treats both roles alike.
+# (upstream: .refs/ens_v1/contracts/wrapper/Controllable.sol:L9-L19 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L315 @ ens_v1@91c966f)
+[[contracts]]
+role = "wrapped_registrar_controller_4477cac"
+address = "0x4477cAc137F3353Ca35060E01E5aEb777a1Ca01B"
+proxy_kind = "none"
+start_block = 7035078
+
 # BaseRegistrar ERC-721 transfer admission follows the deployed ABI.
 # (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L188-L206 @ ens_v1@91c966f)
 [[abi.events]]
@@ -92,7 +108,7 @@ normalized_events = ["RegistrationGranted", "RegistrationRenewed", "ExpiryChange
 [[abi.events]]
 name = "NameRenewed"
 fragment = "event NameRenewed(string name, bytes32 indexed label, uint256 cost, uint256 expires)"
-emitter_roles = ["wrapped_registrar_controller"]
+emitter_roles = ["wrapped_registrar_controller", "wrapped_registrar_controller_4477cac"]
 normalized_events = ["ExpiryChanged", "PreimageObserved"]
 
 # BaseRegistrar authorization checks both ERC-721 token approvals and

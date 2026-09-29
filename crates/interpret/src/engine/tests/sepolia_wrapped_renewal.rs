@@ -21,6 +21,10 @@ mod wrapped_controller {
 /// renewals.
 /// (upstream: .refs/basenames/lib/ens-contracts/deployments/sepolia/ETHRegistrarController.json:L2 @ basenames@1809bbc)
 const WRAPPED_CONTROLLER: &str = "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72";
+/// The second NameWrapper-enabled wrapped controller, admitted from chain evidence under its own
+/// role (docs/upstream.md, "Second Sepolia wrapped registrar controller admitted from chain
+/// evidence").
+const SECOND_WRAPPED_CONTROLLER: &str = "0x4477cac137f3353ca35060e01e5aeb777a1ca01b";
 const REGISTRATION_BLOCK: i64 = SETUP_BLOCK;
 const RENEWAL_BLOCK: i64 = PREDECESSOR_BLOCK;
 const REGISTRAR_EXPIRY: u64 = 1_900_000_000;
@@ -45,7 +49,22 @@ type ExpiryRow = (Option<Uuid>, String, Option<i64>, Option<String>);
 /// a redo.
 #[tokio::test]
 async fn sepolia_wrapped_controller_renewal_moves_the_wrapper_expiry() -> TestResult {
-    let database = database("interpret_sepolia_wrapped_renewal").await?;
+    renewal_moves_the_wrapper_expiry(WRAPPED_CONTROLLER, "interpret_sepolia_wrapped_renewal").await
+}
+
+/// The same for a renewal through the second wrapped controller, which the manifest declares
+/// under its own role.
+#[tokio::test]
+async fn sepolia_second_wrapped_controller_renewal_moves_the_wrapper_expiry() -> TestResult {
+    renewal_moves_the_wrapper_expiry(
+        SECOND_WRAPPED_CONTROLLER,
+        "interpret_sepolia_second_wrapped_renewal",
+    )
+    .await
+}
+
+async fn renewal_moves_the_wrapper_expiry(controller: &str, database_name: &str) -> TestResult {
+    let database = database(database_name).await?;
     let pool = database.pool();
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -58,7 +77,7 @@ async fn sepolia_wrapped_controller_renewal_moves_the_wrapper_expiry() -> TestRe
     let namehash = eth_namehash(labelhash);
     let logical_name_id = format!("ens:{namehash:#x}");
     seed_wrapped_registration(pool, label, labelhash, namehash).await?;
-    seed_wrapped_renewal(pool, label, labelhash).await?;
+    seed_wrapped_renewal(pool, controller, label, labelhash).await?;
 
     Engine::new(pool.clone())
         .run_batch(BatchRequest {
@@ -223,8 +242,13 @@ async fn seed_wrapped_registration(
 
 /// `renew` on the wrapped controller: `NameWrapper.renew` calls `BaseRegistrar.renew`, which emits
 /// the numeric `NameRenewed`, then the controller emits its label-bearing `NameRenewed`.
-async fn seed_wrapped_renewal(pool: &PgPool, label: &[u8], labelhash: B256) -> TestResult {
-    insert_transaction(pool, RENEWAL_BLOCK, WRAPPED_CONTROLLER).await?;
+async fn seed_wrapped_renewal(
+    pool: &PgPool,
+    controller: &str,
+    label: &[u8],
+    labelhash: B256,
+) -> TestResult {
+    insert_transaction(pool, RENEWAL_BLOCK, controller).await?;
     insert_log(
         pool,
         RENEWAL_BLOCK,
@@ -241,7 +265,7 @@ async fn seed_wrapped_renewal(pool: &PgPool, label: &[u8], labelhash: B256) -> T
         pool,
         RENEWAL_BLOCK,
         1,
-        WRAPPED_CONTROLLER,
+        controller,
         wrapped_controller::NameRenewed {
             name: std::str::from_utf8(label)?.to_owned(),
             label: labelhash,
