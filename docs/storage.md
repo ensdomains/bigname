@@ -240,6 +240,14 @@ Family indexes serve these concrete readers:
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry
   pointers only) by namespace and namehash, joined by a BitmapOr; the planner chooses that
   path on cost, and the plan test pins it for a selective request.
+- A follow block's name-summary work list (`project:families.derived.summary_names`) reads
+  the registry events and name surfaces of the blocks after the family marker's through
+  `normalized_events_chain_block_number_idx` (or its descending twin) and
+  `name_surfaces_chain_block_number_idx`, with the marker's block bound as a parameter, and
+  each such event's resource through `normalized_events_resource_history_idx`. Name-summary
+  composition looks names up through `project_lifecycle_key_state_name_idx` (beside the key
+  state primary key, joined by a BitmapOr) and `project_name_state_name_idx`, since
+  `project_name_state`'s primary key leads with the namespace.
 
 
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase

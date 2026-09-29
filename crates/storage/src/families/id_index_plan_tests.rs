@@ -4,7 +4,10 @@
 //! uuid column itself with the ids, so the planner can probe the column's index; a
 //! `column::text` comparison can only filter a scan of the whole chain. Their fixture is small,
 //! so `enable_seqscan` is off to stand in for a large table: the assertions are about which
-//! access paths the planner can use at all, not about costs.
+//! access paths the planner can use at all, not about costs. The name summary loaders that look
+//! rows up by name id (lifecycle key states, authority starts, name migrations) are checked the
+//! same way: each must probe an index on `(chain_id, logical_name_id)`, the key states' by-name
+//! arm beside the primary key under a BitmapOr.
 //!
 //! The resource pointer lookup ORs a by-resource arm with a root-registry arm. Its test keeps
 //! sequential scans enabled and pins, in the generic plan, a BitmapOr of the primary key and
@@ -18,8 +21,11 @@ use sqlx::{PgConnection, Row, raw_sql};
 use uuid::Uuid;
 
 use super::{
-    control::{lifecycle::LEASE_CANDIDATES_SQL, wrapper::WRAPPER_ROWS_SQL},
-    name::{RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid},
+    control::{
+        lifecycle::{AUTHORITY_STARTS_SQL, KEY_STATES_SQL, LEASE_CANDIDATES_SQL},
+        wrapper::WRAPPER_ROWS_SQL,
+    },
+    name::{MIGRATIONS_SQL, RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid},
 };
 
 const CHAIN: &str = "ethereum-sepolia";
@@ -80,9 +86,13 @@ async fn check_id_lookups(connection: &mut PgConnection) -> Result<()> {
     ]
     .map(|id| id.to_string());
     let ids_literal = format!("'{{{}}}'", ids.join(","));
+    // The name summary loaders look names up by id: names 3, 4 and 5, and one with no rows.
+    let names = ["ens:3", "ens:4", "ens:5", "ens:4000"].map(str::to_owned);
+    let names_literal = format!("'{{{}}}'", names.join(","));
     let resource_probe = &["(resource_id = ANY "][..];
     let keyed_probe = &["(chain_id = ", "(resource_id = ANY "][..];
     let wrapped_probe = &["(chain_id = ", "(wrapped_registrar_resource_id = ANY "][..];
+    let named_probe = &["(chain_id = ", "(logical_name_id = ANY "][..];
     // Each statement is prepared with the parameter types the loader binds.
     let statements = [
         (
@@ -121,6 +131,43 @@ async fn check_id_lookups(connection: &mut PgConnection) -> Result<()> {
                     conditions: wrapped_probe,
                 },
             ],
+        ),
+        (
+            // By name through the partial name index, by resource through the primary key.
+            "key_states",
+            KEY_STATES_SQL,
+            "text, text[], text[]",
+            format!("'{CHAIN}', {names_literal}, {ids_literal}"),
+            vec![
+                Probe {
+                    index: "project_lifecycle_key_state_name_idx",
+                    conditions: named_probe,
+                },
+                Probe {
+                    index: "project_lifecycle_key_state_pkey",
+                    conditions: keyed_probe,
+                },
+            ],
+        ),
+        (
+            "authority_starts",
+            AUTHORITY_STARTS_SQL,
+            "text, text[]",
+            format!("'{CHAIN}', {names_literal}"),
+            vec![Probe {
+                index: "project_name_state_name_idx",
+                conditions: named_probe,
+            }],
+        ),
+        (
+            "name_migrations",
+            MIGRATIONS_SQL,
+            "text, text[]",
+            format!("'{CHAIN}', {names_literal}"),
+            vec![Probe {
+                index: "project_name_state_name_idx",
+                conditions: named_probe,
+            }],
         ),
     ];
     let mut failures = Vec::new();
@@ -188,6 +235,45 @@ async fn check_id_lookups(connection: &mut PgConnection) -> Result<()> {
         ensure!(
             candidates == ["ens:3", "ens:6"],
             "{mode}: lease candidates returned {candidates:?}"
+        );
+        // Names 3 and 5 by name (name 4 has a key state with no name), and resource 3 again
+        // by id, returned once.
+        let mut key_states: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT state ->> 'resource_id' FROM ({KEY_STATES_SQL}) row (state)"
+        ))
+        .bind(CHAIN)
+        .bind(&names)
+        .bind(&ids)
+        .fetch_all(&mut *connection)
+        .await?;
+        key_states.sort();
+        ensure!(
+            key_states == [fixture_id(3).to_string(), fixture_id(5).to_string()],
+            "{mode}: key states returned {key_states:?}"
+        );
+        let mut starts: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT logical_name_id FROM ({AUTHORITY_STARTS_SQL}) start"
+        ))
+        .bind(CHAIN)
+        .bind(&names)
+        .fetch_all(&mut *connection)
+        .await?;
+        starts.sort();
+        ensure!(
+            starts == ["ens:3", "ens:4", "ens:5"],
+            "{mode}: authority starts returned {starts:?}"
+        );
+        // Only even names carry a MigrationApplied.
+        let migrations: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT logical_name_id FROM ({MIGRATIONS_SQL}) migration"
+        ))
+        .bind(CHAIN)
+        .bind(&names)
+        .fetch_all(&mut *connection)
+        .await?;
+        ensure!(
+            migrations == ["ens:4"],
+            "{mode}: name migrations returned {migrations:?}"
         );
     }
     Ok(())
@@ -407,7 +493,9 @@ async fn install_schema(connection: &mut PgConnection) -> Result<()> {
 
 async fn install_id_fixture(connection: &mut PgConnection) -> Result<()> {
     // Resource n is uuid n; name n holds resource n, and on every third name also wrapped
-    // registrar resource 2^64 + n.
+    // registrar resource 2^64 + n. Resource n has a lifecycle key state, carrying name n
+    // unless n is a multiple of four, and name n a name state, with a MigrationApplied position
+    // when n is even.
     raw_sql(&format!(
         "INSERT INTO chain_lineage
              (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
@@ -432,6 +520,20 @@ async fn install_id_fixture(connection: &mut PgConnection) -> Result<()> {
                 'candidate:' || n,
                 CASE WHEN n % 3 = 0
                      THEN ('0000000000000001' || lpad(to_hex(n), 16, '0'))::uuid END
+         FROM generate_series(1, {ROWS}) n;
+
+         INSERT INTO project_lifecycle_key_state
+             (chain_id, resource_id, logical_name_id, block_number, event_identity)
+         SELECT '{CHAIN}', lpad(to_hex(n), 32, '0')::uuid,
+                CASE WHEN n % 4 <> 0 THEN 'ens:' || n END, n, 'key-state:' || n
+         FROM generate_series(1, {ROWS}) n;
+
+         INSERT INTO project_name_state
+             (namespace, logical_name_id, chain_id, block_number, event_identity,
+              migration_position)
+         SELECT 'ens', 'ens:' || n, '{CHAIN}', n, 'name-state:' || n,
+                CASE WHEN n % 2 = 0
+                     THEN jsonb_build_object('event_identity', 'migration:' || n) END
          FROM generate_series(1, {ROWS}) n;
 
          ANALYZE; SET enable_seqscan = off"

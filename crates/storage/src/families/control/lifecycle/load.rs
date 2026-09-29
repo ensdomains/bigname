@@ -44,6 +44,22 @@ pub(crate) const LEASE_CANDIDATES_SQL: &str =
        AND (candidate.resource_id = ANY($2::uuid[])
             OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[]))";
 
+/// The lifecycle key states on chain `$1` of the names `$2` or the resources `$3`: a BitmapOr of
+/// `project_lifecycle_key_state_name_idx` and the primary key.
+pub(crate) const KEY_STATES_SQL: &str =
+    "/* storage:families.control.lifecycle.key_states */ SELECT to_jsonb(state)
+     FROM bigname_phase.project_lifecycle_key_state state
+     WHERE state.chain_id = $1
+       AND (state.logical_name_id = ANY($2) OR state.resource_id = ANY($3::uuid[]))";
+
+/// The authority epoch starts on chain `$1` of the names `$2`, by `project_name_state_name_idx`
+/// (the primary key leads with the namespace, which the names do not bind).
+pub(crate) const AUTHORITY_STARTS_SQL: &str =
+    "/* storage:families.control.lifecycle.authority_starts */
+     SELECT state.logical_name_id, state.authority_start_positions
+     FROM bigname_phase.project_name_state state
+     WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2)";
+
 /// The namespace of a logical name id: the part before the first `:`, or `ens` when the id
 /// has none.
 pub fn namespace_of(name: &str) -> &str {
@@ -167,18 +183,13 @@ pub async fn load_name_facts_on(
     }
     resources.extend(targets.values().map(|(resource, _)| resource.clone()));
     let resource_list: Vec<String> = resources.iter().cloned().collect();
-    let key_state_rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.lifecycle.key_states */ SELECT to_jsonb(state)
-         FROM bigname_phase.project_lifecycle_key_state state
-         WHERE state.chain_id = $1
-           AND (state.logical_name_id = ANY($2) OR state.resource_id = ANY($3::uuid[]))",
-    )
-    .bind(chain_id)
-    .bind(&ids)
-    .bind(&resource_list)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load the lifecycle key states")?;
+    let key_state_rows: Vec<Value> = sqlx::query_scalar(KEY_STATES_SQL)
+        .bind(chain_id)
+        .bind(&ids)
+        .bind(&resource_list)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the lifecycle key states")?;
     let mut key_states: BTreeMap<String, (Option<String>, Maxima)> = BTreeMap::new();
     for row in &key_state_rows {
         if let Some(resource) = text(row, "resource_id") {
@@ -278,19 +289,15 @@ pub async fn load_name_facts_on(
         .into_iter()
         .collect(),
     );
-    let starts: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
-        "/* storage:families.control.lifecycle.authority_starts */
-         SELECT state.logical_name_id, state.authority_start_positions
-         FROM bigname_phase.project_name_state state
-         WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2)",
-    )
-    .bind(chain_id)
-    .bind(&ids)
-    .fetch_all(&mut *conn)
-    .await
-    .context("failed to load name states")?
-    .into_iter()
-    .collect();
+    let starts: BTreeMap<String, Value> =
+        sqlx::query_as::<_, (String, Value)>(AUTHORITY_STARTS_SQL)
+            .bind(chain_id)
+            .bind(&ids)
+            .fetch_all(&mut *conn)
+            .await
+            .context("failed to load name states")?
+            .into_iter()
+            .collect();
     let node_keys: Vec<(String, String)> = names
         .iter()
         .map(|name| {

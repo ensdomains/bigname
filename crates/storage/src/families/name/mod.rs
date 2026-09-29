@@ -49,7 +49,7 @@ pub(crate) use batch::{
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 #[cfg(test)]
-pub(crate) use loaders::{RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid};
+pub(crate) use loaders::{MIGRATIONS_SQL, RESOURCE_POINTERS_SQL, RESOURCES_SQL, canonical_uuid};
 pub use summary::{
     NameSummaryPublication, compose_name_summaries, compose_name_summary_publication,
 };
