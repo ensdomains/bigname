@@ -1993,10 +1993,14 @@ request data or a reusable persisted lookup outcome. The current baseline and
 the removal schema-migration keep the guarded functions' signatures and grants
 while removing their former serving-table inputs.
 
-Ledger rows are durable operational observations, not projection input or a
-response cache. When a family publication changes an ENS Mainnet exact resolver
-to null, Project retires active direct observations for that name in the same
-transaction.
+Ledger rows are durable operational observations, not authority for served
+values or a response cache. When a family publication changes an ENS Mainnet or Sepolia exact resolver
+to null, Project retires active direct observations for that name on the
+publication's chain in the same transaction. A Universal Resolver proxy change
+adds names with active disagreements on that chain to the reserved-name summary
+refresh candidates, so cutover also retires observations for names without a live
+ENSv2 entry and their descendants. Candidates are bounded by active evidence rather
+than every name; previously retired observations and other chains are unchanged.
 [Universal Resolver ancestor discovery](glossary.md#universal-resolver-ancestor-discovery)
 revalidates the exact composed name, Ethereum head, family publication, canonical
 positions and Universal Resolver manifest authority. It does not write, compare

@@ -174,11 +174,10 @@ pub(super) async fn apply(
     Ok(())
 }
 
-/// The names whose served expiry a change of the Universal Resolver proxies can move: every name
-/// with an ENSv2 reservation. A reserved `.eth` name serves its ENSv1 lease's expiry before the
-/// cutover and the reservation's after it (storage families/control/lifecycle/expiry.rs), so a
-/// block that changed a proxy row recomposes their summaries. Empty for any other block: the
-/// guard reads the block's journal by its primary key, and the scan runs only past it.
+/// A proxy change can move reserved names' served expiry and null other names' resolver.
+/// Refresh reservations plus names with active disagreements on this chain, so publication
+/// retires newly outdated evidence without scanning every name. The journal guard admits the
+/// candidate scans only for a block that changed a proxy row.
 pub(super) async fn cutover_names(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -198,15 +197,20 @@ pub(super) async fn cutover_names(
 }
 
 const CUTOVER_NAMES: &str = r#"/* project:families.derived.cutover_names */
-    SELECT DISTINCT COALESCE(event.decoded_logical_name_id, event.original_logical_name_id)
-    FROM project_lifecycle_event event
-    WHERE EXISTS (
-            SELECT 1 FROM project_family_undo undo
-            WHERE undo.chain_id = $1 AND undo.block_number = $2
-              AND undo.family = 'project_universal_resolver_proxy'
-          )
-      AND event.chain_id = $1
-      AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
-      AND event.event_kind = 'RegistrationReserved'
-      AND COALESCE(event.decoded_logical_name_id, event.original_logical_name_id) IS NOT NULL
+    SELECT DISTINCT logical_name_id FROM (
+        SELECT COALESCE(event.decoded_logical_name_id, event.original_logical_name_id)
+               AS logical_name_id
+        FROM project_lifecycle_event event
+        WHERE event.chain_id = $1
+          AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
+          AND event.event_kind = 'RegistrationReserved'
+        UNION ALL
+        SELECT logical_name_id FROM resolution_divergences
+        WHERE resolver_chain_id = $1 AND cleared_at IS NULL
+    ) candidates
+    WHERE logical_name_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM project_family_undo undo
+        WHERE undo.chain_id = $1 AND undo.block_number = $2
+          AND undo.family = 'project_universal_resolver_proxy'
+    )
 "#;
