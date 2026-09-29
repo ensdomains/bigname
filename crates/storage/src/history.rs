@@ -17,6 +17,7 @@ mod keyset;
 mod lineage;
 mod options;
 mod paging;
+mod primary_values;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;
 mod read_filter;
@@ -53,6 +54,7 @@ pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
+pub use primary_values::load_recorded_primary_names;
 pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,

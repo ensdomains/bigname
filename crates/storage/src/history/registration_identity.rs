@@ -20,6 +20,13 @@ use super::{
 /// it, so rows Interpret wrote above the bound publication cannot reclassify rows below it.
 type PublicationBounds<'a> = Option<&'a BTreeMap<String, i64>>;
 
+/// A confirmed migration's registration: the resource of the ENSv2 successor binding its
+/// correlation group validated, which the migration interpreter records on the boundary. The
+/// boundary's own resource is the pending `LabelRegistered` grant's, which a fresh registration
+/// has not been given yet. Only activated boundaries reach history reads.
+const MIGRATION_SUCCESSOR: &str =
+    "NULLIF(ne.after_state #>> '{successor_binding,resource_id}', '')::uuid";
+
 pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         "ne.event_kind IN (
@@ -103,7 +110,11 @@ pub(super) fn push_registration_filter<'a>(
             );
         });
     }
-    builder.push(")) OR (");
+    builder.push(format!(
+        ")) OR (ne.event_kind = 'MigrationApplied' AND {MIGRATION_SUCCESSOR} = "
+    ));
+    builder.push_bind(registration_id);
+    builder.push(") OR (");
     push_public_registration_at_event(builder, registration_id, canonical_only, published);
     builder.push(" AND ");
     push_product_registration_id(builder, canonical_only);
@@ -393,6 +404,7 @@ fn push_product_registration_id_with_anchors(
     builder.push(format!(
         r#"
         CASE
+            WHEN ne.event_kind = 'MigrationApplied' THEN {MIGRATION_SUCCESSOR}
             WHEN ne.resource_id IS NULL THEN NULL::uuid
             WHEN ne.source_family IN ('ens_v2_registry_l1', 'ens_v2_migration_l1') AND (
                 ne.event_kind = 'RegistrationReserved'

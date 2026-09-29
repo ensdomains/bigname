@@ -2347,6 +2347,7 @@ async fn v2_history_include_data_adds_friendly_payloads_and_keeps_lean_rows_othe
             "key": "addr:60",
             "coin_type": 60,
             "value": "0x0000000000000000000000000000000000000def",
+            "resolver": { "chain_id": 1, "address": RESOLVER },
         })
     );
     assert_eq!(
