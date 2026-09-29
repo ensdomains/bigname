@@ -9,6 +9,7 @@ fn binding(coin_type: &'static str) -> ResolvesToCursorBinding<'static> {
         coin_type,
         dedupe: AddressNamesDedupe::Name,
         q: None,
+        name_match: NameMatch::Prefix,
         authority: None,
         sort: AddressNamesSort::Name,
         order: SortOrder::Asc,
@@ -30,8 +31,10 @@ fn resolves_to_cursor_binds_relation_and_coin_type() {
         cursor
     );
     assert!(resolves_to_storage_cursor(&payload, &binding("2147483658")).is_err());
+    let ens_v1 = AuthoritySet::from(Authority::EnsV1);
+    let ens_v2 = AuthoritySet::from(Authority::EnsV2);
     let selected_authority = ResolvesToCursorBinding {
-        authority: Some(Authority::EnsV1),
+        authority: Some(&ens_v1),
         ..binding("60")
     };
     assert!(resolves_to_storage_cursor(&payload, &selected_authority).is_err());
@@ -46,7 +49,7 @@ fn resolves_to_cursor_binds_relation_and_coin_type() {
         resolves_to_storage_cursor(
             &selected_payload,
             &ResolvesToCursorBinding {
-                authority: Some(Authority::EnsV2),
+                authority: Some(&ens_v2),
                 ..binding("60")
             },
         )
@@ -62,6 +65,7 @@ fn resolves_to_cursor_binds_relation_and_coin_type() {
             relation: None,
             dedupe: AddressNamesDedupe::Name,
             q: None,
+            name_match: NameMatch::Prefix,
             authority: None,
             is_migrated: None,
             sort: AddressNamesSort::Name,

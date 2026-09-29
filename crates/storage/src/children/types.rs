@@ -43,13 +43,13 @@ pub enum ChildrenCurrentOrder {
     Desc,
 }
 
-/// Page-narrowing controls for declared direct child page reads. `q` is a caller-normalized
-/// prefix compared byte-wise against the served child name; `include_expired=false` omits
+/// Page-narrowing controls for declared direct child page reads. `q` is caller-normalized text
+/// compared byte-wise against the served child name as a prefix or a substring; `include_expired=false` omits
 /// children whose current registration is released or whose expiry is earlier than the
 /// supplied fixed evaluation time, which the page then requires.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildrenCurrentPageFilter<'a> {
-    pub q: Option<&'a str>,
+    pub q: Option<crate::NameQuery<'a>>,
     pub include_expired: bool,
     /// Fixed evaluation time for expiry filtering across count and continuation requests;
     /// required when `include_expired` is false.

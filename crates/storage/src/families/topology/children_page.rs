@@ -1,6 +1,6 @@
 //! The subnames page, the registry labels page and the child counts over the family child
 //! relation, with the page semantics of crates/storage/src/children/page.rs and reads.rs: the
-//! optional prefix, the expiry fence with its null treatment, the name and timestamp sorts, the
+//! optional prefix or substring filter, the expiry fence with its null treatment, the name and timestamp sorts, the
 //! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds. The total
 //! is an exact count over the same filtered relation, taken in the same statement as the page;
 //! there is no maintained child count, because eligibility depends on the parent's current
@@ -19,8 +19,7 @@ use sqlx::{
 
 use crate::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentSort, ChildrenCurrentSortValue, address_names::escape_like_pattern,
-    families::name::ensure_published,
+    ChildrenCurrentSort, ChildrenCurrentSortValue, families::name::ensure_published,
 };
 
 use super::{
@@ -298,9 +297,9 @@ fn push_children<'a>(
         builder.push(" AND selected.registry_address = ");
         builder.push_bind(registry);
     }
-    if let Some(prefix) = filter.q {
+    if let Some(q) = filter.q {
         builder.push(format!(" AND {CHILD_DISPLAY_NAME} LIKE "));
-        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push_bind(q.like_pattern());
         builder.push(" ESCAPE '\\'");
     }
     if !filter.include_expired {

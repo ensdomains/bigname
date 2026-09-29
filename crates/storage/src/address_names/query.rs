@@ -8,6 +8,7 @@ use sqlx::{Postgres, QueryBuilder};
 use super::types::{
     AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+    NameQuery,
 };
 use super::{
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
@@ -22,8 +23,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     namespace: Option<&'a str>,
     relations: Option<&'a [AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&'a str>,
-    authority: Option<&'a str>,
+    q: Option<NameQuery<'_>>,
+    authorities: Option<&[&str]>,
     is_migrated: Option<bool>,
 ) {
     source.push_with(builder);
@@ -79,17 +80,17 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push_bind(relation_values);
         builder.push(")");
     }
-    if let Some(prefix) = q {
+    if let Some(q) = q {
         builder.push(" AND anc.normalized_name LIKE ");
-        builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
+        builder.push_bind(q.like_pattern());
         builder.push(" ESCAPE '\\'");
     }
-    if let Some(authority) = authority {
+    if let Some(authorities) = authorities.filter(|authorities| !authorities.is_empty()) {
         crate::name_current::push_public_authority_filter_in(
             builder,
             source.names(),
             "anc.logical_name_id",
-            authority,
+            authorities,
         );
     }
     if let Some(is_migrated) = is_migrated {
@@ -313,7 +314,9 @@ pub(super) fn push_address_names_current_cursor_after<'a>(
             push_address_names_current_name_tie_after(builder, sort_value, cursor);
             builder.push(")");
         }
-        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+        AddressNamesCurrentSort::ExpiresAt
+        | AddressNamesCurrentSort::RegisteredAt
+        | AddressNamesCurrentSort::CreatedAt => {
             let sort_value = match &cursor.sort_value {
                 AddressNamesCurrentSortedCursorValue::Timestamp(sort_value) => *sort_value,
                 AddressNamesCurrentSortedCursorValue::Name(_) => return,
@@ -380,7 +383,9 @@ pub(super) fn push_address_names_current_order(
             });
             builder.push(", logical_name_id ASC, resource_id::TEXT ASC");
         }
-        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+        AddressNamesCurrentSort::ExpiresAt
+        | AddressNamesCurrentSort::RegisteredAt
+        | AddressNamesCurrentSort::CreatedAt => {
             builder.push(" ORDER BY ");
             builder.push(timestamp_rank_expr("sort_timestamp", order));
             builder.push(" ASC, sort_timestamp ");
@@ -416,7 +421,9 @@ pub(super) fn push_address_names_current_cursor_sort_value_match<'a>(
             builder.push(" AND canonical_display_name = ");
             builder.push_bind(sort_value);
         }
-        AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+        AddressNamesCurrentSort::ExpiresAt
+        | AddressNamesCurrentSort::RegisteredAt
+        | AddressNamesCurrentSort::CreatedAt => {
             let AddressNamesCurrentSortedCursorValue::Timestamp(sort_value) = &cursor.sort_value
             else {
                 return;
@@ -485,6 +492,7 @@ fn push_address_names_current_sort_timestamp_expr(
         }
         AddressNamesCurrentSort::ExpiresAt => push_expires_at_timestamp_expr(builder),
         AddressNamesCurrentSort::RegisteredAt => push_registered_at_timestamp_expr(builder),
+        AddressNamesCurrentSort::CreatedAt => push_created_at_timestamp_expr(builder),
     };
 }
 
@@ -513,6 +521,15 @@ pub(crate) fn push_registered_at_timestamp_expr(builder: &mut QueryBuilder<'_, P
             &["registration", "registered_at"],
             &["registration", "registration_date"],
         ],
+    );
+}
+
+/// Push the first-observation timestamp read of a `name_current` row aliased `nc`: the paths the
+/// served `created_at` reads (composition always writes `registration.created_at`).
+fn push_created_at_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>) {
+    push_json_timestamp_coalesce_expr(
+        builder,
+        &[&["registration", "created_at"], &["history", "created_at"]],
     );
 }
 
@@ -579,11 +596,4 @@ fn timestamp_null_rank(value: Option<OffsetDateTime>, order: AddressNamesCurrent
         (true, AddressNamesCurrentOrder::Desc) => 0,
         (false, AddressNamesCurrentOrder::Desc) => 1,
     }
-}
-
-pub(crate) fn escape_like_pattern(value: &str) -> String {
-    value
-        .replace('\\', r"\\")
-        .replace('%', r"\%")
-        .replace('_', r"\_")
 }

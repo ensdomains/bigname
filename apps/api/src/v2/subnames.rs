@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
-use super::name_filter::normalize_name_prefix;
+use super::name_filter::NameMatch;
 use super::support::normalize_inferred_route_name;
 use super::{
     AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
@@ -38,6 +38,7 @@ const NAMESPACE_FILTER_KEY: &str = "namespace";
 const PARENT_FILTER_KEY: &str = "parent";
 const ORDER_FILTER_KEY: &str = "order";
 const Q_FILTER_KEY: &str = "q";
+const MATCH_FILTER_KEY: &str = "match";
 const INCLUDE_EXPIRED_FILTER_KEY: &str = "include_expired";
 /// Today's behaviour, kept as the default: a page lists released and past-expiry children.
 const DEFAULT_INCLUDE_EXPIRED: bool = true;
@@ -50,6 +51,7 @@ impl QueryParamAllowlist for SubnamesQueryParams {
         "at",
         "finality",
         "q",
+        "match",
         "sort",
         "order",
         "include_expired",
@@ -93,6 +95,7 @@ pub(crate) async fn get_subnames(
 ) -> V2Result<Json<Envelope<Vec<Subname>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
+    let storage_sort = sort_to_storage(params.sort)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -131,20 +134,25 @@ pub(crate) async fn get_subnames(
         )));
     };
 
-    let normalized_q = params.q.as_deref().map(normalize_name_prefix).transpose()?;
+    let normalized_q = params
+        .q
+        .as_deref()
+        .map(|q| params.name_match.normalize(q))
+        .transpose()?;
     let binding = SubnamesCursorBinding {
         namespace: &namespace,
         parent_logical_name_id: &parent.logical_name_id,
         q: normalized_q.as_deref(),
+        name_match: params.name_match,
         include_expired: params.include_expired.unwrap_or(DEFAULT_INCLUDE_EXPIRED),
         sort: params.sort,
         order: params.order.unwrap_or(SortOrder::Asc),
     };
     let filter = ChildrenCurrentPageFilter {
         evaluated_at: Some(snapshot.evaluated_at()),
-        q: binding.q,
+        q: binding.q.map(|q| binding.name_match.to_storage(q)),
         include_expired: binding.include_expired,
-        sort: sort_to_storage(binding.sort),
+        sort: storage_sort,
         order: order_to_storage(binding.order),
     };
     let storage_cursor = params
@@ -317,6 +325,7 @@ pub(crate) struct SubnamesCursorBinding<'a> {
     pub(crate) namespace: &'a str,
     pub(crate) parent_logical_name_id: &'a str,
     pub(crate) q: Option<&'a str>,
+    pub(crate) name_match: NameMatch,
     pub(crate) include_expired: bool,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
@@ -332,7 +341,7 @@ impl SubnamesCursorBinding<'_> {
     }
 
     fn filters(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
+        let mut filters = BTreeMap::from([
             (NAMESPACE_FILTER_KEY.to_owned(), self.namespace.to_owned()),
             (
                 PARENT_FILTER_KEY.to_owned(),
@@ -347,15 +356,26 @@ impl SubnamesCursorBinding<'_> {
                 INCLUDE_EXPIRED_FILTER_KEY.to_owned(),
                 self.include_expired.to_string(),
             ),
-        ])
+        ]);
+        // As on address names: only a contains match that narrows a present `q` adds a key,
+        // so prefix cursors keep the shape they had before `match`.
+        if self.q.is_some() && self.name_match == NameMatch::Contains {
+            filters.insert(
+                MATCH_FILTER_KEY.to_owned(),
+                self.name_match.as_str().to_owned(),
+            );
+        }
+        filters
     }
 }
 
-pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> ChildrenCurrentSort {
+/// The children sorts. `created_at` is an address-name sort only; subnames refuse it.
+pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> V2Result<ChildrenCurrentSort> {
     match sort {
-        AddressNamesSort::Name => ChildrenCurrentSort::Name,
-        AddressNamesSort::ExpiresAt => ChildrenCurrentSort::ExpiresAt,
-        AddressNamesSort::RegisteredAt => ChildrenCurrentSort::RegisteredAt,
+        AddressNamesSort::Name => Ok(ChildrenCurrentSort::Name),
+        AddressNamesSort::ExpiresAt => Ok(ChildrenCurrentSort::ExpiresAt),
+        AddressNamesSort::RegisteredAt => Ok(ChildrenCurrentSort::RegisteredAt),
+        AddressNamesSort::CreatedAt => Err(V2Error::invalid_input("sort is invalid")),
     }
 }
 

@@ -45,6 +45,7 @@ pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> AddressNamesCurrentSort
         AddressNamesSort::Name => AddressNamesCurrentSort::Name,
         AddressNamesSort::ExpiresAt => AddressNamesCurrentSort::ExpiresAt,
         AddressNamesSort::RegisteredAt => AddressNamesCurrentSort::RegisteredAt,
+        AddressNamesSort::CreatedAt => AddressNamesCurrentSort::CreatedAt,
     }
 }
 

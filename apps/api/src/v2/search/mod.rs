@@ -14,7 +14,6 @@ use tracing::error;
 use crate::{AppState, state::is_recognized_public_namespace};
 
 use super::list_cursor::{ListCursor, ListPosition};
-use super::name_filter::{normalize_name_contains, normalize_name_prefix};
 use super::{
     AtSelector, Envelope, Finality, Page, QueryParams, RawQueryParams, RegistrationStatus, V2Error,
     V2Result, api_error_to_v2,
@@ -81,20 +80,8 @@ pub(crate) struct SearchQueryParams {
     pub(crate) page_size: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SearchMatch {
-    Prefix,
-    Contains,
-}
-
-impl SearchMatch {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Prefix => "prefix",
-            Self::Contains => "contains",
-        }
-    }
-}
+/// Search's `match`, the vocabulary the name-list `q` filters share.
+pub(crate) use super::name_filter::NameMatch as SearchMatch;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -143,7 +130,7 @@ impl TryFrom<RawSearchQueryParams> for SearchQueryParams {
             validate_namespace(namespace)?;
         }
 
-        let match_mode = parse_match(raw.match_mode.as_deref())?;
+        let match_mode = SearchMatch::parse(raw.match_mode.as_deref())?;
         Ok(Self {
             at: shared.at,
             finality: shared.finality,
@@ -407,18 +394,7 @@ fn parse_q(value: Option<String>, match_mode: SearchMatch) -> V2Result<String> {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| V2Error::invalid_input("q is required and must be non-empty"))?;
-    match match_mode {
-        SearchMatch::Prefix => normalize_name_prefix(&value),
-        SearchMatch::Contains => normalize_name_contains(&value),
-    }
-}
-
-fn parse_match(value: Option<&str>) -> V2Result<SearchMatch> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None | Some("prefix") => Ok(SearchMatch::Prefix),
-        Some("contains") => Ok(SearchMatch::Contains),
-        Some(_) => Err(V2Error::invalid_input("match is invalid")),
-    }
+    match_mode.normalize(&value)
 }
 
 fn validate_namespace(namespace: &str) -> V2Result<()> {
