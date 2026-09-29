@@ -7,6 +7,7 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 
 use super::rows::WrapperRow;
+use crate::families::uuid_ids;
 
 /// The fuse the NameWrapper burns on a `.eth` second-level name.
 /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
@@ -122,6 +123,12 @@ pub fn restrictions(row: &WrapperRow, clock_seconds: i64) -> Option<Value> {
     }))
 }
 
+/// The F2b rows of the resources `$2` on chain `$1`.
+pub(crate) const WRAPPER_ROWS_SQL: &str =
+    "/* storage:families.control.wrapper_rows */ SELECT to_jsonb(wrapper)
+     FROM bigname_phase.project_wrapper_state wrapper
+     WHERE wrapper.chain_id = $1 AND wrapper.resource_id = ANY($2::uuid[])";
+
 /// The F2b rows of `resource_ids`.
 pub async fn load_wrapper_rows(
     executor: impl PgExecutor<'_>,
@@ -131,16 +138,12 @@ pub async fn load_wrapper_rows(
     if resource_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.wrapper_rows */ SELECT to_jsonb(wrapper)
-         FROM bigname_phase.project_wrapper_state wrapper
-         WHERE wrapper.chain_id = $1 AND wrapper.resource_id::text = ANY($2)",
-    )
-    .bind(chain_id)
-    .bind(resource_ids)
-    .fetch_all(executor)
-    .await
-    .context("failed to load the wrapper family rows")?;
+    let rows: Vec<Value> = sqlx::query_scalar(WRAPPER_ROWS_SQL)
+        .bind(chain_id)
+        .bind(uuid_ids(resource_ids))
+        .fetch_all(executor)
+        .await
+        .context("failed to load the wrapper family rows")?;
     Ok(rows.iter().filter_map(WrapperRow::from_row).collect())
 }
 

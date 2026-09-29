@@ -48,6 +48,8 @@ pub(crate) use batch::{
 };
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
+#[cfg(test)]
+pub(crate) use loaders::RESOURCES_SQL;
 pub use summary::{
     NameSummaryPublication, compose_name_summaries, compose_name_summary_publication,
 };

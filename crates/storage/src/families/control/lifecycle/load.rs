@@ -11,11 +11,14 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 
 use super::{NameFacts, NameInput, TripleFacts, admission::REGISTRAR};
-use crate::families::control::{
-    position::Position,
-    registry::load_registry_nodes_on,
-    rows::{BindingCandidate, LifecycleEvent, Maxima, text},
-    wrapper::load_wrapper_rows,
+use crate::families::{
+    control::{
+        position::Position,
+        registry::load_registry_nodes_on,
+        rows::{BindingCandidate, LifecycleEvent, Maxima, text},
+        wrapper::load_wrapper_rows,
+    },
+    uuid_ids,
 };
 
 async fn json_rows(
@@ -34,6 +37,15 @@ async fn json_rows(
         .await
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
+
+/// The binding candidates on chain `$1` whose resource or wrapped registrar resource is one of
+/// the leases `$2`.
+pub(crate) const LEASE_CANDIDATES_SQL: &str =
+    "/* storage:families.control.lifecycle.lease_candidates */ SELECT to_jsonb(candidate)
+     FROM bigname_phase.project_binding_candidate candidate
+     WHERE candidate.chain_id = $1
+       AND (candidate.resource_id = ANY($2::uuid[])
+            OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[]))";
 
 /// The namespace of a logical name id: the part before the first `:`, or `ens` when the id
 /// has none.
@@ -210,20 +222,19 @@ pub async fn load_name_facts_on(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let lease_candidates: Vec<BindingCandidate> = json_rows(
-        &mut *conn,
-        "/* storage:families.control.lifecycle.lease_candidates */ SELECT to_jsonb(candidate)
-         FROM bigname_phase.project_binding_candidate candidate
-         WHERE candidate.chain_id = $1
-           AND (candidate.resource_id::text = ANY($2)
-                OR candidate.wrapped_registrar_resource_id::text = ANY($2))",
-        chain_id,
-        &leases,
-    )
-    .await?
-    .iter()
-    .filter_map(BindingCandidate::from_row)
-    .collect();
+    let lease_candidates: Vec<BindingCandidate> = if leases.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_scalar::<_, Value>(LEASE_CANDIDATES_SQL)
+            .bind(chain_id)
+            .bind(uuid_ids(&leases))
+            .fetch_all(&mut *conn)
+            .await
+            .context("failed to load the lease candidates")?
+            .iter()
+            .filter_map(BindingCandidate::from_row)
+            .collect()
+    };
 
     let wrappers = load_wrapper_rows(&mut *conn, chain_id, &resource_list).await?;
     let blocks: Vec<i64> = events
