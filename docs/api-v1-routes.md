@@ -342,9 +342,11 @@ collection route carry neither header.
   and no projected authority.
   That classified row serves its resolver without acquiring registration
   identity or control. Indexed records are served when its serving resource has
-  supported inventory. The TLD row keeps `status=unsupported` with
-  `current_authority_not_projected` and the full detail shape; only the
-  resolver and resolver-record fields are added.
+  supported inventory. The TLD row stays `current_authority_not_projected` and
+  unregistered, and like name detail it serves `status=ok` with no
+  `unsupported_reason` and no `registration_id`; only the resolver and
+  resolver-record fields are added. `authority` follows the rule below for
+  rows with no selected binding.
   `profile=detail` name results and reverse rows take `addresses`,
   `text_records`, `content_hash`, and `primary_address` only from a record
   inventory whose coverage is authoritative. When the serving resolver's
@@ -353,8 +355,11 @@ collection route carry neither header.
   `status` and `resolver` keep following the name row. The per-key reason is
   served by `GET /v1/names/{name}/records`.
   With `include=inventory`, each `profile=detail` name result whose record
-  has a current registration and a record inventory row on its serving
-  resource also carries `record.inventory: {known_keys, unset_keys,
+  may serve resolver records (a current registration, or one of the
+  classified serving paths above: an ownerless ENSv1 or Basenames registry
+  row with a retained serving resource, or an ENSv2 TLD served through its
+  root-registry resolver pointer, both unregistered) and has a record
+  inventory row on its serving resource also carries `record.inventory: {known_keys, unset_keys,
   unsupported_keys, abi_content_types, abi_unsupported_reason?}`, the records
   route's container with the records route's meaning: `known_keys` and
   `unset_keys` come from a record inventory whose coverage is authoritative,
@@ -363,10 +368,13 @@ collection route carry neither header.
   applies, so `unsupported_keys` holds only keys the row itself carries.
   `abi_content_types` and `abi_unsupported_reason` have the records route's
   meaning too, and the whole batch reads their evidence at once rather than
-  once per name. The container is omitted, not empty, on a record with no
-  serving inventory: a `status=unsupported` or `unregistered` record, a
-  reservation, or a name whose serving resource has no inventory row; the
-  four value fields are then listed in `unsupported_fields` as before. This
+  once per name. The container is omitted, not empty, in two cases. On a
+  `status=unsupported` record it is omitted with every other field outside
+  the identity-only shape, and that record carries no `unsupported_fields`.
+  On a served record that has no serving inventory (an unregistered record
+  outside the classified serving paths, a reservation, a released name, or a
+  name whose serving resource has no inventory row) it is omitted and the four
+  value fields are listed in `unsupported_fields` as before. This
   is the batch form of the records route's inventory for a caller holding many
   names, bounded by the batch limit above; per-key values, `source=verified`,
   and the `keys` allowlist stay on the records route.
@@ -423,6 +431,18 @@ collection route carry neither header.
   `reverse`, and `addr.reverse` follow the same rule as every other name. An
   address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
+  A name result's `status` and `unsupported_reason` follow the
+  `GET /v1/names/{name}` rule for the same row at the same snapshot, for both
+  profiles: an unsupported projected row downgrades to the unsupported record
+  below unless its reason is `current_authority_not_projected`, which serves
+  `status=ok` with the registration and identity fields that can be served,
+  their omissions and `unsupported_fields` unchanged, and no `resolver` outside
+  the TLD case above. Such a row is `registration_status=unregistered` with no
+  `registration_id`, but it can still carry `authority`: the arm the name's
+  history selected (for example `ens_v1` after a named ENSv1 registration
+  event) even though no binding of that arm is current. `status=ok` on such a
+  result is not evidence of ownership, and `authority` on it is not evidence
+  of a current registration; read `registration_status` and `owner`.
   An unsupported name result retains `input`, `kind`, and a `record` containing
   only `name`, `display_name`, `namespace`, `namehash`, `status`, and
   `unsupported_reason`. It omits registration, control, lifecycle, resolver,
@@ -736,7 +756,31 @@ collection route carry neither header.
   `addresses`, `text_records`, `content_hash`, and `primary_address` are built
   by a fresh schema-v2 lookup at the current readable position, using the same
   verified path as `/v1/names/{name}/records`; indexed resolver-record values
-  are not substituted into those fields. The registration and identity summary
+  are not substituted into those fields. The verified lookup reads every record
+  key the name's record inventory lists (the same chain-neutral inventory
+  `GET /v1/names/{name}/records` takes its default keys from, on whichever
+  chain the deployment indexes) plus `addr:60` for `primary_address`. When
+  that inventory is missing or lists no key, it reads the bounded profile set
+  `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and
+  `text:email`. The inventory's contents select the keys; its coverage status
+  neither selects nor suppresses the set. Whether each getter executes is the
+  lookup's answer, so a field whose keys are all `ok` or
+  unset is served (unset keys are absent from the map), while a field with no
+  requested key, or with an unsupported, stale, or failed key, is omitted and
+  listed in `unsupported_fields`; the name-level `status` and reason come from
+  those answers. The set is not an enumeration of every text key or coin type
+  the resolver holds; read others through the records route with `keys`. A
+  name that is not eligible to serve resolver records (no current
+  registration and no classified serving path, for example a released name, a
+  reservation, or an unbound `current_authority_not_projected` row) requests
+  no key, dispatches no call, and returns `status=unsupported` with
+  `verified_records_not_supported`. An inventory-derived set above 200 keys
+  also dispatches no call: the request fails with `422 unsupported`. An
+  eligible name is not in that group just because it has no exact resolver:
+  an ENS name whose exact resolver is null executes the same key set through
+  Universal Resolver discovery, and `resolver` stays absent from the response.
+  Each requested key is one record call; a route that follows CCIP-Read can
+  add continuation calls per key. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
   `registration_status`, `wrapper_state`, `wrapper_fuses`, `authority`,
   `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
@@ -812,8 +856,10 @@ collection route carry neither header.
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   is its serving resource: the row stays `current_authority_not_projected` and
-  unregistered, `authority` stays absent, and `resolver` and the resolver-record
-  fields are served from that pointer and its inventory.
+  unregistered, has no `registration_id`, and `resolver` and the
+  resolver-record fields are served from that pointer and its inventory.
+  `authority` is omitted unless the name's history selected an arm, which a
+  row with no selected binding can still carry.
   An ownerless ENSv1 or Basenames registry row with a zero [getter-visible
   owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
   When a current event-linked nonzero registry resolver pointer survives, name
@@ -2525,7 +2571,9 @@ introduces it rebuilds Project from full history before serving the option; see
   in [`api-v1.md`](api-v1.md#cursors-and-pagination) still lists the row even if other name
   coverage is unsupported. When no current authority can be proven, no current
   address relation can be established and the name is structurally absent;
-  callers use name detail or batch lookup for its explicit coverage reason.
+  callers use name detail or batch lookup for its status: a downgraded row
+  carries its `unsupported_reason`, and a `current_authority_not_projected`
+  row is served `status=ok` and `registration_status=unregistered`.
   A name bigname has never materialized as a
   [name surface](glossary.md#surface-name-surface) is likewise absent even
   when its registry owner is proven. On the ENSv1 arm a surface comes from a
@@ -2837,7 +2885,9 @@ introduces it rebuilds Project from full history before serving the option; see
   Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or
-  batch lookup when they need an omitted name's explicit coverage reason. The
+  batch lookup for an omitted name's status: a downgraded row carries its
+  `unsupported_reason`, and a `current_authority_not_projected` row is served
+  `status=ok` and `registration_status=unregistered`. The
   omission is applied before paging, so returned counts, page order, and cursor
   continuation all reflect the same filtered set.
 - Pagination behavior: standard collection pagination. Without an explicit
@@ -3049,7 +3099,9 @@ For a registrar lease first identified by a later readable observation, registra
   mixed-history name whose selected arm has a current registration is listed
   like any other name. This nested collection adds no row-local
   mixed-authority status, so callers use name detail or batch lookup for the
-  explicit coverage reason. A row classified as
+  name's status (a downgraded row carries its `unsupported_reason`; a
+  `current_authority_not_projected` row is served `status=ok` and
+  unregistered). A row classified as
   `current_authority_not_projected` is absent from `bound_names` unless its
   serving resource is a TLD's root-registry resolver pointer; otherwise
   retained resolver-pointer evidence does not establish listing membership.
