@@ -343,7 +343,9 @@ fn derive_resolvers(event: &BlockEvent, keys: &mut BlockKeys) {
                 }
             }
         }
-        "Upgraded" => {
+        // A Universal Resolver proxy's Upgraded (universal_resolver.rs) upgrades no name's
+        // resolver.
+        "Upgraded" if family != super::universal_resolver::FAMILY => {
             resolvers.push(event.after_text("proxy_address"));
             resolvers.push(event.before_text("proxy_address"));
         }

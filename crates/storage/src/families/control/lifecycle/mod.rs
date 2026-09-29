@@ -17,6 +17,7 @@
 //! ordered by the canonical order.
 mod admission;
 mod control;
+mod expiry;
 mod laterals;
 mod load;
 pub mod membership;
@@ -94,6 +95,39 @@ impl AuthoritySelection {
     }
 }
 
+/// Where a name sits relative to the registrars whose registrations carry a renewal grace period,
+/// read from its surface.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum NamePlace {
+    /// A `.eth` second-level name (namespace `ens`): an ENSv1 BaseRegistrar lease, an ENSv2 `eth`
+    /// registry entry, or both.
+    EthSecondLevel,
+    /// A name below a `.eth` second-level name, with that name's logical name id.
+    BelowEthSecondLevel(String),
+    /// A Basenames second-level name, `<label>.base.eth`.
+    BasenamesSecondLevel,
+    #[default]
+    Other,
+}
+
+impl NamePlace {
+    /// The place of a surface's name from its namespace, raw name and label hashes (in name
+    /// order).
+    pub fn of(namespace: &str, raw_name: &str, labelhashes: &[String]) -> Self {
+        let labels: Vec<&str> = raw_name.split('.').collect();
+        match (namespace, labels.as_slice()) {
+            ("ens", [_, "eth"]) => Self::EthSecondLevel,
+            ("ens", [.., _, "eth"]) if labelhashes.len() == labels.len() => {
+                let second_level = &labelhashes[labelhashes.len() - 2..];
+                expiry::logical_name_of_labelhashes(namespace, second_level)
+                    .map_or(Self::Other, Self::BelowEthSecondLevel)
+            }
+            ("basenames", [_, "base", "eth"]) => Self::BasenamesSecondLevel,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// One name to read.
 #[derive(Clone, Debug)]
 pub struct NameInput {
@@ -101,6 +135,7 @@ pub struct NameInput {
     /// The surface namehash, lower case.
     pub namehash: String,
     pub selection: AuthoritySelection,
+    pub place: NamePlace,
 }
 
 /// The publication the read is for: its block and the block's timestamp, the clock every
@@ -162,6 +197,9 @@ pub struct NameFacts {
     pub authority_starts: Value,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
+    /// Whether the chain resolves `.eth` names through ENSv2 at the publication
+    /// (`families::control::cutover`), read once per batch.
+    pub resolution_cutover: bool,
 }
 
 /// The shadow of one name's registration and control blocks.
@@ -219,6 +257,15 @@ pub(crate) fn released_v2(
             tombstone.event.position.event_identity.clone(),
         )
     }))
+}
+
+/// Whether the name has a live ENSv2 registry entry at the publication: a reservation or
+/// registration that no release ended (Interpret writes the path-expiry release at the first
+/// block past the expiry, so an unreleased entry has not expired). The Universal Resolver reads only
+/// ENSv2 registries after the cutover, so a `.eth` name without one resolves to nothing there
+/// (`expiry::live_entry`).
+pub fn has_live_ens_v2_entry(facts: &NameFacts) -> anyhow::Result<bool> {
+    served::live_ens_v2_entry(facts).map(|entry| entry.is_some())
 }
 
 /// Whether `event` carries the name once the two staging passes have run: emitted with it, or

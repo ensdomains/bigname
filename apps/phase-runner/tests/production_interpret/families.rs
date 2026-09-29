@@ -99,7 +99,7 @@ pub async fn served_fields(pool: &PgPool, name: &str) -> Result<Value> {
 /// The lifecycle selector's actual retained-fact trace, including the deciding event identity.
 pub async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
     use bigname_storage::families::control::lifecycle::{
-        AuthoritySelection, Clock, NameInput, evaluate, load_name_facts,
+        AuthoritySelection, Clock, NameInput, NamePlace, evaluate, load_name_facts,
     };
     let row = project_name(pool, name).await?;
     let chain = row
@@ -117,6 +117,7 @@ pub async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
             logical_name_id: name.into(),
             namehash: row.namehash.clone(),
             selection: AuthoritySelection::from_provenance(&row.provenance),
+            place: NamePlace::of(&row.namespace, &row.normalized_name, &[]),
         }],
     )
     .await?;

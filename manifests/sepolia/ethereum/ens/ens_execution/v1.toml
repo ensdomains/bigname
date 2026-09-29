@@ -5,7 +5,7 @@ namespace = "ens"
 source_family = "ens_execution"
 chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_20260915"
-rollout_status = "shadow"
+rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 discovery_rules = []
@@ -16,12 +16,52 @@ discovery_rules = []
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L1593 @ ens_v2_sepolia_20260916@366de741)
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741)
 verified_authority_arms = ["ens_v1", "ens_v2"]
+# The UniversalResolverV2 implementation of the admitted deployment. A block resolves through
+# ENSv2 (the Universal Resolver cutover, docs/manifests.md § `universal_resolver_implementations`)
+# while the client-facing proxy's implementation chain ends here. It was constructed with the
+# admitted RootRegistry as its immutable ROOT_REGISTRY (constructor argument 0).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L20 @ ens_v2_sepolia_20260916@366de741)
+universal_resolver_implementations = ["0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3"]
 
 [capability_flags]
 verified_resolution = { status = "shadow", notes = "verified resolution through the official Sepolia Universal Resolver for both ENSv1 and ENSv2 authority" }
 
+# The client-facing Universal Resolver proxy. Its `Upgraded` events are admitted so that the
+# cutover to ENSv2 resolution is read from chain data. The pinned artifact has no receipt; the
+# start block is its creation block on chain (docs/upstream.md, "Sepolia Universal Resolver
+# proxies admitted from chain evidence"): the constructor's AdminChanged is log 108 of
+# transaction 0x174522103c23879297dbfc7b089897bc6f0d00ba26fee5f5041fd16e6563efb7 at block
+# 8928790. `proxy_kind` stays "none": lookup calls the proxy itself, and its implementation is
+# not a contract bigname indexes.
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/universalResolver.md:L7-L17 @ ens_v2_sepolia_20260916@366de741)
 [[contracts]]
 role = "universal_resolver"
 address = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe"
 proxy_kind = "none"
+start_block = 8928790
+
+# The managed (intermediate) Universal Resolver proxy the client-facing proxy points at; every
+# Sepolia implementation swap since block 10928444 has been an `upgradeTo` on it. Created at
+# block 10922008 (constructor AdminChanged, log 215 of transaction
+# 0xaa61fc98451c1fcc271e0184a3c016fb940e90402a0c812d917591916199ab37).
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ManagedUniversalResolverProxy.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/universalResolver.md:L7-L17 @ ens_v2_sepolia_20260916@366de741)
+[[contracts]]
+role = "universal_resolver_managed"
+address = "0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1"
+proxy_kind = "none"
+start_block = 10922008
+
+# `upgradeTo` emits Upgraded with the new implementation; the constructor sets the first
+# implementation without an event, so a proxy with no Upgraded yet reads as not cut over.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L71-L75 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/UpgradableUniversalResolverProxy.json:L127 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "Upgraded"
+fragment = "event Upgraded(address indexed implementation)"
+emitter_roles = ["universal_resolver", "universal_resolver_managed"]
+normalized_events = ["Upgraded"]

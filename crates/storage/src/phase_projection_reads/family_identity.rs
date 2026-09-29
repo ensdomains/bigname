@@ -37,7 +37,7 @@ pub(crate) async fn load_on(
             let chain = row.provenance["chain_id"]
                 .as_str()
                 .context("composed name has no chain")?;
-            if let Some(resource) = row.serving_resource_id.or(row.resource_id) {
+            if let Some(resource) = row.record_serving_resource_id() {
                 first
                     .entry(resource)
                     .or_insert_with(|| (chain.to_owned(), row.chain_positions.clone()));

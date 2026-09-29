@@ -100,6 +100,8 @@ pub(crate) struct AddressName {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) migrated_at: Option<String>,
@@ -507,6 +509,7 @@ pub(crate) fn build_address_name(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        grace_ends_at: registration.grace_ends_at,
         authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
         migrated_at,
         relations: entry

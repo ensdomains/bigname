@@ -180,9 +180,31 @@ fn official_sepolia_keeps_canonical_v1_dependencies_and_both_execution_arms() ->
                 .unwrap()
         )
     );
+    // The pinned artifacts carry no receipts; both proxies start at their creation blocks on
+    // chain (docs/upstream.md, "Sepolia Universal Resolver proxies admitted from chain
+    // evidence"), so their `Upgraded` history is read from the start.
+    assert_eq!(execution.contracts[0].start_block, Some(8_928_790));
+    let managed = execution
+        .contracts
+        .iter()
+        .find(|contract| contract.role == "universal_resolver_managed")
+        .expect("the managed proxy");
     assert_eq!(
-        execution.contracts[0].start_block, None,
-        "no invented creation receipt for the long-lived proxy"
+        normalize_address(&managed.address),
+        normalize_address(
+            artifact("ManagedUniversalResolverProxy")?["address"]
+                .as_str()
+                .unwrap()
+        )
+    );
+    assert_eq!(managed.start_block, Some(10_922_008));
+    assert_eq!(
+        execution.universal_resolver_implementations,
+        [normalize_address(
+            artifact("UniversalResolverV2")?["address"]
+                .as_str()
+                .unwrap()
+        )]
     );
     assert!(!workspace().join("manifests/sepolia-hackathon").exists());
     Ok(())

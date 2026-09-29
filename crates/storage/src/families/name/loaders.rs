@@ -17,7 +17,7 @@ pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<
     let rows = sqlx::query(
         "/* storage:families.name.surfaces */
          SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash,
-                surface.chain_id, surface.block_number
+                surface.labelhashes, surface.chain_id, surface.block_number
          FROM bigname_phase.name_surfaces surface
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
@@ -37,6 +37,7 @@ pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<
                 namespace: row.try_get("namespace")?,
                 raw_name: row.try_get("raw_name")?,
                 namehash: row.try_get("namehash")?,
+                labelhashes: row.try_get("labelhashes")?,
                 chain_id: row.try_get("chain_id")?,
                 block_number: row.try_get("block_number")?,
             })

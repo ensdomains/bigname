@@ -106,9 +106,11 @@ fn proposals(event: &BlockEvent) -> Vec<(String, &'static str, i64)> {
     found
 }
 
-/// The proxy an `Upgraded` of any family upgrades, with its family.
+/// The proxy an `Upgraded` of any family upgrades, with its family. A Universal Resolver proxy's
+/// `Upgraded` (universal_resolver.rs) is not a resolver's.
 fn upgrade(event: &BlockEvent) -> Option<(String, String)> {
-    (event.event_kind == "Upgraded").then_some(())?;
+    (event.event_kind == "Upgraded" && event.source_family != super::universal_resolver::FAMILY)
+        .then_some(())?;
     Some((
         resolver(raw_lower(&event.after, "proxy_address"))?,
         event.source_family.clone(),

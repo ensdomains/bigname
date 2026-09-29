@@ -83,6 +83,8 @@ pub(crate) struct Subname {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
@@ -310,6 +312,7 @@ pub(crate) fn build_subname(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        grace_ends_at: registration.grace_ends_at,
         subregistry: None,
         subname_count: include_counts.then(|| {
             summary

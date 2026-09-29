@@ -59,7 +59,7 @@ pub(super) async fn refresh(
                 "family block {number} of chain {chain_id} is not readable for its name summaries"
             ))
         })?;
-    let names: Vec<String> = sqlx::query_scalar(WORK_LIST)
+    let mut names: Vec<String> = sqlx::query_scalar(WORK_LIST)
         .bind(chain_id)
         .bind(number)
         .bind(block.timestamp_seconds)
@@ -68,6 +68,14 @@ pub(super) async fn refresh(
         .map_err(|error| {
             ProjectError::database("failed to read the names a family block touched", error)
         })?;
+    // A Universal Resolver change moves the expiry every reserved name serves (TYR-90).
+    let cutover =
+        super::super::universal_resolver::cutover_names(transaction, chain_id, number).await?;
+    if !cutover.is_empty() {
+        names.extend(cutover);
+        names.sort_unstable();
+        names.dedup();
+    }
     if names.is_empty() {
         return Ok(Refreshed::default());
     }

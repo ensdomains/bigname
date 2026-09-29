@@ -99,6 +99,8 @@ fn named_expiry_fixture(
         deployment_label: "unit-test".to_owned(),
         correlation_addresses: BTreeMap::new(),
         resolver_implementations: Vec::new(),
+        universal_resolver_implementations: Vec::new(),
+        universal_resolver_proxies: Vec::new(),
         events: vec![event.clone()],
     };
     let selected = Selected {

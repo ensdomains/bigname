@@ -67,6 +67,8 @@ pub(crate) struct SearchName {
     pub(crate) created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,6 +273,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        grace_ends_at: registration.grace_ends_at,
     }
 }
 

@@ -471,7 +471,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "registration_status": "released",
                 "registered_at": "2023-02-02T00:00:00+00:00",
                 "created_at": "2023-02-02T00:00:00+00:00",
-                "expires_at": "2023-11-14T22:13:20Z"
+                "expires_at": "2023-11-14T22:13:20Z",
+                "grace_ends_at": "2024-02-12T22:13:20Z"
             },
             {
                 "name": "live-listed.eth",
@@ -483,7 +484,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "registration_status": "active",
                 "registered_at": "2024-02-02T00:00:00+00:00",
                 "created_at": "2024-02-02T00:00:00+00:00",
-                "expires_at": "2030-03-17T17:46:40Z"
+                "expires_at": "2030-03-17T17:46:40Z",
+                "grace_ends_at": "2030-06-15T17:46:40Z"
             }
         ]),
         "the released name keeps its place at its old expiry, with no registrant or owner"

@@ -20,6 +20,7 @@ use super::{
         histories, migrations, named_resource_pointers, node_pointers, resource_pointers,
         resources, root_releases, surfaces,
     },
+    resolvability::Resolvability,
     selection::select,
     serving::{PointerRow, ownerless_serving, root_tld_serving},
 };
@@ -27,7 +28,8 @@ use crate::{
     NameCurrentRow,
     families::control::{
         lifecycle::{
-            AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts_on,
+            AuthoritySelection, Clock, NameFacts, NameInput, NamePlace, evaluate,
+            load_name_facts_on,
         },
         wrapper::clock_boundaries,
     },
@@ -340,9 +342,11 @@ pub(super) async fn load_chain(
             logical_name_id: surface.logical_name_id.clone(),
             namehash: surface.namehash.to_ascii_lowercase(),
             selection: AuthoritySelection::default(),
+            place: NamePlace::of(&surface.namespace, &surface.raw_name, &surface.labelhashes),
         })
         .collect();
     let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
+    let resolvability = Resolvability::load(conn, chain_id, &facts).await?;
     let histories = histories(conn, chain_id, &ids).await?;
     let mut migrations = migrations(conn, chain_id, &ids).await?;
     let mut wanted: BTreeSet<String> = BTreeSet::new();
@@ -493,6 +497,8 @@ pub(super) async fn load_chain(
                 node_pointer: node_pointers.get(&node),
                 heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),
+                unresolvable: resolvability
+                    .unresolvable(facts, decided.selection.authority_arm.as_deref()),
             },
             shape,
         )?;

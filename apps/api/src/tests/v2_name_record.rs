@@ -94,6 +94,55 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_without_an_ens_v2_entry()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    let before = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    assert!(before["data"].get("unresolvable_reason").is_none(), "{before}");
+    assert_eq!(
+        before["data"]["grace_ends_at"],
+        json!("2027-04-02T03:04:05Z"),
+        "an ENSv1 lease's grace ends 90 days after its expiry"
+    );
+
+    // The client-facing proxy now forwards to an admitted UniversalResolverV2; alice.eth has
+    // no ENSv2 entry, so it resolves to nothing while ENSv1 keeps deciding its owner.
+    let mut upgraded = history_event(
+        "alice-cutover-upgraded",
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(21_000_003),
+        Some("0xbinding"),
+        Some("0xcutover"),
+        Some(900),
+        CanonicalityState::Canonical,
+    );
+    upgraded.event_kind = "Upgraded".into();
+    upgraded.source_family = "ens_execution".into();
+    upgraded.before_state = json!({});
+    upgraded.after_state = json!({"source_event": "Upgraded",
+        "proxy_address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
+        "proxy_role": "universal_resolver",
+        "implementation": "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3",
+        "implementation_kind": "admitted_universal_resolver"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgraded]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+
+    let after = v2_name_record_payload_for_database(&database, "/v1/names/Alice.eth").await?;
+    let data = &after["data"];
+    assert_eq!(data["unresolvable_reason"], json!("no_live_ens_v2_entry"), "{after}");
+    assert!(data.get("resolver").is_none(), "{after}");
+    assert!(data.get("records").is_none(), "{after}");
+    assert!(data.get("primary_address").is_none(), "{after}");
+    assert_eq!(data["owner"], before["data"]["owner"]);
+    assert_eq!(data["expires_at"], before["data"]["expires_at"]);
+    assert_eq!(data["grace_ends_at"], before["data"]["grace_ends_at"]);
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn storage_name_surface_reads_preserve_stored_ensip15_normalized_name_bytes() -> Result<()> {
     const NORMALIZED_NAME: &str = "ᏣᎳᎩ.eth";
     const INPUT_LOGICAL_NAME_ID: &str = "ens:ᏣᎳᎩ.eth";

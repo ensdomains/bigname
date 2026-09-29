@@ -111,6 +111,12 @@ pub const ENSV1_MIRROR_REGISTRY_CORRELATION_KEY: &str = "ens_v1_registry";
 pub const VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1", "ens_v2"];
 /// Arms an `ens_execution` manifest admits when it declares no `verified_authority_arms`.
 pub const DEFAULT_VERIFIED_AUTHORITY_ARMS: &[&str] = &["ens_v1"];
+/// `[[contracts]].role` of the Universal Resolver address clients call (`ens_execution`).
+pub const UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
+/// `[[contracts]].role` of an intermediate Universal Resolver proxy that the client-facing proxy
+/// can point at, so that the implementation behind it changes without a transaction from the
+/// client-facing proxy's admin (`ens_execution`).
+pub const MANAGED_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver_managed";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceManifest {
@@ -137,6 +143,12 @@ pub struct SourceManifest {
     /// manifests serialize unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_authority_arms: Option<Vec<String>>,
+    /// `ens_execution` only: the UniversalResolverV2 implementations whose presence behind the
+    /// declared Universal Resolver proxy marks the chain as resolving through ENSv2
+    /// (`docs/manifests.md` § `universal_resolver_implementations`). Empty means no
+    /// implementation is admitted, so the chain never counts as cut over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub universal_resolver_implementations: Vec<String>,
 }
 
 impl SourceManifest {
@@ -311,6 +323,8 @@ pub(crate) struct RawSourceManifest {
     abi: ManifestAbi,
     #[serde(default)]
     verified_authority_arms: Option<Vec<String>>,
+    #[serde(default)]
+    universal_resolver_implementations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -351,6 +365,7 @@ impl From<RawSourceManifest> for SourceManifest {
             discovery_rules: value.discovery_rules,
             abi: value.abi,
             verified_authority_arms: value.verified_authority_arms,
+            universal_resolver_implementations: value.universal_resolver_implementations,
         }
     }
 }

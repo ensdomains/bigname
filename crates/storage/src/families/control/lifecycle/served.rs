@@ -11,6 +11,7 @@ use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, StagedName},
     control::{control_owner, served_owner},
+    expiry::{choose, grace_ends_at, live_entry},
     laterals::{
         authority_context, expiry_candidate, format_utc, latest_event_kind, registered_at,
         registrant, registrar_resource,
@@ -97,13 +98,8 @@ pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
     }
 }
 
-pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
-    let input = &facts.input;
-    let selection = &input.selection;
-    let is_v2 = selection.is_v2();
-    let authority = authority_of(facts);
-    let binding = authority.binding;
-    let binding_resource = binding.map(|binding| binding.resource_id.as_str());
+/// Every retained event of the name with its staged name, admission and ENSv2 lifecycle key.
+fn tag<'a>(facts: &'a NameFacts, authority: &Authority<'a>) -> Vec<Tagged<'a>> {
     let triple_targets: BTreeMap<String, Option<String>> = facts
         .triples
         .iter()
@@ -114,7 +110,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             )
         })
         .collect();
-    let tagged: Vec<Tagged<'_>> = facts
+    facts
         .events
         .iter()
         .map(|event| {
@@ -131,7 +127,24 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 key: key.flatten(),
             }
         })
-        .collect();
+        .collect()
+}
+
+/// The name's live ENSv2 registry entry (`expiry::live_entry`), whatever arm is selected.
+pub(super) fn live_ens_v2_entry(facts: &NameFacts) -> Result<Option<String>> {
+    let authority = authority_of(facts);
+    let tagged = tag(facts, &authority);
+    Ok(live_entry(facts, &tagged)?.map(|entry| entry.key))
+}
+
+pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
+    let input = &facts.input;
+    let selection = &input.selection;
+    let is_v2 = selection.is_v2();
+    let authority = authority_of(facts);
+    let binding = authority.binding;
+    let binding_resource = binding.map(|binding| binding.resource_id.as_str());
+    let tagged = tag(facts, &authority);
 
     let mut trace = Map::new();
     // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
@@ -304,6 +317,16 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     } else {
         wrapper_fallback.map_or(Value::Null, |seconds| json!(seconds))
     };
+    // The expiry and renewal grace the name serves: after the Universal Resolver cutover a live
+    // ENSv2 entry's, whatever arm holds authority (`expiry::choose`).
+    let entry = live_entry(facts, &tagged)?;
+    let (registration_expiry, grace) = choose(
+        facts,
+        is_v2,
+        registration_expiry,
+        entry.as_ref(),
+        &mut trace,
+    );
 
     let registrant = registrant(
         &authority,
@@ -400,6 +423,11 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             registration.insert("expiry".into(), Value::Null);
         }
     }
+
+    registration.insert(
+        "grace_ends_at".into(),
+        grace_ends_at(registration.get("expiry"), grace),
+    );
 
     let (folded, owner_kind) =
         control_owner(facts, &authority, &in_scope, is_v2, selected_key.as_deref());

@@ -25,6 +25,8 @@ pub(super) struct Surface {
     pub(super) namespace: String,
     pub(super) raw_name: String,
     pub(super) namehash: String,
+    /// The label hashes in name order.
+    pub(super) labelhashes: Vec<String>,
     pub(super) chain_id: String,
     pub(super) block_number: i64,
 }
@@ -44,6 +46,9 @@ pub(super) struct Parts<'a> {
     pub(super) token_lineage_id: Option<Uuid>,
     /// The history heads (`heads.rs`), given the row's resource.
     pub(super) heads: &'a super::heads::Heads,
+    /// Whether the name resolves to nothing through the Universal Resolver
+    /// (`resolvability.rs`): its resolver and records are withheld.
+    pub(super) unresolvable: bool,
 }
 
 fn trace_text<'a>(shadow: &'a ShadowName, key: &str) -> Option<&'a str> {
@@ -252,6 +257,7 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
             Some("RegistrationReleased" | "RegistrationReserved")
         ) && selection.authority_arm.as_deref() == Some("ens_v2"))
             || selection.released_tombstone,
+        unresolvable: parts.unresolvable,
     };
     let (resolver, source_family) = resolver_block(
         &scope,
@@ -264,6 +270,12 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
     summary.insert("registration".into(), Value::Object(registration));
     summary.insert("control".into(), Value::Object(shadow.control.clone()));
     summary.insert("resolver".into(), resolver);
+    if parts.unresolvable {
+        summary.insert(
+            "unresolvable_reason".into(),
+            json!(super::resolvability::NO_LIVE_ENS_V2_ENTRY),
+        );
+    }
     summary.insert("coverage".into(), coverage_block.clone());
     let staged: Vec<&str> = parts
         .facts

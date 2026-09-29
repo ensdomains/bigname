@@ -24,6 +24,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_registry_pointer",
     "project_resource_pointer",
     "project_named_resource_pointer",
+    "project_universal_resolver_proxy",
     "project_node_record_partition",
     "project_node_record_value",
     "project_record_id_value",
@@ -95,8 +96,10 @@ async fn install_baseline(database: &TestDatabase, without_families: bool) -> Re
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
     }
     if without_families {
+        // The historical fixture predates the newest family tables, such as
+        // `project_universal_resolver_proxy`, which only the schema-migrations create.
         for table in FAMILY_TABLES {
-            sqlx::raw_sql(&format!("DROP TABLE bigname_phase.{table}"))
+            sqlx::raw_sql(&format!("DROP TABLE IF EXISTS bigname_phase.{table}"))
                 .execute(&mut *transaction)
                 .await?;
         }

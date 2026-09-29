@@ -40,8 +40,8 @@ mod wrapper;
 
 pub(crate) use declared::{LapsedRegistration, lapsed_registration, registration_id};
 use declared::{
-    chain_positions_created_at, declared_created_at, declared_expires_at, declared_owner,
-    declared_registered_at, declared_registrant, declared_registration,
+    chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
+    declared_owner, declared_registered_at, declared_registrant, declared_registration,
 };
 use inventory::load_name_record_inventory;
 pub(super) use values::{
@@ -80,6 +80,8 @@ pub(crate) struct NameRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_state: Option<WrapperState>,
@@ -97,6 +99,11 @@ pub(crate) struct NameRecord {
     pub(crate) namehash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
+    /// Why the name resolves to nothing through the Universal Resolver although its authority
+    /// records a resolver: `no_live_ens_v2_entry` once the chain resolves through ENSv2 and the
+    /// `.eth` name has no live ENSv2 entry. Its resolver and records are then withheld.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unresolvable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     /// Present when the name may serve resolver records and has a record inventory, or on a
@@ -330,6 +337,7 @@ pub(crate) fn build_name_record(
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
+        grace_ends_at: registration.grace_ends_at,
         registration_status: Some(registration.registration_status),
         wrapper_state,
         wrapper_fuses,
@@ -341,6 +349,7 @@ pub(crate) fn build_name_record(
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         resolver,
+        unresolvable_reason: row.unresolvable_reason().map(str::to_owned),
         subregistry: None,
         records: record_inventory.map(|inventory| RecordGroups::indexed(inventory.into())),
         primary_name: json_string_at_paths(
@@ -375,6 +384,7 @@ pub(super) struct NameRegistrationFields {
     pub(super) registered_at: Option<String>,
     pub(super) created_at: Option<String>,
     pub(super) expires_at: Option<String>,
+    pub(super) grace_ends_at: Option<String>,
     pub(super) registration_status: RegistrationStatus,
 }
 
@@ -417,6 +427,7 @@ fn empty_registration_fields(namespace: &str) -> NameRegistrationFields {
         registered_at: None,
         created_at: None,
         expires_at: None,
+        grace_ends_at: None,
         registration_status: classify_registration_status(namespace, None, None, false),
     }
 }
@@ -436,6 +447,7 @@ fn registration_fields_from_parts(
         created_at: declared_created_at(declared_summary)
             .or_else(|| chain_positions_created_at(chain_positions)),
         expires_at: declared_expires_at(declared_summary),
+        grace_ends_at: declared_grace_ends_at(declared_summary),
         registration_status: classify_registration_status(
             namespace,
             registration,

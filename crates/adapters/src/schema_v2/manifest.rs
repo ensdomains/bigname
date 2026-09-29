@@ -18,6 +18,11 @@ pub(super) struct ManifestSource {
     /// Lowercase `resolver_implementations[].address` entries; the admission authority for
     /// announcement-discovered resolvers.
     pub resolver_implementations: Vec<String>,
+    /// Lowercase `universal_resolver_implementations` entries (`ens_execution` only).
+    pub universal_resolver_implementations: Vec<String>,
+    /// Lowercase addresses of the declared Universal Resolver proxies (`ens_execution` contracts
+    /// with the `universal_resolver` or `universal_resolver_managed` role).
+    pub universal_resolver_proxies: Vec<String>,
     pub events: Vec<ManifestEvent>,
 }
 
@@ -65,7 +70,17 @@ struct StoredPayload {
     #[serde(default)]
     resolver_implementations: Vec<StoredImplementation>,
     #[serde(default)]
+    universal_resolver_implementations: Vec<String>,
+    #[serde(default)]
+    contracts: Vec<StoredContract>,
+    #[serde(default)]
     abi: StoredAbi,
+}
+
+#[derive(Deserialize)]
+struct StoredContract {
+    role: String,
+    address: String,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +133,23 @@ pub(super) fn decode(input: ManifestInput) -> anyhow::Result<ManifestSource> {
             .resolver_implementations
             .into_iter()
             .map(|implementation| implementation.address.to_ascii_lowercase())
+            .collect(),
+        universal_resolver_implementations: stored
+            .universal_resolver_implementations
+            .iter()
+            .map(|address| address.to_ascii_lowercase())
+            .collect(),
+        universal_resolver_proxies: stored
+            .contracts
+            .iter()
+            .filter(|contract| {
+                matches!(
+                    contract.role.as_str(),
+                    bigname_manifests::UNIVERSAL_RESOLVER_ROLE
+                        | bigname_manifests::MANAGED_UNIVERSAL_RESOLVER_ROLE
+                )
+            })
+            .map(|contract| contract.address.to_ascii_lowercase())
             .collect(),
         events,
     })

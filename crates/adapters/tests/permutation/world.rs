@@ -212,8 +212,14 @@ pub const ENS_V2_SEPOLIA: World = World {
 
 /// Active families whose event space is exercised by a dedicated corpus instead of the generic
 /// protocol permutation pool. Migration correlation is per name and path, so its decoded catalog
-/// fixtures are the authoritative generator rather than an uncorrelated source slot here.
-const DEDICATED_CORPUS_FAMILIES: &[(&str, &str)] = &[("ethereum-sepolia", "ens_v2_migration_l1")];
+/// fixtures are the authoritative generator rather than an uncorrelated source slot here. The
+/// Universal Resolver proxies' `Upgraded` (`ens_execution`) touches no name, resource or binding,
+/// so its decode test (`protocol/universal_resolver.rs`) and the Project cutover tests
+/// (`families_expiry_grace.rs`) cover it.
+const DEDICATED_CORPUS_FAMILIES: &[(&str, &str)] = &[
+    ("ethereum-sepolia", "ens_v2_migration_l1"),
+    ("ethereum-sepolia", "ens_execution"),
+];
 
 pub struct Wiring {
     pub chain_id: String,

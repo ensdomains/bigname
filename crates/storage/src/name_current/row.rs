@@ -29,8 +29,23 @@ pub struct NameCurrentRow {
 }
 
 impl NameCurrentRow {
+    /// The resource the name serves records through: its serving resource, else its bound
+    /// resource; none for a name that resolves to nothing through the Universal Resolver
+    /// ([`Self::unresolvable_reason`]).
     pub fn record_serving_resource_id(&self) -> Option<Uuid> {
+        if self.unresolvable_reason().is_some() {
+            return None;
+        }
         self.serving_resource_id.or(self.resource_id)
+    }
+
+    /// Why the name serves no resolver or records although its authority has them: after the
+    /// Universal Resolver cutover a `.eth` name ENSv1 decides without a live ENSv2 entry at its
+    /// second-level name (`families::name::resolvability`).
+    pub fn unresolvable_reason(&self) -> Option<&str> {
+        self.declared_summary
+            .get("unresolvable_reason")
+            .and_then(Value::as_str)
     }
 
     /// Load current exact-name projection rows keyed by logical name identity.

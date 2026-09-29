@@ -29,6 +29,7 @@ mod store;
 mod tables;
 mod topology;
 mod undo;
+mod universal_resolver;
 mod wrapper;
 
 pub use input::{InputToken, Revision, input_token};

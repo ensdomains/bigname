@@ -77,6 +77,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.project_registry_pointer'),
                 ('relation', 'bigname_phase.project_resource_pointer'),
                 ('relation', 'bigname_phase.project_named_resource_pointer'),
+                ('relation', 'bigname_phase.project_universal_resolver_proxy'),
                 ('relation', 'bigname_phase.project_node_record_partition'),
                 ('relation', 'bigname_phase.project_node_record_value'),
                 ('relation', 'bigname_phase.project_record_id_value'),

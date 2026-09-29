@@ -38,6 +38,7 @@ tables! {
     RESOURCE_POINTER = "project_resource_pointer" ["chain_id", "resource_id"];
     NAMED_RESOURCE_POINTER = "project_named_resource_pointer"
         ["chain_id", "resource_id", "logical_name_id"];
+    UNIVERSAL_RESOLVER_PROXY = "project_universal_resolver_proxy" ["chain_id", "proxy_address"];
     NODE_RECORD_PARTITION = "project_node_record_partition"
         ["chain_id", "resolver_address", "arm", "arm_identity"];
     NODE_RECORD_VALUE = "project_node_record_value"

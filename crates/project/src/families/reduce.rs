@@ -94,6 +94,7 @@ pub(crate) fn preload(
     super::reverse::preload(&chain, events, keys, into);
     super::addresses::preload(&chain, events, into);
     super::lifecycle::preload(&chain, events, into);
+    super::universal_resolver::preload(&chain, events, into);
 }
 
 /// Name the family in a reducer error, so a failed block says which family failed.
@@ -129,6 +130,7 @@ pub(crate) async fn apply(
     super::reverse::apply(transaction, context, events, rows).await?;
     super::addresses::apply(transaction, context, events, rows).await?;
     super::lifecycle::apply(transaction, context, events, rows).await?;
+    super::universal_resolver::apply(transaction, context, events, rows).await?;
     Ok(())
 }
 

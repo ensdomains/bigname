@@ -423,6 +423,7 @@ fn validate_manifest_metadata(
 
     validate_manifest_abi(manifest, path)?;
     validate_verified_authority_arms(manifest, path)?;
+    metadata::validate_universal_resolver_implementations(manifest, path)?;
 
     Ok(())
 }

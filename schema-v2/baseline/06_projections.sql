@@ -1193,6 +1193,44 @@ COMMENT ON COLUMN project_named_resource_pointer.resolver_address IS
 COMMENT ON COLUMN project_named_resource_pointer.source_family IS
     'This value is that event''s source family.';
 
+CREATE TABLE IF NOT EXISTS project_universal_resolver_proxy (
+    chain_id text NOT NULL,
+    proxy_address text NOT NULL,
+    proxy_role text,
+    implementation text NOT NULL,
+    implementation_kind text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    PRIMARY KEY (chain_id, proxy_address),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (implementation_kind IN ('admitted_universal_resolver', 'universal_resolver_proxy', 'other'))
+);
+COMMENT ON TABLE project_universal_resolver_proxy IS
+    'Project-owned Universal Resolver proxy state: per declared ens_execution proxy, the implementation its latest Upgraded event installed, in canonical event order. A block resolves through ENSv2 (the Universal Resolver cutover) while the chain of implementations from the client-facing universal_resolver proxy, through declared proxies, ends at an admitted UniversalResolverV2 implementation; a proxy with no row has no known implementation, since its constructor sets the first one without an event. The composed name reader reads every row of the chain at the family publication.';
+COMMENT ON COLUMN project_universal_resolver_proxy.chain_id IS
+    'This value is the chain whose events wrote the row.';
+COMMENT ON COLUMN project_universal_resolver_proxy.proxy_address IS
+    'This value is the lower-cased address of the proxy that emitted Upgraded.';
+COMMENT ON COLUMN project_universal_resolver_proxy.proxy_role IS
+    'This value is the manifest role of that proxy: universal_resolver for the client-facing proxy, universal_resolver_managed for the intermediate one.';
+COMMENT ON COLUMN project_universal_resolver_proxy.implementation IS
+    'This value is the lower-cased implementation the latest Upgraded installed.';
+COMMENT ON COLUMN project_universal_resolver_proxy.implementation_kind IS
+    'This value is how the manifest classifies that implementation: admitted_universal_resolver (listed in universal_resolver_implementations), universal_resolver_proxy (another declared Universal Resolver proxy), or other.';
+COMMENT ON COLUMN project_universal_resolver_proxy.block_number IS
+    'This value is the block number of the latest Upgraded of the proxy.';
+COMMENT ON COLUMN project_universal_resolver_proxy.transaction_index IS
+    'This value is the transaction index of that event; null with log_index for a synthesised event.';
+COMMENT ON COLUMN project_universal_resolver_proxy.log_index IS
+    'This value is the log index of that event; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_universal_resolver_proxy.event_identity IS
+    'This value is that event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_universal_resolver_proxy.normalized_event_id IS
+    'This value names that event in normalized_events as attribution only; it never takes part in ordering.';
+
 CREATE TABLE IF NOT EXISTS project_node_record_partition (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,

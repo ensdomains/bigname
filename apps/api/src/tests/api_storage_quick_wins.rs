@@ -214,6 +214,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_resource_pointer",
         "relation: bigname_phase.project_reverse_node_claim",
         "relation: bigname_phase.project_reverse_tuple",
+        "relation: bigname_phase.project_universal_resolver_proxy",
         "relation: bigname_phase.project_wrapper_state",
         "relation: bigname_phase.resolution_divergences",
         "relation: bigname_phase.resources",
@@ -225,7 +226,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 61);
+    assert_eq!(actual.len(), 62);
     database.cleanup().await
 }
 

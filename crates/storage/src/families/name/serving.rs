@@ -147,6 +147,9 @@ pub struct ResolverScope<'a> {
     /// Whether ENSv2 is the selected arm with a released or reserved registration, or the name
     /// is a released ENSv1 tombstone: its admitted pointer is kept but not served.
     pub withholds: bool,
+    /// Whether the name resolves to nothing through the Universal Resolver
+    /// (`resolvability.rs`): no pointer is served, not even a serving resource's.
+    pub unresolvable: bool,
 }
 
 /// The resolver block and the pointer's source family.
@@ -180,8 +183,9 @@ pub fn resolver_block(
         .into_iter()
         .max_by(|left, right| left.0.position.cmp(&right.0.position));
     let mut block = serde_json::Map::new();
-    let shown = latest
-        .filter(|(pointer, is_serving)| pointer.resolves() && (*is_serving || !scope.withholds));
+    let shown = latest.filter(|(pointer, is_serving)| {
+        !scope.unresolvable && pointer.resolves() && (*is_serving || !scope.withholds)
+    });
     block.insert(
         "chain_id".into(),
         shown.map_or(Value::Null, |_| Value::from(scope.chain_id)),

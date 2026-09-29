@@ -75,6 +75,9 @@ pub fn resolution_record_inventory_lookup_key_any_chain(
 pub fn resolution_record_inventory_lookup_key_for_revalidation(
     row: &NameCurrentRow,
 ) -> Result<Option<(Uuid, Value)>> {
+    if row.unresolvable_reason().is_some() {
+        return Ok(None);
+    }
     if let Some(lookup) = projected_record_inventory_lookup_key_for_revalidation(row)? {
         return Ok(Some(lookup));
     }

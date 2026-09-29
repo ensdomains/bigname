@@ -956,6 +956,75 @@ fn repository_loader_validates_verified_authority_arms() -> Result<()> {
 }
 
 #[test]
+fn repository_loader_validates_universal_resolver_implementations() -> Result<()> {
+    let with = |list: &str| {
+        execution_manifest_contents(None).replacen(
+            "discovery_rules = []\n",
+            &format!("discovery_rules = []\nuniversal_resolver_implementations = {list}\n"),
+            1,
+        )
+    };
+    let admitted =
+        load_execution_manifest(&with("[\"0x5D25c1d6acbb71b7a28aa7899618a3412a8303e3\"]"))?;
+    let manifest = &admitted.manifests()[0].manifest;
+    assert_eq!(
+        serde_json::to_value(manifest)?["universal_resolver_implementations"],
+        json!(["0x5D25c1d6acbb71b7a28aa7899618a3412a8303e3"]),
+        "a declaration must reach the synced payload the adapter reads"
+    );
+    let absent = load_execution_manifest(&execution_manifest_contents(None))?;
+    assert!(
+        serde_json::to_value(&absent.manifests()[0].manifest)?
+            .get("universal_resolver_implementations")
+            .is_none(),
+        "an absent declaration must not appear in the synced payload"
+    );
+
+    for (case, contents, expected) in [
+        (
+            "invalid address",
+            with("[\"0x5d25\"]"),
+            "invalid universal resolver implementation address",
+        ),
+        (
+            "duplicate address",
+            with(
+                "[\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\", \
+                 \"0x5D25C1D6ACBB71B7A28AA7899618A3412A8303E3\"]",
+            ),
+            "duplicates universal resolver implementation address",
+        ),
+        (
+            "no client-facing proxy",
+            with("[\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"]").replacen(
+                "role = \"universal_resolver\"",
+                "role = \"universal_resolver_managed\"",
+                1,
+            ),
+            "without a universal_resolver contract",
+        ),
+    ] {
+        let error = load_execution_manifest(&contents).expect_err(case);
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{case} returned an unexpected error: {error:#}"
+        );
+    }
+
+    let error = load_one(&manifest_contents().replacen(
+        "\n[capability_flags]",
+        "\nuniversal_resolver_implementations = [\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"]\n\n[capability_flags]",
+        1,
+    ))
+    .expect_err("a non-execution family must not declare implementations");
+    assert!(
+        format!("{error:#}").contains("only source family ens_execution may declare"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
 fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
     let approval =
         "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)";

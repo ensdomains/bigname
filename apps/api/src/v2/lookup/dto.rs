@@ -115,12 +115,17 @@ pub(crate) struct LookupRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) grace_ends_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_status: Option<RegistrationStatus>,
     /// The lapsed holder of a released ENSv1 lease; never current data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lapsed_registration: Option<LapsedRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
+    /// Why the name resolves to nothing through the Universal Resolver, as on name detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) unresolvable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     /// Present on `profile=detail` records that may serve resolver records and have a record

@@ -328,8 +328,8 @@ Interpret chooses how it restores prior adapter state for each chain and each
 batch; there is nothing to enable. When every active or deprecated manifest of
 the chain belongs to a source family the
 [lookahead loader](glossary.md#lookahead-loader) covers (the five `ens_v1_*`
-families, plus `basenames_l1_compat` and the `*_execution` families, which
-interpret no logs), and the chain retains no `normalized_events` history of an
+families, plus `basenames_l1_compat` and the `*_execution` families, whose
+only log, a Universal Resolver proxy's `Upgraded`, reads no prior state), and the chain retains no `normalized_events` history of an
 uncovered family whose manifest has moved to `draft` or `shadow`, Interpret
 uses the lookahead loader: it reads the names and
 resources the batch's logs mention plus the registrations falling due in the
@@ -880,6 +880,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_registry_pointer,
     bigname_phase.project_resource_pointer,
     bigname_phase.project_named_resource_pointer,
+    bigname_phase.project_universal_resolver_proxy,
     bigname_phase.project_node_record_partition,
     bigname_phase.project_node_record_value,
     bigname_phase.project_record_id_value,
@@ -1037,8 +1038,9 @@ projection needs an `ethereum-sepolia=<https url>` entry (an API in front of
 routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
 `verified_records` and `verified_primary_name` as `unsupported` with
 `unsupported_reason=execution_provider_not_configured` for chain `11155111`;
-with it, both report `full`. The Sepolia entrypoint is the checked-in shadow
-`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+with it, both report `full`. The Sepolia entrypoint is the checked-in active
+`manifests/sepolia/ethereum/ens/ens_execution/v1.toml` (its verified-resolution
+flag stays `shadow`), which the normal
 manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.

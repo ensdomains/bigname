@@ -7,6 +7,7 @@ pub(super) mod v1;
 pub(super) fn reconcile_same_transaction_setups_for_test(output: &mut super::model::BatchOutput) {
     v1::reconcile_same_transaction_setups(output);
 }
+mod universal_resolver;
 pub(super) mod v2_record_resolver;
 pub(super) mod v2_registry;
 mod v2_resolver;
@@ -262,6 +263,7 @@ pub(super) fn interpret(
             }
             "ens_v2_resolver_l1" => v2_resolver::interpret(selected, raw, state),
             "ens_v2_migration_l1" => migration::interpret(selected, raw),
+            "ens_execution" => universal_resolver::interpret(selected, raw),
             family => bail!("source family {family} has no schema-v2 adapter"),
         }
     }?;
@@ -556,6 +558,7 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "Upgraded(address)"
         ),
         "ens_v2_resolver_l1" if public_resolver_v2_signature(signature) => true,
+        "ens_execution" => universal_resolver::supports(signature),
         "ens_v2_resolver_l1" => matches!(
             signature,
             "ResolverCreated()"
