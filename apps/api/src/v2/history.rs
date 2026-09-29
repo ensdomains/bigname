@@ -49,6 +49,9 @@ impl QueryParamAllowlist for HistoryQueryParams {
         "finality",
         "scope",
         "type",
+        "exclude_type",
+        "kind",
+        "record_key",
         "order",
         "from_timestamp",
         "to_timestamp",
@@ -264,6 +267,7 @@ pub(crate) fn insert_history_filter_keys(
     filters: &mut BTreeMap<String, String>,
     params: &QueryParams,
 ) {
+    params.history_filters.insert_cursor_keys(filters);
     if let Some(event_types) = params.event_types.as_ref() {
         filters.insert(TYPE_FILTER_KEY.to_owned(), event_types.canonical_value());
     }
@@ -335,15 +339,15 @@ pub(crate) fn history_page_options(
     params: &QueryParams,
     block_window: Option<HistoryBlockWindow>,
 ) -> HistoryPageOptions {
+    let event_kinds = super::history_filters::event_kinds(params);
     HistoryPageOptions {
         publication_block_bounds: None,
         order: history_storage_order(params.order),
-        event_kinds: params
-            .event_types
-            .as_ref()
-            .map(|event_types| event_types.storage_event_kinds())
-            .unwrap_or_else(product_history_event_kinds),
-        bind_cursor_anchor_to_event_kinds: params.event_types.is_some(),
+        match_no_events: event_kinds.is_empty(),
+        event_kinds,
+        record_key: params.history_filters.record_key.clone(),
+        bind_cursor_anchor_to_event_kinds: params.event_types.is_some()
+            || params.history_filters.is_explicit(),
         block_window,
     }
 }

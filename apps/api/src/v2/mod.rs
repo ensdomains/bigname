@@ -13,6 +13,7 @@ mod event_data;
 mod events;
 mod history;
 mod history_context;
+mod history_filters;
 pub(crate) mod history_keyset;
 mod list_cursor;
 pub(crate) mod lookup;

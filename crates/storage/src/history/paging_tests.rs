@@ -375,7 +375,8 @@ async fn explain_page(
 ) -> Result<Value> {
     match mode {
         PlanMode::Unprepared => {
-            let mut explain = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
+            let mut explain =
+                QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ");
             explain.push(query.sql());
             let sql = explain.into_sql();
             let mut built = query.build();
@@ -407,7 +408,7 @@ async fn explain_page(
                     .fetch_one(&mut *connection)
                     .await?;
             let plan = sqlx::query_scalar(&format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE history_page({})",
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE history_page({})",
                 literals.join(", ")
             ))
             .persistent(false)
@@ -463,3 +464,6 @@ fn page_scans<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
         }
     }
 }
+
+#[path = "contract_count_tests.rs"]
+mod contract_count_tests;

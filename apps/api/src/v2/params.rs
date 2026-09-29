@@ -26,6 +26,9 @@ pub(crate) struct RawQueryParams {
     pub(crate) scope: Option<String>,
     #[serde(rename = "type")]
     pub(crate) event_type: Option<String>,
+    pub(crate) exclude_type: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) record_key: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
@@ -64,6 +67,7 @@ pub(crate) struct QueryParams {
     pub(crate) include: Vec<String>,
     pub(crate) scope: HistoryScope,
     pub(crate) event_types: Option<HistoryEventTypeSet>,
+    pub(crate) history_filters: super::history_filters::HistoryFilters,
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
@@ -153,7 +157,12 @@ impl TryFrom<RawQueryParams> for QueryParams {
             namespace: trim_to_option(raw.namespace),
             include: parse_include(raw.include),
             scope: parse_scope(raw.scope.as_deref())?,
-            event_types: parse_event_types(raw.event_type.as_deref())?,
+            event_types: parse_event_types(raw.event_type.as_deref(), "type")?,
+            history_filters: super::history_filters::HistoryFilters::parse(
+                raw.exclude_type.as_deref(),
+                raw.kind.as_deref(),
+                raw.record_key,
+            )?,
             name: trim_to_option(raw.name),
             registration_id: parse_registration_id(raw.registration_id)?,
             address: parse_address(raw.address, "address")?,
@@ -256,7 +265,10 @@ fn parse_scope(value: Option<&str>) -> V2Result<HistoryScope> {
 
 /// `type` accepts one product event type or a comma-separated set; the set is
 /// canonicalized so cursors bind one wire value per distinct set.
-fn parse_event_types(value: Option<&str>) -> V2Result<Option<HistoryEventTypeSet>> {
+pub(super) fn parse_event_types(
+    value: Option<&str>,
+    parameter: &'static str,
+) -> V2Result<Option<HistoryEventTypeSet>> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -268,14 +280,14 @@ fn parse_event_types(value: Option<&str>) -> V2Result<Option<HistoryEventTypeSet
         .filter(|part| !part.is_empty())
     {
         let Some(event_type) = HistoryEventType::from_wire(part) else {
-            return Err(invalid_parameter("type"));
+            return Err(invalid_parameter(parameter));
         };
         event_types.push(event_type);
     }
 
     HistoryEventTypeSet::from_event_types(event_types)
         .map(Some)
-        .ok_or_else(|| invalid_parameter("type"))
+        .ok_or_else(|| invalid_parameter(parameter))
 }
 
 fn parse_timestamp_bound(

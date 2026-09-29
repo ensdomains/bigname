@@ -1610,8 +1610,32 @@ A recognized namespace with no available publication returns retryable `409 stal
 - `type` accepts one friendly event type or a comma-separated set, for example
   `type=registration,renewal`. Parts are trimmed, empty parts are ignored,
   duplicates collapse, and the set is canonicalized into the friendly
-  vocabulary order. A part outside the vocabulary or an entirely empty set
+  vocabulary order. A part outside the vocabulary or a nonblank comma-only value
   returns `400 invalid_input`. Rows match when their `type` is in the set.
+- `exclude_type` removes a comma-separated set of friendly types. `kind`
+  selects a comma-separated set of normalized product event kinds, using the
+  case-sensitive values returned by `include=raw`, such as `RecordChanged`
+  and `RecordVersionChanged`. Internal or candidate-only kinds are invalid.
+  Inclusion, exclusion, and kind selection intersect; exclusion wins when a
+  type occurs in both sets. Valid contradictory filters return an empty
+  collection. Each set is canonicalized for cursors: parts are trimmed,
+  blank parts ignored, and repeats collapsed. A wholly blank parameter is
+  treated as omitted; a nonblank value containing only commas is invalid.
+  This blank-parameter rule also applies to `type`. Repeated parameter names
+  are invalid; send multiple values in one comma-separated value.
+- `record_key` selects one exact, nonempty, case-sensitive stored history key,
+  for example `addr:60`, `text:avatar`, `name`, or `abi:16`. Its URL-decoded
+  value is not trimmed, normalized, or split on commas. It is independent of
+  the narrower record-lookup key grammar. Matching rows are writes or clears
+  of that key plus record-version resets already within the route's history
+  scope, even when no earlier write of that key was retained. Other keys and
+  resets outside that collection are excluded. A reset remains one reset row
+  with no fabricated key/value; use `include=raw` to identify its
+  `RecordVersionChanged` kind. Other explicit type/kind filters still apply,
+  so `kind=RecordChanged` omits resets and incompatible filters match nothing.
+  This filter adds no child-registration rows, reconstructs no effective
+  resolution, and changes no resolver attribution. All these filters apply
+  before pagination and existing counts, and all bind the cursor.
 - `from_timestamp` and `to_timestamp` are inclusive RFC 3339 bounds (`Z` or a
   numeric offset; fractional seconds allowed). They are resolved to block
   ranges from readable chain lineage, never through RPC: for every chain the
@@ -1754,6 +1778,14 @@ A recognized namespace with no available publication returns retryable `409 stal
   `page_size=1&include=total_count`; no event rows need to be enumerated. This
   option may cost more on names with a long history. Unanchored `/v1/events` reads (namespace, type, and block
   or timestamp windows only) never count and always report `total_count=null`.
+  A `/v1/events` read bounded only by `contract_address` also defaults to
+  `total_count=null`, but `include=total_count` requests the exact filtered
+  total in the same page transaction and published snapshot. This is a row
+  count after product duplicate suppression, not the registry's aggregate or
+  an action count. Clients can request it on the first page and omit the flag
+  on continuation pages; the flag does not bind cursors. Each opt-in request
+  counts again at its current published position. No cached or approximate
+  total is returned, and an exact empty result is zero.
 
 ### History event payloads (`include=data`, `include=raw`)
 
@@ -2003,7 +2035,8 @@ log states the previous roles too.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data|raw|total_count|child_registrations`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `exclude_type`, `kind`, `record_key`,
+  `include=data|raw|total_count|child_registrations`, `cursor`, `page_size`, and optional
   `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. `type`, `order`, and the timestamp
   window follow the [history collection filters](#history-collection-filters);
@@ -3136,7 +3169,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Purpose: address activity history.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data|raw|total_count`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `exclude_type`, `kind`, `record_key`,
+  `include=data|raw|total_count`, `cursor`, `page_size`, and optional
   `finality=latest`. `at`
   and historical `finality` values are rejected by the shared latest-state
   collection rule. `type`, `order`, and the timestamp window follow the
@@ -3284,7 +3318,8 @@ For a registrar lease first identified by a later readable observation, registra
   resolver, type, and block filters.
 - Request parameters: query `namespace`, `name`, `address`, `resolver`,
   `contract_address`, `registration_id`, `type`, `from_block`, `to_block`, `from_timestamp`,
-  `to_timestamp`, `order=asc|desc`, `include=data|raw|total_count`, `cursor`, `page_size`,
+  `to_timestamp`, `exclude_type`, `kind`, `record_key`, `order=asc|desc`,
+  `include=data|raw|total_count`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. When `name` is present and `namespace`
   is omitted, namespace is inferred from the name; `namespace` defaults to
@@ -3383,7 +3418,9 @@ For a registrar lease first identified by a later readable observation, registra
   terminal page may be shorter. `page.total_count` follows the shared history
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
-  `include=total_count` removes that cap. It is always `null` for unanchored reads.
+  `include=total_count` removes that cap and also enables exact filtered totals
+  for contract-address reads, whose default remains null. Other unanchored
+  reads always return null.
 - Walk behavior: each page and its counts read the publication captured when
   that page is admitted, disclosed in `meta.as_of`. The continuation cursor
   holds the last row's position, not a publication, so a later page can
