@@ -6401,8 +6401,8 @@ async fn seed_readable_lineage(pool: &sqlx::PgPool, chain_id: &str, through: i64
 
 // A release that changes the interpreter content hash can land while the prior release's Project
 // redo is stopped mid-way (`required downstream redo active`). That redo's progress is invalid
-// under the new hash, so the Interpret redo that starts the new hash epoch supersedes it, and the
-// Project redo it stamps then runs under the new hash.
+// under the new hash, so the Interpret redo that starts the interpreter content-hash rotation
+// supersedes it, and the Project redo it stamps then runs under the new hash.
 const PRIOR_RELEASE_HASH: &str = "keccak256:prior-release";
 
 #[tokio::test]
@@ -6448,7 +6448,7 @@ async fn a_new_hash_interpret_redo_supersedes_a_prior_hash_project_redo() -> Res
             ),
             ("project".into(), "completed".into(), false, current),
         ],
-        "the new hash epoch ran Interpret and the stamped Project redo"
+        "the interpreter content-hash rotation ran Interpret and the stamped Project redo"
     );
     scratch.cleanup().await
 }
@@ -6565,7 +6565,7 @@ async fn a_refused_new_hash_interpret_redo_keeps_the_prior_project_redo() -> Res
             CancellationToken::new(),
         )
         .await
-        .expect_err("a partial range cannot start a new hash epoch");
+        .expect_err("a partial range cannot start an interpreter content-hash rotation");
     assert_eq!(error.kind(), ErrorKind::ContentHashMismatch, "{error}");
     assert!(error.to_string().contains("full range 0..=9"), "{error}");
     assert_eq!(active_project_redo(scratch.pool(), chain_id).await?, before);
@@ -6698,8 +6698,9 @@ async fn a_pending_short_project_stamp_is_widened_through_the_ingest_handoff() -
     scratch.cleanup().await
 }
 
-/// A prior-hash epoch with Ingest and Interpret through block 9 and Project at block 5 inside a
-/// prior-hash Project redo over 0..=5: active (a kill) or pending (a recorded stop).
+/// A chain derived under the prior hash, with Ingest and Interpret through block 9 and Project at
+/// block 5 inside a prior-hash Project redo over 0..=5: active (a kill) or pending (a recorded
+/// stop).
 async fn leave_short_project_redo(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -6752,7 +6753,7 @@ async fn assert_new_hash_epoch_completed(pool: &sqlx::PgPool, chain_id: &str) ->
             ),
             ("project".into(), "completed".into(), false, current),
         ],
-        "the new hash epoch ran Interpret and the stamped Project redo"
+        "the interpreter content-hash rotation ran Interpret and the stamped Project redo"
     );
     Ok(())
 }

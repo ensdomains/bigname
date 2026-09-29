@@ -1189,8 +1189,8 @@ async fn a_resumed_redo_carries_the_interrupted_rebuild_over() -> Result<()> {
     fixture.cleanup().await
 }
 
-// Without the runner saying the redo resumes (another range, or a hash epoch), the rebuild starts
-// again.
+// Without the runner saying the redo resumes (another range, or an interpreter content-hash
+// rotation), the rebuild starts again.
 #[tokio::test]
 async fn a_redo_that_does_not_resume_rebuilds_from_the_start() -> Result<()> {
     let fixture = Fixture::new("families_repair_redo_fresh", 30).await?;

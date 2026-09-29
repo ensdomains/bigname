@@ -247,7 +247,8 @@ fn require_compatible_active_phase(
 ) -> RunnerResult<()> {
     let required_ingest_recovery = matches!(phase, PhaseName::Ingest | PhaseName::Live)
         && is_required_downstream_redo(row_for(rows, PhaseName::Ingest)?);
-    // An Interpret redo starting a new hash epoch supersedes a Project redo of another hash.
+    // An Interpret redo starting an interpreter content-hash rotation supersedes a Project redo of
+    // another hash.
     let superseded = crate::redo_supersede::superseded_project_redo(rows, phase, mode)?;
     for row in rows {
         let other: PhaseName = row.phase_name.parse()?;
@@ -457,7 +458,8 @@ fn content_hash_mismatch(
         format!(
             "refusing derived writes for chain {chain_id} phase {phase}: binary \
              interpretation-input hash {} differs from recorded {recorded_hash} on phase \
-             {recorded_phase}; start a new hash epoch with redo interpret",
+             {recorded_phase}; start the interpreter content-hash rotation with a full-range \
+             Interpret redo",
             bigname_content_hash::INTERPRETER_CONTENT_HASH
         ),
     )

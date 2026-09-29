@@ -1,11 +1,11 @@
 //! A Project redo left in progress by a binary with another interpreter content hash cannot finish
 //! under this binary: Project refuses to write while Interpret records the other hash, and the
 //! other binary may be gone (a schema-migration can drop the tables it needs). Its progress is
-//! invalid under this hash anyway. The Interpret redo that starts this binary's hash epoch
-//! therefore supersedes it: in the transaction that begins the Interpret redo, the Project row is
-//! restored the way a finished redo restores it, and the Interpret redo's completion stamps the
-//! Project redo again under this hash. A Project redo from this binary's own hash is live work and
-//! still blocks Interpret.
+//! invalid under this hash anyway. The Interpret redo that starts the interpreter content-hash
+//! rotation therefore supersedes it: in the transaction that begins the Interpret redo, the Project
+//! row is restored the way a finished redo restores it, and the Interpret redo's completion stamps
+//! the Project redo again under this hash. A Project redo from this binary's own hash is live work
+//! and still blocks Interpret.
 use sqlx::{Postgres, Transaction};
 
 use crate::{
@@ -15,7 +15,8 @@ use crate::{
     transitions::{PhaseStateRow, is_pending_required_downstream_redo, row_for},
 };
 
-/// The Project row an Interpret redo starting a new hash epoch supersedes, if any: a Project redo
+/// The Project row an Interpret redo starting an interpreter content-hash rotation supersedes, if
+/// any: a Project redo
 /// that began under another hash, while Interpret itself still records another hash. A stamped
 /// Project redo that has not begun (or whose stop was recorded) already lets Interpret start and
 /// is widened by Interpret's completion, so it is left alone.
@@ -75,7 +76,7 @@ pub(crate) async fn supersede(
             ErrorKind::LockHeld,
             format!(
                 "chain {chain_id} phase project is still running a redo under interpreter content \
-                 hash {}; stop that runner before starting the new hash epoch",
+                 hash {}; stop that runner before starting the interpreter content-hash rotation",
                 project.input_content_hash.as_deref().unwrap_or("none")
             ),
         ));
@@ -164,7 +165,7 @@ impl Superseded {
             redo_from_block = self.from,
             redo_to_block = self.to,
             "superseded a Project redo left by another interpreter content hash; the Interpret \
-             redo that starts this hash epoch stamps it again"
+             redo that starts this interpreter content-hash rotation stamps it again"
         );
     }
 }
