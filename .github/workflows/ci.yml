@@ -1072,9 +1072,6 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # The image build takes its single-job constraint from the pinned one-CPU
-      # builder that `scripts/test-container-shutdown` creates and verifies, not from
-      # this job's environment, so the host build is free to use the runner's cores.
       BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
       BIGNAME_E2E_SHUTDOWN_SOURCE_SHA: ${{ github.sha }}
       BIGNAME_E2E_SHUTDOWN_EVIDENCE: ${{ github.workspace }}/target/api-container-shutdown
@@ -1152,13 +1149,16 @@ jobs:
           echo "runtime=${runtime}" >>"$GITHUB_OUTPUT"
           echo "rust:${RUST_VERSION}-bookworm is sha256:${builder}; ubuntu:24.04 is sha256:${runtime}"
 
-      # The image build compiles the whole workspace in release mode on the pinned
-      # single-CPU builder. Its builder is per-run, so without this the compile starts
-      # cold every time. The Dockerfile builds third-party dependencies in their own
+      # The image build compiles the whole workspace in release mode. Its builder
+      # is per-run, so restore its layers to avoid compiling dependencies cold.
+      # The Dockerfile builds third-party dependencies in their own
       # layer, ahead of any first-party source, so an ordinary commit reuses that layer
       # and recompiles only this workspace's crates.
-      - name: Cache exact-image build layers
-        uses: actions/cache@v4
+      # Restore on every ref; only main saves the shared entry below. PR and
+      # merge-queue copies cannot serve later PRs and compete for cache space.
+      - name: Restore exact-image build layers
+        id: shutdown_image_cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/shutdown-image-cache
           # Keyed on every input of the dependency layer and nothing else: the base
@@ -1185,6 +1185,12 @@ jobs:
           name: api-container-shutdown
           path: target/api-container-shutdown
           if-no-files-found: error
+      - name: Save exact-image build layers
+        if: github.ref == 'refs/heads/main' && steps.shutdown_image_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/shutdown-image-cache
+          key: ${{ steps.shutdown_image_cache.outputs.cache-primary-key }}
 
   e2e:
     name: test (e2e)

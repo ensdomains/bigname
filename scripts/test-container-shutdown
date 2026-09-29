@@ -107,39 +107,24 @@ sha="${BIGNAME_E2E_SHUTDOWN_SOURCE_SHA:?explicit reviewed source SHA required}"
 [[ -z "$(git -C "$source_root" status --porcelain)" ]]
 git -C "$source_root" log -1 --format="checkout_sha=%H tree=%T requested_sha=$sha"
 builder="${BIGNAME_E2E_SHUTDOWN_BUILDER:-bigname-shutdown-$$}"
-scratch="$(mktemp -d)"; created_builder=0
+created_builder=0
 export BIGNAME_E2E_SHUTDOWN_IMAGE="bigname-api-shutdown:$sha-$$"
 cleanup_build() {
-  rm -rf "$scratch"
-  docker image rm "$BIGNAME_E2E_SHUTDOWN_IMAGE" "bigname-shutdown-probe:$$" >/dev/null 2>&1 || true
+  docker image rm "$BIGNAME_E2E_SHUTDOWN_IMAGE" >/dev/null 2>&1 || true
   if [[ "$created_builder" == 1 ]]; then docker buildx rm "$builder" >/dev/null 2>&1 || true; fi
 }
 trap cleanup_build EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ -z "${BIGNAME_E2E_SHUTDOWN_BUILDER:-}" ]]; then
-  cpu="$(awk '/Cpus_allowed_list/{split($2,a,/[-,]/);print a[1]}' /proc/self/status)"
   if docker buildx inspect "$builder" >/dev/null 2>&1; then echo "owned builder name already exists" >&2; exit 1; fi
   created_builder=1
-  docker buildx create --name "$builder" --driver docker-container --driver-opt "cpuset-cpus=$cpu" --driver-opt cpu-period=100000 --driver-opt cpu-quota=100000 --bootstrap
+  # Compile with the builder host's available CPUs, as the published image does.
+  docker buildx create --name "$builder" --driver docker-container --bootstrap
 fi
-mkdir "$scratch/src"
-printf '%s\n' '[package]' 'name="shutdown-cpu-probe"' 'version="0.1.0"' 'edition="2021"' > "$scratch/Cargo.toml"
-printf '%s\n' 'fn main() {}' > "$scratch/src/main.rs"
-printf '%s\n' 'fn main() { assert_eq!(std::env::var("NUM_JOBS").unwrap(),"1"); assert_eq!(std::thread::available_parallelism().unwrap().get(),1); }' > "$scratch/build.rs"
-printf '%s\n' 'FROM rust:1.98.0-bookworm' 'WORKDIR /probe' 'COPY . .' 'RUN cargo build --offline -vv' > "$scratch/Dockerfile"
-docker buildx build --builder "$builder" --load -t "bigname-shutdown-probe:$$" "$scratch"
-# Only BIGNAME_BUILD_SHA is exported: the image build takes its single-job
-# constraint from the builder's pinned CPU above, which the probe verifies, and
-# buildx forwards no host environment into it. Exporting CARGO_BUILD_JOBS here
-# would only throttle the host test build below.
 export BIGNAME_BUILD_SHA="$sha"
-# The builder is created and destroyed per run, so its `--mount=type=cache` mounts
-# start empty every time and the release build recompiles the whole workspace. When
-# a cache directory is supplied, carry the layers across runs instead. This changes
-# only layer reuse: the source tree, the Dockerfile, the single-CPU builder, and the
-# `-j1` build above are all unchanged, and buildx reuses a layer only when its own
-# inputs hash identically. Unset, the build behaves exactly as before.
+# A per-run builder starts with empty cache mounts. Reuse exported layers when
+# available; BuildKit still checks their inputs against the candidate source.
 cache_args=()
 if [[ -n "${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE:-}" ]]; then
   cache_out="${BIGNAME_E2E_SHUTDOWN_BUILD_CACHE}-next"
