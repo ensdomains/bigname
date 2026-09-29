@@ -656,9 +656,12 @@ rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless. When a full-history Interpret redo for an interpreter
 content hash rotation starts at the finite ingest bounds after Live has
 advanced, the runner extends Interpret
-through its recorded head and stamps the range onto Project clipped to
-Project's own recorded head — the same range unless a crash between the two
-phases' live-cycle advances left Project one block behind. Run or resume
+through its recorded head and stamps Project with the range its hash
+adoption requires: from the first ingested block to the Ingest handoff or
+Project's own recorded head, whichever is higher. That is the Interpret range
+unless a crash between the two phases' live-cycle advances left Project one
+block behind, in which case it ends at Project's head; when Project stood below
+the handoff it still reaches the handoff. Run or resume
 the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
 an interrupted attempt keeps the live-extended range. When that interruption
@@ -670,8 +673,8 @@ likewise invalid under the new hash and would otherwise block the new Interpret 
 the Interpret redo that starts the new hash supersedes it in its own start
 transaction, restoring the Project row as a finished redo would, provided no
 runner holds the Project lock, and its completion stamps the Project redo
-again. A Project redo from the running binary's own hash still blocks a new
-Interpret redo.
+again. A Project redo whose row records the running binary's hash still
+blocks a new Interpret redo.
 
 The first manifest sync under the binary that adds `_bigname_compiled_watch`
 rewrites every stored active payload. For every chain with existing derived

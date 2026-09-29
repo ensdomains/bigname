@@ -52,12 +52,12 @@ fn other_hash(row: &PhaseStateRow) -> bool {
 /// lifecycle from before the redo (a phase that was running then is failed, as an interrupted one
 /// is), every redo column cleared, its recorded extent and hash kept. The advisory lock proves no
 /// Project writer is still running the redo; the update is guarded on the attempt generation and
-/// hash the caller locked.
+/// hash the caller locked. The caller reports the result after its transaction commits.
 pub(crate) async fn supersede(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     project: &PhaseStateRow,
-) -> RunnerResult<()> {
+) -> RunnerResult<Superseded> {
     let free: bool = sqlx::query_scalar(
         "SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0::bigint))",
     )
@@ -138,15 +138,33 @@ pub(crate) async fn supersede(
             "the Project redo of chain {chain_id} changed after it was locked; retry the redo"
         )));
     }
-    tracing::warn!(
-        chain_id,
-        superseded_hash = project.input_content_hash.as_deref(),
-        interpreter_content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
-        redo_attempt_generation = project.redo_attempt_generation,
-        redo_from_block = project.redo_from_block_number,
-        redo_to_block = project.redo_to_block_number,
-        "superseded a Project redo left by another interpreter content hash; the Interpret redo \
-         that starts this hash epoch stamps it again"
-    );
-    Ok(())
+    Ok(Superseded {
+        hash: project.input_content_hash.clone(),
+        generation: project.redo_attempt_generation,
+        from: project.redo_from_block_number,
+        to: project.redo_to_block_number,
+    })
+}
+
+/// What a supersede changed, reported once the transaction that made it has committed.
+pub(crate) struct Superseded {
+    hash: Option<String>,
+    generation: i64,
+    from: Option<i64>,
+    to: Option<i64>,
+}
+
+impl Superseded {
+    pub(crate) fn report(&self, chain_id: &str) {
+        tracing::warn!(
+            chain_id,
+            superseded_hash = self.hash.as_deref(),
+            interpreter_content_hash = bigname_content_hash::INTERPRETER_CONTENT_HASH,
+            redo_attempt_generation = self.generation,
+            redo_from_block = self.from,
+            redo_to_block = self.to,
+            "superseded a Project redo left by another interpreter content hash; the Interpret \
+             redo that starts this hash epoch stamps it again"
+        );
+    }
 }

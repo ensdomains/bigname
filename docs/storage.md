@@ -1760,10 +1760,12 @@ An interpreter content hash rotation requires a planned full-history
 interpretation and projection walk; the system refuses to mix generations from
 different hashes. Interpret accepts the full finite-ingest range and extends
 its execution through its recorded live-followed head. Its downstream Project
-redo carries that effective range clipped to Project's own recorded head —
-identical unless a crash between the two phases' live-cycle advances left
-Project one block behind — and Project adopts the new hash only when the redo
-covers its entire recorded head. An
+redo covers what Project's hash adoption requires: from the first ingested
+block to the Ingest handoff or Project's own recorded head, whichever is
+higher. That matches the Interpret range unless a crash between the two
+phases' live-cycle advances left Project one block behind, and it still
+reaches the handoff when Project stood below it. Project adopts the new hash
+only when the redo covers that range. An
 interrupted redo retains that same effective range; recovery cannot narrow back
 to the finite ingest handoff. If an interrupted attested Interpret redo spans
 the hash rotation, its token remains valid only for that exact range. The new

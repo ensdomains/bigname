@@ -25,6 +25,7 @@ mod redo_completion;
 mod redo_discovery_authorization;
 mod redo_extent;
 mod redo_failure;
+mod redo_hash_adoption;
 mod redo_manifest_attestation;
 mod redo_manifest_audit;
 mod redo_manifest_authority;

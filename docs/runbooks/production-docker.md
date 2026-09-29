@@ -1194,16 +1194,22 @@ in the same step.
    redo restores it and logs a warning naming the superseded hash and range;
    the Interpret redo's completion then stamps the Project redo again under the
    new hash. The Interpret redo refuses with a lock error while any runner still
-   holds the Project lock; stop that runner and rerun. A Project redo started
-   under the running binary's own hash is never superseded: it still blocks the
-   Interpret redo until it is completed by rerunning its reported command. Do not
-   edit `chain_phase_state` by hand;
+   holds the Project lock; stop that runner and rerun. A Project redo whose row
+   records the running binary's hash is never superseded: it still blocks the
+   Interpret redo until it is completed by rerunning its reported command. While
+   Project records the prior hash, the stamp reaches from the first ingested
+   block to the Ingest handoff or Project's recorded head, whichever is higher,
+   which is the range Project needs to adopt the new hash, even when Project
+   stood below the handoff. Do not edit `chain_phase_state` by hand;
 8. complete the matching full-history Project redo while the supervisor remains
-   stopped. If it stops part-way, rerun the same command: with the same range
-   under the same binary it resumes the owned-key family rebuild from the family
-   marker instead of starting again at the first block. A rerun over another
-   range, or after an Interpret redo or flag recomputation changed Project's
-   input in between, rebuilds from the first block;
+   stopped. If it stops part-way, rerun the same command. The rerun resumes the
+   owned-key family rebuild from the family marker instead of starting again at
+   the first block when all of these hold: the range and binary are the same,
+   the rebuild was left by the attempt immediately before the rerun (a process
+   killed after starting the redo but before its first family batch uses up an
+   attempt), no Interpret redo or flag recomputation changed Project's input in
+   between, and the family marker is still on the readable chain. Otherwise it
+   rebuilds from the first block;
 9. start the long-running phase runner only after those one-shot redos succeed.
    When the release also carries a versioned schema-migration or required
    replays, complete them before the Sepolia reset and full
@@ -1373,8 +1379,9 @@ range — `rerun \`phase-runner redo --chain <chain> --phase <phase>
 options …` — because the stamp records neither the sources nor the verifier URL:
 add back the `--source` options the chain runs with and
 `--verification-database-url` when the phase is Verify or `all`. A rerun of an
-interrupted Project redo with the same range under the same binary resumes an
-unfinished family rebuild from its family marker.
+interrupted Project redo with the same range under the same binary can resume an
+unfinished family rebuild from its family marker, under the conditions in step 8
+of the [planned boundary](#planned-migration-and-fingerprint-boundary).
 `recompute-flags` needs neither intake sources nor hydration RPC. Bounded
 Project redo/rebuild also needs no hydration RPC; current enrichment is repaired
 by later Project Follow work. A redo over several chains that is stopped between two of them exits
