@@ -48,8 +48,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
-| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`). `resolves_to` is not part of `any` and cannot be combined with an authority relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
-| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, and `resolves_to` values | `relation_facets`, role-specific match arrays |
+| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`), or, on its own and on `GET /v1/addresses/{address}/names` only, `former_registrant` (released names whose ended registration the address last held; see [lapsed registration](#lapsed-registration)). `resolves_to` and `former_registrant` are not part of `any` and cannot be combined with another relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
+| `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, `resolves_to`, and `former_registrant` values | `relation_facets`, role-specific match arrays |
 | `resolution` | on a `resolves_to` row read for one decimal coin type only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)) | subgraph `resolver.coinTypes` |
 | `resolutions` | on a `resolves_to` row read with `coin_type=evm` only: `[{coin_type, record_key}]`, one entry per EVM coin type (`60`, or `2147483648` through `4294967295`, the set ENSIP-19 treats as EVM (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)) whose stored resolver record matched the address, ascending by coin type, each with the stored record key that matched. The ENSIP-19 default record appears once, as coin type `2147483648` (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f). A row carries at most 100 entries; a row that matched more returns `422 unsupported` for the whole request; read one decimal `coin_type` at a time instead. It lists matches only, not every coin type the resolver has records for; see the [known divergence](upstream.md#resolves-to-matched-coin-types) | subgraph `resolver.coinTypes`, which lists every coin type the resolver has observed whatever its value (upstream: .refs/ens_subgraph/schema.graphql:L294-L295 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/resolver.ts:L59-L79 @ ens_subgraph@723f1b6) |
 | `expires_at` | expiry, RFC 3339: for a `.eth` second-level name with a live ENSv2 entry, that entry's expiry once the chain is past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover), whichever arm holds authority (see [Expiry and grace](#expiry-and-grace)); otherwise the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted). A seconds value before 1970-01-01T00:00:00Z or after 9999-12-31T23:59:59Z, stored as a number or a quoted number, is an unknown expiry: every route omits the field and expiry sorting places the row with the other unknown expiries | `expiry_date`, `expiration` (unix), `expiry` |
@@ -1576,9 +1576,10 @@ does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-
 
 ### Lapsed registration
 
-A released ENSv1 name also carries `lapsed_registration`, the holder the lease
-had when it lapsed. It is a separate block so that nobody reads it as current
-state:
+A released name also carries `lapsed_registration`, the holder its registration
+had when it ended: an ENSv1 lease that lapsed past its grace, or an ENSv2
+registration that passed its expiry or was unregistered. It is a separate block
+so that nobody reads it as current state:
 
 ```json
 {
@@ -1589,7 +1590,8 @@ state:
   "lapsed_registration": {
     "registrant": "0x…",
     "held_through": "wrapper",
-    "released_at": "2024-07-30T00:00:12Z"
+    "released_at": "2024-07-30T00:00:12Z",
+    "release_kind": "expired"
   }
 }
 ```
@@ -1598,21 +1600,32 @@ state:
 name that is the NameWrapper token owner at the release, never the NameWrapper
 contract, which only holds the BaseRegistrar token on the owner's behalf. For an
 unwrapped name, including one whose token was transferred without `reclaim`, it is
-the BaseRegistrar token owner at the release. `held_through`
-is `registrar` or `wrapper`, the contract the lapsed lease was held through, and
-is omitted for any other value; the top-level `authority` field is a different
+the BaseRegistrar token owner at the release. For an ENSv2 registration it is
+the registry token's holder when the registration ended: the latest grant,
+transfer or release registrant on its registry entry. `held_through`
+is `registrar` or `wrapper`, the contract the lapsed lease was held through, or
+`registry` for an ENSv2 registration, and is omitted for any other value; the top-level `authority` field is a different
 thing and names the `ens_v0`, `ens_v1` or `ens_v2` side. `released_at` is the time of the
 block at which Bigname recorded the release. That is the first block whose
 timestamp is after `expires_at` plus the 90-day grace period, so it is always
-later than `expires_at` plus 90 days and never equal to it. Each field is
-omitted when unknown. The top-level `registrant`, `owner` and `manager` stay
+later than `expires_at` plus 90 days and never equal to it. For an ENSv2
+registration it is the block that recorded the unregister, or the first block
+at or past its expiry. `release_kind` is `expired` for a lapsed ENSv1 lease and
+an ENSv2 registration past its expiry, which keeps its `expires_at` and can
+still be renewed until `grace_ends_at` because the registry remembers its last
+owner, and `unregistered` for an explicit ENSv2 unregister, which burns the
+token, leaves no `expires_at` and cannot be renewed. Each field is omitted when unknown.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L270-L292 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741) The top-level `registrant`, `owner` and `manager` stay
 absent.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
-The block appears on `GET /v1/names/{name}` and on detail-profile
-`POST /v1/lookup` rows, only while the name is released, and is never an input
-to address-to-name relations, permissions or counts: the lapsed holder does not
-list the name under `GET /v1/addresses/{address}/names`. A name whose
+The block appears on `GET /v1/names/{name}`, detail-profile
+`POST /v1/lookup` rows and `GET /v1/names` rows, only while the name is
+released; a re-registration removes it. It is never an input to the authority
+relations, permissions or counts: the lapsed holder lists the name under
+`GET /v1/addresses/{address}/names` only with `relation=former_registrant`. A name whose
 NameWrapper expiry alone has passed while its registrar lease is live is not
 released and carries no block; in that state the NameWrapper reports no owner,
 so the name serves no current `registrant` and no `registrant` relation until a

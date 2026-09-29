@@ -626,10 +626,12 @@ collection route carry neither header.
   expiry with the entry, so it is outside every window; `GET /v1/names/{name}`
   serves it as `released` without `expires_at`. A released row has
   `registration_status: released`, its old `expires_at`, and
-  no `owner` or `registrant`. The row shape has no `lapsed_registration` field;
-  `GET /v1/names/{name}` serves that block, with the last holder, for a released
-  ENSv1 name. A client that wants only held names filters rows on
-  `registration_status`.
+  no `owner` or `registrant`, and carries the
+  [`lapsed_registration`](api-v1.md#lapsed-registration) block with the ended
+  registration's last holder, as `GET /v1/names/{name}` serves it. A client that
+  wants only held names filters rows on `registration_status`; one that wants
+  the names a given address last held asks
+  `GET /v1/addresses/{address}/names?relation=former_registrant`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
   bound to namespace, both bounds, and order, and hold the last row's position;
@@ -2629,6 +2631,30 @@ introduces it rebuilds Project from full history before serving the option; see
   token-holder -> `owner`, effective-controller -> `manager`, and
   registrant -> `registrant`. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource.
+  `relation=former_registrant` lists the released names whose ended
+  registration the path address last held, for renewal reminders: an ENSv1
+  lease that lapsed past its grace, or an ENSv2 registration that expired or was
+  unregistered (the row's `lapsed_registration.registrant`; see
+  [lapsed registration](api-v1.md#lapsed-registration)). It stands alone like
+  `resolves_to`: combined with another relation or `any` it returns
+  `400 invalid_input`, `any` never includes it, and it never feeds `owner`,
+  `manager`, `registrant` or a permission. A re-registration of the name drops
+  it. Rows carry `relations: ["former_registrant"]`, `registration_status:
+  released`, the ended registration's `expires_at` and `grace_ends_at`, and the
+  `lapsed_registration` block, and no current `owner` or `registrant`. The read
+  takes `expires_after` (inclusive) and `expires_before` (exclusive) as RFC 3339
+  UTC bounds on `expires_at`, which only this relation accepts; a row without
+  an expiry (an unregistered ENSv2 name) is outside every window. It sorts by
+  `expires_at` only (`sort=expires_at` is the default here; any other value is
+  `400 invalid_input`), ties broken by namespace, name and namehash, with rows
+  without an expiry last ascending and first descending. `coin_type`,
+  `authority`, `is_migrated`, `q` and `include` return `400 invalid_input` with
+  it, and `page.total_count` is `null`. Its cursor binds the address,
+  namespace, both bounds and order, and holds the last row's position, as on
+  `GET /v1/names`. An app looking for names still renewable in grace asks for
+  `expires_after` at `now` minus the longest grace and checks `grace_ends_at`
+  and the contract's own renewal rules: an unregistered ENSv2 name cannot be
+  renewed.
   `relation=resolves_to` is the resolver-record relation: the names whose
   current `addr:<coin_type>` resolver record resolves to the path address, read
   from the address-to-record family indexes rather than the authority
