@@ -389,16 +389,10 @@ pub(super) fn validate_manifest(
         {
             bail!("PublicResolverV2 admits only its node record events");
         }
-        // ENSv2 has no ABIChanged decoder of its own: only the PublicResolverV2 node path decodes it
-        // (PermissionedResolver emits ABIUpdated instead). An empty or non-public role would select a
-        // legacy admission and then fail to decode, so refuse that configuration here.
+        // Only the PublicResolverV2 node path decodes ENSv2 ABIChanged; any other role fails to decode.
         if source.source_family == "ens_v2_resolver_l1"
             && event.name == "ABIChanged"
-            && (event.emitter_roles.is_empty()
-                || event
-                    .emitter_roles
-                    .iter()
-                    .any(|role| role != "public_resolver_v2"))
+            && event.emitter_roles != ["public_resolver_v2"]
         {
             bail!(
                 "manifest {} source family ens_v2_resolver_l1 declares ABIChanged for a role other than public_resolver_v2; only the PublicResolverV2 node path decodes it",
@@ -561,6 +555,7 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "ParentUpdated(address,string,address)"
                 | "Upgraded(address)"
         ),
+        "ens_v2_resolver_l1" if public_resolver_v2_signature(signature) => true,
         "ens_v2_resolver_l1" => matches!(
             signature,
             "ResolverCreated()"
@@ -573,13 +568,6 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "NameUpdated(uint256,string)"
                 | "ABIUpdated(uint256,uint256)"
                 | "InterfaceUpdated(uint256,bytes4,address)"
-                | "ABIChanged(bytes32,uint256)"
-                | "AddrChanged(bytes32,address)"
-                | "AddressChanged(bytes32,uint256,bytes)"
-                | "TextChanged(bytes32,string,string,string)"
-                | "ContenthashChanged(bytes32,bytes)"
-                | "NameChanged(bytes32,string)"
-                | "VersionChanged(bytes32,uint64)"
                 | "AliasChanged(bytes,bytes,bytes,bytes)"
                 | "NamedResource(uint256,bytes)"
                 | "NamedTextResource(uint256,bytes,bytes32,string)"
