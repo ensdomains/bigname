@@ -17,6 +17,7 @@ pub(crate) struct RedoSession {
     interrupted_before_redo: bool,
     range: BlockRange,
     attempt_generation: i64,
+    resumes_interrupted: bool,
     recompute_flags: bool,
     required_ingest: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
@@ -26,6 +27,7 @@ impl RedoSession {
         RedoAttemptFence {
             generation: self.attempt_generation,
             execution_range: self.range,
+            resumes_interrupted: self.resumes_interrupted,
         }
     }
 }
@@ -81,7 +83,7 @@ pub(crate) async fn begin(
     let adopts_new_hash =
         matches!(phase, PhaseName::Interpret | PhaseName::Project) && hash_requires_full_redo;
     if adopts_new_hash {
-        require_full_hash_redo(
+        crate::redo_hash_adoption::require_full_hash_redo(
             &mut transaction,
             chain_id,
             phase,
@@ -164,6 +166,12 @@ pub(crate) async fn begin(
             !phase.writes_derived_data() || recorded_hash == Some(current_interpreter_hash)
         };
     let preserve_started_at = resume_same_epoch || same_active_audit;
+    let superseded = match crate::redo_supersede::superseded_project_redo(&rows, phase, mode)? {
+        Some(project) => {
+            Some(crate::redo_supersede::supersede(&mut transaction, chain_id, project).await?)
+        }
+        None => None,
+    };
     let attempt_generation = sqlx::query_scalar::<_, i64>(
         "
         UPDATE chain_phase_state SET phase_status = 'running',
@@ -247,6 +255,9 @@ pub(crate) async fn begin(
             error,
         )
     })?;
+    if let Some(superseded) = superseded {
+        superseded.report(chain_id);
+    }
     crate::redo_manifest_authority::reject_changed(
         ingest_authority_changed,
         chain_id,
@@ -257,6 +268,7 @@ pub(crate) async fn begin(
         previous,
         range: execution_range,
         attempt_generation,
+        resumes_interrupted: resume_same_epoch,
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         required_ingest,
         manifest_authority_audit: attestation_audit,
@@ -302,66 +314,6 @@ fn require_interrupted_redo_coverage(
         "chain {chain_id} phase {phase} has an interrupted redo; {instruction} before starting a \
          different redo"
     )))
-}
-
-async fn require_full_hash_redo(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    chain_id: &str,
-    phase: PhaseName,
-    mode: &RunMode,
-    recorded_head: Option<i64>,
-    interrupted_redo: bool,
-) -> RunnerResult<()> {
-    let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
-        "
-        SELECT
-            (SELECT min(start_block_number)
-             FROM ingest_cursors
-             WHERE chain_id = $1),
-            (SELECT live_handoff_block_number
-             FROM chain_phase_state
-             WHERE chain_id = $1
-               AND phase_name = 'ingest'
-               AND phase_status = 'completed')
-        ",
-    )
-    .bind(chain_id)
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|error| {
-        RunnerError::database(
-            format!("failed to load full redo bounds for chain {chain_id}"),
-            error,
-        )
-    })?;
-    let (Some(from), Some(mut to)) = bounds else {
-        return Err(RunnerError::new(
-            crate::error::ErrorKind::ContentHashMismatch,
-            format!(
-                "cannot adopt a new interpretation-input hash for chain {chain_id} phase {phase}: \
-                 completed ingest bounds are missing"
-            ),
-        ));
-    };
-    if phase == PhaseName::Project || interrupted_redo {
-        to = to.max(recorded_head.unwrap_or(to));
-    }
-    let Some(range) = mode.range() else {
-        return Err(RunnerError::data_integrity(
-            "hash adoption requires an explicit redo range",
-        ));
-    };
-    if range.from != from || range.to != to {
-        return Err(RunnerError::new(
-            crate::error::ErrorKind::ContentHashMismatch,
-            format!(
-                "cannot adopt a new interpretation-input hash for chain {chain_id} phase {phase} \
-                 with range {}..={}; redo the full range {from}..={to}",
-                range.from, range.to
-            ),
-        ));
-    }
-    Ok(())
 }
 
 pub(crate) async fn finish(
@@ -537,14 +489,8 @@ pub(crate) async fn finish(
         .await?;
     }
     if phase == PhaseName::Interpret && !recompute_flags {
-        crate::redo_stamp::stamp_required_in_transaction(
-            &mut transaction,
-            chain_id,
-            PhaseName::Project,
-            range,
-            "interpret redo completed",
-        )
-        .await?;
+        crate::redo_hash_adoption::stamp_project_after_interpret(&mut transaction, chain_id, range)
+            .await?;
     }
     let stamped_ranges = crate::redo_recompute::stamp_transitions_and_load_ranges(
         &mut transaction,

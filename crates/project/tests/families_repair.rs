@@ -1113,3 +1113,135 @@ async fn a_new_content_hash_replaces_state_the_old_order_wrote() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+const FULL_REDO: FamilyMode = FamilyMode::Redo { from: 0, to: 30 };
+
+/// A full-history redo under attempt 7 that its budget stops part-way through the rebuild, then
+/// the rerun's attempt 8 on the Project row. Returns where the rebuild stopped and its reset
+/// generation.
+async fn interrupted_rebuild(fixture: &Fixture) -> Result<(Option<i64>, Value)> {
+    seed(fixture, 11..=25).await?;
+    fixture
+        .project_row(7, Some((0, 30, "operator redo")))
+        .await?;
+    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(5);
+    let first = fixture.apply_with(30, FULL_REDO, &small).await?;
+    assert!(first.reset && first.budget_exhausted, "{first:?}");
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    assert_eq!(
+        (&record["state"], &record["attempt"]),
+        (&json!("rebuilding"), &json!(7))
+    );
+    let stopped = fixture.marker().await?.0;
+    assert!(stopped.is_some_and(|block| block < 30), "{stopped:?}");
+    fixture
+        .project_row(8, Some((0, 30, "operator redo")))
+        .await?;
+    Ok((stopped, record["reset_sequence"].clone()))
+}
+
+fn resumed() -> FamilyOptions {
+    FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(5)
+        .with_resumed_redo(true)
+}
+
+// The rerun of a full-history redo that stopped part-way through its rebuild, which the runner
+// marks as resuming the same redo (same range, same interpreter hash), carries the rebuild over to
+// its attempt and continues from the family marker. The finished families equal a fresh rebuild.
+#[tokio::test]
+async fn a_resumed_redo_carries_the_interrupted_rebuild_over() -> Result<()> {
+    let fixture = Fixture::new("families_repair_redo_resume", 30).await?;
+    let (stopped, reset) = interrupted_rebuild(&fixture).await?;
+
+    let second = fixture.apply_with(30, FULL_REDO, &resumed()).await?;
+    assert!(!second.reset, "the rebuild resumed: {second:?}");
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    assert_eq!(
+        (&record["attempt"], &record["reset_sequence"]),
+        (&json!(8), &reset),
+        "the record moved to the rerun's attempt and kept its reset"
+    );
+    let reached = fixture.marker().await?.0;
+    assert!(reached > stopped, "{stopped:?} then {reached:?}");
+    // The runner continues a budgeted redo in normal mode under the same attempt.
+    let mut runs = 0;
+    while fixture.marker().await?.0 != Some(30) {
+        let next = fixture
+            .apply_with(30, FamilyMode::Normal, &resumed())
+            .await?;
+        assert!(!next.reset, "{next:?}");
+        runs += 1;
+        assert!(runs < 20, "the rebuild does not converge");
+    }
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    assert_eq!(
+        (
+            &record["state"],
+            &record["attempt"],
+            &record["reset_sequence"]
+        ),
+        (&json!("complete"), &json!(8), &reset)
+    );
+    let resumed_rows = fixture.snapshot().await?;
+    fixture.apply(30, FamilyMode::Rebuild).await?;
+    assert_eq!(fixture.snapshot().await?, resumed_rows);
+    fixture.cleanup().await
+}
+
+// Without the runner saying the redo resumes (another range, or an interpreter content-hash
+// rotation), the rebuild starts again.
+#[tokio::test]
+async fn a_redo_that_does_not_resume_rebuilds_from_the_start() -> Result<()> {
+    let fixture = Fixture::new("families_repair_redo_fresh", 30).await?;
+    interrupted_rebuild(&fixture).await?;
+    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(5);
+    let second = fixture.apply_with(30, FULL_REDO, &small).await?;
+    assert!(second.reset, "{second:?}");
+    fixture.cleanup().await
+}
+
+// A rebuild from an attempt older than the one just before the rerun is not carried over: an
+// attempt in between may have changed what the redo covers.
+#[tokio::test]
+async fn a_resumed_redo_after_a_skipped_attempt_rebuilds() -> Result<()> {
+    let fixture = Fixture::new("families_repair_redo_gap", 30).await?;
+    interrupted_rebuild(&fixture).await?;
+    fixture
+        .project_row(9, Some((0, 30, "operator redo")))
+        .await?;
+    let second = fixture.apply_with(30, FULL_REDO, &resumed()).await?;
+    assert!(second.reset, "{second:?}");
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    assert_eq!(record["attempt"], json!(9));
+    fixture.cleanup().await
+}
+
+// A rebuild whose input revision moved since it began (an Interpret redo or flag recomputation
+// in between) starts again under the new revision.
+#[tokio::test]
+async fn a_resumed_redo_over_a_moved_input_revision_rebuilds() -> Result<()> {
+    let fixture = Fixture::new("families_repair_redo_revision", 30).await?;
+    interrupted_rebuild(&fixture).await?;
+    fixture.interpret_row(CONTENT_HASH, 3, false).await?;
+    let second = fixture.apply_with(30, FULL_REDO, &resumed()).await?;
+    assert!(second.reset, "{second:?}");
+    assert_eq!(
+        fixture.marker_revision().await?,
+        (Some(CONTENT_HASH.to_owned()), Some(3))
+    );
+    fixture.cleanup().await
+}
+
+// Families another binary's hash wrote are not resumed by this one.
+#[tokio::test]
+async fn a_resumed_redo_under_another_content_hash_rebuilds() -> Result<()> {
+    let fixture = Fixture::new("families_repair_redo_hash", 30).await?;
+    interrupted_rebuild(&fixture).await?;
+    let rotated = FamilyOptions::new("rotated-content-hash")
+        .with_max_blocks_per_run(5)
+        .with_resumed_redo(true);
+    let second = fixture.apply_with(30, FULL_REDO, &rotated).await?;
+    assert!(second.reset, "{second:?}");
+    fixture.cleanup().await
+}

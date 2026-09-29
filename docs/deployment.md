@@ -692,16 +692,28 @@ rotation with neither a current manifest-authority marker nor an active audited
 redo remains flagless. When a full-history Interpret redo for an interpreter
 content hash rotation starts at the finite ingest bounds after Live has
 advanced, the runner extends Interpret
-through its recorded head and stamps the range onto Project clipped to
-Project's own recorded head — the same range unless a crash between the two
-phases' live-cycle advances left Project one block behind. Run or resume
-the stamped Project range exactly as recorded. Project hash adoption uses its
+through its recorded head and stamps Project with the range its hash
+adoption requires: from the first ingested block to the Ingest handoff or
+Project's own recorded head, whichever is higher. That is the Interpret range
+unless a crash between the two phases' live-cycle advances left Project one
+block behind, in which case it ends at Project's head; when Project stood below
+the handoff it still reaches the handoff. While upstream discovery repair has
+installed required Ingest work, completed Ingest bounds are unavailable and the
+stamp falls back to Project's head; the runner refuses Project until the repair
+and the Interpret replay after it complete, and that replay widens the stamp.
+Run or resume the stamped Project range exactly as recorded. Project hash adoption uses its
 recorded head rather than narrowing the stamp to the older ingest handoff, and
 an interrupted attempt keeps the live-extended range. When that interruption
 belongs to an attested Interpret redo from the prior interpreter content hash,
 restart the same audited range with its token; the range restarts from its
 beginning rather than resuming the cursor written under the prior interpreter
-content hash.
+content hash. A Project redo the prior binary started and left unfinished is
+likewise invalid under the new hash and would otherwise block the new Interpret redo:
+the Interpret redo that starts the new hash supersedes it in its own start
+transaction, restoring the Project row as a finished redo would, provided no
+runner holds the Project lock, and its completion stamps the Project redo
+again. A Project redo whose row records the running binary's hash still
+blocks a new Interpret redo.
 
 The first manifest sync under the binary that adds `_bigname_compiled_watch`
 rewrites every stored active payload. For every chain with existing derived
@@ -1375,3 +1387,34 @@ generation, so every collection cursor that binds the publication, including
 address-name and subname cursors, returns `409 stale` after the switch and
 clients restart pagination without it. No cursor compatibility is carried
 across this deploy.
+
+### Registry label owner filters
+
+The build that adds `owner` and `exclude_owner` to
+[`GET /v1/registries/{chain_id}/{address}/labels`](api-v1-routes.md#get-v1registrieschain_idaddresslabels)
+stores the owner each name serves in the [name summary](glossary.md#name-summary),
+so it needs `20260929170000_project_name_summary_owner.sql`, which adds
+`project_name_summary.owner`. On a database without the column it also resets
+every owned key family, including `child_registration_events`, with the
+[family marker](glossary.md#family-marker), undo journal and repair records, as
+the name-summary schema-migration above does, so the next family run rebuilds
+them and writes every name's owner; fenced routes answer `409 stale` until that
+rebuild finishes. It takes the marker table in `EXCLUSIVE` mode first and holds
+it to commit, so a family run cannot create or lock a marker, for a chain with
+or without one, between the reset and the new column. A run that starts
+meanwhile waits; afterwards it either rebuilds with the column or, if it had
+planned against a marker the reset removed, fails its generation check once and
+the next run rebuilds. A run already holding its marker delays the
+schema-migration until that run's transaction ends. While it runs, API requests
+that read the name summary (the subname and label lists) or lock the marker
+(verified lookups) wait for it rather than answer `409 stale`, up to the API's
+statement and request timeouts, so apply it at a quiet moment. Apply it before starting the release: the family writer
+inserts summary rows by column name, so without the column that release's
+summaries silently lose their owner and the filtered label reads fail. The
+composition that fills it lives in hashed storage sources
+(`crates/storage/src/families`), so the build rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) and its first
+family run rebuilds the families anyway; the reset adds no second rebuild when
+the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
+redo and Project rebuild discharge this, and collection cursors restart as
+described above.

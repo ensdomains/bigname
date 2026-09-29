@@ -88,6 +88,26 @@ pub(super) async fn run(
     }
 
     let rebuilding = active.filter(|record| record.state == State::Rebuilding);
+    // The same redo rerun after a stop (the runner kept its range, interpreter hash and saved
+    // progress) finds the rebuild the attempt just before it left. A rebuild depends on its input,
+    // not on its attempt: carry it over to this attempt and resume it. Another range, a moved
+    // input revision or families written under another hash start it again below.
+    if matches!(mode, FamilyMode::Redo { .. })
+        && options.resumes_interrupted_redo
+        && let Some(record) = rebuilding.filter(|record| {
+            record.attempt + 1 == attempt
+                && token
+                    .revision()
+                    .is_some_and(|revision| record.prefix_revision.as_ref() == Some(&revision))
+                && family
+                    .input_content_hash
+                    .as_deref()
+                    .is_none_or(|hash| hash == options.input_content_hash)
+        })
+    {
+        let adopted = run.adopt_rebuild(&family, record, attempt).await?;
+        return run.resume_rebuild(&adopted, &family, &token, outcome).await;
+    }
     let rebuild = match mode {
         FamilyMode::Rebuild => Some(Reason::ContentHashRebuild),
         // A redo attempt the families never saw (an earlier one was lost) cannot be undone from

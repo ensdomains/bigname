@@ -2551,8 +2551,9 @@ filtering, ordering and counts without composing every candidate at read time.
 child counts and the registry labels filter, sort and count by inside one
 statement, which a list cannot compose at read for every child: the selected
 authority arm, whether the name has a serving resource, its registration
-status, expiry and registration times, and whether the latest registry
-Transfer attributed to it names the zero owner. Each but the last is the value
+status, expiry and registration times, the owner it serves, and whether the
+latest registry Transfer attributed to it names the zero owner. Each but the
+last is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
 latest named registry event of any kind of its resource, else an active surface

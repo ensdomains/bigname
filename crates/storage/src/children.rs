@@ -10,7 +10,7 @@ pub use reads::{
 pub use types::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
     ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
-    ChildrenCurrentSummary, RegistryChildrenPage,
+    ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
 };
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
