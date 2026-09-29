@@ -345,6 +345,7 @@ fn progress_context(mode: RunMode) -> PhaseContext {
         redo_attempt: execution_range.map(|execution_range| RedoAttemptFence {
             generation: 4,
             execution_range,
+            resumes_interrupted: false,
         }),
         sources: Arc::from([]),
         available_heads: None,

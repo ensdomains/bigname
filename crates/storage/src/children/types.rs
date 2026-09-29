@@ -117,8 +117,18 @@ pub struct ChildrenCurrentPage {
     pub summary: ChildrenCurrentSummary,
 }
 
+/// A registry labels page's filter on the owner each label serves: the owner of the label's
+/// composed name row, absent when it composes none (`project_name_summary.owner`). Addresses are
+/// lower-cased by the caller. `ExcludeOwner` keeps every label not served with that owner,
+/// including the ownerless ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryLabelOwnerFilter<'a> {
+    Owner(&'a str),
+    ExcludeOwner(&'a str),
+}
+
 /// Bounded page of the declared children one registry contract holds, with the exact count of
-/// every such child.
+/// every such child the page's owner filter admits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryChildrenPage {
     pub rows: Vec<ChildrenCurrentRow>,
