@@ -219,9 +219,9 @@ Field ownership:
   `inputs` are request controls, `record` holds a single name result, `records`
   holds reverse result rows, and `changed`, `input_name`, and `reason` live
   inside `normalization` only.
-- Name-filter request fields are route-local: `q` is shared by search and
-  address-name collections, `match` is search-only, and `dedupe` is
-  address-name-only.
+- Name-filter request fields are route-local: `q` and `match` are shared by
+  search, the address-name collection and the subnames collection, and `dedupe`
+  is address-name-only.
 - Record-answer containers are route-local: `records` and `value` are the
   per-key answer shape for one resolver-record route, not shared domain
   vocabulary. The inventory container `inventory: {known_keys, unset_keys,
@@ -1341,7 +1341,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Tier: product read.
 - Purpose: direct subnames.
 - Request parameters: path `name`; query `namespace`, `q`,
-  `sort=name|expires_at|registered_at`, `order=asc|desc`,
+  `match=prefix|contains`, `sort=name|expires_at|registered_at`,
+  `order=asc|desc`,
   `include_expired=true|false`, `include=counts`, `cursor`, `page_size`, and
   optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
@@ -1350,9 +1351,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   normalized as an ENSIP-15 name prefix (`q=AL` matches `alpha.parent.eth`),
   one trailing dot marks a label boundary (`q=alpha.` matches
   `alpha.parent.eth` but not `alphax.parent.eth`), an empty `q` is absent, and
-  input the normalizer rejects returns `400 invalid_input`. The comparison is
-  byte-wise against the served name, so a [non-name form](glossary.md#non-name-form)
-  row matches only a prefix of its placeholder or escaped text.
+  input the normalizer rejects returns `400 invalid_input`. `match` selects
+  prefix (the default) or substring matching exactly as on
+  `GET /v1/addresses/{address}/names`, so `q=o&match=contains` matches
+  `carol.parent.eth` and `two.parent.eth`. The comparison is byte-wise against
+  the served name, so a [non-name form](glossary.md#non-name-form) row matches
+  only a prefix, or with `match=contains` a substring, of its placeholder or
+  escaped text.
   `sort` defaults to `name` and `order` to `asc`. `expires_at` and
   `registered_at` order by the child's own registration timestamps, read the
   same way `GET /v1/addresses/{address}/names` reads them; a child with no
@@ -1402,8 +1407,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `subregistry` is `{chain_id, address}` of the ENSv2 registry the child's
   current subregistry pointer targets, omitted when there is none.
 - Pagination behavior: standard collection pagination in the requested sort
-  and order. Cursors are bound to namespace, parent, `q`, `include_expired`,
-  sort, and order; a cursor replayed under different controls returns
+  and order. Cursors are bound to namespace, parent, `q`, `match=contains`
+  when it narrows a `q`, `include_expired`, sort, and order; a cursor replayed under different controls returns
   `400 invalid_input`. A cursor must also carry the current publication and
   expiry evaluation time; older cursors without them return `409 stale` and
   require restarting without a cursor.
@@ -2286,19 +2291,27 @@ introduces it rebuilds Project from full history before serving the option; see
 - Tier: product read.
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`,
-  `authority=ens_v0|ens_v1|ens_v2`, `coin_type`, `q`,
-  `sort=name|expires_at|registered_at`, `order=asc|desc`,
+  `authority` (a comma-separated set of `ens_v0`, `ens_v1`, `ens_v2`),
+  `coin_type`, `q`, `match=prefix|contains`,
+  `sort=name|expires_at|registered_at|created_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `authority` keeps only rows whose current name row would serve that
-  `authority` value, so `ens_v1` no longer matches a name served as `ens_v0`,
-  whose record the current registry does not hold yet
+  `authority` keeps only rows whose current name row would serve one of the
+  listed `authority` values, so `ens_v1` alone no longer matches a name served
+  as `ens_v0`, whose record the current registry does not hold yet
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f);
-  it is a primary-key probe of the name row per candidate relation row, applied
-  before grouping and pagination. Any other value returns `400 invalid_input`.
-  Rows with no selected arm (Basenames) and ownerless registry rows match none
-  of the three values.
+  `authority=ens_v0,ens_v1` returns both in one collection, each row keeping its
+  own `authority`. It is a primary-key probe of the name row per candidate
+  relation row, applied before grouping, sorting, pagination and
+  `page.total_count`. The set is comma-separated and unordered: blank segments
+  are skipped and repeats collapse, as for `relation`, and a single value is
+  the one-value set. A whitespace-only value is treated as absent. A value that
+  names no authority (`authority=,`), any other value, or a repeated
+  `authority` parameter returns `400 invalid_input`. Rows with no selected arm
+  (Basenames) and ownerless registry rows match no set, including all three
+  values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
+  filter.
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
   `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
@@ -2322,7 +2335,26 @@ introduces it rebuilds Project from full history before serving the option; see
   `q=ALICE.` matches `alice.eth` but not `alicex.eth`. An empty name before the
   boundary marker, multiple trailing dots, an empty interior label, or any
   other input rejected by bigname's name validation atop ENSIP-15 returns
-  `400 invalid_input`. This route does not accept `match`.
+  `400 invalid_input`. `match=prefix` (the default) is the prefix rule above.
+  `match=contains` matches `q` anywhere in the stored normalized name, with the
+  normalization and boundary rules `match=contains` has on `GET /v1/search`:
+  `q=cat&match=contains` matches `cat.eth` and `mycat.eth`, one leading dot is
+  accepted and kept as a label boundary (`q=.eth`), and one trailing dot keeps
+  the preceding label boundary as for a prefix. Both modes compare bytes
+  literally: `_`, `%` and `\` are never wildcards, and `%` and `\` are not name
+  characters, so they return `400 invalid_input`. Matching is exact substring
+  matching on the normalized name, with no fuzzy matching. `match` without a
+  nonempty `q` selects nothing and is ignored; any value other than `prefix`
+  or `contains` returns `400 invalid_input`. The match mode applies before
+  grouping, sorting, pagination and `page.total_count`.
+  `sort` defaults to `name`, ordered by the row's served name. `expires_at`,
+  `registered_at` and `created_at` order by the row's name timestamps as served
+  on the row; `created_at` is the name's first observation, the block time of
+  the first event that named it, and is unrelated to `registered_at`, the
+  registration time. A row with no such timestamp sorts after every dated row
+  ascending and before every dated row descending. Equal timestamps, and equal
+  names, break ties by name identity and then by the grouped resource, in both
+  orders.
   `relation` accepts a comma-separated set of v2 vocabulary values
   `owner`, `manager`, and `registrant`; `any` normalizes to all three values.
   Rows match when any listed relation matches. The storage relations map as
@@ -2377,8 +2409,8 @@ introduces it rebuilds Project from full history before serving the option; see
   resource can match without a current owner or registration; the result does
   not invent authority for them. For such names, `dedupe=registration` and
   cursor identity use the serving resource as the grouping key while
-  registration fields remain absent. `namespace`, `authority`, `q`, `sort`,
-  `order`, `dedupe`,
+  registration fields remain absent. `namespace`, `authority`, `q`, `match`,
+  `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
@@ -2486,7 +2518,8 @@ introduces it rebuilds Project from full history before serving the option; see
   given on `GET /v1/names/{name}`. Any other `include` value returns
   `400 invalid_input`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
-  address, optional namespace filter, normalized relation set, `authority`, `is_migrated`,
+  address, optional namespace filter, normalized relation set, the normalized
+  `authority` set, `is_migrated`, `q`, `match=contains` when it narrows a
   `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
   the coin-type selector (the canonical decimal coin type, or `evm`), so a
   single-coin cursor never resumes an `evm` read or the reverse, and a cursor
