@@ -2619,7 +2619,9 @@ introduces it rebuilds Project from full history before serving the option; see
   (409) and the read restarts without a cursor. That holds when the renamed
   child is the cursor's own anchor too: the renderings are compared before the
   anchor is checked. A malformed cursor, or one issued before this binding,
-  stays `invalid_input` (400). The listing covers the ENSv1 arm: a
+  stays `invalid_input` (400), even when the publication that issued it has
+  since changed: the cursor's shape and binding are checked before its
+  publication. The listing covers the ENSv1 arm: a
   Basenames registry child with no surface is listed only on its parent's
   subnames page. Reverse inputs of `POST /v1/lookup` still list only names
   with a current name row.

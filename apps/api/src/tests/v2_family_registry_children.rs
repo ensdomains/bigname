@@ -499,3 +499,51 @@ async fn v2_registry_child_rename_of_the_cursor_anchor_restarts_the_read() -> Re
 
     database.cleanup().await
 }
+
+/// Re-encode an issued address-names cursor after `change`, as if a different publication had
+/// issued it: its publication token no longer matches the served one.
+fn stale_address_names_cursor(cursor: &str, change: impl FnOnce(&mut Value)) -> Result<String> {
+    let mut payload: Value = serde_json::from_slice(&hex::decode(cursor)?)?;
+    payload["snapshot"] = json!("a-superseded-publication");
+    change(&mut payload);
+    Ok(hex::encode(serde_json::to_vec(&payload)?))
+}
+
+/// The ownership cursor's shape and binding are checked before its publication: a legacy
+/// eight-key cursor, or one whose anchor is malformed, is invalid input (400) even when the
+/// publication it came from is gone, and only a well-formed stale cursor restarts (409).
+#[tokio::test]
+async fn v2_a_stale_malformed_ownership_cursor_is_invalid_before_it_is_stale() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=1");
+    let (status, first) = read_family_response(&database, &uri).await?;
+    assert_eq!(status, StatusCode::OK, "{first:#}");
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("a second page")
+        .to_owned();
+
+    let stale = stale_address_names_cursor(&cursor, |_| {})?;
+    let (status, error) = read_family_response(&database, &format!("{uri}&cursor={stale}")).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
+    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+
+    let legacy = stale_address_names_cursor(&cursor, |payload| {
+        let removed = payload["filters"]
+            .as_object_mut()
+            .and_then(|filters| filters.remove("registry_children"));
+        assert!(removed.is_some(), "an issued cursor binds the registry children");
+    })?;
+    let bad_anchor = stale_address_names_cursor(&cursor, |payload| {
+        payload["last_item"]["resource_id"] = json!("not-a-uuid");
+    })?;
+    for (case, cursor) in [("legacy eight-key", legacy), ("malformed anchor", bad_anchor)] {
+        let (status, error) =
+            read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {error:#}");
+        assert_eq!(error["error"]["code"], json!("invalid_input"), "{case}: {error:#}");
+    }
+
+    database.cleanup().await
+}

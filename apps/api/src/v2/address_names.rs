@@ -188,21 +188,19 @@ pub(crate) async fn get_address_names(
         sort: params.sort,
         order,
     };
+    // The cursor's shape and binding come before its publication, so a malformed or legacy
+    // cursor is invalid input (400) even when the publication that issued it is gone (409).
+    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor_payload
+        .as_ref()
+        .map(|payload| address_names_storage_cursor(payload, &cursor_binding))
+        .transpose()?;
     let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),
         params.namespace.as_deref(),
     )
     .await?;
-    let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
-    let storage_cursor = cursor_payload
-        .as_ref()
-        .map(|payload| {
-            let cursor = address_names_storage_cursor(payload, &cursor_binding)?;
-            snapshot.validate_cursor(payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
 
     let storage_page = bigname_storage::load_address_names_current_page_filtered(
         &state.pool,
