@@ -6,8 +6,8 @@ use bigname_domain::vocabulary::parse_alloy_evm_address;
 
 use super::normalize_address;
 use crate::{
-    DEFAULT_VERIFIED_AUTHORITY_ARMS, SourceManifest, UNIVERSAL_RESOLVER_ROLE,
-    VERIFIED_AUTHORITY_ARMS,
+    DEFAULT_VERIFIED_AUTHORITY_ARMS, MANAGED_UNIVERSAL_RESOLVER_ROLE, SourceManifest,
+    UNIVERSAL_RESOLVER_ROLE, VERIFIED_AUTHORITY_ARMS,
 };
 
 /// `universal_resolver_implementations` is an `ens_execution` declaration of valid, distinct
@@ -41,6 +41,17 @@ pub(super) fn validate_universal_resolver_implementations(
         if parse_alloy_evm_address(address).is_err() {
             bail!(
                 "manifest {} has invalid universal resolver implementation address {address}",
+                path.display()
+            );
+        }
+        if manifest.contracts.iter().any(|contract| {
+            matches!(
+                contract.role.as_str(),
+                UNIVERSAL_RESOLVER_ROLE | MANAGED_UNIVERSAL_RESOLVER_ROLE
+            ) && normalize_address(&contract.address) == normalize_address(address)
+        }) {
+            bail!(
+                "manifest {} universal resolver implementation address {address} overlaps declared Universal Resolver proxy",
                 path.display()
             );
         }

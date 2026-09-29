@@ -995,6 +995,19 @@ fn repository_loader_validates_universal_resolver_implementations() -> Result<()
             "duplicates universal resolver implementation address",
         ),
         (
+            "client-facing proxy admitted as implementation",
+            with("[\"0x00000000000000000000000000000000000000ee\"]"),
+            "overlaps declared Universal Resolver proxy",
+        ),
+        (
+            "managed proxy admitted as implementation",
+            format!(
+                "{}\n[[contracts]]\nrole = \"universal_resolver_managed\"\naddress = \"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"\nproxy_kind = \"none\"\n",
+                with("[\"0x5D25C1D6ACBB71B7A28AA7899618A3412A8303E3\"]")
+            ),
+            "overlaps declared Universal Resolver proxy",
+        ),
+        (
             "no client-facing proxy",
             with("[\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"]").replacen(
                 "role = \"universal_resolver\"",

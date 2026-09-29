@@ -119,6 +119,15 @@ async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_w
         Some(900),
         CanonicalityState::Canonical,
     );
+    let execution_manifest = database.insert_manifest(
+        "ens", "ens_execution", "ethereum-mainnet", "cutover-fixture", 1, "active", "test",
+    ).await?;
+    seed_fixture_manifest_update(
+        &database.pool, execution_manifest, "ethereum-mainnet", "ens", "ens_execution",
+        &json!({"contracts": [{"role": "universal_resolver",
+            "address": "0xeeeeeeee14d718c2b47d9923deab1335e144eeee", "start_block": 0}],
+            "universal_resolver_implementations": ["0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3"]}),
+    ).await?;
     upgraded.event_kind = "Upgraded".into();
     upgraded.source_family = "ens_execution".into();
     upgraded.before_state = json!({});
@@ -139,6 +148,15 @@ async fn v2_get_name_after_the_universal_resolver_cutover_withholds_resolution_w
     assert_eq!(data["owner"], before["data"]["owner"]);
     assert_eq!(data["expires_at"], before["data"]["expires_at"]);
     assert_eq!(data["grace_ends_at"], before["data"]["grace_ends_at"]);
+    let verified = v2_name_record_payload_for_database(
+        &database, "/v1/names/Alice.eth?source=verified",
+    ).await?;
+    let verified_data = &verified["data"];
+    assert_eq!(verified_data["unresolvable_reason"], data["unresolvable_reason"]);
+    assert!(verified_data.get("records").is_none(), "{verified}");
+    assert!(verified_data.get("primary_address").is_none(), "{verified}");
+    assert_eq!(verified_data["owner"], data["owner"]);
+    assert_eq!(verified_data["expires_at"], data["expires_at"]);
     database.cleanup().await
 }
 
