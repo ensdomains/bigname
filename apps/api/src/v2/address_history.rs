@@ -62,6 +62,15 @@ pub(crate) async fn get_address_history(
             "relation=resolves_to is not supported for address history",
         ));
     }
+    if params
+        .relation
+        .as_ref()
+        .is_some_and(RelationSet::is_former_registrant)
+    {
+        return Err(V2Error::invalid_input(
+            "relation=former_registrant is not supported for address history",
+        ));
+    }
     let include = history_include(&params.include)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());

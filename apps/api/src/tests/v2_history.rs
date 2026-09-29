@@ -1,4 +1,32 @@
 #[tokio::test]
+async fn v2_address_history_rejects_former_registrant_instead_of_returning_unfiltered_events()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let path = "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=20";
+    let response = v2_history_response_for_database(&database, path).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let unfiltered: Value = read_json(response).await?;
+    assert!(
+        !unfiltered["data"].as_array().expect("events").is_empty(),
+        "{unfiltered}"
+    );
+    let response =
+        v2_history_response_for_database(&database, &format!("{path}&relation=former_registrant"))
+            .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], "invalid_input");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("former_registrant")
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_address_history_rejects_resolves_to_relation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
