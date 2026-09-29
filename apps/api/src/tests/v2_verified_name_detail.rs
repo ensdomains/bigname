@@ -179,12 +179,13 @@ async fn verified_name_detail_executes_the_chain_neutral_inventory_keys_on_sepol
     assert_eq!(
         data["records"],
         json!({
-            "address_keys": ["60"],
+            "seen_addresses": ["60"],
             "addresses": {"60": SEPOLIA_DETAIL_EXECUTED},
-            "text_keys": [],
+            "seen_texts": [],
             "texts": {},
-            "abi_keys": [],
-            "abis": {}
+            "seen_abis": [],
+            "abis": {},
+            "seen_singletons": []
         }),
         "{detail}"
     );
@@ -230,17 +231,18 @@ async fn verified_name_detail_reads_the_profile_set_without_inventory_keys() -> 
     assert_eq!(
         data["records"],
         json!({
-            "address_keys": ["60"],
+            "seen_addresses": ["60"],
             "addresses": {"60": SEPOLIA_DETAIL_EXECUTED},
-            "text_keys": ["avatar", "description", "email", "url"],
+            "seen_texts": ["avatar", "description", "email", "url"],
             "texts": {
                 "avatar": null,
                 "description": null,
                 "email": null,
                 "url": "https://alice.example"
             },
-            "abi_keys": [],
+            "seen_abis": [],
             "abis": {},
+            "seen_singletons": ["contenthash"],
             "contenthash": null
         }),
         "{detail}"
@@ -264,7 +266,7 @@ async fn verified_name_detail_reports_a_failed_getter_as_failed() -> Result<()> 
     assert_eq!(data["status"], json!("failed"), "{detail}");
     assert_eq!(data["failure_reason"], json!("resolver_call_reverted"));
     // The failed key stays listed with no value.
-    assert_eq!(data["records"]["address_keys"], json!(["60"]), "{detail}");
+    assert_eq!(data["records"]["seen_addresses"], json!(["60"]), "{detail}");
     assert_eq!(data["records"]["addresses"], json!({}), "{detail}");
     assert!(data.get("primary_address").is_none(), "{detail}");
     assert_eq!(data["unsupported_fields"], json!(["primary_address"]));
@@ -328,12 +330,14 @@ async fn verified_name_detail_takes_the_first_failed_key_in_key_order() -> Resul
     // The failed contenthash and the reverted text:url stay listed with no value.
     let records = &data["records"];
     assert_eq!(records["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{detail}");
-    assert_eq!(records["text_keys"], json!(["avatar", "description", "email", "url"]), "{detail}");
+    assert_eq!(records["seen_texts"], json!(["avatar", "description", "email", "url"]), "{detail}");
     assert_eq!(
         records["texts"],
         json!({"avatar": null, "description": null, "email": null}),
         "{detail}"
     );
+    // Read but failed: listed, value unknown.
+    assert_eq!(records["seen_singletons"], json!(["contenthash"]), "{detail}");
     assert!(records.get("contenthash").is_none(), "{detail}");
     assert!(data.get("unsupported_fields").is_none(), "{detail}");
     assert_eq!(joined_keys(rpc_handle).await?, PROFILE_KEYS_SORTED);
@@ -392,7 +396,7 @@ async fn verified_name_detail_discovers_a_null_resolver_without_inventory() -> R
     assert_eq!(data["records"]["addresses"], json!({"60": SEPOLIA_DETAIL_EXECUTED}), "{payload}");
     assert_eq!(data["records"]["texts"]["url"], json!("https://alice.example"));
     // With no inventory row the ABI content types cannot be listed.
-    assert!(data["records"].get("abi_keys").is_none(), "{payload}");
+    assert!(data["records"].get("seen_abis").is_none(), "{payload}");
     assert_eq!(
         data["records"]["abi_unsupported_reason"],
         json!("inventory_not_available"),

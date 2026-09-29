@@ -170,17 +170,21 @@ async fn lookup_detail_records_match_name_detail() -> Result<()> {
 }
 
 /// A resolver whose implementation is not an admitted profile: the keys it was seen writing are
-/// listed on both routes, with no value.
+/// listed on both routes, with no value, singletons included.
 #[tokio::test]
 async fn lookup_detail_records_list_an_unknown_resolvers_keys_without_values() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_unknown_resolver_inputs(&database, &unknown_resolver_record_writes()).await?;
+    let mut writes = unknown_resolver_record_writes();
+    writes.push(family_fixture_record_write("contenthash", Some(json!("0xe3010170"))));
+    seed_unknown_resolver_inputs(&database, &writes).await?;
     let detail = assert_lookup_detail_matches_name_detail(&database, "alice.eth").await?;
     let records = &detail["records"];
-    assert_eq!(records["address_keys"], json!(["60"]), "{detail}");
+    assert_eq!(records["seen_addresses"], json!(["60"]), "{detail}");
     assert_eq!(records["addresses"], json!({}), "{detail}");
-    assert_eq!(records["text_keys"], json!(["description"]), "{detail}");
+    assert_eq!(records["seen_texts"], json!(["description"]), "{detail}");
     assert_eq!(records["texts"], json!({}), "{detail}");
+    // Written, value unknown.
+    assert_eq!(records["seen_singletons"], json!(["contenthash"]), "{detail}");
     assert!(records.get("contenthash").is_none(), "{detail}");
     assert!(records.get("name").is_none(), "{detail}");
     database.cleanup().await
@@ -235,10 +239,11 @@ async fn lookup_detail_records_serve_cleared_values_as_null() -> Result<()> {
     let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
     let records = &detail["records"];
     // `seed_identity_name` also writes the fixture's own text records.
-    let text_keys = records["text_keys"].as_array().expect("text keys");
+    let text_keys = records["seen_texts"].as_array().expect("text keys");
     assert!(text_keys.contains(&json!("url")) && text_keys.contains(&json!("email")), "{detail}");
     assert_eq!(records["texts"]["email"], json!("kept@example.test"), "{detail}");
     assert_eq!(records["texts"].get("url"), Some(&Value::Null), "{detail}");
+    assert_eq!(records["seen_singletons"], json!(["contenthash"]), "{detail}");
     assert_eq!(records.get("contenthash"), Some(&Value::Null), "{detail}");
     database.cleanup().await
 }
@@ -279,20 +284,29 @@ async fn lookup_detail_records_follow_the_forward_name_record() -> Result<()> {
             "value_retained":false, "raw_name":value})
     };
     let forward_name = |detail: &Value| detail["records"].get("name").cloned();
+    let name_seen = |detail: &Value| {
+        detail["records"]["seen_singletons"]
+            .as_array()
+            .expect("seen singletons")
+            .contains(&json!("name"))
+    };
 
-    // Never written, on an authoritative inventory: unset.
+    // Never written, on an authoritative inventory: not seen, unset.
     let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
     assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+    assert!(!name_seen(&detail), "{detail}");
 
     publish("RecordChanged", name_changed("forward-target.eth")).await?;
     let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
     assert_eq!(forward_name(&detail), Some(json!("forward-target.eth")), "{detail}");
+    assert!(name_seen(&detail), "{detail}");
     assert!(detail.get("primary_name").is_none(), "{detail}");
 
-    // `setName("")` clears it.
+    // `setName("")` clears it: seen, `null`.
     publish("RecordChanged", name_changed("")).await?;
     let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
     assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+    assert!(name_seen(&detail), "{detail}");
 
     // A rewrite counts again, and a record-version reset drops it.
     publish("RecordChanged", name_changed("rewritten.eth")).await?;
@@ -301,5 +315,6 @@ async fn lookup_detail_records_follow_the_forward_name_record() -> Result<()> {
     publish("RecordVersionChanged", version_after(&node, GROUPED_RESOLVER, 1)).await?;
     let detail = assert_lookup_detail_matches_name_detail(&database, name).await?;
     assert_eq!(forward_name(&detail), Some(Value::Null), "{detail}");
+    assert!(!name_seen(&detail), "{detail}");
     database.cleanup().await
 }

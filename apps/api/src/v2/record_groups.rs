@@ -1,10 +1,12 @@
 //! The `records` object of name detail and `POST /v1/lookup` `profile=detail`
-//! (docs/api-v1-routes.md § `GET /v1/names/{name}`): each record category's key list beside its
-//! value map, and the `contenthash` and forward `name` singletons.
+//! (docs/api-v1-routes.md § `GET /v1/names/{name}`): each record category's `seen_*` key list
+//! beside its value map, and the `contenthash` and forward `name` singletons, listed in
+//! `seen_singletons` when a write was observed.
 //!
-//! Encoding: a listed key missing from its value map is not known in this response; a listed key
-//! mapped to `null` is set to empty (cleared). A singleton is its value, `null` when cleared, and
-//! absent when unknown.
+//! Encoding: a seen key missing from its value map is not known in this response; a seen key
+//! mapped to `null` is set to empty (cleared). A singleton is its value, `null` when cleared (or,
+//! left out of `seen_singletons`, never written on an authoritative inventory), and absent when
+//! unknown; a seen singleton that is absent is a write whose value is unknown.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,17 +31,20 @@ use super::{Status, V2Error, V2Result};
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct RecordGroups {
     /// Canonical decimal coin types.
-    pub(crate) address_keys: Vec<String>,
+    pub(crate) seen_addresses: Vec<String>,
     pub(crate) addresses: BTreeMap<String, Option<String>>,
-    pub(crate) text_keys: Vec<String>,
+    pub(crate) seen_texts: Vec<String>,
     pub(crate) texts: BTreeMap<String, Option<String>>,
     /// ABI content types, or absent with `abi_unsupported_reason` when the index cannot list them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) abi_keys: Option<Vec<String>>,
+    pub(crate) seen_abis: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) abi_unsupported_reason: Option<String>,
     /// bigname retains no ABI bytes, so every listed content type is unknown here.
     pub(crate) abis: BTreeMap<String, Option<String>>,
+    /// `contenthash` and/or `name`: the singletons a write was observed for (indexed) or that
+    /// were read (verified).
+    pub(crate) seen_singletons: Vec<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -97,9 +102,10 @@ fn nonempty(value: String) -> Option<String> {
 impl RecordGroups {
     fn list(&mut self, record: &ResolutionRecordKey) {
         match slot(record) {
-            Some(Slot::Address(coin_type)) => self.address_keys.push(coin_type),
-            Some(Slot::Text(key)) => self.text_keys.push(key),
-            Some(Slot::Contenthash) | None => {}
+            Some(Slot::Address(coin_type)) => self.seen_addresses.push(coin_type),
+            Some(Slot::Text(key)) => self.seen_texts.push(key),
+            Some(Slot::Contenthash) => self.seen_singletons.push("contenthash".to_owned()),
+            None => {}
         }
     }
 
@@ -132,12 +138,16 @@ impl RecordGroups {
     }
 
     fn finish(mut self) -> Self {
-        for keys in [&mut self.address_keys, &mut self.text_keys] {
+        for keys in [
+            &mut self.seen_addresses,
+            &mut self.seen_texts,
+            &mut self.seen_singletons,
+        ] {
             let sorted: BTreeSet<String> = keys.drain(..).collect();
             keys.extend(sorted);
         }
         // Canonical decimal coin types, numerically ascending.
-        self.address_keys
+        self.seen_addresses
             .sort_by(|left, right| (left.len(), left).cmp(&(right.len(), right)));
         self
     }
@@ -154,6 +164,8 @@ impl RecordGroups {
         {
             if let Some(record) = product_record_from_item(item) {
                 groups.list(&record);
+            } else if string_field(item.get("record_family")).as_deref() == Some("name") {
+                groups.seen_singletons.push("name".to_owned());
             }
         }
         if sections.authoritative {
@@ -223,7 +235,7 @@ impl RecordGroups {
     }
 
     pub(crate) fn set_abi_content_types(&mut self, answer: AbiContentTypes) {
-        (self.abi_keys, self.abi_unsupported_reason) = match answer {
+        (self.seen_abis, self.abi_unsupported_reason) = match answer {
             AbiContentTypes::Observed(content_types) => (Some(content_types), None),
             AbiContentTypes::Unavailable(reason) => (None, Some(reason.as_str().to_owned())),
         };
@@ -351,17 +363,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&groups).expect("serializes"),
             json!({
-                "address_keys": ["60"], "addresses": {"60": "0xabc"},
-                "text_keys": ["email", "url"], "texts": {"url": null},
-                "abis": {}, "contenthash": "0xe301", "name": "alice.eth"
+                "seen_addresses": ["60"], "addresses": {"60": "0xabc"},
+                "seen_texts": ["email", "url"], "texts": {"url": null}, "abis": {},
+                "seen_singletons": ["contenthash", "name"],
+                "contenthash": "0xe301", "name": "alice.eth"
             })
         );
         let unknown = RecordGroups::indexed(sections(false, &selectors, &entries, &empty));
         assert_eq!(
             serde_json::to_value(&unknown).expect("serializes"),
             json!({
-                "address_keys": ["60"], "addresses": {},
-                "text_keys": ["email", "url"], "texts": {}, "abis": {}
+                "seen_addresses": ["60"], "addresses": {},
+                "seen_texts": ["email", "url"], "texts": {}, "abis": {},
+                "seen_singletons": ["contenthash", "name"]
             })
         );
         let round: RecordGroups =
@@ -382,6 +396,11 @@ mod tests {
         assert_eq!(value["contenthash"], Value::Null);
         assert_eq!(value["name"], Value::Null);
         assert!(value.get("contenthash").is_some() && value.get("name").is_some());
+        assert_eq!(
+            value["seen_singletons"],
+            json!(["contenthash", "name"]),
+            "{value}"
+        );
     }
 
     #[test]
@@ -392,6 +411,7 @@ mod tests {
         assert_eq!(value["contenthash"], Value::Null, "{value}");
         assert_eq!(value["name"], Value::Null, "{value}");
         assert!(value.get("contenthash").is_some() && value.get("name").is_some());
+        assert_eq!(value["seen_singletons"], json!([]), "{value}");
 
         // A family the row lists as unsupported, or an entry whose value is not known, is unknown.
         let unsupported = json!([{"record_family": "name", "unsupported_reason": "x"}]);
@@ -406,6 +426,8 @@ mod tests {
             unsupported_families: &unsupported,
         });
         let value = serde_json::to_value(&groups).expect("serializes");
+        // Written, value unknown; and a family the row cannot speak for.
+        assert_eq!(value["seen_singletons"], json!(["contenthash"]), "{value}");
         assert!(value.get("contenthash").is_none(), "{value}");
         assert!(value.get("name").is_none(), "{value}");
     }
@@ -431,9 +453,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&groups).expect("serializes"),
             json!({
-                "address_keys": ["60"], "addresses": {"60": "0xabc"},
-                "text_keys": ["avatar", "email", "url"], "texts": {"avatar": null, "url": null},
-                "abis": {}
+                "seen_addresses": ["60"], "addresses": {"60": "0xabc"},
+                "seen_texts": ["avatar", "email", "url"],
+                "texts": {"avatar": null, "url": null}, "abis": {},
+                "seen_singletons": ["contenthash"]
             })
         );
     }

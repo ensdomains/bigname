@@ -1,4 +1,4 @@
-// ABI content types on the records route's `include=inventory` and the grouped `records.abi_keys`
+// ABI content types on the records route's `include=inventory` and the grouped `records.seen_abis`
 // of name detail and lookup (docs/api-v1-routes.md). Decoding
 // `ABIChanged` per resolver family is covered in
 // crates/adapters/src/schema_v2/tests/abi_changed.rs; these cases pin the public shape,
@@ -277,7 +277,7 @@ async fn abi_inventory_on_both_routes(database: &TestDatabase, name: &str) -> Re
     let detail = v2_get_json(database, &format!("/v1/names/{name}")).await?;
     assert_eq!(detail["data"]["records"], grouped, "{detail:#}");
     let mut abi = json!({
-        "abi_content_types": grouped.get("abi_keys").cloned().unwrap_or(Value::Null)
+        "abi_content_types": grouped.get("seen_abis").cloned().unwrap_or(Value::Null)
     });
     if let Some(reason) = grouped.get("abi_unsupported_reason") {
         abi["abi_unsupported_reason"] = reason.clone();
@@ -759,7 +759,7 @@ async fn a_lookup_reads_every_inventory_of_the_batch_at_once() -> Result<()> {
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["records"]["abi_keys"],
+            result["record"]["records"]["seen_abis"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );
@@ -790,7 +790,7 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     assert_eq!(results.len(), NAMES);
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            result["record"]["records"]["abi_keys"],
+            result["record"]["records"]["seen_abis"],
             json!([abi_batch_content_type(index)]),
             "{index}: {result}"
         );

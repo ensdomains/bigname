@@ -354,7 +354,7 @@ collection route carry neither header.
   coverage is authoritative, and `primary_address` listed in
   `unsupported_fields` when no authoritative inventory serves it. `status` and
   `resolver` keep following the name row. The whole batch reads the ABI
-  evidence behind `abi_keys` at once rather than once per name. `records` is
+  evidence behind `seen_abis` at once rather than once per name. `records` is
   omitted on a `status=unsupported` record, with every other field outside the
   identity-only shape, and on a served record that has no serving inventory (an
   unregistered record outside the classified serving paths, a reservation, a
@@ -750,11 +750,12 @@ collection route carry neither header.
   `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and
   `text:email`. The inventory's contents select the keys; its coverage status
   neither selects nor suppresses the set. Verified `records` lists exactly
-  the keys the lookup read: a key that answered with a value maps to it, a key
+  the keys the lookup read in its `seen_*` lists (`seen_singletons` holds
+  `contenthash` when it was read): a key that answered with a value maps to it, a key
   that answered unset (`not_found` or an empty value) maps to `null`, and a key
   that answered `unsupported`, `stale`, or `failed` stays listed with no map
-  entry. The verified lookup does not read the forward `name` record, so
-  verified `records` never carries `name`. `primary_address` is the `addr:60`
+  entry or singleton value. The verified lookup does not read the forward
+  `name` record, so verified `records` never carries or lists `name`. `primary_address` is the `addr:60`
   answer, omitted and listed in `unsupported_fields` when that key could not be
   served; the name-level `status` and reason come from the answers. The set is not an enumeration of every text key or coin type
   the resolver holds; read others through the records route with `keys`. A
@@ -866,40 +867,47 @@ collection route carry neither header.
 #### Grouped name-profile records
 
 `records` on name detail and on `POST /v1/lookup` `profile=detail` records
-groups the name's resolver records by category, each key list beside its
-value map:
+groups the name's resolver records by category, each `seen_*` key list beside
+its value map:
 
 ```json
 "records": {
-  "address_keys": ["0", "60"],
+  "seen_addresses": ["0", "60"],
   "addresses": { "60": "0x8e8db5ccef88cca9d624701db544989c996e3216", "0": null },
-  "text_keys": ["avatar", "com.twitter", "url"],
+  "seen_texts": ["avatar", "com.twitter", "url"],
   "texts": { "avatar": "eip155:1/erc721:0x…/1", "url": null },
-  "abi_keys": ["1"],
+  "seen_abis": ["1"],
   "abis": {},
+  "seen_singletons": ["contenthash", "name"],
   "contenthash": "0xe301…",
   "name": "taytems.eth"
 }
 ```
 
-- `address_keys` holds canonical decimal coin types and `text_keys` holds text
-  keys, `avatar` included; each list is ascending and always present, empty
-  when the name has no key in that category. The value maps use the same keys.
-  A listed key missing from its map is not known in this response; a listed key
-  mapped to `null` is set to empty (cleared, or never set on a key the index
-  lists as a gap). An address value is the scalar hex string and a text value
-  the stored string; an empty value is served as `null`.
-- `abi_keys` lists the single-bit ABI content types, as ascending decimal
+- `seen_addresses` holds canonical decimal coin types and `seen_texts` holds
+  text keys, `avatar` included: the keys bigname observed a write for. Each
+  list is ascending and always present, empty when the name has no key in that
+  category. The value maps use the same keys. A seen key missing from its map
+  is not known in this response; a seen key mapped to `null` is set to empty
+  (cleared, or never set on a key the index lists as a gap). An address value
+  is the scalar hex string and a text value the stored string; an empty value
+  is served as `null`.
+- `seen_abis` lists the single-bit ABI content types, as ascending decimal
   strings, of the name's selected ABI writes, with the meaning of the records
   route's `abi_content_types`. `abis` is always `{}`: bigname does not retain
-  ABI bytes, so every listed content type is unknown here. When the index
-  cannot list the content types, `abi_keys` is omitted and
+  ABI bytes, so every seen content type is unknown here. When the index
+  cannot list the content types, `seen_abis` is omitted and
   `abi_unsupported_reason` names the cause from the records route's
   vocabulary (`inventory_not_available` only on a verified read of a name with
   no inventory row).
-- `contenthash` and `name` are singletons: the value, `null` when cleared (or
-  never set, on an inventory whose coverage is authoritative, which is
-  complete for its resolver), and omitted when unknown. `contenthash` is the scalar contenthash string. `name`
+- `seen_singletons` is always present and holds `contenthash` and/or `name`
+  when bigname observed a write for that record. `contenthash` and `name` are
+  the value, `null` when cleared, and omitted when unknown. A singleton in
+  `seen_singletons` that is omitted was written with a value not known here.
+  On an inventory whose coverage is authoritative, which is complete for its
+  resolver, a singleton never written (or dropped by a record-version reset)
+  is left out of `seen_singletons` and served as `null`. `contenthash` is the
+  scalar contenthash string. `name`
   is the forward name record written on the name's own node (ENS
   `NameChanged`, ENSv2 `NameUpdated` on the name's record), the value its
   `name(node)` getter returns. It is not the primary name, which is
@@ -907,14 +915,17 @@ value map:
   name that is not valid UTF-8 is omitted.
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L29 @ ens_v1@91c966f)
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L210-L218 @ ens_v2@a971bd64)
-- Indexed keys come from the serving inventory row's selectors, entries, and
-  explicit gaps whatever its coverage, so a resolver whose implementation is
-  not an admitted profile still lists the keys bigname saw written, with empty
-  value maps and no singletons. Values come only from a row whose coverage is
-  authoritative. A `VersionChanged` clear or a resolver change resets the
-  lists and values like every other indexed record. Record kinds outside these
-  categories (public keys, interfaces, and the like) stay on the diagnostics
-  route.
+- Indexed `seen_*` lists come from the serving inventory row's selectors,
+  entries, and explicit gaps whatever its coverage, so a resolver whose
+  implementation is not an admitted profile still lists the keys and
+  singletons bigname saw written, with empty value maps and no singleton
+  values. Values come only from a row whose coverage is authoritative. A
+  `VersionChanged` clear or a resolver change resets the lists and values like
+  every other indexed record. Record kinds outside these categories (public
+  keys, interfaces, and the like) stay on the diagnostics route.
+- With `source=verified`, the `seen_*` lists hold the keys the lookup read
+  rather than observed writes, `seen_singletons` included; `name` is never
+  read.
 - Indexed `records` is present when the name may serve resolver records and
   its serving resource has an inventory row; verified `records` is present
   when the name is eligible for verified reads. It is omitted otherwise,
@@ -1416,7 +1427,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | Registry TTL | Validated and discarded | `NewTTL` is decoded to validate admitted logs but produces no normalized event or public record key. The LLL-era low-byte validation exception is documented in the [registry-word divergence](upstream.md#ensv1-lll-era-registry-word-decoding). ENS declares the TTL event and getter as `uint64`. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L14-L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L49-L57 @ ens_v1@91c966f) |
 | Registry owner | Served outside the grammar | No record key. `NewOwner` and `Transfer` are retained as normalized authority events. `GET /v1/names/{name}` carries the selected current owner in its optional `owner` field; its history route exposes a retained authority change as `type=authority`. Ownership is never requestable as a record key. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f) |
 | Registry resolver | Served outside the grammar | No record key. `NewResolver` is retained as the node's resolver-binding event. `GET /v1/names/{name}` carries a serveable current binding in its optional `resolver` object (`chain_id` and `address`); its history route exposes a retained change as `type=resolver`. A resolver address is not itself a requestable record. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L11-L12 @ ens_v1@91c966f) |
-| ABI records | Content types served outside the grammar | No record key and no value. The records route with `include=inventory` lists the content types of the name's selected ABI writes as `abi_content_types` (see the records route above), and name detail and lookup list them as `records.abi_keys`; the ABI bytes are never served, and `keys=abi:<content_type>` is rejected. ENS defines ABI records by node and accepted content-type mask, and each write names one single-bit content type. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L16-L26 @ ens_v1@91c966f) |
+| ABI records | Content types served outside the grammar | No record key and no value. The records route with `include=inventory` lists the content types of the name's selected ABI writes as `abi_content_types` (see the records route above), and name detail and lookup list them as `records.seen_abis`; the ABI bytes are never served, and `keys=abi:<content_type>` is rejected. ENS defines ABI records by node and accepted content-type mask, and each write names one single-bit content type. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L16-L26 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
 | Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged`, it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |

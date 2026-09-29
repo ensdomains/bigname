@@ -68,15 +68,16 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
     assert_eq!(
         data.get("records"),
         Some(&json!({
-            "address_keys": ["60"],
+            "seen_addresses": ["60"],
             "addresses": {"60": "0x0000000000000000000000000000000000000def"},
-            "text_keys": ["avatar", "description"],
+            "seen_texts": ["avatar", "description"],
             "texts": {
                 "avatar": "https://example.test/avatar.png",
                 "description": "Alice profile"
             },
-            "abi_keys": [],
+            "seen_abis": [],
             "abis": {},
+            "seen_singletons": ["contenthash"],
             "contenthash": "ipfs://alice",
             "name": null
         })),
@@ -378,9 +379,10 @@ async fn v2_get_name_verified_source_reports_stale_when_lookup_state_is_unavaila
     // Every read key stays listed; a stale answer maps none of them, so the indexed value is
     // not substituted.
     let records = &payload["data"]["records"];
-    assert!(records["address_keys"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{payload}");
+    assert!(records["seen_addresses"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{payload}");
     assert_eq!(records["addresses"], json!({}), "{payload}");
     assert_eq!(records["texts"], json!({}), "{payload}");
+    assert_eq!(records["seen_singletons"], json!([]), "{payload}");
     assert!(records.get("contenthash").is_none(), "{payload}");
     assert!(payload["data"].get("primary_address").is_none());
 
@@ -626,8 +628,9 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
             "60": executed_address
         })
     );
-    assert_eq!(payload["data"]["records"]["address_keys"], json!(["60", "2147483648"]));
-    assert_eq!(payload["data"]["records"]["text_keys"], json!([]));
+    assert_eq!(payload["data"]["records"]["seen_addresses"], json!(["60", "2147483648"]));
+    assert_eq!(payload["data"]["records"]["seen_texts"], json!([]));
+    assert_eq!(payload["data"]["records"]["seen_singletons"], json!([]));
     assert!(payload["data"]["records"].get("name").is_none());
     assert_eq!(payload["data"]["primary_address"], json!(executed_address));
     assert!(payload["data"].get("unsupported_fields").is_none(), "{payload}");
@@ -3116,9 +3119,9 @@ async fn v2_get_name_withholds_indexed_record_fields_from_unsupported_inventory(
     );
     // The keys the resolver was seen writing stay listed; none of their values is known.
     let records = &payload["data"]["records"];
-    assert_eq!(records["address_keys"], json!(["60"]), "{payload}");
+    assert_eq!(records["seen_addresses"], json!(["60"]), "{payload}");
     assert_eq!(records["addresses"], json!({}), "{payload}");
-    assert_eq!(records["text_keys"], json!(["description"]), "{payload}");
+    assert_eq!(records["seen_texts"], json!(["description"]), "{payload}");
     assert_eq!(records["texts"], json!({}), "{payload}");
     assert!(payload["data"].get("primary_address").is_none());
     assert_eq!(payload["data"]["unsupported_fields"], json!(["primary_address"]));

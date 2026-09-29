@@ -650,9 +650,9 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     assert!(profile["data"].get("unsupported_fields").is_none());
     // Known-empty categories serve empty key lists and maps.
     let records = &profile["data"]["records"];
-    assert_eq!(records["address_keys"], json!([]), "{profile}");
+    assert_eq!(records["seen_addresses"], json!([]), "{profile}");
     assert_eq!(records["addresses"], json!({}), "{profile}");
-    assert_eq!(records["text_keys"], json!([]), "{profile}");
+    assert_eq!(records["seen_texts"], json!([]), "{profile}");
     assert_eq!(records["texts"], json!({}), "{profile}");
     let search = v2_conformance_get_json(&database, "/v1/search?q=alice&namespace=ens").await?;
     assert_shared_record_subset(

@@ -798,10 +798,10 @@ async fn v2_lookup_detail_records_list_keys_beside_their_values() -> Result<()> 
     .await?;
     let record = &payload["data"][0]["record"];
     let records = &record["records"];
-    assert!(records["address_keys"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{record}");
+    assert!(records["seen_addresses"].as_array().is_some_and(|keys| keys.contains(&json!("60"))), "{record}");
     assert!(records["addresses"].get("60").is_some(), "{record}");
     // `seed_identity_name` writes its own text records beside the unretained one.
-    let text_keys = records["text_keys"].as_array().expect("text keys");
+    let text_keys = records["seen_texts"].as_array().expect("text keys");
     assert!(text_keys.contains(&json!("url")), "{record}");
     assert!(records["texts"].get("url").is_none(), "{record}");
     assert!(record.get("inventory").is_none(), "{record}");
@@ -869,11 +869,12 @@ async fn v2_lookup_rejects_every_include() -> Result<()> {
 /// implementation is not an admitted profile: both keys listed, no value known.
 fn assert_unknown_resolver_records(record: &Value) {
     let records = &record["records"];
-    assert_eq!(records["address_keys"], json!(["60"]), "{record}");
+    assert_eq!(records["seen_addresses"], json!(["60"]), "{record}");
     assert_eq!(records["addresses"], json!({}), "{record}");
-    assert_eq!(records["text_keys"], json!(["description"]), "{record}");
+    assert_eq!(records["seen_texts"], json!(["description"]), "{record}");
     assert_eq!(records["texts"], json!({}), "{record}");
     assert_eq!(records["abis"], json!({}), "{record}");
+    assert_eq!(records["seen_singletons"], json!([]), "{record}");
     assert!(records.get("contenthash").is_none(), "{record}");
     assert!(records.get("name").is_none(), "{record}");
 }
