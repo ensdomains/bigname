@@ -75,13 +75,21 @@ impl OwnerEvent {
         })
     }
 
-    /// The owner this event reports to the served control block: null when
-    /// its owner word is unmasked, else its registry_owner, else its owner.
+    /// The owner this event reports to the served control block, the registry getter's view of
+    /// it (`owner(node)`): none when its owner word is unmasked; else the owner getter the
+    /// adapter recorded, which is the owner for an ordinary word and zero for a literal zero or,
+    /// on a registry whose getter maps its own address to zero, for that address
+    /// (`owner_getter_reason = registry_self`); else, for a payload written before the getter
+    /// was recorded, its registry_owner, else its owner.
+    /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
     pub fn reported_owner(&self) -> Option<String> {
         if self.owner_word_unmasked == Some(true) {
             None
         } else {
-            self.registry_owner.clone().or_else(|| self.owner.clone())
+            self.owner_getter
+                .clone()
+                .or_else(|| self.registry_owner.clone())
+                .or_else(|| self.owner.clone())
         }
     }
 }

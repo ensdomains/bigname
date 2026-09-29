@@ -6,7 +6,11 @@ use super::{
     laterals::{admitted_epochs, admitted_registry_only},
     served::{Tagged, latest},
 };
-use crate::families::control::{position::Position, registry::ZERO_ADDRESS, rows::family_arm};
+use crate::families::control::{
+    position::Position,
+    registry::{OwnerEvent, ZERO_ADDRESS},
+    rows::family_arm,
+};
 
 /// The control block's registry owner and latest kind, from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, F1's latest
@@ -14,8 +18,9 @@ use crate::families::control::{position::Position, registry::ZERO_ADDRESS, rows:
 /// SurfaceBound with its bound owner, the registry owner an admitted registrar-authority
 /// SurfaceBound of the selected resource recorded (`admitted_registrar_bindings`), and each of
 /// the name's registry AuthorityTransferred
-/// events F2c keeps (`project_registry_owner_event`) that the admission holds, each reporting
-/// its own registry_owner and unmasked-word facts. For an ENSv2 name those are its ENSv2
+/// events F2c keeps (`project_registry_owner_event`) that the admission holds, each read as the
+/// registry getter's view (`OwnerEvent::reported_owner`). A binding snapshot that is the latest
+/// fact gives way to a newer registry write of the node (`superseding_transfer`). For an ENSv2 name those are its ENSv2
 /// registry's transfers on the selected lifecycle key, so the owner a registration names counts
 /// until a later ERC1155 transfer, and an earlier registration's owner never reaches a later
 /// one on another resource. A SubregistryChanged never counts, as in the served lateral.
@@ -26,7 +31,9 @@ pub(super) fn control_owner(
     is_v2: bool,
     selected_key: Option<&str>,
 ) -> (FoldedOwner, Option<String>) {
-    let mut owners: Vec<(Position, Option<String>)> = Vec::new();
+    // Each owner fact, with whether it is a binding snapshot: the registry owner a SurfaceBound
+    // recorded when its binding opened, which a newer registry write can outdate.
+    let mut owners: Vec<(Position, Option<String>, bool)> = Vec::new();
     let mut kinds: Vec<(Position, &str)> = Vec::new();
     for tagged in in_scope {
         let event = tagged.event;
@@ -39,7 +46,7 @@ pub(super) fn control_owner(
                 } else {
                     event.to_address.clone()
                 };
-                owners.push((event.position.clone(), owner));
+                owners.push((event.position.clone(), owner, false));
             }
         }
         if event.event_kind == "RegistrationGranted"
@@ -51,7 +58,7 @@ pub(super) fn control_owner(
             } else {
                 event.owner_getter.clone()
             };
-            owners.push((event.position.clone(), owner));
+            owners.push((event.position.clone(), owner, false));
         }
     }
     // The name's own registry transfers the admission holds (its admitted AuthorityTransferred
@@ -88,7 +95,7 @@ pub(super) fn control_owner(
                 namehash: None,
             });
             if admitted {
-                owners.push((event.position.clone(), event.reported_owner()));
+                owners.push((event.position.clone(), event.reported_owner(), false));
                 kinds.push((event.position.clone(), "AuthorityTransferred"));
             }
         }
@@ -96,17 +103,23 @@ pub(super) fn control_owner(
     for epoch in admitted_epochs(facts, authority, is_v2, selected_key) {
         // An epoch that states no owner leaves the owner as the earlier facts set it.
         if let Some(owner) = epoch.owner {
-            owners.push((epoch.position.clone(), owner));
+            owners.push((epoch.position.clone(), owner, false));
         }
         kinds.push((epoch.position, "AuthorityEpochChanged"));
     }
     for (position, candidate) in admitted_registry_only(facts, authority, is_v2, selected_key) {
-        owners.push((position.clone(), candidate.bound_owner.clone()));
+        owners.push((position.clone(), candidate.bound_owner.clone(), true));
     }
     for (position, owner) in admitted_registrar_bindings(facts, authority, is_v2) {
-        owners.push((position.clone(), Some(owner.to_owned())));
+        owners.push((position.clone(), Some(owner.to_owned()), true));
     }
-    let owner = latest(owners, |(position, _)| position).map(|(_, owner)| owner);
+    let owner = latest(owners, |(position, _, _)| position).map(|(position, owner, snapshot)| {
+        if snapshot && !is_v2 {
+            superseding_transfer(facts, &position).map_or(owner, OwnerEvent::reported_owner)
+        } else {
+            owner
+        }
+    });
     let kind = latest(kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
     (
         FoldedOwner {
@@ -115,6 +128,21 @@ pub(super) fn control_owner(
         },
         kind,
     )
+}
+
+/// The node's latest ENSv1 or Basenames registry owner write when it is newer than a binding
+/// snapshot at `snapshot`. The snapshot is the registry owner the binding read when it opened; a
+/// later registry `Transfer` or `NewOwner` of the node sets `owner(node)` again, whatever
+/// resource the adapter anchored it on. A zero-equivalent write while the registrar lease stays
+/// selected sits on the registry's read-anchor resource, which the admission does not hold for
+/// the name, so without this the older snapshot would stand.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+fn superseding_transfer<'a>(facts: &'a NameFacts, snapshot: &Position) -> Option<&'a OwnerEvent> {
+    facts
+        .registry_node
+        .as_ref()?
+        .latest_transfer()
+        .filter(|transfer| &transfer.position > snapshot)
 }
 
 /// What the owner fold found: the owner its latest owner fact reports (none for a clear or an
@@ -151,7 +179,7 @@ impl std::error::Error for RequiredOwnerMissing {}
 /// record (`owner_required`) — always has one on chain: the registry answers `owner(node)` for
 /// every node, zero when it holds no record. When the fold found no owner fact, or its latest
 /// fact cleared the owner, the owner is the node's latest registry `NewOwner` or `Transfer`
-/// (F2c keeps every one, whatever name it carried); with no registry record at all it is the
+/// (F2c keeps every one, whatever name it carried), read as the registry getter's view; with no registry record at all it is the
 /// zero address. An unmasked owner word names no owner, on the node or in the fold, and is
 /// served as none. A node that has a registry record but no owner-setting event the families
 /// kept is an integrity failure, never an absent owner.

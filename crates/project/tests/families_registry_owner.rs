@@ -190,6 +190,43 @@ async fn registry_transfer(
     Ok(())
 }
 
+/// The registry's read-anchor resource of the name's node: the adapter anchors a zero-equivalent
+/// registry owner write there while the registrar lease stays the selected authority, so the
+/// families do not admit it for the name.
+fn read_anchor() -> String {
+    uuid(3)
+}
+
+/// A registry write at `block`/`log` that leaves `owner(node)` answering zero while the lease
+/// stays selected: the AuthorityTransferred the adapter anchors on the read anchor, with the raw
+/// `owner` word and the getter view (zero) and its reason.
+async fn zero_equivalent_transfer(
+    fixture: &Fixture,
+    block: i64,
+    log: i64,
+    source_event: &str,
+    owner: &str,
+    reason: &str,
+) -> Result<()> {
+    let mut after = json!({"source_event": source_event, "node": node(), "owner": owner,
+                           "owner_getter": ZERO, "owner_getter_reason": reason,
+                           "emitter_role": "registry"});
+    if source_event == "NewOwner" {
+        after["node"] = json!(ETH_NODE);
+        after["child_node"] = json!(node());
+    }
+    write(
+        fixture,
+        block,
+        log,
+        "AuthorityTransferred",
+        V1_REGISTRY,
+        &read_anchor(),
+        after,
+    )
+    .await
+}
+
 /// The composed name's registration and control fields the tests compare.
 async fn served(fixture: &Fixture) -> Result<Value> {
     let row = load_family_name(&fixture.pool, &name())
@@ -452,6 +489,76 @@ async fn a_registered_name_whose_registry_record_has_no_owner_is_not_published()
     ensure!(
         fixture.marker().await?.0 == marker,
         "the failed block moved the marker"
+    );
+    fixture.cleanup().await
+}
+
+/// `setOwner(node, 0)` by the registrant while the lease stays selected: the adapter anchors the
+/// transfer on the registry read anchor, which the families do not admit for the name, and the
+/// lease binding's SurfaceBound still records the earlier owner. The node's newer registry owner
+/// supersedes that snapshot, in a later block and later in the registration's own transaction.
+#[tokio::test]
+async fn a_registry_clear_on_the_read_anchor_supersedes_the_lease_binding_snapshot() -> Result<()> {
+    for (label, block, log) in [("later_block", 11, 1), ("same_transaction", 10, 5)] {
+        let fixture = Fixture::new(&format!("families_registry_owner_clear_{label}"), 20).await?;
+        registered(&fixture, 10, ALICE, None).await?;
+        zero_equivalent_transfer(&fixture, block, log, "Transfer", ZERO, "literal_zero").await?;
+        fixture.apply(10, FamilyMode::Normal).await?;
+        fixture.apply(11, FamilyMode::Normal).await?;
+        let row = served(&fixture).await?;
+        ensure!(
+            row == json!({"status": "active", "authority_kind": "registrar", "registered": true,
+                          "expiry": EXPIRY, "owner": ZERO}),
+            "{label}: the registry clear lost to the binding snapshot: {row}"
+        );
+        fixture.assert_undo_restores(11).await?;
+        fixture.assert_rebuild_equal(11).await?;
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// `reclaim(id, registry)` on a lease with no other owner fact: the registrar's NewOwner names
+/// the current registry itself, which `owner(node)` reads as zero. The fallback serves the
+/// event's getter view, not the raw registry address.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_reclaim_to_the_registry_itself_serves_the_zero_owner() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_registry_self", 20).await?;
+    fixture
+        .binding(&uuid(100), &name(), &lease(), "ens_v1", 10, 2, None)
+        .await?;
+    let grant = json!({"authority_kind": "registrar", "authority_key": "lease",
+                       "namehash": node(), "registrant": ALICE, "expiry": EXPIRY});
+    write(
+        &fixture,
+        10,
+        2,
+        "SurfaceBound",
+        V1_REGISTRAR,
+        &lease(),
+        grant.clone(),
+    )
+    .await?;
+    let mut granted = grant.clone();
+    granted["status"] = json!("registered");
+    write(
+        &fixture,
+        10,
+        2,
+        "RegistrationGranted",
+        V1_REGISTRAR,
+        &lease(),
+        granted,
+    )
+    .await?;
+    zero_equivalent_transfer(&fixture, 11, 1, "NewOwner", REGISTRY, "registry_self").await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    let row = served(&fixture).await?;
+    ensure!(
+        row["owner"] == json!(ZERO) && row["status"] == json!("active"),
+        "the registry's own address was served as the owner: {row}"
     );
     fixture.cleanup().await
 }

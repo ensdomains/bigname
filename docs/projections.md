@@ -762,16 +762,30 @@ registry owner the registrar adapter read from retained registry state (`owner_g
 fold reads that bound owner for every admitted, non-state-derived registrar binding of the
 selected resource. So a registry `Transfer` that opened a registry-only binding, whose
 `AuthorityTransferred` sits on the registry-only resource and is no longer admitted once a
-registrar token transfer binds the lease again, still decides the owner served.
+registrar token transfer binds the lease again, still decides the owner served. A bound owner is
+a snapshot of the registry owner when its binding opened: when it is the fold's latest fact and
+the node has a newer registry `NewOwner` or `Transfer` in `project_registry_owner_event`, that
+newer write's owner is served instead, whatever resource it sits on. That covers a
+zero-equivalent write while the lease stays selected, which the adapter anchors on the
+registry's read-anchor resource.
 
-An `active`, unwrapped ENSv1 or Basenames registration whose authority is its registrar lease or
-its registry record always serves a registry owner, because the registry answers `owner(node)`
-for every node. When the fold finds no owner fact, or its latest fact cleared the owner, the
+Every registry owner fact the fold and the fallback below read is the registry getter's view,
+`owner(node)`: the event's `owner_getter`, which is zero for a literal zero and, on a registry
+whose getter maps its own address to zero, for that address (`owner_getter_reason`
+`registry_self`), such as a `reclaim` to the registry itself; none when the owner word is
+unmasked; and the reported `registry_owner` or `owner` only for a payload written before the
+getter was recorded.
+
+An `active` ENSv1 or Basenames registration whose authority is its registrar lease or its
+registry record always serves a registry owner, because the registry answers `owner(node)` for
+every node. The test is the registration's status and authority kind; it does not look at a
+wrapper, so a wrapped name whose registration authority is the registrar is included. When the fold finds no owner fact, or its latest fact cleared the owner, the
 served owner is the node's latest registry `AuthorityTransferred` kept in
 `project_registry_owner_event` (none when its owner word is unmasked), or the zero address when
 the registry holds no record of the node. A node with a registry record but no owner the
-families kept is a data-integrity failure: Project stops at that block and does not publish it,
-like any other integrity failure.
+families kept is a data-integrity failure: Project does not publish the block, like any other
+integrity failure. A rebuild range composes its names at the range's last block, so there the
+check applies to what that block serves, not to each block inside the range.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
