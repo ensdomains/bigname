@@ -521,9 +521,10 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     database.cleanup().await
 }
 
-// Record rows on the events feed and address history carry no name: a resolver write is keyed by
-// node or record ID. Under `include=data` each carries its resolver and node or record ID, and
-// name history is where a name's record changes are listed under that name.
+// A record write the adapter did not link to a name carries no name on the events feed: a
+// resolver write is keyed by node or record ID, and no name is derived for it at read time. Under
+// `include=data` each carries its resolver and node or record ID, and name history is where a
+// name's record changes are listed under that name.
 #[tokio::test]
 async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     const RECORD_RESOLVER: &str = "0x0c47bc813361aeb3d0ad84f8f642bcce0e34b7f4";
@@ -688,6 +689,110 @@ async fn record_events_carry_their_locator_and_no_name() -> Result<()> {
     );
     assert!(history.iter().all(|row| row["name"] == json!("legal.eth")), "{history:?}");
     assert_eq!(history.len(), 3);
+
+    database.cleanup().await
+}
+
+// On the events feed and address history a record row carries `name` only when the adapter linked
+// the written node to a known name when it stored the write (ENSv1 does so once the node's name
+// surface exists). A write it did not link, here one attributed to the name only through its
+// resolver pointer, carries the locator and no name. Both shapes, with and without
+// `include=data`, and for a record-version reset too.
+#[tokio::test]
+async fn record_rows_carry_a_name_only_when_their_node_was_linked() -> Result<()> {
+    const RESOLVER: &str = "0x0000000000000000000000000000000000080a12";
+    const OWNER: &str = "0x00000000000000000000000000000000000a11ce";
+    let database = TestDatabase::new_migrated().await?;
+    let name = "linked-record.eth";
+    let resource = Uuid::from_u128(0x8101);
+    let logical = seed_event_data_name(&database, name, 499, 0x8101).await?;
+    seed_v2_history_blocks(&database, 499..=504).await?;
+    let node = bigname_lookup::ens_namehash_hex(name).expect("namehash");
+    let resolver_event = |identity: &str, linked: bool, kind: &str, block: i64, after: Value| {
+        event_data_event(
+            identity,
+            linked.then_some(logical.as_str()),
+            linked.then_some(resource),
+            kind,
+            "ens_v1_resolver_l1",
+            block,
+            &format!("0xtx{block}"),
+            0,
+            RESOLVER,
+            after,
+        )
+    };
+    let text = |value: &str| {
+        json!({"source_event": "TextChanged", "resolver": RESOLVER, "node": node,
+               "record_key": "text:avatar", "record_family": "text",
+               "selector_key": "avatar", "value_retained": true, "value": value})
+    };
+    let events = vec![
+        v2_history_authority_to(&logical, resource, OWNER, 500),
+        event_data_event(
+            "linked-record-pointer",
+            Some(&logical),
+            Some(resource),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            500,
+            "0xtx500",
+            1,
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+            json!({"source_event": "NewResolver", "node": node, "resolver": RESOLVER}),
+        ),
+        resolver_event("linked-write", true, "RecordChanged", 501, text("linked")),
+        resolver_event("unlinked-write", false, "RecordChanged", 502, text("unlinked")),
+        resolver_event(
+            "linked-reset",
+            true,
+            "RecordVersionChanged",
+            503,
+            json!({"source_event": "VersionChanged", "resolver": RESOLVER, "node": node,
+                   "record_version": 1}),
+        ),
+    ];
+    publish_event_data(&database, &events, 504).await?;
+
+    let locator = json!({"chain_id": 1, "address": RESOLVER});
+    for route in [
+        "/v1/events?type=record&order=asc".to_owned(),
+        format!("/v1/events?name={name}&type=record&order=asc"),
+        format!("/v1/addresses/{OWNER}/history?type=record&order=asc"),
+    ] {
+        for include in ["", "&include=data"] {
+            let uri = format!("{route}{include}");
+            let rows = event_data_rows(&event_data_payload(&database, &uri).await?);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| (row["block_number"].clone(), row.get("name").cloned()))
+                    .collect::<Vec<_>>(),
+                [
+                    (json!(501), Some(json!(name))),
+                    (json!(502), None),
+                    (json!(503), Some(json!(name))),
+                ],
+                "{uri}"
+            );
+            if include.is_empty() {
+                assert!(rows.iter().all(|row| row.get("data").is_none()), "{uri}");
+                continue;
+            }
+            assert_eq!(
+                rows[0]["data"],
+                json!({"key": "text:avatar", "value": "linked", "resolver": locator,
+                       "node": node}),
+                "{uri}"
+            );
+            assert_eq!(
+                rows[1]["data"],
+                json!({"key": "text:avatar", "value": "unlinked", "resolver": locator,
+                       "node": node}),
+                "{uri}"
+            );
+            assert_eq!(rows[2]["data"], json!({"resolver": locator, "node": node}), "{uri}");
+        }
+    }
 
     database.cleanup().await
 }

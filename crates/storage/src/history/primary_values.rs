@@ -24,9 +24,10 @@
 //!   lies between, and it was emitted by the resolver the registry selected for the reverse node
 //!   at that point. Otherwise none is returned, and a later write never stands in. The four-log
 //!   bound fits the standard `setNameForAddr` call with a resolver that emits only `NameChanged`;
-//!   a resolver that logs more before it gives no name. Logs carry no call boundaries, so the
-//!   rule does not prove which call made the write: a separate call that writes the claim's
-//!   resolver inside that span meets it too.
+//!   extra logs before the write give no name only when they push the first `NameChanged` past
+//!   the claim plus four logs. Logs carry no call boundaries, so the rule does not prove which
+//!   call made the write: a separate call that writes the claim's resolver inside that span meets
+//!   it too.
 //!
 //! No name value is taken from outside the claim's transaction, so a later name write or the
 //! address's current primary name never stands in for the value an event recorded. Only the

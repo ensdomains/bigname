@@ -1720,7 +1720,7 @@ Per friendly `type`, `data` may contain:
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
-| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies a record row that carries no name; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
 | `permission` | `address` (the subject), `powers` (product power vocabulary, as on permission rows), `fuses` (uint32 word for NameWrapper fuse changes) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
@@ -1739,7 +1739,13 @@ Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
   "transaction_hash": "0x...",
   "log_index": 12,
   "contract_address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63",
-  "data": { "key": "addr:60", "coin_type": 60, "value": "0x..." }
+  "data": {
+    "key": "addr:60",
+    "coin_type": 60,
+    "value": "0x...",
+    "resolver": { "chain_id": 1, "address": "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63" },
+    "node": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec"
+  }
 }
 ```
 
@@ -1806,18 +1812,23 @@ there is no action count.
 
 #### Record event names
 
-A resolver record write is keyed by node or by record ID, not by name, so its
-stored event carries no name. On `GET /v1/events` and
-`GET /v1/addresses/{address}/history`, a `record` row whose event carries no
-name has no `name` field. Under `include=data` it carries where the record
-lives: `resolver`, and `node` or `record_id`. It is never duplicated per name
-or dropped.
+A resolver record write is keyed by node or by record ID, not by name. On
+`GET /v1/events` and `GET /v1/addresses/{address}/history`, a `record` row
+carries `name` only when the written node was already linked to a known name
+when the write was indexed: an ENSv1 or Basenames write to a node whose name
+surface existed, or an ENSv2 write whose node the indexer maps to a name. That
+name is the one whose node the write addresses; it does not say the name's
+resolver pointer selected that resolver. Any other record row, including every
+record-ID write, has no `name` field and is identified only by its locator:
+under `include=data`, `resolver`, and `node` or `record_id`. No name is derived
+for such a row at read time, and a row is never duplicated per name or dropped.
 
 [Name history](#get-v1namesnamehistory) is where a name's record changes are
 shown: it lists the writes the name's resolver pointers and record links
 attribute to it, with the requested name on every row.
-`GET /v1/events?name=...` returns that same row set, and its record rows still
-carry no `name`.
+`GET /v1/events?name=...` returns that same row set; each of its record rows
+carries `name` under the rule above, so a write attributed to the name only
+through a pointer or link has none.
 
 #### Primary-name values
 
@@ -1841,8 +1852,8 @@ A `primary_name` row's `data` returns the name its event recorded:
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L29 @ ens_v1@91c966f)
   The four-log bound fits the standard `setNameForAddr` call with a resolver
-  that emits only `NameChanged`; a resolver that logs more before it gives
-  `unknown`. Logs carry no call boundaries, so the rule does not prove which
+  that emits only `NameChanged`. Extra logs before the write give `unknown`
+  only when they push the first `NameChanged` past the claim plus four logs. Logs carry no call boundaries, so the rule does not prove which
   call made the write: a separate call that writes the claim's resolver inside
   that span meets it too. A later write in the same span never replaces the
   first one.
