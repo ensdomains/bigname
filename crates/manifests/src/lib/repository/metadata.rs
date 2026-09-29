@@ -17,6 +17,23 @@ pub(super) fn validate_universal_resolver_implementations(
     manifest: &SourceManifest,
     path: &Path,
 ) -> Result<()> {
+    if manifest.source_family == "ens_execution" {
+        let mut proxies = BTreeSet::new();
+        for contract in manifest.contracts.iter().filter(|contract| {
+            matches!(
+                contract.role.as_str(),
+                UNIVERSAL_RESOLVER_ROLE | MANAGED_UNIVERSAL_RESOLVER_ROLE
+            )
+        }) {
+            if !proxies.insert(normalize_address(&contract.address)) {
+                bail!(
+                    "manifest {} overlaps Universal Resolver proxy roles at address {}",
+                    path.display(),
+                    contract.address
+                );
+            }
+        }
+    }
     if manifest.universal_resolver_implementations.is_empty() {
         return Ok(());
     }

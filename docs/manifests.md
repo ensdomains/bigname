@@ -258,7 +258,8 @@ the field on any other source family, an empty list, an arm outside
 that only an `ens_execution` manifest may carry, and only alongside a
 `universal_resolver` contract: the client-facing Universal Resolver proxy. The
 manifest may also declare `universal_resolver_managed`, a proxy that the
-client-facing proxy points at. When the manifest admits the proxies'
+client-facing proxy points at. These two proxy roles must declare distinct
+addresses, compared case-insensitively. When the manifest admits the proxies'
 `Upgraded(address)` event, Interpret records each upgrade with the new
 implementation classified against the manifest: a listed implementation, another
 declared proxy, or anything else. Project keeps each proxy's latest upgrade in

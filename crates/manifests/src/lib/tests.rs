@@ -1008,6 +1008,14 @@ fn repository_loader_validates_universal_resolver_implementations() -> Result<()
             "overlaps declared Universal Resolver proxy",
         ),
         (
+            "overlapping client-facing and managed proxy addresses",
+            format!(
+                "{}\n[[contracts]]\nrole = \"universal_resolver_managed\"\naddress = \"0x00000000000000000000000000000000000000ee\"\nproxy_kind = \"none\"\n",
+                with("[\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"]")
+            ),
+            "overlaps Universal Resolver proxy roles",
+        ),
+        (
             "no client-facing proxy",
             with("[\"0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3\"]").replacen(
                 "role = \"universal_resolver\"",
