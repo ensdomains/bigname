@@ -400,7 +400,7 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
 <li><code>chain_id</code> is 1 for Ethereum, 8453 for Base, and 11155111 for Sepolia. <code>network</code> is the display slug, <code>ethereum</code> or <code>base</code>.</li>
 <li><code>coin_type</code> follows ENS and SLIP-44. Coin type 60 is Ethereum and is the default.</li>
 </ul>` },
-    { h: 'Relation sets', id: 'relations', html: `<p>The <code>relation</code> parameter is a comma-separated set drawn from <code>owner</code>, <code>manager</code>, and <code>registrant</code>. A row matches when it holds any of them. The word <code>any</code> stands for all three. Matched rows report the subset that matched in <code>relations</code>. In storage terms the token holder is the owner and the effective controller is the manager.</p>` },
+    { h: 'Relation sets', id: 'relations', html: `<p>The <code>relation</code> parameter is a comma-separated set drawn from <code>owner</code>, <code>manager</code>, and <code>registrant</code>. A row matches when it holds any of them. The word <code>any</code> stands for all three. Matched rows report the subset that matched in <code>relations</code>. In storage terms the token holder is the owner and the effective controller is the manager. An address holding the ENSv2 registry <code>set_resolver</code> or <code>set_subregistry</code> role on a name\'s current registration is also its manager; other roles, registry-root roles, and registry operators are not.</p>` },
   ],
 },
 {
