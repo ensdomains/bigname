@@ -1502,8 +1502,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   current name row serves its node's current registry owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
   `NewOwner` moves it. A child whose registry owner is the zero address, one
-  the registry reads as zero, or an unmasked 2017 registry owner word has no
-  owner and is listed only while it has a serving resource. Registry events prove the child node and its
+  the registry reads as zero, or one the admitted Graveyard holds has no
+  owner and is listed only while it has a serving resource. An unmasked 2017
+  registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
   never been observed carries `[<labelhash-without-0x>].<parent-name>` in

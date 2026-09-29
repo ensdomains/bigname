@@ -165,9 +165,11 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
             -- The owner is the child node's current registry owner, `owner(node)`: the node's
             -- latest owner-setting registry event (F2c, `project_registry_node_state`), so a
             -- Transfer after the NewOwner moves it. That is the registry's owner getter view
-            -- (zero for an owner the registry reads as zero), else the reported owner; an
-            -- unmasked LLL owner word, or the admitted Graveyard holding a record it claimed or
-            -- cleared, names no owner. The edge's own owner serves only a node
+            -- (zero for an owner the registry reads as zero), else the reported owner. An
+            -- unmasked LLL owner word serves its low 20 bytes as the display owner, as the
+            -- fallback registry's typed read returns it (docs/architecture.md, the 2017
+            -- registry); the admitted Graveyard holding a record it claimed or cleared names
+            -- no owner. The edge's own owner serves only a node
             -- with no F2c row, which the NewOwner that writes the edge always writes. A zero
             -- owner in the child's name summary (its node's latest registry transfer names the
             -- zero owner) still overrides.
@@ -176,7 +178,7 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                    CASE WHEN {zero_owner} THEN {ZERO_ADDRESS}
                         WHEN node_state.node IS NULL
                             THEN lower(COALESCE(edge.owner_getter, edge.owner))
-                        WHEN node_state.owner_word_unmasked THEN NULL
+                        WHEN node_state.owner_word_unmasked THEN lower(node_state.owner)
                         WHEN node_state.owner_getter_reason = 'graveyard' THEN NULL
                         ELSE lower(COALESCE(node_state.owner_getter, node_state.registry_owner,
                                             node_state.owner))

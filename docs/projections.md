@@ -531,7 +531,9 @@ An ENSv1 or Basenames registry child's owner is its node's current registry
 owner, from the node's latest owner-setting registry event, not the owner the
 edge's `NewOwner` reported: a later registry `Transfer` moves it. The owner is
 the registry's owner getter view, so an owner the registry reads as zero is
-zero, and an unmasked 2017 registry owner word is no owner. A child with no
+zero. An unmasked 2017 registry owner word serves its low 20 bytes as the
+child's display owner, as the fallback registry's typed read returns it
+([architecture](architecture.md)); it still names no control owner. A child with no
 owner, or whose name summary records a zero-owner transfer, publishes a relation
 only while it has a serving resource.
 For registry
@@ -800,9 +802,10 @@ claims a lapsed `.eth` name and clears a subname of a name it holds by making it
 registry owner, so the registry adapter marks a current-registry `NewOwner` or `Transfer` naming
 the Graveyard of the migration manifest (same chain and namespace, at or after its declared
 start block) with `owner_getter_reason` `graveyard`. Its owner word and getter stay as the chain
-wrote them. Every served read then gives that node no owner, as for an unmasked word: the
-control owner is none, the `owner_required` fallback serves none instead of failing, and the
-subnames route serves no owner, so a cleared subname with no name row is not listed. The record
+wrote them. Every served read then gives that node no owner: the control owner is none, as
+for an unmasked word; the `owner_required` fallback serves none instead of failing; and the
+subnames route serves no owner, unlike an unmasked word, whose low 20 bytes stay the display
+owner, so a cleared subname with no name row is not listed. The record
 decides even when the name is NameWrapper-selected: a subname wrapped without
 `PARENT_CANNOT_CONTROL` keeps a live, transferable NameWrapper token after the Graveyard clears its
 record, and the owner fold lets the Graveyard-held write win over every later NameWrapper token
