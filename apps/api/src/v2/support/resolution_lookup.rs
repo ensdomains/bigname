@@ -30,8 +30,8 @@ pub(crate) enum ResolutionLookupOutcome {
     AuthorityArmNotAdmitted,
 }
 
-/// Executes a fresh schema-v2 lookup. The lookup engine owns any guarded
-/// divergence-ledger write; the API never writes a legacy execution outcome.
+/// Executes a fresh read-only schema-v2 lookup and revalidates the captured
+/// execution state after provider calls.
 pub(crate) async fn execute_resolution_lookup(
     state: &AppState,
     row: &NameCurrentRow,
@@ -60,10 +60,12 @@ pub(crate) async fn execute_resolution_lookup(
             timestamp: bigname_storage::UnixSeconds::from(position.timestamp).internal_string(),
         })
         .collect::<Vec<_>>();
-    let response =
-        bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
-            .lookup_at_positions(request, &admitted_positions)
-            .await;
+    let response = bigname_lookup::LookupEngine::read_only(
+        state.pool.clone(),
+        state.lookup_chain_rpc_urls.clone(),
+    )
+    .lookup_at_positions(request, &admitted_positions)
+    .await;
     match response {
         Ok(response) => {
             expose_lookup_positions(selected_snapshot, &response)?;

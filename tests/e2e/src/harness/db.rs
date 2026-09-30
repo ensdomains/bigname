@@ -118,6 +118,26 @@ impl HarnessDb {
         Ok(url.into())
     }
 
+    /// Add the API's read-only lookup capability when a proof starts the real API.
+    /// Verification-only fixtures retain their existing grants.
+    pub async fn api_url(&mut self) -> Result<String> {
+        let url = self.verification_url().await?;
+        let role = self
+            .cleanup_guard
+            .verification_role
+            .as_deref()
+            .context("API reader role was not installed")?;
+        sqlx::raw_sql(&format!(
+            "GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+                 text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
+             ) TO {}",
+            quote_identifier(role),
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(url)
+    }
+
     pub async fn cleanup(mut self) -> Result<()> {
         if std::env::var_os("BIGNAME_E2E_KEEP_DB").is_some() {
             eprintln!(
@@ -457,15 +477,46 @@ mod tests {
             second.verification_url().await?,
         ] {
             let mut reader = PgConnection::connect(&url).await?;
-            let access: (bool, bool) = sqlx::query_as(
+            let access: (bool, bool, bool) = sqlx::query_as(
                 "SELECT current_user = session_user,
-                 has_table_privilege(current_user, 'bigname_phase.chain_phase_state', 'UPDATE')",
+                 has_table_privilege(current_user, 'bigname_phase.chain_phase_state', 'UPDATE'),
+                 has_function_privilege(current_user,
+                   'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+                   'EXECUTE')",
             )
             .fetch_one(&mut reader)
             .await?;
-            assert_eq!(access, (true, false));
+            assert_eq!(access, (true, false, false));
             reader.close().await?;
         }
+        let api_pool = PgPool::connect(&first.api_url().await?).await?;
+        assert!(
+            bigname_storage::load_missing_api_lookup_ddl(&api_pool)
+                .await?
+                .is_empty()
+        );
+        let writer_access: (bool, bool, bool) = sqlx::query_as(
+            "SELECT has_function_privilege(current_user,
+               'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)',
+               'EXECUTE'),
+             has_function_privilege(current_user,
+               'bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)',
+               'EXECUTE'),
+             has_table_privilege(current_user, 'bigname_phase.resolution_divergences', 'INSERT')",
+        )
+        .fetch_one(&api_pool)
+        .await?;
+        assert_eq!(writer_access, (false, false, false));
+        api_pool.close().await;
+        let independent_verifier_can_execute: bool = sqlx::query_scalar(
+            "SELECT has_function_privilege($1,
+               'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+               'EXECUTE')",
+        )
+        .bind(second.cleanup_guard.verification_role.as_deref())
+        .fetch_one(&second.pool)
+        .await?;
+        assert!(!independent_verifier_can_execute);
         let admin_url = first.cleanup_guard.admin_url.clone();
         let roles = vec![
             first.cleanup_guard.verification_role.clone(),

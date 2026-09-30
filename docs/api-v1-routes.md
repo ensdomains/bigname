@@ -1126,10 +1126,9 @@ its value map:
   `not_found`.
   `source=verified`
   and verified fallback from `source=auto` execute a fresh schema-v2 lookup on
-  every request. They do not read or write the legacy execution cache. A direct
-  live/indexed disagreement may update the guarded resolution divergence
-  ledger; restored agreement may clear a matching active row, while wildcard
-  and CCIP-Read answers do not mutate it. A selected position
+  every request. They do not read or write the legacy execution cache or mutate
+  the diagnostic resolution divergence ledger. Post-provider revalidation uses
+  a fresh read-only snapshot and retains the same stale rejection conditions. A selected position
   that the provider cannot serve is reported per key as `status=stale` with a
   `failure_reason`; a completed provider response timeout or malformed result
   remains an in-band `status=failed` result.
@@ -1196,9 +1195,8 @@ its value map:
   as unsatisfied and executes verified lookup for them; without `keys` it
   stays an indexed read and returns the `unsupported` answers above.
   `source=verified` is unaffected by
-  indexed coverage. The divergence ledger applies the same refusal: a verified
-  answer over an unsupported inventory is compared against an `unsupported`
-  indexed result, never against a retained entry value.
+  indexed coverage. For retained non-API diagnostic comparisons, an unsupported
+  inventory compares as `unsupported`, never as a retained entry value.
   A name whose current ENSv2 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   keeps that mirror as `data.resolver`, and its indexed `records` and
@@ -1546,10 +1544,9 @@ its value map:
   state is unregistered. Indexed reads use the [serving resource](glossary.md#serving-resource)'s inventory, verified reads select
   the surviving resolver, and `source=auto` follows the ordinary indexed/verified blend. Owner zero
   or registry-self alone therefore does not produce `inventory_not_available`.
-  Direct verified lookup compares against the same exact-or-derived indexed
-  evaluator before the guarded resolution-divergence-ledger write. Agreement
-  can therefore clear an older exact-key false miss; provider output remains
-  request-scoped and is never copied into inventory or another projection.
+  Provider output remains request-scoped and is never copied into inventory,
+  another projection, or the diagnostic ledger. API agreement does not clear
+  earlier diagnostic observations.
   When projection changes a formerly direct resolver to null, projection
   publication retires active observations for that old direct resolver as stale
   evidence. This cleanup does not compare a live ancestor-served answer with the

@@ -27,6 +27,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_universal_resolver_proxy",
     "project_node_record_partition",
     "project_node_record_value",
+    "project_text_hydration_work",
     "project_record_id_value",
     "project_resolver_link",
     "project_grant",
@@ -37,6 +38,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_child_edge_candidate",
     "project_parent_subregistry",
     "project_reverse_tuple",
+    "project_reverse_hydration_work",
     "project_reverse_node_claim",
     "project_claim_normalization",
     "project_address_name_fold",
@@ -155,17 +157,22 @@ async fn schema_migrations_create_the_family_tables_the_baseline_installs() -> R
     let current = database("families_schema_current").await?;
     install_baseline(&current, false).await?;
     let before = structures(&current).await?;
-    // A fresh initializer already contains historical changes. Only the forward removal
-    // upgrade is meaningful on both fresh and installed pre-removal schema shapes.
+    // A fresh initializer already contains historical changes. The forward removal and
+    // hydration-work upgrades also support an already-current baseline without changing it.
     sqlx::raw_sql(include_str!(
         "../../../migrations/20260929160000_remove_served_projections.sql"
+    ))
+    .execute(current.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260930220000_project_hydration_work.sql"
     ))
     .execute(current.pool())
     .await?;
     assert_eq!(
         structures(&current).await?,
         before,
-        "the removal upgrade changes nothing on the fresh family baseline"
+        "the forward upgrades change nothing on the fresh family baseline"
     );
 
     installed.cleanup().await?;

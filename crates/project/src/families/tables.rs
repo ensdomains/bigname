@@ -67,7 +67,9 @@ tables! {
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.
-pub(crate) const DERIVED: [&str; 3] = [
+pub(crate) const DERIVED: [&str; 5] = [
+    "project_text_hydration_work",
+    "project_reverse_hydration_work",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",

@@ -22,11 +22,26 @@ const MAX_CONCURRENT_RECORD_CALLS: usize = 16;
 pub struct LookupEngine {
     pool: PgPool,
     rpc_urls: ChainRpcUrls,
+    write_divergences: bool,
 }
 
 impl LookupEngine {
     pub fn new(pool: PgPool, rpc_urls: ChainRpcUrls) -> Self {
-        Self { pool, rpc_urls }
+        Self {
+            pool,
+            rpc_urls,
+            write_divergences: true,
+        }
+    }
+
+    /// Executes request-scoped verification without writing the diagnostic ledger.
+    /// Revalidation still checks a fresh database snapshot after all provider calls.
+    pub fn read_only(pool: PgPool, rpc_urls: ChainRpcUrls) -> Self {
+        Self {
+            pool,
+            rpc_urls,
+            write_divergences: false,
+        }
     }
 
     pub async fn lookup(&self, request: LookupRequest) -> Result<LookupResponse> {
@@ -105,7 +120,7 @@ impl LookupEngine {
         )
         .await?;
         before_revalidate().await;
-        revalidate_primary_name_position(&self.pool, &authority).await?;
+        revalidate_primary_name_position(&self.pool, &authority, self.write_divergences).await?;
         Ok(result)
     }
 
@@ -182,7 +197,7 @@ impl LookupEngine {
             .collect::<Vec<_>>();
 
         before_persist().await;
-        persist_comparisons(&self.pool, &snapshot, &mut records).await?;
+        persist_comparisons(&self.pool, &snapshot, &mut records, self.write_divergences).await?;
 
         Ok(LookupResponse {
             logical_name_id: snapshot.logical_name_id,

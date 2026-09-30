@@ -39,6 +39,7 @@ async fn proxy_upgrade_discovery_preserves_omitted_manifest_floor_without_repair
         "interpret_discovery_omitted_manifest_floor",
     ))
     .await?;
+    database.create_phase_schema().await?;
     for sql in [
         include_str!("../../../../storage/schema/baseline/01_chain.sql"),
         include_str!("../../../../storage/schema/baseline/02_raw_facts.sql"),

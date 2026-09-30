@@ -23,7 +23,15 @@ const CONTROL_TABLES: [&str; 3] = [
 ];
 
 fn reset_tables() -> BTreeSet<&'static str> {
-    families::family_tables().chain(CONTROL_TABLES).collect()
+    families::family_tables()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_text_hydration_work" | "project_reverse_hydration_work"
+            )
+        })
+        .chain(CONTROL_TABLES)
+        .collect()
 }
 
 #[test]

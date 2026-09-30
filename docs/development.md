@@ -43,7 +43,7 @@ verified reads; no local indexing occurs without the phase runner.
 it refuses every nonempty target. Reviewed versioned schema-migrations can
 upgrade an initialized namespace in place when their preconditions pass; other
 changes require the reviewed replacement procedure. The API reads phase
-projections and may invoke the guarded resolution-divergence write. The
+projections and verifies provider answers without database writes. The
 checked-in SQLx schema-migration history remains append-only, but the deleted
 worker schema-migration command is no longer a runtime entrypoint; deployment
 automation applies reviewed versioned schema-migrations at the planned boundary.

@@ -18,8 +18,9 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 - Schema-v2 Project owns projection tables and rebuild behavior. Publication may
   retire stale direct-resolution observations through the guarded projection
   lifecycle trigger; it does not write a live/indexed comparison.
-- API code reads phase projections and request-scoped lookup output; lookup may
-  write only the guarded divergence ledger. Project may only retire ledger rows
+- API code reads phase projections and request-scoped lookup output without
+  database writes. Non-API lookup callers retain the guarded divergence writer.
+  Project may only retire ledger rows
   when publication changes an ENS Mainnet exact resolver to null.
 - Storage owns [canonicality](../glossary.md#canonicality), snapshot selection, reusable row reads,
   and database invariants.

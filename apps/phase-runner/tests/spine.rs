@@ -1844,17 +1844,28 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     )
     .fetch_one(scratch.pool())
     .await?;
-    tokio::time::sleep(Duration::from_millis(5_200)).await;
-    let refreshed_heartbeat: f64 = sqlx::query_scalar(
-        "
-        SELECT extract(epoch FROM heartbeat_at)::double precision
-        FROM service_heartbeats
-        WHERE chain_id = 'capacity-chain'
-          AND phase_name = 'verify'
-        ",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
+    // The runner records every five seconds; a fixed 5.2s sleep leaves only 200ms for
+    // CI scheduling and the database write. Wait for the actual commit with a hard bound.
+    let refreshed_heartbeat = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let heartbeat: f64 = sqlx::query_scalar(
+                "
+                SELECT extract(epoch FROM heartbeat_at)::double precision
+                FROM service_heartbeats
+                WHERE chain_id = 'capacity-chain'
+                  AND phase_name = 'verify'
+                ",
+            )
+            .fetch_one(scratch.pool())
+            .await?;
+            if heartbeat > initial_heartbeat {
+                return Result::<f64>::Ok(heartbeat);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("capacity pause heartbeat did not advance within 15 seconds")??;
     assert!(refreshed_heartbeat > initial_heartbeat);
     assert!(
         loop_heartbeat

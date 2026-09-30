@@ -155,37 +155,25 @@ pub(crate) async fn load_v2_primary_name_route_read(
     let gate_pool = state.pool.clone();
     let gate_namespace = namespace.to_owned();
     let gate_outcome = Arc::clone(&live_outcome);
-    let lookup =
-        bigname_lookup::LookupEngine::new(state.pool.clone(), state.lookup_chain_rpc_urls.clone())
-            .lookup_ens_primary_name_gated(
-                &lookup_chain_id,
-                address,
-                move |claimed_name| async move {
-                    let outcome = match unverifiable_name_authority(
-                        &gate_pool,
-                        &gate_namespace,
-                        &claimed_name,
-                    )
-                    .await
-                    {
-                        Ok(ForwardGateDecision::Admit) => return true,
-                        Ok(ForwardGateDecision::Refuse(reason)) => {
-                            LiveGateOutcome::Refused(Some(reason))
-                        }
-                        Ok(ForwardGateDecision::ProjectionUnavailable) => {
-                            LiveGateOutcome::Refused(Some(
-                                crate::v2::primary_name::PRIMARY_NAME_SURFACE_UNSUPPORTED
-                                    .to_owned(),
-                            ))
-                        }
-                        Err(error) => LiveGateOutcome::Failed(error),
-                    };
-                    *gate_outcome.lock().await = Some(outcome);
-                    false
-                },
-            )
-            .await
-            .map_err(|error| primary_name_lookup_error(address, error))?;
+    let lookup = bigname_lookup::LookupEngine::read_only(
+        state.pool.clone(),
+        state.lookup_chain_rpc_urls.clone(),
+    )
+    .lookup_ens_primary_name_gated(&lookup_chain_id, address, move |claimed_name| async move {
+        let outcome =
+            match unverifiable_name_authority(&gate_pool, &gate_namespace, &claimed_name).await {
+                Ok(ForwardGateDecision::Admit) => return true,
+                Ok(ForwardGateDecision::Refuse(reason)) => LiveGateOutcome::Refused(Some(reason)),
+                Ok(ForwardGateDecision::ProjectionUnavailable) => LiveGateOutcome::Refused(Some(
+                    crate::v2::primary_name::PRIMARY_NAME_SURFACE_UNSUPPORTED.to_owned(),
+                )),
+                Err(error) => LiveGateOutcome::Failed(error),
+            };
+        *gate_outcome.lock().await = Some(outcome);
+        false
+    })
+    .await
+    .map_err(|error| primary_name_lookup_error(address, error))?;
     let selected_snapshot = primary_name_lookup_snapshot(&lookup.position)?;
     if mixed_publication.as_ref().is_some_and(|publication| {
         publication.selected_snapshot.as_ref() != Some(&selected_snapshot)

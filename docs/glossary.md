@@ -2093,9 +2093,10 @@ resolution without an exact comparison row writes nothing, and any answer that
 used CCIP-read never writes or clears a row. When Project publishes a null exact
 resolver, the publication trigger retires active observations from the former
 direct route without treating an
-ancestor-resolver answer as a comparison. A serving-path mutation succeeds only
-while the compared projection row and its canonical block lineage remain
-unchanged.
+ancestor-resolver answer as a comparison. The retained non-API lookup writer
+mutates it only while the compared family publication and canonical block
+lineage remain unchanged. API requests never create, refresh, or clear these
+diagnostic observations; serving code does not consume them.
 
 <a id="resource"></a>
 ## Resource (backing resource, `resource_id`)
@@ -2408,9 +2409,9 @@ with a live ENSv2 entry serves that entry's expiry and the ENSv2 grace, and a
 
 request-scoped resolution or primary-name verification
 that calls admitted contracts at the selected block identity. It creates no
-durable execution trace or reusable outcome. Its only possible durable output
-is the guarded resolution divergence ledger for an eligible direct
-live/indexed comparison.
+durable execution trace or reusable outcome. API verification writes no database
+state. Non-API lookup callers can separately retain an eligible direct
+live/indexed comparison in the [resolution divergence ledger](#resolution-divergence-ledger).
 
 ## Walking skeleton
 

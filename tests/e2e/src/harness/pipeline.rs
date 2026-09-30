@@ -2066,8 +2066,8 @@ async fn exact_source_api_binary(repo_root: &Path) -> Result<PathBuf> {
     Ok(api_binary)
 }
 
-/// The production API serving a harness database through its SELECT-only
-/// verification role, for scenarios that assert real HTTP responses.
+/// The production API serving a harness database through a restricted reader
+/// with the read-only lookup grant, for scenarios that assert real HTTP responses.
 pub struct ProductionApi {
     process: OwnedProofProcess,
     address: std::net::SocketAddr,
@@ -2080,7 +2080,7 @@ impl ProductionApi {
         db: &mut super::db::HarnessDb,
         sepolia_rpc_url: &str,
     ) -> Result<Self> {
-        let reader = db.verification_url().await?;
+        let reader = db.api_url().await?;
         let api_binary = exact_source_api_binary(repo_root).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let startup_guard = await_with_readiness_deadline(
@@ -2252,11 +2252,12 @@ pub async fn prove_normal_sepolia_http(
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     drop(listener);
+    let api_reader = db.api_url().await?;
     let mut api_command = pipeline_command(repo_root, &api_binary);
     api_command.args([
         "serve",
         "--database-url",
-        &reader,
+        &api_reader,
         "--bind-addr",
         &address.to_string(),
         "--metrics-bind-addr",

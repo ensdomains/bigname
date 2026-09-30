@@ -5,6 +5,7 @@
 mod admission;
 mod reverse;
 mod text;
+pub(crate) mod work;
 
 use sqlx::{PgPool, Postgres, Transaction};
 

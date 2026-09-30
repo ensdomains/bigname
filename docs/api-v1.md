@@ -784,13 +784,12 @@ trace, or execution-cache readback. The engine refuses a name whose selected
 `verified_authority_arms` the selected `ens_execution` manifest declares
 (`manifests.md` § `verified_authority_arms`); the routes report that refusal as
 `exact_name_authority_not_verifiable`, distinct from the
-`verified_records_not_supported` a row without an admitted topology reports. A direct live answer that disagrees
-with the indexed exact entry or manifest-authorized derived read used for
-comparison writes the guarded
+`verified_records_not_supported` a row without an admitted topology reports. API requests, including diagnostics and verified fallback, are read-only.
+They never create, refresh, or clear the diagnostic
 [resolution divergence ledger](glossary.md#resolution-divergence-ledger).
-Agreement creates no divergence but may clear a matching active row, wildcard
-lookup without an exact comparison row writes nothing, and an answer that used
-CCIP-Read never writes or clears the ledger. For cross-chain resolution, the
+After provider calls, verification rechecks the captured publication, canonical
+positions, and manifest authority in a fresh read-only snapshot; concurrent
+changes keep their existing stale rejection. For cross-chain resolution, the
 selected product snapshot must admit
 the current authoritative position and include the execution chain, while the
 canonical projected row supplies the exact hash-pinned execution position. The
@@ -981,9 +980,8 @@ Diagnostics are the only public routes that may carry pipeline vocabulary.
 They expose coverage taxonomy, binding and authority explanations, record
 inventory and indexed-value internals, active manifests, and raw
 normalized-event rows.
-The diagnostics records route drives the same verified lookup engine and can
-write or clear rows in the
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger).
+The diagnostics records route drives the same read-only verified lookup engine.
+It does not create, refresh, or clear diagnostic observations.
 
 ## Parameters
 

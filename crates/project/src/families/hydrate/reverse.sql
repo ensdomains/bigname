@@ -1,10 +1,29 @@
 /* project:families.hydrate.reverse.select */
 -- The preview and the real reducer use identical owned rows. Replace only changed keys with
 -- their RowSet images; no preview is written to the database.
-WITH tuple_changes AS (
+WITH changed_keys AS (
+    SELECT * FROM jsonb_populate_recordset(NULL::project_reverse_tuple, $10)
+), rolling_keys AS MATERIALIZED (
+    SELECT q.address, q.coin_type, q.namespace
+    FROM project_reverse_hydration_work q
+    WHERE q.chain_id = $1 AND q.eligible AND NOT $11
+      AND NOT EXISTS (SELECT 1 FROM changed_keys c
+          WHERE (c.address, c.coin_type, c.namespace) = (q.address, q.coin_type, q.namespace))
+    ORDER BY q.attempt_ordinal NULLS FIRST, q.successful_at_block NULLS FIRST, q.address LIMIT 250
+), stale_keys AS MATERIALIZED (
+    SELECT q.address, q.coin_type, q.namespace
+    FROM project_reverse_hydration_work q
+    WHERE q.chain_id = $1 AND NOT q.eligible AND NOT $11
+      AND NOT EXISTS (SELECT 1 FROM changed_keys c
+          WHERE (c.address, c.coin_type, c.namespace) = (q.address, q.coin_type, q.namespace))
+    ORDER BY q.attempt_block, q.address LIMIT 250
+), candidate_keys AS (
+    SELECT address, coin_type, namespace FROM changed_keys
+    UNION SELECT * FROM rolling_keys UNION SELECT * FROM stale_keys
+), tuple_changes AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_reverse_tuple, $4)
 ), tuples AS (
-    SELECT t.* FROM project_reverse_tuple t
+    SELECT t.* FROM candidate_keys key JOIN project_reverse_tuple t USING (address, coin_type, namespace)
     WHERE t.chain_id = $1 AND NOT EXISTS (
         SELECT 1 FROM tuple_changes c
         WHERE (c.address, c.coin_type, c.namespace) = (t.address, t.coin_type, t.namespace)
@@ -79,22 +98,26 @@ WITH tuple_changes AS (
                  {pointer_emission_ordinal} DESC, p.event_identity COLLATE "C" DESC
         LIMIT 1
     ) pointer ON true
-    LEFT JOIN nodes node ON t.source_event = 'ReverseClaimed'
-        AND node.namespace = t.namespace AND node.reverse_node = t.reverse_node
-        AND node.resolver_address = pointer.resolver_address
-    LEFT JOIN normalization claim ON claim.claim_event_identity = CASE
-        WHEN t.source_event = 'ReverseClaimed' THEN node.event_identity
-        ELSE t.claim_event_identity END
+    LEFT JOIN LATERAL (
+        SELECT node.* FROM nodes node WHERE t.source_event = 'ReverseClaimed'
+          AND node.namespace = t.namespace AND node.reverse_node = t.reverse_node
+          AND node.resolver_address = pointer.resolver_address OFFSET 0
+    ) node ON true
+    LEFT JOIN LATERAL (
+        SELECT claim.* FROM normalization claim WHERE claim.claim_event_identity = CASE
+            WHEN t.source_event = 'ReverseClaimed' THEN node.event_identity
+            ELSE t.claim_event_identity END OFFSET 0
+    ) claim ON true
     WHERE t.namespace = 'ens' AND t.coin_type = '60'
 ), active AS (
     SELECT * FROM selected WHERE eligible
         AND NOT COALESCE(attempt_block = $2 AND attempt_hash = $3, false)
-), priority AS (
+), selected_priority AS (
     SELECT attempt_ordinal FROM active WHERE NOT delta
     ORDER BY attempt_ordinal NULLS FIRST,
         CASE WHEN hydrated_name IS NOT NULL THEN attempt_block END NULLS FIRST, address LIMIT 1
 ), rolling AS (
-    SELECT a.* FROM active a JOIN priority p
+    SELECT a.* FROM active a JOIN selected_priority p
         ON a.attempt_ordinal IS NOT DISTINCT FROM p.attempt_ordinal
     WHERE NOT a.delta ORDER BY
         CASE WHEN a.hydrated_name IS NOT NULL THEN a.attempt_block END NULLS FIRST, a.address LIMIT 250
@@ -108,4 +131,7 @@ WITH tuple_changes AS (
     UNION ALL SELECT * FROM stale WHERE delta
     UNION ALL SELECT * FROM stale_rolling
 )
-SELECT to_jsonb(work) FROM work ORDER BY address, coin_type, namespace
+SELECT payload FROM (
+    SELECT address, coin_type, namespace, to_jsonb(work) AS payload FROM work WHERE NOT $11
+    UNION ALL SELECT address, coin_type, namespace, to_jsonb(selected) FROM selected WHERE $11
+) result ORDER BY address, coin_type, namespace

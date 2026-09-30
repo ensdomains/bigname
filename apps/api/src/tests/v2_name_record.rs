@@ -766,7 +766,7 @@ async fn v2_get_name_verified_source_executes_without_legacy_persistence_and_abo
         sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
             .fetch_one(&lookup_pool)
             .await?;
-    assert_eq!(ledger_count, 2);
+    assert_eq!(ledger_count, 0, "API verification does not write diagnostics");
 
     lookup_pool.close().await;
     database.cleanup().await?;
@@ -2858,7 +2858,7 @@ async fn v2_get_name_records_source_verified_executes_basenames_with_auxiliary_p
         sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
             .fetch_one(&lookup_pool)
             .await?;
-    assert_eq!(ledger_count, 1);
+    assert_eq!(ledger_count, 0, "API verification does not write diagnostics");
 
     // An explicitly selected older auxiliary block cannot use today's composed execution route.
     let old_auxiliary = bigname_storage::SelectedSnapshot {

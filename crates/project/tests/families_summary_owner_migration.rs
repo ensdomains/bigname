@@ -58,7 +58,14 @@ fn reset_literal() -> BTreeSet<String> {
 /// do not seed it as predecessor state or include it in the historical reset assertion.
 fn reset_tables() -> Vec<String> {
     families::family_tables()
-        .filter(|table| *table != "project_universal_resolver_proxy")
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_universal_resolver_proxy"
+                    | "project_text_hydration_work"
+                    | "project_reverse_hydration_work"
+            )
+        })
         .map(str::to_owned)
         .chain(CONTROL_TABLES.map(str::to_owned))
         .collect()

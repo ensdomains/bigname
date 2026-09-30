@@ -5,10 +5,10 @@ topology and phase projections, may call an admitted chain provider, compares
 the answer with indexed state where the route requires it, and returns the
 result without writing a reusable cache outcome or durable execution trace.
 
-The only serving-path write is the guarded
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger). It is
-an operational observation of a direct live/indexed disagreement, not a result
-cache, projection, or source of truth.
+Every API path is read-only. The lookup library retains a guarded
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger) writer
+for non-API callers; API requests never create, refresh or clear its observations.
+The ledger is diagnostic only and is never consumed as a served answer.
 
 ## Read planes
 
@@ -21,9 +21,8 @@ The API keeps these meanings separate:
   requested selectors that indexed state cannot satisfy.
 
 Verified lookup never backfills the record or primary-claim families.
-Project owns those rows and their hydration overlays. A provider answer affects only
-the current response and, for guarded direct comparisons, divergence-ledger
-state.
+Project owns those rows and their hydration overlays. An API provider answer
+affects only the current response.
 
 ## Snapshot and canonicality
 
@@ -44,6 +43,10 @@ captured execution head; the indexed comparison retains its own published
 position. The snapshot contains the full declared topology, including aliases,
 wildcards and any admitted cross-chain transport context.
 
+API revalidation begins a fresh `REPEATABLE READ, READ ONLY` transaction after
+all provider calls, so state committed during those calls is visible. It uses
+no advisory or row locks. A physical streaming standby preserves the row
+versions used to compare manifest authority; logical replicas are not supported.
 Revalidation checks the captured marker generation and canonical lineage. A new
 family block, reset, same-height republication or overlapping Interpret/Project
 redo refuses the response or ledger mutation. An ordinary Project progress or
@@ -260,10 +263,12 @@ Primary-name lookup writes neither projections nor divergence observations.
 
 ## Divergence ledger
 
-The lookup engine may call fixed-`search_path`, security-definer functions that
-revalidate the selected lookup state and then create, refresh, or clear an
-active resolution-divergence observation. The API role has `EXECUTE` on those
-functions but no direct write privilege on the ledger table.
+Non-API lookup callers may use fixed-`search_path`, security-definer functions
+that revalidate the selected lookup state and then create, refresh, or clear an
+active resolution-divergence observation. `LookupEngine::new` retains this
+behavior; the API exclusively constructs `LookupEngine::read_only`. The API
+role receives the snapshot guard privilege only, with no ledger table or writer
+access. Existing observations stop being refreshed or cleared by API agreement.
 
 The guard holds shared locks on the captured publications, canonical lineage,
 manifest selection and relevant Interpret/Project phase rows through the ledger

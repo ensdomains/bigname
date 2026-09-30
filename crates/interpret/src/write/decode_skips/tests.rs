@@ -69,6 +69,7 @@ async fn redo_replay_of_the_same_adapter_batch_records_one_row() -> TestResult {
         TestDatabaseConfig::new("interpret_decode_skip_replay").pool_max_connections(1),
     )
     .await?;
+    database.create_phase_schema().await?;
     for sql in [
         include_str!("../../../../storage/schema/baseline/01_chain.sql"),
         include_str!("../../../../storage/schema/baseline/02_raw_facts.sql"),

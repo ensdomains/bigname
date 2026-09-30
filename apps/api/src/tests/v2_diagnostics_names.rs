@@ -177,7 +177,7 @@ async fn v2_diagnostics_name_records_executes_ephemeral_lookup_without_legacy_pe
         sqlx::query_scalar("SELECT count(*) FROM resolution_divergences WHERE cleared_at IS NULL")
             .fetch_one(&lookup_pool)
             .await?;
-    assert_eq!(ledger_count, 1);
+    assert_eq!(ledger_count, 0, "API verification does not write diagnostics");
 
     lookup_pool.close().await;
     database.cleanup().await?;

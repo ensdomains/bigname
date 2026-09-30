@@ -53,21 +53,22 @@ pub(super) async fn select(
     context: &Context<'_>,
     rows: &RowSet,
 ) -> Result<Vec<Candidate>> {
-    let work: Vec<Value> = sqlx::query_scalar(SELECT_SQL.as_str())
-        .bind(context.chain_id)
-        .bind(context.block.number)
-        .bind(&context.block.hash)
-        .bind(changed(rows, &tables::REVERSE_TUPLE))
-        .bind(changed(rows, &tables::REGISTRY_POINTER))
-        .bind(changed(rows, &tables::RESOURCE_POINTER))
-        .bind(changed(rows, &tables::REVERSE_NODE_CLAIM))
-        .bind(changed(rows, &tables::CLAIM_NORMALIZATION))
-        .bind(EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES)
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database("failed to select family reverse hydration", error)
-        })?;
+    let targets = super::work::reverse_keys(
+        transaction,
+        context.chain_id,
+        &super::work::changed_images(rows),
+    )
+    .await?;
+    let work = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        &context.block.hash,
+        rows,
+        targets,
+        false,
+    )
+    .await?;
     Ok(work
         .into_iter()
         .filter_map(|row| {
@@ -97,6 +98,73 @@ pub(super) async fn select(
             })
         })
         .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn selected_values(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    height: i64,
+    hash: &str,
+    rows: &RowSet,
+    targets: Vec<Value>,
+    refresh: bool,
+) -> Result<Vec<Value>> {
+    sqlx::query_scalar(SELECT_SQL.as_str())
+        .bind(chain)
+        .bind(height)
+        .bind(hash)
+        .bind(changed(rows, &tables::REVERSE_TUPLE))
+        .bind(changed(rows, &tables::REGISTRY_POINTER))
+        .bind(changed(rows, &tables::RESOURCE_POINTER))
+        .bind(changed(rows, &tables::REVERSE_NODE_CLAIM))
+        .bind(changed(rows, &tables::CLAIM_NORMALIZATION))
+        .bind(EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES)
+        .bind(json!(targets))
+        .bind(refresh)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to select family reverse hydration", e))
+}
+
+pub(super) async fn refresh(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    height: i64,
+    targets: Vec<Value>,
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let work = selected_values(
+        transaction,
+        chain,
+        height,
+        "",
+        &RowSet::default(),
+        targets.clone(),
+        true,
+    )
+    .await?
+    .into_iter()
+    .filter(|row| row["eligible"] == true || !row["attempt_block"].is_null())
+    .map(|mut row| {
+        row["successful_at_block"] = if row["hydrated_name"].is_null() {
+            Value::Null
+        } else {
+            row["attempt_block"].clone()
+        };
+        row
+    })
+    .collect();
+    super::work::replace(
+        transaction,
+        "project_reverse_hydration_work",
+        tables::REVERSE_TUPLE.key,
+        targets,
+        work,
+    )
+    .await
 }
 
 pub(super) async fn execute(

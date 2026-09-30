@@ -55,9 +55,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS resolution_divergences_one_active_request_idx
 COMMENT ON INDEX resolution_divergences_one_active_request_idx IS
     'This bounded btree uses SHA-256 of the unbounded request key; writes retain and compare the original key so a digest collision fails closed.';
 
--- Keep serving-path row locks behind a narrow privilege boundary. The API role
--- receives EXECUTE on this function, not UPDATE on the guarded projection and
--- head tables. Both locks remain held by the caller's transaction.
+-- Share every state predicate between API snapshot reads and locking ledger writes.
+-- Read-only callers use a fresh REPEATABLE READ, READ ONLY transaction after RPC.
+-- The eight-argument wrapper retains locks through the ledger transaction's commit.
 CREATE OR REPLACE FUNCTION revalidate_resolution_lookup_state(
     requested_authoritative_chain_id text,
     requested_authoritative_block_number bigint,
@@ -66,7 +66,8 @@ CREATE OR REPLACE FUNCTION revalidate_resolution_lookup_state(
     compared_execution_authority jsonb,
     compared_resource_id uuid,
     compared_boundary_key text,
-    compared_row_xmin text
+    compared_row_xmin text,
+    lock_rows boolean
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -80,20 +81,24 @@ DECLARE
     compared_family_publication jsonb;
     compared_logical_name_id text;
     compared_name_row_xmin text;
+    state_matches boolean;
 BEGIN
     -- Keep this key aligned with SCHEMA_V2_MANIFEST_SYNC_LOCK in
     -- crates/manifests/src/schema_v2.rs. A shared transaction lock makes the
     -- captured active-or-shadow manifest selection stable through commit.
-    PERFORM pg_advisory_xact_lock_shared(4776427281231725874);
+    IF lock_rows THEN
+        PERFORM pg_advisory_xact_lock_shared(4776427281231725874);
+    END IF;
 
-    PERFORM 1
-    FROM chain_heads
-    WHERE chain_id = requested_authoritative_chain_id
-      AND latest_block_number = requested_authoritative_block_number
-      AND latest_block_hash = requested_authoritative_block_hash
-    FOR SHARE;
+    EXECUTE $guard$
+        SELECT true FROM chain_heads
+        WHERE chain_id = $1 AND latest_block_number = $2 AND latest_block_hash = $3
+    $guard$ || CASE WHEN lock_rows THEN ' FOR SHARE' ELSE '' END
+    INTO state_matches
+    USING requested_authoritative_chain_id, requested_authoritative_block_number,
+          requested_authoritative_block_hash;
 
-    IF NOT FOUND THEN
+    IF state_matches IS NOT TRUE THEN
         RETURN 'head_changed';
     END IF;
 
@@ -107,42 +112,39 @@ BEGIN
     compared_name_row_xmin :=
         compared_execution_authority ->> 'name_row_xmin';
 
-    -- Bind every input to the captured family publication and hold its row through commit.
+    -- A publication includes every composed name and inventory input. Writers also
+    -- hold redo admission and publication rows until their ledger mutation commits.
     compared_family_publication := compared_execution_authority -> 'family_publication';
-        -- Redo begins by locking this chain's phase rows in phase-name order. Hold
-        -- the same rows through the caller's commit, without comparing ordinary row
-        -- versions, so a redo cannot start after admission but before a ledger mutation.
-        PERFORM 1
-        FROM chain_phase_state input_phase
-        WHERE input_phase.chain_id = requested_authoritative_chain_id
-          AND input_phase.phase_name IN ('interpret', 'project')
-        ORDER BY input_phase.phase_name
-        FOR SHARE;
+    EXECUTE $guard$
+        SELECT count(*) > 0 FROM (
+            SELECT 1 FROM chain_phase_state input_phase
+            WHERE input_phase.chain_id = $1
+              AND input_phase.phase_name IN ('interpret', 'project')
+            ORDER BY input_phase.phase_name
+    $guard$ || CASE WHEN lock_rows THEN ' FOR SHARE' ELSE '' END || ') AS phases'
+    INTO state_matches USING requested_authoritative_chain_id;
 
-        IF NOT FOUND THEN
-            RETURN 'project_changed';
-        END IF;
+    IF state_matches IS NOT TRUE THEN
+        RETURN 'project_changed';
+    END IF;
 
-        -- Only the lookup builds this object, with every field; a missing field fails the
-        -- equality match below and reads as project_changed.
-        PERFORM 1
+    -- Only lookup builds this object, with every field. Missing fields fail equality.
+    EXECUTE $guard$
+        SELECT true
         FROM project_family_marker marker
         JOIN chain_lineage lineage
           ON lineage.chain_id = marker.chain_id
          AND lineage.block_number = marker.current_block_number
          AND lineage.block_hash = marker.current_block_hash
          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE marker.chain_id = requested_authoritative_chain_id
+        WHERE marker.chain_id = $1
           AND marker.state = 'live'
-          AND marker.sequence::text = compared_family_publication ->> 'sequence'
-          AND marker.current_block_number::text =
-              compared_family_publication ->> 'block_number'
-          AND marker.current_block_hash = compared_family_publication ->> 'block_hash'
-          AND marker.input_content_hash =
-              compared_family_publication ->> 'input_content_hash'
-          AND requested_authoritative_block_number - marker.current_block_number BETWEEN 0 AND 1
-          AND (marker.current_block_number <> requested_authoritative_block_number
-               OR marker.current_block_hash = requested_authoritative_block_hash)
+          AND marker.sequence::text = $2 ->> 'sequence'
+          AND marker.current_block_number::text = $2 ->> 'block_number'
+          AND marker.current_block_hash = $2 ->> 'block_hash'
+          AND marker.input_content_hash = $2 ->> 'input_content_hash'
+          AND $3 - marker.current_block_number BETWEEN 0 AND 1
+          AND (marker.current_block_number <> $3 OR marker.current_block_hash = $4)
           AND NOT EXISTS (
               SELECT 1 FROM chain_phase_state input_phase
               WHERE input_phase.chain_id = marker.chain_id
@@ -150,11 +152,14 @@ BEGIN
                 AND input_phase.redo_in_progress
                 AND input_phase.redo_from_block_number <= marker.current_block_number
           )
-        FOR SHARE OF marker, lineage;
+    $guard$ || CASE WHEN lock_rows THEN ' FOR SHARE OF marker, lineage' ELSE '' END
+    INTO state_matches
+    USING requested_authoritative_chain_id, compared_family_publication,
+          requested_authoritative_block_number, requested_authoritative_block_hash;
 
-        IF NOT FOUND THEN
-            RETURN 'project_changed';
-        END IF;
+    IF state_matches IS NOT TRUE THEN
+        RETURN 'project_changed';
+    END IF;
 
     IF jsonb_typeof(requested_observed_positions) IS DISTINCT FROM 'object'
         OR requested_observed_positions = '{}'::jsonb
@@ -168,31 +173,26 @@ BEGIN
         ORDER BY key
     LOOP
         BEGIN
-            PERFORM 1
-            FROM chain_lineage
-            WHERE chain_id = position_value ->> 'chain_id'
-              AND block_hash = position_value ->> 'block_hash'
-              AND block_number =
-                  (position_value ->> 'block_number')::bigint
-              AND block_timestamp =
-                  (position_value ->> 'timestamp')::timestamptz
-              AND canonicality_state IN (
-                  'canonical',
-                  'safe',
-                  'finalized'
-              )
-            FOR SHARE;
+            EXECUTE $guard$
+                SELECT true FROM chain_lineage
+                WHERE chain_id = $1 ->> 'chain_id'
+                  AND block_hash = $1 ->> 'block_hash'
+                  AND block_number = ($1 ->> 'block_number')::bigint
+                  AND block_timestamp = ($1 ->> 'timestamp')::timestamptz
+                  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+            $guard$ || CASE WHEN lock_rows THEN ' FOR SHARE' ELSE '' END
+            INTO state_matches USING position_value;
         EXCEPTION
             WHEN data_exception THEN
                 RETURN 'position_changed';
         END;
 
-        IF NOT FOUND THEN
+        IF state_matches IS NOT TRUE THEN
             RETURN 'position_changed';
         END IF;
     END LOOP;
 
-        -- The composed name was read in the same snapshot as this locked marker.
+        -- The composed name was read in the same snapshot as this publication.
         IF compared_logical_name_id IS NOT NULL AND (
             compared_execution_authority #>> '{family_name,logical_name_id}'
                 IS DISTINCT FROM compared_logical_name_id
@@ -268,6 +268,29 @@ BEGIN
         END IF;
     RETURN 'unchanged';
 END
+$$;
+
+REVOKE ALL ON FUNCTION revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
+) FROM PUBLIC;
+
+-- Preserve the locking entry point used by the diagnostic ledger writer.
+CREATE OR REPLACE FUNCTION revalidate_resolution_lookup_state(
+    requested_authoritative_chain_id text,
+    requested_authoritative_block_number bigint,
+    requested_authoritative_block_hash text,
+    requested_observed_positions jsonb,
+    compared_execution_authority jsonb,
+    compared_resource_id uuid,
+    compared_boundary_key text,
+    compared_row_xmin text
+)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+    SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6, $7, $8, true)
 $$;
 
 REVOKE ALL ON FUNCTION revalidate_resolution_lookup_state(

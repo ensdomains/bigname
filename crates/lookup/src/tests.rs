@@ -716,12 +716,12 @@ async fn disagreement_writes_one_ledger_row_with_answers_and_anchor() -> AnyResu
 }
 
 #[tokio::test]
-async fn least_privileged_api_role_can_guard_and_write_only_through_functions() -> AnyResult<()> {
+async fn least_privileged_non_api_writer_keeps_its_existing_function_grants() -> AnyResult<()> {
     let (rpc_url, rpc_handle) =
         spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(LIVE_VALUE))]).await?;
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     let role_name = format!(
-        "lookup_api_{}",
+        "lookup_writer_{}",
         fixture
             .database
             .database_name()
@@ -775,15 +775,15 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
         .as_ref()
         .clone()
         .options([("role", role_name.as_str())]);
-    let api_pool = PgPoolOptions::new()
+    let writer_pool = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(connect_options)
         .await?;
 
     let request = lookup_request(&fixture.logical_name_id)?;
-    let snapshot = crate::store::load_snapshot(&api_pool, &request).await?;
+    let snapshot = crate::store::load_snapshot(&writer_pool, &request).await?;
 
-    let mut api_connection = api_pool.acquire().await?;
+    let mut writer_connection = writer_pool.acquire().await?;
     let comparison = &snapshot.execution_authority["family_comparison"];
     let resource_id = comparison["resource_id"]
         .as_str()
@@ -800,7 +800,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
          CREATE TEMP TABLE project_family_marker (shadow text);
          CREATE TEMP TABLE resolution_divergences (shadow text);",
     )
-    .execute(&mut *api_connection)
+    .execute(&mut *writer_connection)
     .await?;
     let positions = observed_position(10, ETHEREUM_HASH, "2026-08-03T00:00:00Z");
     let guard_status: String = sqlx::query_scalar(
@@ -815,7 +815,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .bind(resource_id)
     .bind(boundary_key)
     .bind(row_xmin)
-    .fetch_one(&mut *api_connection)
+    .fetch_one(&mut *writer_connection)
     .await?;
     assert_eq!(guard_status, "unchanged");
     let indexed_answer = json!({ "status": "success", "value": INDEXED_VALUE });
@@ -835,7 +835,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .bind("text:url")
     .bind(&positions)
     .bind(&indexed_answer)
-    .fetch_one(&mut *api_connection)
+    .fetch_one(&mut *writer_connection)
     .await?;
     assert_eq!(writer_status, "agreement");
     let forged_status: String = sqlx::query_scalar(
@@ -853,7 +853,7 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     .bind("0x1000000000000000000000000000000000000001")
     .bind(&positions)
     .bind(&indexed_answer)
-    .fetch_one(&mut *api_connection)
+    .fetch_one(&mut *writer_connection)
     .await?;
     assert_eq!(forged_status, "guard_rejected");
     raw_sql(
@@ -862,16 +862,16 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
          DROP TABLE pg_temp.project_family_marker;
          DROP TABLE pg_temp.resolution_divergences;",
     )
-    .execute(&mut *api_connection)
+    .execute(&mut *writer_connection)
     .await?;
-    drop(api_connection);
+    drop(writer_connection);
 
     let direct_write_error = sqlx::query(
         "UPDATE project_family_marker SET input_content_hash = input_content_hash WHERE false",
     )
-    .execute(&api_pool)
+    .execute(&writer_pool)
     .await
-    .expect_err("the API role must not update guarded projection rows directly");
+    .expect_err("the non-API writer role must not update guarded projection rows directly");
     assert_eq!(
         direct_write_error
             .as_database_error()
@@ -881,9 +881,9 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
     );
 
     let raw_read_error = sqlx::query("SELECT count(*) FROM raw_logs")
-        .fetch_one(&api_pool)
+        .fetch_one(&writer_pool)
         .await
-        .expect_err("the API role must not read raw facts");
+        .expect_err("the non-API writer role must not read raw facts");
     assert_eq!(
         raw_read_error
             .as_database_error()
@@ -892,11 +892,13 @@ async fn least_privileged_api_role_can_guard_and_write_only_through_functions() 
         Some("42501")
     );
 
-    let response = lookup_engine(&api_pool, &rpc_url)?.lookup(request).await?;
+    let response = lookup_engine(&writer_pool, &rpc_url)?
+        .lookup(request)
+        .await?;
     assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
     assert_eq!(ledger_count(fixture.pool()).await?, 1);
 
-    api_pool.close().await;
+    writer_pool.close().await;
     raw_sql(&format!(
         "DROP OWNED BY {role};
          REVOKE {role} FROM CURRENT_USER;
@@ -1059,20 +1061,21 @@ async fn lookup_publication_migration_preserves_guard_writer_and_privileges() ->
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     let before: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
-         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname"
+         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
     ).fetch_all(fixture.pool()).await?;
-    // Upgrade through the Project-row guard, marker fence, then composed family inputs.
+    // Upgrade through the Project-row guard, family inputs, and read-only overload.
     for migration in [
         include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
         include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
         include_str!("../../../migrations/20260929130000_lookup_family_inputs.sql"),
         include_str!("../../../migrations/20260929160000_remove_served_projections.sql"),
+        include_str!("../../../migrations/20260930100000_read_only_lookup_guard.sql"),
     ] {
         raw_sql(migration).execute(fixture.pool()).await?;
     }
     let after: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
-         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname"
+         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
     ).fetch_all(fixture.pool()).await?;
     assert_eq!(
         before, after,

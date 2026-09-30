@@ -1384,11 +1384,9 @@ return selector-local `unsupported`.
 Basenames supports the exact-surface transport-assisted direct path through active `basenames_execution` v2 at the L1 Resolver. Other Basenames verified [path classes](glossary.md) return selector-local `unsupported`.[^bn-readme-l69][^bn-readme-l70][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 V2 verified name and record routes execute through the schema-v2 lookup engine
-without a durable trace or reusable outcome. A
-guarded direct live/indexed disagreement may
-create or replace an active
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger) row;
-restored agreement may clear the matching active row.
+without a durable trace or reusable outcome. Every API request is read-only,
+including verified and diagnostics routes. It revalidates captured state after
+provider calls without creating, refreshing, or clearing diagnostic observations.
 
 ## Permissions
 
@@ -1635,10 +1633,10 @@ Default verified entrypoints:
 - Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
 The v2 lookup engine executes afresh at the schema-v2 current readable position.
-It has no trace or cache identity. It may compare a direct record answer with
-the projected exact entry or a manifest-authorized derived read from that same
-record inventory and perform the guarded divergence-ledger write;
-v2 primary-name verification performs no write.
+It has no trace or cache identity. API record and primary-name verification use
+a fresh read-only snapshot after provider execution to revalidate the captured
+family publication, canonical positions and manifest versions. The lookup
+library retains its guarded diagnostic writer for non-API callers.
 
 ## Reorg, redo, and historical ranges
 

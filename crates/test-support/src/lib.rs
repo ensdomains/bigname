@@ -200,6 +200,30 @@ impl TestDatabase {
         &self.pool
     }
 
+    /// Create and select the production phase schema for a fixture's baseline SQL.
+    pub async fn create_phase_schema(&self) -> Result<()> {
+        sqlx::raw_sql("CREATE SCHEMA bigname_phase")
+            .execute(&self.pool)
+            .await?;
+        self.pool.set_connect_options(
+            self.pool
+                .connect_options()
+                .as_ref()
+                .clone()
+                .options([("search_path", "bigname_phase,public")]),
+        );
+        // Retain each connection until every existing connection has been configured.
+        let mut connections = Vec::new();
+        for _ in 0..self.pool.options().get_max_connections() {
+            let mut connection = self.pool.acquire().await?;
+            sqlx::raw_sql("SET search_path TO bigname_phase, public")
+                .execute(&mut *connection)
+                .await?;
+            connections.push(connection);
+        }
+        Ok(())
+    }
+
     pub fn database_name(&self) -> &str {
         &self.database_name
     }
