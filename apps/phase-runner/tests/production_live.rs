@@ -2135,8 +2135,11 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
     });
 
     let mut waiting_on_locked_begin = false;
-    // PostgreSQL may truncate the tracked query before its trailing FOR UPDATE as
-    // the locked state-row projection grows, so identify this wait by its SELECT.
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    // The tracked query can truncate before FROM as the state-row projection grows.
+    // Its SELECT prefix plus our actual blocking backend identifies the locked begin.
     for _ in 0..200 {
         waiting_on_locked_begin = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -2145,9 +2148,10 @@ async fn locked_begin_rejects_an_audit_created_after_tokenless_preflight() -> Re
                  WHERE datname = current_database()
                    AND wait_event_type = 'Lock'
                    AND query LIKE '%SELECT phase_name%'
-                   AND query LIKE '%FROM chain_phase_state%'
+                   AND $1 = ANY(pg_blocking_pids(pid))
              )",
         )
+        .bind(blocker_pid)
         .fetch_one(scratch.pool())
         .await?;
         if waiting_on_locked_begin {
