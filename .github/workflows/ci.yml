@@ -36,9 +36,9 @@ env:
   RUST_VERSION: 1.98.0
   FOUNDRY_VERSION: v1.7.1
 
-# Main requires the merge queue with no bypass actors. The queue runs validation;
-# the subsequent push only maintains main-scoped caches and publication artifacts.
-# Keep full checks on pull_request and merge_group if the branch policy changes.
+# Main requires the merge queue with no bypass actors and required static,
+# test, and artifacts-and-smoke gates. This policy permits push-only cache and
+# artifact work; revisit the event split if either requirement changes.
 jobs:
   static:
     runs-on: ubuntu-latest
