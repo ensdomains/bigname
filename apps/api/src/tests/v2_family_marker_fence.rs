@@ -329,7 +329,10 @@ async fn api_preflight_requires_a_readable_family_marker() -> Result<()> {
 async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let role = format!("family_grant_preflight_{}", std::process::id());
-    let deployment = include_str!("../../../../docs/deployment.md");
+    let deployment = include_str!("../../../../docs/deployment.md")
+        .split_once("## Surviving services")
+        .context("deployment docs must contain the API service grants")?
+        .1;
     let grants = deployment
         .split_once("GRANT SELECT ON TABLE\n")
         .context("deployment docs must contain the API SELECT grant")?
