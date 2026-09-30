@@ -68,7 +68,7 @@ ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
 # fails against them or ships them.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    find apps crates tools migrations manifests schema-v2 -exec touch {} + \
+    find apps crates tools migrations manifests -exec touch {} + \
     && cargo build --locked --release --workspace --bins
 
 FROM ubuntu:24.04 AS runtime
