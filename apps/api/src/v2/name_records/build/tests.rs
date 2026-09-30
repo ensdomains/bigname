@@ -5,6 +5,8 @@ use sqlx::types::time::OffsetDateTime;
 use super::*;
 use crate::v2::{ErrorCode, support::parse_resolution_record_key};
 
+mod verified;
+
 #[test]
 fn auto_rejects_derived_answer_from_nonauthoritative_inventory() {
     let timestamp =

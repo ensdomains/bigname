@@ -3,14 +3,13 @@ use std::collections::BTreeMap;
 use bigname_domain::resolver_read::{
     IndexedRecordAnswer, IndexedRecordStatus, evaluate_indexed_record,
 };
+use bigname_lookup::{LookupRecordResult, LookupRecordStatus};
 use bigname_storage::{NameCurrentRow, RecordInventoryCurrentRow};
 use serde_json::Value;
 use tracing::error;
 
 use crate::v2::name_record::row_has_current_registration;
-use crate::v2::support::{
-    ResolutionRecordKey, build_lookup_resolution_verified_state, serving_record_inventory,
-};
+use crate::v2::support::{ResolutionRecordKey, serving_record_inventory};
 
 use super::super::vocab::{
     MISSING_UNSUPPORTED_REASON, downgrades_unsupported_name, projected_row_product_reason,
@@ -332,8 +331,7 @@ fn verified_record_answers(
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
     match verified_lookup {
         Some(VerifiedRecordLookup::Found { response }) => {
-            let state = build_lookup_resolution_verified_state(records, Some(response.as_ref()));
-            verified_queries_from_state(&state, records)
+            verified_answers_from_results(&response.records, records)
         }
         Some(VerifiedRecordLookup::Stale(reason)) => {
             let supported =
@@ -371,58 +369,53 @@ fn verified_record_answers(
     }
 }
 
-fn verified_queries_from_state(
-    state: &Value,
+fn verified_answers_from_results(
+    results: &[LookupRecordResult],
     records: &[ResolutionRecordKey],
 ) -> V2Result<BTreeMap<String, RecordAnswer>> {
-    let mut queries = BTreeMap::new();
-    for query in state
-        .get("verified_queries")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(record_key) = string_field(query.get("record_key")) else {
-            continue;
-        };
-        queries.insert(record_key, verified_answer_from_query(query)?);
-    }
+    let results = results
+        .iter()
+        .map(|result| (result.record_key.as_str(), result))
+        .collect::<BTreeMap<_, _>>();
 
     records
         .iter()
         .map(|record| {
-            let answer = match queries.get(&record.record_key).cloned() {
-                Some(answer) => answer,
-                None => unsupported_answer(VERIFIED_NOT_SUPPORTED_REASON)?,
-            };
+            let answer = match results.get(record.record_key.as_str()) {
+                Some(result) => verified_answer_from_result(result),
+                None => unsupported_answer("verified resolution entrypoint is not yet supported"),
+            }?;
             Ok((record.record_key.clone(), answer))
         })
         .collect()
 }
 
-fn verified_answer_from_query(query: &Value) -> V2Result<RecordAnswer> {
-    let status = string_field(query.get("status")).unwrap_or_else(|| "unsupported".to_owned());
-    match status.as_str() {
-        "success" => Ok(RecordAnswer {
+fn verified_answer_from_result(result: &LookupRecordResult) -> V2Result<RecordAnswer> {
+    match result.status {
+        LookupRecordStatus::Success => Ok(RecordAnswer {
             status: Status::Ok,
-            value: query
-                .get("value")
+            value: result
+                .value
+                .as_ref()
                 .and_then(verified_value_string)
                 .map(Value::String),
             unsupported_reason: None,
             failure_reason: None,
             meta: None,
         }),
-        "not_found" => not_found_answer(string_field(query.get("failure_reason"))),
-        "unsupported" => unsupported_answer(
-            &string_field(query.get("unsupported_reason"))
-                .unwrap_or_else(|| VERIFIED_NOT_SUPPORTED_REASON.to_owned()),
+        LookupRecordStatus::NotFound => not_found_answer(result.failure_reason.clone()),
+        LookupRecordStatus::Unsupported => unsupported_answer(
+            result
+                .unsupported_reason
+                .as_deref()
+                .unwrap_or(VERIFIED_NOT_SUPPORTED_REASON),
         ),
-        "execution_failed" | "failed" => failed_answer(
-            string_field(query.get("failure_reason"))
-                .unwrap_or_else(|| "verified_record_read_failed".to_owned()),
+        LookupRecordStatus::ExecutionFailed => failed_answer(
+            result
+                .failure_reason
+                .as_deref()
+                .unwrap_or("verified_record_read_failed"),
         ),
-        _ => failed_answer("verified_record_read_failed"),
     }
 }
 
