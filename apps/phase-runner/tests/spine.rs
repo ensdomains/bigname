@@ -403,13 +403,17 @@ async fn a_stop_while_phase_start_waits_on_a_held_row_returns_without_it() -> Re
     let task = tokio::spawn(async move { runner.run_chain(&chain, run_cancellation).await });
 
     // Wait until the runner is really parked on the row before stopping it.
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity
                  WHERE datname = current_database() AND wait_event_type = 'Lock'
-                   AND query LIKE '%chain_phase_state%'",
+                   AND $1 = ANY(pg_blocking_pids(pid))",
             )
+            .bind(holder_pid)
             .fetch_one(scratch.pool())
             .await?;
             if waiting >= 1 {

@@ -118,6 +118,96 @@ async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<
 async fn legacy_interrupted_rebuild_recovers_without_editing_progress_or_dropping_constraint()
 -> Result<()> {
     let chain = "project-legacy-rebuild";
+    let (scratch, fixture, reset) = legacy_state(chain).await?;
+    runner(&scratch, chain, 3)?
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(HEAD, HEAD)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        reset_sequence(&scratch, chain).await?,
+        reset,
+        "recovery adopts the existing rebuild"
+    );
+    assert_eq!(family_marker(&scratch, chain).await?, HEAD);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM project_registry_pointer WHERE chain_id = $1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(rows, HEAD - 1);
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn old_hash_interrupted_rebuild_recovers_through_full_interpret_project_adoption()
+-> Result<()> {
+    let chain = "project-legacy-hash-adoption";
+    let (scratch, fixture, old_reset) = legacy_state(chain).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'keccak256:prior-release'
+        WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE project_family_marker SET input_content_hash = 'keccak256:prior-release'
+        WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("UPDATE project_repair_record SET prefix_interpret_input_content_hash = 'keccak256:prior-release'
+        WHERE chain_id = $1").bind(chain).execute(scratch.pool()).await?;
+    let phase = runner(&scratch, chain, 3)?;
+    let refused = phase
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(HEAD, HEAD)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("old hash cannot adopt a narrow repair");
+    assert_eq!(refused.kind(), ErrorKind::ContentHashMismatch);
+    phase
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Interpret),
+            BlockRange::new(0, HEAD)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_ne!(
+        reset_sequence(&scratch, chain).await?,
+        old_reset,
+        "the old hash prefix must be rebuilt"
+    );
+    let state: (String, String, String, bool) = sqlx::query_as(
+        "SELECT marker.state, marker.input_content_hash, phase.input_content_hash, phase.redo_in_progress
+         FROM project_family_marker marker JOIN chain_phase_state phase USING (chain_id)
+         WHERE marker.chain_id = $1 AND phase.phase_name = 'project'")
+        .bind(chain).fetch_one(scratch.pool()).await?;
+    assert_eq!(
+        state,
+        (
+            "live".into(),
+            INTERPRETER_CONTENT_HASH.into(),
+            INTERPRETER_CONTENT_HASH.into(),
+            false
+        )
+    );
+    assert_eq!(family_marker(&scratch, chain).await?, HEAD);
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+async fn legacy_state(chain: &str) -> Result<(ScratchDatabase, RpcFixture, Option<i64>)> {
     let (scratch, fixture) = ready(chain).await?;
     install_reorg(&scratch, &fixture, chain).await?;
     // A bounded wrapper reproduces the old Project decision using the production family
@@ -161,28 +251,7 @@ async fn legacy_interrupted_rebuild_recovers_without_editing_progress_or_droppin
     .bind(HEAD)
     .execute(scratch.pool())
     .await?;
-    runner(&scratch, chain, 3)?
-        .redo(
-            &live_chain(chain, &fixture.endpoint)?,
-            RedoPhase::Phase(PhaseName::Project),
-            BlockRange::new(HEAD, HEAD)?,
-            CancellationToken::new(),
-        )
-        .await?;
-    assert_eq!(
-        reset_sequence(&scratch, chain).await?,
-        reset,
-        "recovery adopts the existing rebuild"
-    );
-    assert_eq!(family_marker(&scratch, chain).await?, HEAD);
-    let rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM project_registry_pointer WHERE chain_id = $1")
-            .bind(chain)
-            .fetch_one(scratch.pool())
-            .await?;
-    assert_eq!(rows, HEAD - 1);
-    fixture.server.abort();
-    scratch.cleanup().await
+    Ok((scratch, fixture, reset))
 }
 
 struct LegacyRebuild {
