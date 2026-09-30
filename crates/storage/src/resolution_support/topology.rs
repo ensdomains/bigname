@@ -73,9 +73,3 @@ pub fn row_has_basenames_supported_chain_positions(row: &NameCurrentRow) -> bool
 
     saw_base && saw_ethereum
 }
-
-pub(crate) fn row_has_basenames_supported_chain_positions_for_revalidation(
-    row: &NameCurrentRow,
-) -> bool {
-    row_has_basenames_supported_chain_positions(row)
-}
