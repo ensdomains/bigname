@@ -91,18 +91,73 @@ pub(super) async fn select(
     context: &Context<'_>,
     rows: &RowSet,
 ) -> Result<Vec<Candidate>> {
-    let values: Vec<Value> = sqlx::query_scalar(SELECT_SQL.as_str())
-        .bind(context.chain_id)
-        .bind(context.block.number)
+    let targets = super::work::text_keys(
+        transaction,
+        context.chain_id,
+        &super::work::changed_images(rows),
+    )
+    .await?;
+    let values = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        rows,
+        targets,
+        false,
+    )
+    .await?;
+    values.into_iter().map(candidate).collect()
+}
+
+async fn selected_values(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    height: i64,
+    rows: &RowSet,
+    targets: Vec<Value>,
+    refresh: bool,
+) -> Result<Vec<Value>> {
+    sqlx::query_scalar(SELECT_SQL.as_str())
+        .bind(chain)
+        .bind(height)
         .bind(changes(rows, &tables::NODE_RECORD_VALUE))
         .bind(changes(rows, &tables::NODE_RECORD_PARTITION))
         .bind(changes(rows, &tables::RESOLVER_CLASSIFICATION))
         .bind(TEXT_RESOLVERS)
         .bind(ROLLING_LIMIT as i64)
+        .bind(json!(targets))
+        .bind(refresh)
         .fetch_all(&mut **transaction)
         .await
-        .map_err(|error| ProjectError::database("failed to select family text hydration", error))?;
-    values.into_iter().map(candidate).collect()
+        .map_err(|e| ProjectError::database("failed to select family text hydration", e))
+}
+
+pub(super) async fn refresh(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain: &str,
+    height: i64,
+    targets: Vec<Value>,
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let work = selected_values(
+        transaction,
+        chain,
+        height,
+        &RowSet::default(),
+        targets.clone(),
+        true,
+    )
+    .await?;
+    super::work::replace(
+        transaction,
+        "project_text_hydration_work",
+        tables::NODE_RECORD_VALUE.key,
+        targets,
+        work,
+    )
+    .await
 }
 
 /// One selected row. The query already dropped current and cleared selectors and cut the block's

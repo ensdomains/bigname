@@ -58,6 +58,7 @@ pub(crate) async fn undo_block(
         return Ok(None);
     };
 
+    let mut hydration_images = super::hydrate::work::Images::new();
     let mut by_table: BTreeMap<&str, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
     for (family, key, image) in &journal {
         if family == "marker" {
@@ -68,6 +69,16 @@ pub(crate) async fn undo_block(
                 "family undo record of chain {chain_id} names unknown table {family}"
             ))
         })?;
+        let mut hydration_image = image
+            .clone()
+            .unwrap_or(Value::Object(store::key_object(table, key)?));
+        if hydration_image.get("chain_id").is_none() {
+            hydration_image["chain_id"] = serde_json::json!(chain_id);
+        }
+        hydration_images
+            .entry(table.name)
+            .or_default()
+            .push(hydration_image);
         let (keys, images) = by_table.entry(table.name).or_default();
         keys.push(Value::Object(store::key_object(table, key)?));
         if let Some(image) = image {
@@ -76,9 +87,18 @@ pub(crate) async fn undo_block(
     }
     // The index rows follow the base rows: take the keys while the block's rows still stand.
     let touched = derived::touched(&mut transaction, chain_id, current.number, None).await?;
+    let hydration =
+        super::hydrate::work::Targets::read(&mut transaction, chain_id, &hydration_images).await?;
     for (name, (keys, images)) in by_table {
         store::replace(&mut transaction, tables::spec(name), keys, images).await?;
     }
+    hydration
+        .refresh(
+            &mut transaction,
+            chain_id,
+            prior["current_block_number"].as_i64().unwrap_or(-1),
+        )
+        .await?;
     derived::refresh(&mut transaction, chain_id, &touched).await?;
 
     let restored = FamilyMarker::from_journal_image(&prior, locked.sequence + 1);

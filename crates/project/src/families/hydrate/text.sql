@@ -1,11 +1,24 @@
 /* project:families.hydrate.text.select */
--- Preview only the owned rows changed in this block; all other keys read their stored image.
--- The query decides which selectors need work and cuts the block's share, so a block transfers
--- at most $7 rows however many selectors are already current.
-WITH value_changes AS (
+-- Read changed/dependent keys and an indexed share of pending work before joining selectors.
+-- $9 refreshes the derived work index for $8 only, without the rolling share or result limit.
+WITH changed_keys AS (
+    SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $8)
+), rolling_keys AS MATERIALIZED (
+    SELECT q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key
+    FROM project_text_hydration_work q WHERE q.chain_id = $1 AND NOT $9
+      AND NOT EXISTS (SELECT 1 FROM changed_keys c
+          WHERE (c.chain_id, c.resolver_address, c.arm, c.arm_identity, c.record_key) =
+              (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key))
+    ORDER BY q.hydrated_at_block NULLS FIRST, q.resolver_address, q.arm, q.arm_identity, q.record_key
+    LIMIT $7
+), candidate_keys AS (
+    SELECT chain_id, resolver_address, arm, arm_identity, record_key FROM changed_keys
+    UNION SELECT * FROM rolling_keys
+), value_changes AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $3)
 ), record_values AS (
-    SELECT value.* FROM project_node_record_value value WHERE value.chain_id = $1
+    SELECT value.* FROM candidate_keys key JOIN project_node_record_value value
+        USING (chain_id, resolver_address, arm, arm_identity, record_key) WHERE value.chain_id = $1
       AND NOT EXISTS (SELECT 1 FROM value_changes change
           WHERE (change.chain_id, change.resolver_address, change.arm, change.arm_identity,
                  change.record_key) = (value.chain_id, value.resolver_address, value.arm,
@@ -34,6 +47,7 @@ WITH value_changes AS (
         jsonb_build_object('classification', classification, 'support_status', support_status,
             'unsupported_reason', unsupported_reason, 'manifest_id', manifest_id) AS admission
     FROM classifications
+    WHERE resolver_address IN (SELECT resolver_address FROM record_values)
 ), selected AS (
     SELECT value.*,
         -- What an overlay is read for, part by part; `_selector` below assembles it.
@@ -147,4 +161,4 @@ SELECT to_jsonb(work.*) || jsonb_build_object('_selector', jsonb_build_object(
 FROM work
 ORDER BY NOT _delta, hydrated_at_block NULLS FIRST,
     resolver_address, arm, arm_identity, record_key
-LIMIT $7
+LIMIT CASE WHEN $9 THEN NULL ELSE $7 END

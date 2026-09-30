@@ -318,3 +318,221 @@ async fn preparation_releases_transaction_and_changed_inputs_refuse_publication(
     }
     Ok(())
 }
+
+#[path = "families_hydration/plans.rs"]
+mod plans;
+
+fn reverse_selection_sql() -> String {
+    include_str!("../src/families/hydrate/reverse.sql").replace(
+        "{pointer_emission_ordinal}",
+        &bigname_storage::families::position::emission_ordinal_sql(
+            "p.event_identity",
+            "p.transaction_index",
+            "p.log_index",
+        ),
+    )
+}
+
+#[tokio::test]
+async fn reverse_selection_reads_a_bounded_rotation_among_fifty_thousand_refresh_tuples()
+-> Result<()> {
+    let fixture = Fixture::new("family_reverse_work_plan", 4).await?;
+    fixture.lineage(CHAIN, 4).await?;
+    let rpc = rpc::Rpc::new().await?;
+    seed(&fixture, 1, 1).await?;
+    run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
+    // Duplicate the persisted rows as a large already-built fixture. All retain the admitted
+    // pointer, so this measures the active rotation, rather than only excluding inactive rows.
+    sqlx::query(
+        "INSERT INTO project_reverse_tuple SELECT (jsonb_populate_record(t,
+        jsonb_build_object('address', '0x' || lpad(to_hex(i), 40, '0')))).*
+        FROM project_reverse_tuple t, generate_series(2, 50001) i WHERE t.address=$1",
+    )
+    .bind(ADDRESS)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_reverse_hydration_work SELECT (jsonb_populate_record(w,
+        jsonb_build_object('address', '0x' || lpad(to_hex(i), 40, '0')))).*
+        FROM project_reverse_hydration_work w, generate_series(2, 50001) i WHERE w.address=$1",
+    )
+    .bind(ADDRESS)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_resource_pointer
+        (chain_id, resource_id, block_number, event_identity, namespace, namehash, pointer_position)
+        SELECT $1, md5(i::text)::uuid, 1, 'pointer:' || i, 'ens', 'unrelated:' || i,
+            jsonb_build_object('block_number', 1, 'event_identity', 'pointer:' || i)
+        FROM generate_series(1, 50000) i",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_reverse_node_claim
+        (namespace, reverse_node, chain_id, block_number, event_identity, resolver_address)
+        SELECT 'ens', 'unrelated:' || i, $1, 1, 'unrelated:' || i, $2
+        FROM generate_series(1, 50000) i",
+    )
+    .bind(CHAIN)
+    .bind(SILENT)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_claim_normalization
+        (chain_id, claim_event_identity, block_number, event_identity, status)
+        SELECT $1, 'unrelated:' || i, 1, 'unrelated:' || i, 'not_found'
+        FROM generate_series(1, 50000) i",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::raw_sql("ANALYZE project_reverse_node_claim; ANALYZE project_claim_normalization; ANALYZE project_resource_pointer; ANALYZE project_reverse_tuple; ANALYZE project_reverse_hydration_work")
+        .execute(&fixture.pool)
+        .await?;
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        reverse_selection_sql()
+    ))
+    .bind(CHAIN)
+    .bind(2_i64)
+    .bind(hash(2))
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(vec![SILENT])
+    .bind(json!([]))
+    .bind(false)
+    .fetch_one(&fixture.pool)
+    .await?;
+    plans::save("reverse-rotation-among-50000", &plan)?;
+    let generic = plans::generic(&fixture.pool, &reverse_selection_sql(), &format!(
+        "'ethereum-mainnet', 2, '{}', '[]', '[]', '[]', '[]', '[]', ARRAY['{SILENT}'], '[]', false", hash(2))).await?;
+    plans::save("reverse-rotation-generic-among-50000", &generic)?;
+    assert!(
+        plans::visits(&generic, "project_reverse_tuple") <= 250.0,
+        "{generic}"
+    );
+    assert!(
+        plans::visits(&generic, "project_reverse_hydration_work") <= 250.0,
+        "{generic}"
+    );
+    assert_eq!(
+        plans::visits(&generic, "project_resource_pointer"),
+        0.0,
+        "{generic}"
+    );
+    for relation in ["project_reverse_node_claim", "project_claim_normalization"] {
+        assert_eq!(
+            plans::visits(&generic, relation),
+            0.0,
+            "{relation}: {generic}"
+        );
+        assert_eq!(plans::visits(&plan, relation), 0.0, "{relation}: {plan}");
+    }
+    let dependencies = plans::generic(
+        &fixture.pool,
+        include_str!("../src/families/hydrate/reverse_keys.sql"),
+        "'ethereum-mainnet', '[]', '[]', '[]', '[]', '[]'",
+    )
+    .await?;
+    plans::save(
+        "reverse-empty-dependencies-generic-among-50000",
+        &dependencies,
+    )?;
+    assert_eq!(
+        plans::visits(&dependencies, "project_reverse_tuple"),
+        0.0,
+        "{dependencies}"
+    );
+    assert_eq!(
+        plans::visits(&dependencies, "project_resource_pointer"),
+        0.0,
+        "{dependencies}"
+    );
+    assert_eq!(
+        plans::visits(&plan, "project_resource_pointer"),
+        0.0,
+        "{plan}"
+    );
+    assert!(
+        plans::visits(&plan, "project_reverse_tuple") <= 250.0,
+        "{plan}"
+    );
+    assert!(
+        plans::visits(&plan, "project_reverse_hydration_work") <= 250.0,
+        "{plan}"
+    );
+    rpc.answer(2, Some("first.eth"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    rpc.answer(3, Some("next.eth"));
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(rpc.calls(), vec![(hash(2), 250), (hash(3), 250)]);
+    let attempts: Vec<(i64, i64)> = sqlx::query_as("SELECT attempt_block, count(*) FROM
+        project_reverse_tuple WHERE attempt_block IS NOT NULL GROUP BY attempt_block ORDER BY attempt_block")
+        .fetch_all(&fixture.pool).await?;
+    assert_eq!(
+        attempts,
+        vec![(2, 250), (3, 250)],
+        "the next cohort progresses"
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn another_chains_shared_tuple_write_and_undo_update_mainnet_work() -> Result<()> {
+    let fixture = Fixture::new("family_reverse_shared_work", 4).await?;
+    fixture.lineage(CHAIN, 4).await?;
+    let rpc = rpc::Rpc::new().await?;
+    fixture.apply_on(support::CHAIN, 0).await?;
+    seed(&fixture, 1, 1).await?;
+    run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
+    let pending = async || -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM project_reverse_hydration_work")
+                .fetch_one(&fixture.pool)
+                .await?,
+        )
+    };
+    assert_eq!(pending().await?, 1);
+    fixture
+        .event(
+            Event::new("other-claim:1", 1, 1, "ReverseChanged", "ens_v1_reverse_l1").after(
+                json!({"source_event":"ReverseClaimed", "address":ADDRESS, "coin_type":"60",
+            "namespace":"ens", "reverse_node":node(1)}),
+            ),
+        )
+        .await?;
+    fixture.apply_on(support::CHAIN, 1).await?;
+    assert_eq!(tuple(&fixture).await?["chain_id"], support::CHAIN);
+    assert_eq!(
+        pending().await?,
+        0,
+        "displaced mainnet rows cannot consume rolling slots"
+    );
+    families::undo_to(&fixture.pool, support::CHAIN, 0).await?;
+    assert_eq!(tuple(&fixture).await?["chain_id"], CHAIN);
+    assert_eq!(
+        pending().await?,
+        1,
+        "undo restores mainnet work with its shared source row"
+    );
+    rpc.answer(2, Some("restored.eth"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(tuple(&fixture).await?["hydrated_name"], "restored.eth");
+    // Reset on the other chain removes its displaced row; subsequent mainnet rebuild restores
+    // both its source rows and work entries from canonical input.
+    fixture.apply(1, FamilyMode::Rebuild).await?;
+    assert_eq!(pending().await?, 0);
+    run(&fixture, 2, FamilyMode::Rebuild, &rpc).await?;
+    assert_eq!(pending().await?, 1);
+    assert_eq!(
+        rpc.calls().len(),
+        1,
+        "other-chain writes and rebuilds perform no hydration RPC"
+    );
+    fixture.cleanup().await
+}

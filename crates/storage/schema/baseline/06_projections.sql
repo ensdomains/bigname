@@ -2289,3 +2289,45 @@ CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_resource_i
 
 CREATE INDEX IF NOT EXISTS project_grant_resource_subject_idx
     ON project_grant (resource_id, subject COLLATE "C", scope COLLATE "C");
+-- Derived Project work indexes, refreshed with source-row publication and undo.
+CREATE TABLE IF NOT EXISTS project_text_hydration_work (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    arm text NOT NULL,
+    arm_identity text NOT NULL,
+    record_key text NOT NULL,
+    hydrated_at_block bigint,
+    PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key)
+);
+COMMENT ON TABLE project_text_hydration_work IS
+    'Project-owned derived index of text selectors needing hydration or overlay clearing. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+CREATE INDEX IF NOT EXISTS project_text_hydration_work_order_idx
+    ON project_text_hydration_work (chain_id, hydrated_at_block NULLS FIRST,
+        resolver_address, arm, arm_identity, record_key);
+
+CREATE TABLE IF NOT EXISTS project_reverse_hydration_work (
+    address text NOT NULL,
+    coin_type text NOT NULL,
+    namespace text NOT NULL,
+    chain_id text NOT NULL,
+    eligible boolean NOT NULL,
+    attempt_ordinal bigint,
+    attempt_block bigint,
+    successful_at_block bigint,
+    PRIMARY KEY (address, coin_type, namespace)
+);
+COMMENT ON TABLE project_reverse_hydration_work IS
+    'Project-owned derived index of continuously refreshed reverse tuples and obsolete overlays to clear. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+CREATE INDEX IF NOT EXISTS project_reverse_hydration_work_active_idx
+    ON project_reverse_hydration_work (chain_id, attempt_ordinal NULLS FIRST,
+        successful_at_block NULLS FIRST, address) WHERE eligible;
+CREATE INDEX IF NOT EXISTS project_reverse_hydration_work_stale_idx
+    ON project_reverse_hydration_work (chain_id, attempt_block, address) WHERE NOT eligible;
+CREATE INDEX IF NOT EXISTS project_reverse_tuple_node_idx
+    ON project_reverse_tuple (chain_id, namespace, reverse_node);
+CREATE INDEX IF NOT EXISTS project_reverse_tuple_claim_idx
+    ON project_reverse_tuple (chain_id, claim_event_identity);
+CREATE INDEX IF NOT EXISTS project_reverse_node_claim_event_idx
+    ON project_reverse_node_claim (chain_id, event_identity);
+CREATE INDEX IF NOT EXISTS project_resource_pointer_hydration_node_idx
+    ON project_resource_pointer (chain_id, namespace, namehash);
