@@ -13,9 +13,8 @@ Checks the public Caddy allowlist against a running bigname API:
   - the landing page and docs (now the separate static site) and the removed
     GraphQL routes return 404 internally and publicly
   - the edge admits /v1 reads, POST /v1/lookup and its browser preflight, and
-    GET/HEAD /openapi.json (which the API answers 404 until the OpenAPI
-    document ships) with a single wildcard Access-Control-Allow-Origin that /
-    does not carry
+    GET/HEAD /openapi.json with its JSON contract, conditional caching, and a
+    single wildcard Access-Control-Allow-Origin that / does not carry
   - the edge still denies /v2, /graphql, health, wrong-method, GET preflight,
     encoded-traversal (%2e%2e) paths, and unknown paths
 
@@ -153,6 +152,7 @@ if [ "$no_network" -eq 1 ]; then
 fi
 
 require_command curl
+require_command python3
 require_command grep
 require_command sed
 require_command seq
@@ -282,6 +282,31 @@ assert_single_wildcard_origin() {
   fi
 }
 
+assert_openapi() {
+  local label="$1" base="$2" etag
+  assert_status "${label}-openapi-get" 200 GET "${base}/openapi.json" ''
+  assert_single_wildcard_origin "${label}-openapi-get"
+  assert_last_header "$label" '^content-type:[[:space:]]*application/json'
+  assert_last_header "$label" '^cache-control:[[:space:]]*public, max-age=300$'
+  assert_last_header "$label" '^etag:[[:space:]]*W/"[^"]+"$'
+  etag="$(tr -d '\r' < "$last_headers" | sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p')"
+  python3 - "$last_body" <<'PYJSON' || fail "${label}: invalid OpenAPI body"
+import json, sys
+with open(sys.argv[1]) as source:
+    doc = json.load(source)
+assert doc['openapi'] == '3.1.0'
+assert doc['info']['version'] and doc['info']['x-build-sha']
+assert '__BIGNAME_' not in json.dumps(doc)
+assert '/v1/lookup' in doc['paths']
+assert not any('/diagnostics/' in path for path in doc['paths'])
+PYJSON
+  assert_status "${label}-openapi-head" 200 HEAD "${base}/openapi.json" ''
+  assert_single_wildcard_origin "${label}-openapi-head"
+  assert_status "${label}-openapi-conditional" 304 GET "${base}/openapi.json" '' --header "If-None-Match: ${etag}"
+  assert_single_wildcard_origin "${label}-openapi-conditional"
+  [ ! -s "$last_body" ] || fail "${label}: 304 OpenAPI response has a body"
+}
+
 assert_preflight_headers() {
   local label="$1"
   local requested_method="${2:-POST}"
@@ -329,15 +354,15 @@ page_label() {
   esac
 }
 
-# The landing page and docs moved to the static site, and the OpenAPI document
-# is not served until TYR-18; the API answers all four paths like any unknown
-# route. /openapi.json flips to 200 internally and publicly together.
-for page_path in / /docs /docs/ /openapi.json; do
+# The landing page and docs live in the separate static site.
+for page_path in / /docs /docs/; do
   page_name="$(page_label "$page_path")" || fail "could not label $page_path"
   for page_method in GET HEAD; do
     assert_status "internal-${page_name}-${page_method}" 404 "$page_method" "${internal_api_url}${page_path}" ''
   done
 done
+assert_openapi internal "$internal_api_url"
+assert_status internal-openapi-wrong-method 405 POST "${internal_api_url}/openapi.json" ''
 assert_status internal-unknown 404 GET "${internal_api_url}${unknown_path}" ''
 request_timeout_secs=10
 
@@ -389,22 +414,18 @@ assert_status public-v1-lookup-preflight 200 OPTIONS "${public_edge_url}/v1/look
 assert_preflight_headers public-v1-lookup-preflight
 assert_status public-v1-diagnostic 200 GET "${public_edge_url}${diagnostic_path}" ''
 
+assert_openapi public "$public_edge_url"
+assert_status public-openapi-wrong-method 404 POST "${public_edge_url}/openapi.json" ''
+assert_status public-openapi-slash 404 GET "${public_edge_url}/openapi.json/" ''
+
 log "checking public default-deny behavior"
-# The edge admits GET/HEAD /openapi.json and denies the other three; all four
-# are 404 until TYR-18 publishes the document. The CORS header is the edge's
-# own mark on /openapi.json: exactly one wildcard there, none on the others,
-# which shows the @openapi matcher proxied the request and the deferred header
-# replaced rather than duplicated.
-for page_path in / /docs /docs/ /openapi.json; do
+# The separate site paths stay outside the public API allowlist.
+for page_path in / /docs /docs/; do
   page_name="$(page_label "$page_path")" || fail "could not label $page_path"
   for page_method in GET HEAD; do
     page_check="public-${page_name}-${page_method}"
     assert_status "$page_check" 404 "$page_method" "${public_edge_url}${page_path}" ''
-    if [ "$page_path" = /openapi.json ]; then
-      assert_single_wildcard_origin "$page_check"
-    else
-      assert_no_last_header "$page_check" '^access-control-allow-origin:'
-    fi
+    assert_no_last_header "$page_check" '^access-control-allow-origin:'
   done
 done
 assert_status public-v2-status 404 GET "${public_edge_url}/v2/status" ''

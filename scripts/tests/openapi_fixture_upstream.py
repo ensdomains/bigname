@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """Fixture upstream for scripts/tests/openapi-edge-smoke.
 
-Stands in for the API behind the committed Caddyfile. /openapi.json?case=ok
-answers 200 with a JSON body and its own wildcard CORS header; every other
-GET or HEAD answers 404 with a body no other part of the stack produces and
-no CORS header. Binds to loopback and writes the port it got to --port-file.
+Stands in for the API behind the committed Caddyfile. /openapi.json serves the
+checked-in generated document with CORS and conditional caching. Other paths
+answer 404 with a distinct fixture body and no CORS header. Binds to loopback and writes the port it got to --port-file.
 """
 
 import argparse
 import http.server
+import hashlib
+from pathlib import Path
 import os
 
-OK_BODY = b'{"openapi":"3.1.0","fixture":"openapi-edge-smoke"}'
+OK_BODY = (Path(__file__).resolve().parents[2] / 'apps/api/openapi.json').read_bytes().replace(b'__BIGNAME_VERSION__', b'edge-fixture').replace(b'__BIGNAME_BUILD_SHA__', b'edge-fixture-sha')
+ETAG = 'W/"' + hashlib.sha256(OK_BODY).hexdigest() + '"'
 MISSING_BODY = b"openapi-fixture-upstream-404"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _answer(self, head):
-        if self.path == "/openapi.json?case=ok":
-            status, body, ctype, cors = 200, OK_BODY, "application/json", True
+        if self.path == "/openapi.json":
+            candidates = self.headers.get("If-None-Match", "").split(",")
+            matched = any(tag.strip() in ("*", ETAG, ETAG[2:]) for tag in candidates)
+            status, body, ctype, cors = (304, b"", "application/json", True) if matched else (200, OK_BODY, "application/json", True)
         else:
             status, body, ctype, cors = 404, MISSING_BODY, "text/plain", False
         self.send_response(status)
@@ -27,6 +31,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("x-openapi-fixture", "1")
         if cors:
             self.send_header("access-control-allow-origin", "*")
+            self.send_header("etag", ETAG)
+            self.send_header("cache-control", "public, max-age=300")
         self.end_headers()
         if not head:
             self.wfile.write(body)

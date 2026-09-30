@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Generate the embedded API contract from the checked-in Markdown tables."""
+
+import sys
+
+sys.dont_write_bytecode = True
+
+from openapi.generator import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

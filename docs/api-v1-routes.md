@@ -18,7 +18,9 @@ prefix in #315, and the public edge serves it.
 versioned product routes. The landing page and the API reference are a
 separate static site ([`site/`](../site/README.md)) outside the API binary;
 both describe this contract and neither is part of it. The API answers `GET /`
-and `GET /docs` like any unknown route. `GET /openapi.json` is not served yet.
+and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 20
+product operations below. It is a static contract artifact, outside the product envelope, and excludes
+the six diagnostic operations.
 
 ## Shared Route Rules
 
@@ -272,9 +274,33 @@ qualifies only when `source=indexed` is explicit, because its default answer
 set includes the verified source. Errors, `POST /v1/lookup`, and every
 collection route carry neither header.
 
+
+
+<!-- openapi:headers -->
+| Header | Type | Description |
+| --- | --- | --- |
+| `ETag` | string | Weak validator of the complete indexed response body. Only the four documented cacheable indexed reads carry it. |
+| `Cache-Control` | string | public, max-age=12, stale-while-revalidate=48 on the same cacheable indexed responses and their 304 replies. |
+
 ## Tier 1: Lookup Primitives
 
 ### `POST /v1/lookup`
+
+<!-- openapi:parameters POST /v1/lookup -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `body` | body | object LookupRequest | yes | none | Batch lookup request. The route accepts no query parameters; each reverse input owns its cursor and page size. |
+
+<!-- openapi:responses POST /v1/lookup -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object LookupResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `POST /v1/lookup`
 - Tier: lookup primitive.
@@ -466,6 +492,19 @@ collection route carry neither header.
 
 ### `GET /v1/status`
 
+<!-- openapi:parameters GET /v1/status -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+
+<!-- openapi:responses GET /v1/status -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object StatusResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/status`
 - Tier: lookup primitive.
 - Purpose: per-chain indexing readiness.
@@ -555,6 +594,30 @@ collection route carry neither header.
 ## Tier 2: Product Reads
 
 ### `GET /v1/names`
+
+<!-- openapi:parameters GET /v1/names -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `namespace` | query | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
+| `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
+| `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
+| `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/names -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object NamesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/names`
 - Tier: product read.
@@ -648,6 +711,32 @@ collection route carry neither header.
 
 ### `GET /v1/names/{name}`
 
+<!-- openapi:parameters GET /v1/names/{name} -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `source` | query | enum Source | no | `indexed` | Answer origin. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
+
+<!-- openapi:responses GET /v1/names/{name} -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object NameDetailResponse | none | `ETag`, `Cache-Control` | The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed. |
+| 304 | none | none | `ETag`, `Cache-Control` | A cacheable indexed representation matches If-None-Match. The response has no body. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 422 | object ErrorEnvelope | `unsupported` | none | The verified inventory-derived record-key set exceeds 200 keys, before any provider call. |
+| 429 | object ErrorEnvelope | `rate_limited` | none | The enabled verified-execution client rate limit rejected this request. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/names/{name}`
 - Tier: product read.
 - Purpose: name-profile read, using the flat record shape plus registration summary.
@@ -659,8 +748,9 @@ collection route carry neither header.
   as `page.total_count`), and `record_count`, the known record-selector count
   of the current registration's record inventory with the same meaning as on
   address-name rows; `record_count` is omitted when the row has no current
-  record inventory. Neither count is added to the `status=unsupported`
-  identity-only object. There is no `event_count`: bigname keeps no
+  record inventory. Neither count is added to any `status=unsupported`
+  name-level record, including a verified unsupported record that retains its
+  registration fields. There is no `event_count`: bigname keeps no
   precomputed per-name event total, and counting history rows on the request
   path would be an unbounded scan, so the expansion does not offer one. Any
   other `include` value returns `400 invalid_input`.
@@ -669,6 +759,15 @@ collection route carry neither header.
   returns `409 stale`; historical profiles without counts retain their existing behavior.
 
 - Response shape: `data` is one flat record object using dictionary fields.
+  Every name-level record with `status=unsupported` omits `subregistry`,
+  including verified unsupported records that retain registration fields;
+  the same withholding applies to batch-lookup name-level records.
+  Every name-level record with `status=unsupported` omits `subregistry`,
+  including verified unsupported records that retain registration fields;
+  the same withholding applies to batch-lookup name-level records.
+  Every name-level record with `status=unsupported` omits `subregistry`,
+  including verified unsupported records that retain registration fields;
+  the same withholding applies to batch-lookup name-level records.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
@@ -714,8 +813,8 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L221 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
-  `manager` is omitted when no forward-read source can derive it; it is not
-  emitted as a permanent null placeholder. `authority` names where the chain
+  `manager` remains an optional wire field; the current forward-read
+  constructors never emit it. No permanent null placeholder is emitted. `authority` names where the chain
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
   `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
@@ -956,6 +1055,33 @@ its value map:
   the same value appears in `records.addresses` and `primary_address`.
 
 ### `GET /v1/names/{name}/records`
+
+<!-- openapi:parameters GET /v1/names/{name}/records -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. |
+| `keys` | query | array of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
+
+<!-- openapi:responses GET /v1/names/{name}/records -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object RecordsResponse | none | `ETag`, `Cache-Control` | The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed. |
+| 304 | none | none | `ETag`, `Cache-Control` | A cacheable indexed representation matches If-None-Match. The response has no body. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 422 | object ErrorEnvelope | `unsupported` | none | The inventory-derived default record-key set exceeds the 200-key limit. |
+| 429 | object ErrorEnvelope | `rate_limited` | none | The enabled verified-execution client rate limit rejected this request. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/names/{name}/records`
 - Tier: product read.
@@ -1468,6 +1594,33 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 
 ### `GET /v1/names/{name}/subnames`
 
+<!-- openapi:parameters GET /v1/names/{name}/subnames -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. |
+| `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
+| `sort` | query | enum `name`, `expires_at`, `registered_at` | no | `name` | Row sort key; ties use the route's stable identity order. |
+| `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
+| `include_expired` | query | boolean | no | `true` | Whether released and already-expired children are included. Evaluation uses the published block timestamp. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/names/{name}/subnames -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object SubnamesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/names/{name}/subnames`
 - Tier: product read.
 - Purpose: direct subnames.
@@ -1500,8 +1653,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   released children and children whose `expires_at` has passed are listed with
   their `registration_status` and `expires_at` as served. `include_expired=false`
   omits a child whose current registration status is `released` or whose
-  `expires_at` is earlier than the database's transaction time when the page is
-  read. A child with no registration or no expiry — an unregistered subname, or
+  `expires_at` is earlier than the published block's timestamp used for the page. A child with no registration or no expiry — an unregistered subname, or
   one under a parent that carries no expiry — is not expired and stays. bigname
   applies no grace period here: the comparison is against the served
   `expires_at`. Any other value returns `400 invalid_input`.
@@ -1857,7 +2009,7 @@ Per friendly `type`, `data` may contain:
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
-| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: text values are strings, other families are hex strings. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
 | `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes); see [permission change values](#permission-change-values) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
@@ -2051,6 +2203,36 @@ the controller a name's `manager` or `role_holder`.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L78-L88 @ ens_v1@91c966f)
 
 ### `GET /v1/names/{name}/history`
+
+<!-- openapi:parameters GET /v1/names/{name}/history -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `scope` | query | enum HistoryScope | no | `both` | Name events, registration events, or both. |
+| `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
+| `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
+| `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
+| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
+| `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
+| `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
+| `include` | query | array of enum `data`, `raw`, `total_count`, `child_registrations` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/names/{name}/history -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object NameHistoryResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/names/{name}/history`
 - Tier: product read.
@@ -2315,6 +2497,30 @@ introduces it rebuilds Project from full history before serving the option; see
 [`projections.md`](projections.md#child-registration-events).
 
 ### `GET /v1/permissions`
+
+<!-- openapi:parameters GET /v1/permissions -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `name` | query | string | no | none | Name anchor. At least one of name, registration_id or address is required. |
+| `registration_id` | query | string | no | none | Opaque public registration handle. |
+| `address` | query | string | no | none | EVM address in hexadecimal form. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `include` | query | array of enum `lineage` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/permissions -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object PermissionsResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/permissions`
 - Tier: product read.
@@ -2636,6 +2842,40 @@ introduces it rebuilds Project from full history before serving the option; see
   `GET /v1/resources/lookup`.
 
 ### `GET /v1/addresses/{address}/names`
+
+<!-- openapi:parameters GET /v1/addresses/{address}/names -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `namespace` | query | string | no | none | Optional public namespace filter; omission spans active public namespaces. |
+| `relation` | query | array of enum `owner`, `manager`, `registrant`, `role_holder`, `any`, `resolves_to`, `former_registrant` | no | none | Authority relations default to all four. resolves_to and former_registrant each stand alone; neither is part of any. |
+| `coin_type` | query | string | no | none | Decimal coin type or evm, only with relation=resolves_to; omission defaults to 60 on that relation. evm matches all EVM coin types. |
+| `expires_after` | query | string | no | none | Inclusive expiry lower bound, only with relation=former_registrant. |
+| `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_registrant. |
+| `authority` | query | array of enum Authority | no | none | Comma-separated selected authority arms. Rows without an authority arm do not match. |
+| `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with resolves_to. |
+| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. |
+| `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
+| `sort` | query | enum AddressNamesSort | no | `name` | Row sort key; ties use the route's stable identity order. |
+| `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
+| `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. |
+| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/addresses/{address}/names -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object AddressNamesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 422 | object ErrorEnvelope | `unsupported` | none | A requested expansion exceeds its bounded permission budget, or a coin_type=evm row would carry more than 100 matches. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/addresses/{address}/names`
 - Tier: product read.
@@ -3020,6 +3260,28 @@ introduces it rebuilds Project from full history before serving the option; see
 
 ### `GET /v1/addresses/{address}/primary-name`
 
+<!-- openapi:parameters GET /v1/addresses/{address}/primary-name -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `coin_type` | query | integer | no | `60` | ENS/SLIP-44 coin type. |
+| `namespace` | query | string | no | `ens` | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `source` | query | enum Source | no | none | Omission returns indexed then verified answers; an explicit value selects that source only. |
+| `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
+
+<!-- openapi:responses GET /v1/addresses/{address}/primary-name -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object PrimaryNameResponse | none | `ETag`, `Cache-Control` | The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed. |
+| 304 | none | none | `ETag`, `Cache-Control` | A cacheable indexed representation matches If-None-Match. The response has no body. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 429 | object ErrorEnvelope | `rate_limited` | none | The enabled verified-execution client rate limit rejected this request. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/addresses/{address}/primary-name`
 - Tier: product read.
 - Purpose: primary name for an address.
@@ -3222,6 +3484,37 @@ introduces it rebuilds Project from full history before serving the option; see
 
 ### `GET /v1/addresses/{address}/history`
 
+<!-- openapi:parameters GET /v1/addresses/{address}/history -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `namespace` | query | string | no | `ens` | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `relation` | query | array of enum `owner`, `manager`, `registrant`, `role_holder`, `any` | no | none | Authority relations default to all four; resolves_to and former_registrant are invalid on history. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `scope` | query | enum HistoryScope | no | `both` | Name events, registration events, or both. |
+| `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
+| `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
+| `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
+| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
+| `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
+| `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/addresses/{address}/history -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object EventsResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/addresses/{address}/history`
 - Tier: product read.
 - Purpose: address activity history.
@@ -3290,6 +3583,28 @@ introduces it rebuilds Project from full history before serving the option; see
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v1/search`
+
+<!-- openapi:parameters GET /v1/search -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `q` | query | string | yes | none | Non-empty normalized name search text. |
+| `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
+| `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/search -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object SearchResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/search`
 - Tier: product read.
@@ -3367,6 +3682,41 @@ introduces it rebuilds Project from full history before serving the option; see
   `GET /v1/names`; exact name profiles move to `GET /v1/names/{name}`.
 
 ### `GET /v1/events`
+
+<!-- openapi:parameters GET /v1/events -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `namespace` | query | string | no | none | Inferred from name when supplied; defaults to ens only when neither name nor resolver is supplied. A bare resolver selector spans namespaces. |
+| `name` | query | string | no | none | ENS name; name-shaped paths normalize it before reading. |
+| `address` | query | string | no | none | EVM address in hexadecimal form. |
+| `resolver` | query | string | no | none | Resolver selector in numeric-chain-id:hex-address form; matches emitted events and current/previous resolver-pointer changes. |
+| `contract_address` | query | string | no | none | Case-insensitive emitting contract address; combines with resolver and other filters. |
+| `registration_id` | query | string | no | none | Opaque public registration handle. |
+| `from_block` | query | integer | no | none | Inclusive block lower bound. |
+| `to_block` | query | integer | no | none | Inclusive block upper bound. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to include. |
+| `exclude_type` | query | array of enum HistoryEventType | no | none | Comma-separated friendly event types to exclude after applying type. |
+| `kind` | query | array of enum HistoryEventKind | no | none | Comma-separated raw event kinds from the supported product history vocabulary; intersects the friendly type filters. |
+| `record_key` | query | string | no | none | Exact decoded retained record key, including punctuation or whitespace; non-empty and no NUL. Restricts results to record writes. |
+| `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
+| `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
+| `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/events -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object EventsResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The requested namespace is not a supported public namespace. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
@@ -3504,6 +3854,30 @@ For a registrar lease first identified by a later readable observation, registra
 
 ### `GET /v1/resolvers/{chain_id}/{address}`
 
+<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address} -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
+
+<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object ResolverResponse | none | `ETag`, `Cache-Control` | The requested answer, including the empty or in-band outcomes documented below. Caching headers appear only on indexed responses that carry meta.as_of_token; primary-name additionally requires explicit source=indexed. |
+| 304 | none | none | `ETag`, `Cache-Control` | A cacheable indexed representation matches If-None-Match. The response has no body. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/resolvers/{chain_id}/{address}`
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
@@ -3598,6 +3972,72 @@ For a registrar lease first identified by a later readable observation, registra
   and the `GET /v1/names?resolver=...` filter.
 
 ### `GET /v1/resolvers/{chain_id}/{address}/aliases`, `/links`, and `/roles`
+
+<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/roles -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/roles -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object ResolverRolesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
+<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/links -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/links -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object ResolverLinksResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
+<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/aliases -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/aliases -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object ResolverAliasesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Tier: product read. These collections page a resolver's alias mappings,
   record links, and resolver-scoped permission rows.
@@ -3705,6 +4145,29 @@ For a registrar lease first identified by a later readable observation, registra
 
 ### `GET /v1/registries/{chain_id}/{address}`
 
+<!-- openapi:parameters GET /v1/registries/{chain_id}/{address} -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
+| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/registries/{chain_id}/{address} -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object RegistryResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/registries/{chain_id}/{address}`
 - Tier: product read.
 - Purpose: one ENSv2 registry contract by numeric `chain_id` and contract
@@ -3784,6 +4247,30 @@ For a registrar lease first identified by a later readable observation, registra
 
 ### `GET /v1/registries/{chain_id}/{address}/labels`
 
+<!-- openapi:parameters GET /v1/registries/{chain_id}/{address}/labels -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
+| `address` | path | string | yes | none | EVM address in hexadecimal form. |
+| `include` | query | array of enum `counts` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `owner` | query | string | no | none | Keep registry labels held by this address; cannot combine a nonblank value with exclude_owner. |
+| `exclude_owner` | query | string | no | none | Keep labels not held by this address, including ownerless labels; cannot combine a nonblank value with owner. |
+| `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
+| `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
+| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
+| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+
+<!-- openapi:responses GET /v1/registries/{chain_id}/{address}/labels -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object RegistryLabelsResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
+
 - Method/path: `GET /v1/registries/{chain_id}/{address}/labels`
 - Tier: product read.
 - Purpose: the labels one ENSv2 registry currently holds.
@@ -3850,6 +4337,21 @@ For a registrar lease first identified by a later readable observation, registra
 - Replaces (v1): none; new in F1.
 
 ### `GET /v1/namespaces/{namespace}`
+
+<!-- openapi:parameters GET /v1/namespaces/{namespace} -->
+| Parameter | In | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- | --- |
+| `namespace` | path | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
+
+<!-- openapi:responses GET /v1/namespaces/{namespace} -->
+| Status | Body | Code | Headers | When |
+| --- | --- | --- | --- | --- |
+| 200 | object NamespaceResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
+| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
+| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
+| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
+| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
+| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
 - Method/path: `GET /v1/namespaces/{namespace}`
 - Tier: product read.

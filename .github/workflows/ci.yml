@@ -79,6 +79,12 @@ jobs:
         if: github.event_name != 'push'
         run: scripts/test-sync-refs
 
+      - name: Offline OpenAPI generation and freshness
+        if: github.event_name != 'push'
+        run: |
+          python3 scripts/tests/test-generate-openapi.py
+          scripts/generate-openapi --check
+
       - name: Rust source size ratchet
         if: github.event_name != 'push'
         env:
@@ -1322,8 +1328,8 @@ jobs:
         if: github.event_name != 'push'
         run: ./scripts/rollback-smoke --no-network
 
-      # The committed Caddyfile in front of a fixture upstream that already
-      # answers /openapi.json, which the API does not until TYR-18.
+      # Exercise the committed Caddyfile against the checked-in OpenAPI artifact
+      # served by a fixture. API tests and public-edge-smoke cover the real origin.
       - name: OpenAPI edge regression (fixture upstream)
         if: github.event_name != 'push'
         run: ./scripts/tests/openapi-edge-smoke

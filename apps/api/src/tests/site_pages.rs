@@ -153,8 +153,7 @@ fn try_it_line_is_single_flight_and_curl_is_safe() {
     assert!(HOME.contains("clip.writeText(cmd).then(copied, fallback)"));
 }
 
-// The pages moved out of the binary. `/`, `/docs`, `/docs/` and (until the
-// OpenAPI document ships) `/openapi.json` answer exactly like any unknown route.
+// The pages moved out of the binary. `/`, `/docs` and `/docs/` answer like unknown routes.
 #[tokio::test]
 async fn former_page_routes_answer_like_an_unknown_route() {
     let app = app_router(AppState::new(
@@ -183,7 +182,7 @@ async fn former_page_routes_answer_like_an_unknown_route() {
             .await
             .expect("body must read");
         assert_eq!(unknown_status, StatusCode::NOT_FOUND, "{method} unknown");
-        for path in ["/", "/docs", "/docs/", "/openapi.json"] {
+        for path in ["/", "/docs", "/docs/"] {
             let removed = app
                 .clone()
                 .oneshot(request(method, path))

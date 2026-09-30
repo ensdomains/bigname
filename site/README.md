@@ -93,9 +93,10 @@ Hosting (Cloudflare Pages) is provisioned separately, by the infrastructure
 part of TYR-56, not from this repository. After the site checks pass, CI
 uploads `site/` as an artifact.
 
-The OpenAPI document will be served by the API at `/openapi.json` (TYR-18).
-The public edge already admits that path; until the document ships the API
-answers `404`.
+The API serves its generated OpenAPI 3.1 document at `/openapi.json`, with
+package version and build SHA. It describes the 20 product operations; the
+handwritten guide also covers diagnostics and health.
+The public edge admits that exact path for GET and HEAD.
 `scripts/tests/openapi-edge-smoke` runs the committed Caddyfile in front of a
 fixture upstream that does answer it, a `404` without a CORS header and a `200`
 with its own wildcard, and checks the edge keeps the status and body and sends

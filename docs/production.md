@@ -20,8 +20,13 @@ are:
 - REST lookup: `POST /v1/lookup` and its `OPTIONS` browser preflight.
 - OpenAPI document: `GET` and `HEAD` on `/openapi.json`. The document is
   public and read-only, and the edge adds `Access-Control-Allow-Origin: *` so
-  the documentation site can read it from another origin. The API answers
-  `404` until the document ships (TYR-18).
+  the documentation site can read it from another origin. The API embeds the
+  generated OpenAPI 3.1 document for the 20 product operations, including package
+  version and build SHA. Diagnostics and health remain outside the document.
+  It answers without querying the database or providers, carries
+  `Cache-Control: public, max-age=300` and a body-derived weak `ETag`, and answers
+  a matching `If-None-Match` with a bodyless `304`. Regenerate with
+  `scripts/generate-openapi`; CI checks freshness against the contract tables.
 
 The removed `POST /v1/identity:lookup` matcher was dropped with the flip and
 now falls through to the edge's `404`. The landing page and API reference no
@@ -207,7 +212,7 @@ Check the public edge:
 ```sh
 test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/)" = 404
 test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/docs)" = 404
-test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/openapi.json)" = 404
+test "$(curl -sS -o /dev/null -w '%{http_code}' -I http://127.0.0.1/openapi.json)" = 200
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/v1/status)" = 200
 test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/v2/status)" = 404
 ```

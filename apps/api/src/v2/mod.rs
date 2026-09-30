@@ -151,3 +151,7 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 mod timestamps;
+
+#[cfg(test)]
+#[path = "../tests/openapi_vocabulary.rs"]
+mod openapi_vocabulary;

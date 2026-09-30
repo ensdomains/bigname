@@ -7,8 +7,9 @@
 
 Development-time contract for the API surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Per-route reference lives in
-[`api-v1-routes.md`](api-v1-routes.md). This surface has no generated OpenAPI
-artifact.
+[`api-v1-routes.md`](api-v1-routes.md). The OpenAPI 3.1 reference is generated
+from the machine-marked tables in these two documents and served at
+`GET /openapi.json`.
 
 ## Contract Principles
 
@@ -199,6 +200,7 @@ response carries `meta.completeness=partial`,
 `meta.unsupported_reason=permissions_partially_listed`, and
 `meta.unlisted_permission_surfaces`, a sorted list of short stable codes:
 
+<!-- openapi:enum UnlistedPermissionSurface -->
 | Code | Surface not listed |
 | --- | --- |
 | `ens_v2_registry_operators` | operators that the name's owner approved on the ENSv2 registry with `setApprovalForAll` |
@@ -453,6 +455,7 @@ them.
   (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10 @ ens_v2_sepolia_20260903@5da83f6a)
 
 <!-- powers-vocabulary:start -->
+<!-- openapi:enum PermissionPower -->
 | Power | Producer | On-chain role or condition |
 | --- | --- | --- |
 | `registration_control` | ENSv1/Basenames control | Storage `resource_control`. Held by the account that controls the registration's authority object: the registrar token owner (`RegistrationGranted`, registrar `Transfer`), the registry owner of a registry-only resource (`NewOwner`/`Transfer`), or the NameWrapper token holder (`TokenControlTransferred`). Masked away while the wrapper is `locked`. |
@@ -1096,13 +1099,16 @@ proves current authority is absent.
 One result-status vocabulary is used everywhere except the `/v1/status` ops
 route:
 
-- `ok`
-- `not_found`
-- `invalid_name`
-- `mismatch`
-- `unsupported`
-- `stale`
-- `failed`
+<!-- openapi:enum Status -->
+| Value | Meaning |
+| --- | --- |
+| `ok` | The requested answer is served. |
+| `not_found` | No answer is present. |
+| `invalid_name` | Lookup input cannot be normalized as a name. |
+| `mismatch` | Verification produced a different answer. |
+| `unsupported` | The requested answer is not supported. |
+| `stale` | The selected position is not currently available. |
+| `failed` | Execution failed for this answer. |
 
 Rules:
 
@@ -1571,6 +1577,7 @@ and can select finite expiry beyond the calendar range.
 A registration with a classified absent expiry serves `expires_at: null` and
 `expires_at_reason`:
 
+<!-- openapi:enum ExpiryReason -->
 | Reason | Meaning |
 | --- | --- |
 | `no_expiry` | A contract-specific maximum sentinel treated as having no expiry, such as the NameWrapper maximum or the declared ENSv2 root entries. |
@@ -1821,6 +1828,7 @@ Error envelope:
 
 Uniform mapping:
 
+<!-- openapi:enum ErrorCode -->
 | Code | HTTP | Meaning |
 | --- | --- | --- |
 | `invalid_input` | 400 | malformed input, unnormalizable path name, bad parameter combination |
@@ -1883,3 +1891,1601 @@ Rules:
   a valid `{address, coin_type, namespace}` tuple with no claim or an
   unsupported/mismatched verification returns `200` with in-band `status`.
 - Error messages must not name internal storage or pipeline components.
+
+## Table Conventions
+
+The OpenAPI 3.1 document for the `/v1` surface is generated from Markdown
+tables in this file and in [`api-v1-routes.md`](api-v1-routes.md). The prose
+stays the contract of record. The tables state the part of it a machine can
+check: object fields, their types and presence, enum values, and each
+operation's parameters and responses. A table is read by the generator only
+when a marker comment sits directly above it. Every other table, paragraph and
+code block is ignored, so generation cannot tell whether a sentence beside a
+table is still true; review keeps the two in step.
+
+### Where things live
+
+Objects and the presence conditions table live in this file, objects under
+[Objects](#objects). Named enums live in this file, either under
+[Enums](#enums) or in place where a section already lists the vocabulary (the
+[status vocabulary](#status-vocabulary), the [error codes](#error-model) and
+the unlisted permission surfaces). Operations and the response headers table
+live in [`api-v1-routes.md`](api-v1-routes.md), in the section of the route
+they describe. The generator reads no other file.
+
+### Markers
+
+A marker is an HTML comment on a line of its own, starting in the first
+column, and the header row of its table is the next line. Markers and tables
+inside list items, block quotes or fenced code blocks are not read.
+
+| Marker | File | Table that follows |
+| --- | --- | --- |
+| `<!-- openapi:object Name -->` | `api-v1.md`, under Objects | fields table of object `Name` |
+| `<!-- openapi:enum Name -->` | `api-v1.md` | enum table of enum `Name` |
+| `<!-- openapi:conditions -->` | `api-v1.md`, under Objects | the presence conditions table; exactly one |
+| `<!-- openapi:headers -->` | `api-v1-routes.md` | the response headers table; exactly one |
+| `<!-- openapi:parameters METHOD /path -->` | `api-v1-routes.md` | parameters table of one operation |
+| `<!-- openapi:responses METHOD /path -->` | `api-v1-routes.md` | responses table of one operation |
+
+Object and enum names are ASCII identifiers that start with an uppercase
+letter and continue with letters and digits, such as `NameRecord`. Condition
+names are lowercase ASCII letters and digits, with words joined by
+underscores, such as `counts_requested` or `released_ens_v1`. An operation is
+named by its method and path: the method is `GET` or `POST`, and the path is
+written exactly as the router declares it, with `{segment}` placeholders, for
+example `GET /v1/names/{name}`. The marker, not the heading above it, names
+the operation, so one route section can hold several operations.
+
+In table cells, backticks mark literal wire text: field and parameter names,
+header names, enum values, default values and error codes. Names of objects,
+enums and conditions are written bare. Cells are never empty. A cell that
+has nothing to say holds the bare word `none`, which cannot be confused with a
+literal because literals are always in backticks. A literal `|` inside a cell
+is written `\|`.
+
+### Fields tables
+
+An object is a level-3 heading under Objects whose text is the object's name,
+then optional description paragraphs, then an optional composition line, then
+the marker and the table. The description paragraphs become the object's
+schema description.
+
+The fields table has exactly these columns, in this order:
+
+| Column | Meaning |
+| --- | --- |
+| `Field` | The wire name of the field, in backticks. |
+| `Type` | A type expression from the grammar below. |
+| `Presence` | A presence expression from the vocabulary below. |
+| `Description` | What the field means. It becomes the property description. |
+
+Every object is closed: the generator emits `additionalProperties: false`, so
+a field that is not in the table is a contract violation. Fields that are
+genuinely open-ended use a map type instead. Properties keep table order, and
+the fields whose presence is `always` are the schema's `required` list.
+
+Composition is written as the line `Extends Parent.`, for example
+`Extends Envelope.`, directly above the marker, with blank lines allowed in
+between. The object then has every field of the named parent, in the parent's order, followed by its own fields. The
+generator writes out that complete property set in one schema rather than
+combining schemas with `allOf`, because a closed parent cannot be widened by
+combination. A field name that appears in both the parent and the child is
+rejected, and so is a cycle of extends lines.
+
+### Type grammar
+
+A type expression is one of the productions below. Scalars are the JSON
+types; every enum value is a string.
+
+```text
+type        = "nullable " value-type | value-type
+value-type  = "string" | "integer" | "boolean" | "json"
+            | "array of " type
+            | "map of string to " type
+            | "object " Name
+            | "enum " Name
+            | "enum " literal { ", " literal }
+            | "one of " alternative { ", " alternative }
+alternative = "string" | "integer" | "boolean" | "object " Name
+literal     = "`" wire-text "`"
+```
+
+An inline enum and a one of consume the rest of the cell, so either may appear
+last in an array or map type but nothing may follow it. `nullable` may prefix
+any value type once; `nullable nullable` does not parse.
+
+| Production | Example | Meaning | Generated schema |
+| --- | --- | --- | --- |
+| string | `string` | A JSON string. Formats such as RFC 3339 or `0x` hex are stated in the description. | `{"type": "string"}` |
+| json | `json` | Any JSON value, only for a deliberately extensible leaf such as error details. Success response objects remain closed. | `{}` |
+| integer | `integer` | A JSON number with no fractional part. | `{"type": "integer"}` |
+| boolean | `boolean` | `true` or `false`. | `{"type": "boolean"}` |
+| nullable | `nullable string` | The value may be JSON `null`. This is about the value, not about whether the key is present. | `{"type": ["string", "null"]}`; for an object, enum or one of, `anyOf` of that schema and `{"type": "null"}` |
+| array of | `array of string` | A JSON array whose items all have the inner type. | `{"type": "array", "items": {"type": "string"}}` |
+| map of string to | `map of string to object AsOf` | A JSON object used as a dictionary: any key, each value of the inner type. The description says what the keys are. | `{"type": "object", "additionalProperties": {"$ref": "#/components/schemas/AsOf"}}` |
+| object | `object ContractRef` | A named object from Objects. | `{"$ref": "#/components/schemas/ContractRef"}` |
+| named enum | `enum Status` | A named enum from an enum table. | `{"$ref": "#/components/schemas/Status"}` |
+| inline enum | ``enum `registrar`, `wrapper` `` | One of the listed strings. Use it for a vocabulary that only one field has. | `{"type": "string", "enum": ["registrar", "wrapper"]}` |
+| one of | `one of object LookupNameInput, object LookupAddressInput` | Exactly one of the listed alternatives. | `{"oneOf": [{"$ref": "..."}, {"$ref": "..."}]}` |
+
+A one of lists at least two alternatives, and they must be mutually
+exclusive, so that JSON Schema's `oneOf` accepts every valid value. Scalar
+alternatives must have different JSON types. A scalar and an object are
+exclusive by type. Two object alternatives are exclusive when one has an
+`always` field the other does not declare, or when both declare an `always`
+field whose types are single-value inline enums with different values. The
+scalar alternatives cover retained history record values alongside their
+closed structured forms; they do not admit arbitrary JSON.
+
+An open vocabulary, such as `unsupported_reason`, is typed `string` and not an
+enum; its description names the values it can carry today. A closed
+vocabulary is an enum.
+
+### Presence vocabulary
+
+The presence cell says whether the key is in the JSON object. It never says
+anything about `null`: a key that is present with the value `null` is present,
+and only a nullable type allows that value.
+
+| Presence | Meaning | Generated |
+| --- | --- | --- |
+| `always` | The key is in every instance of the object. | listed in `required` |
+| `optional` | The key may be absent. Nothing more is promised. | not required |
+| `when name` | The key is present exactly when condition `name` holds, and absent otherwise. | not required; `"x-presence": "when name"` |
+| `only when name` | The key is absent unless condition `name` holds. It may still be absent when the condition holds. | not required; `"x-presence": "only when name"` |
+
+For example, `subname_count` on `NameRecord` has presence
+`when name_counts_requested`, and `record_count` has `only when name_counts_requested`,
+because a name with no current record inventory has no record count even when
+counts were requested.
+
+A condition is defined once, in the conditions table under Objects, and
+referenced by its bare name after `when` or `only when`. The conditions table
+has exactly two columns, `Condition` and `Holds when`. `Condition` holds the
+bare name. `Holds when` says in prose when the condition holds; it may refer to
+the request, to other fields of the same object by their backticked names, or
+to the served state. The generator appends the condition's text to the
+description of every field that uses it and emits the `x-presence` extension,
+so payload tests can check a `when` field in both directions and an
+`only when` field in one.
+
+### Enum tables
+
+An enum table follows an `openapi:enum` marker. Its first column holds exactly
+one backticked value per row, and its header can be anything, so a table that
+already lists a vocabulary can be marked in place. Any further columns are
+prose; the generator joins them into that value's description and emits the
+values in table order. The enum named `ErrorCode` must also have an `HTTP`
+column, which the generator uses to check responses tables.
+
+### Parameters tables
+
+Every operation has exactly one parameters table, including an operation that
+takes no parameters, whose table has a header and no rows. The table lists
+every parameter the operation accepts; any other query parameter is rejected
+with `400 invalid_input`, as [Parameters](#parameters) states.
+
+| Column | Meaning |
+| --- | --- |
+| `Parameter` | The name as sent, in backticks. A header parameter uses its usual spelling, such as `If-None-Match`. A request body is the literal `body`. |
+| `In` | `path`, `query`, `header` or `body`. |
+| `Type` | A type expression. A query or header parameter is a string, integer, boolean, enum, or an array of one of those. A body is `object Name`. |
+| `Required` | `yes` or `no`. A path parameter is always `yes`. |
+| `Default` | The value the server applies when the parameter is omitted, as a backticked literal, or `none`. A default that depends on other input, such as a namespace inferred from the name, is `none`, and the description says how it is chosen. |
+| `Description` | What the parameter does, including values the type does not rule out but the route rejects. |
+
+A query parameter of type `array of X` is one comma-separated value, such as
+`include=counts,role_summary`; the generator emits `style: form` and
+`explode: false`. Sending the key twice is not part of the contract. Every
+`{segment}` in the path has one `path` row with the same name, and every
+`path` row has a segment. At most one row is `body`, and only on a `POST`
+operation; it becomes the operation's JSON request body.
+
+### Responses tables
+
+Every operation has exactly one responses table, with exactly these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `Status` | The HTTP status code, three digits. |
+| `Body` | `object Name` for a JSON body, or `none` for a response without a body. |
+| `Code` | On an error row, the backticked `ErrorCode` value the body carries. On a `2xx` or `304` row, `none`. |
+| `Headers` | The backticked names of response headers the response can carry, separated by commas, or `none`. Each must be defined in the response headers table, which says when it appears. |
+| `When` | In prose, when the route answers this way. |
+
+There is one row per status and code, so `409 stale` and `409 conflict` are
+two rows. Rows with the same status must have the same body; the generator
+merges them into one OpenAPI response whose description lists each code with
+its `When` text. An error row's code must map to its status in the `HTTP`
+column of `ErrorCode`, and its body is `object ErrorEnvelope`. Every operation
+has a `2xx` row, and every `2xx` body is an object that extends `Envelope`.
+
+The response headers table follows the `openapi:headers` marker and has the
+columns `Header`, `Type` and `Description`, one row per header.
+
+### Operation metadata
+
+The generator derives the rest of each operation. The `operationId` is the
+lowercase method followed by the path segments with braces removed and hyphens
+turned into underscores, joined by underscores: `GET /v1/names/{name}` becomes
+`get_v1_names_name`. The single tag is the first path segment after `/v1`,
+such as `names`. The description is a link to the operation's section in
+[`api-v1-routes.md`](api-v1-routes.md). No summary is generated. Relative
+links in any description are resolved against the documentation base URL the
+generator is given.
+
+### Examples
+
+A fenced code block tagged `json` is an illustration. It may elide values with
+`…` or `0x...` and is never read. A fenced block whose info string is
+`json openapi-example Name` is an executable example: complete JSON that the
+generator validates against object `Name` and publishes as that schema's
+example. Generation fails when it does not validate.
+
+### What the generator rejects
+
+Generation fails, and writes nothing, when any of these holds:
+
+- a marker is malformed, of an unknown kind, or not followed on the next line
+  by a table header;
+- a table's columns differ from the ones given here for its kind, a row has
+  the wrong number of cells, or a cell is empty;
+- a type, presence, required or default cell does not parse, or a default is
+  not a valid value of its type;
+- a name is defined twice, or an object, enum or condition is defined and
+  never referenced, or referenced and never defined;
+- an object marker is outside Objects or not under a level-3 heading whose
+  text is the object's name;
+- a field name repeats within an object's complete property set, an extends
+  line names an unknown object, or extends lines form a cycle;
+- a one of has fewer than two alternatives, or its alternatives are not
+  scalar types or named objects, or are not mutually exclusive;
+- an enum table repeats a value or has a value that is not in backticks, or
+  `ErrorCode` lacks its `HTTP` column;
+- an operation has no parameters table or no responses table, or more than
+  one of either;
+- path parameters and path segments do not match, a `body` row appears on a
+  `GET` operation or more than once, a path parameter is not required, or a
+  required parameter has a default;
+- a responses table has two rows with the same status and code, rows with the
+  same status and different bodies, no `2xx` row, a `2xx` body that does not
+  extend `Envelope`, an error row whose code does not map to its status, or a
+  header that the headers table does not define.
+
+Generation checks the tables against each other. Whether the tables match the
+router and the served JSON is checked by tests over the generated document,
+not by the generator.
+
+## Objects
+
+The tables enumerate closed response and request objects. Route prose carries
+semantic combinations and the presence conditions that JSON Schema alone cannot enforce.
+
+### Envelope
+
+Every success response carries metadata, even when the metadata object is empty.
+
+<!-- openapi:object Envelope -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `meta` | object Meta | always | Response metadata; present even when empty. |
+
+### Page
+
+<!-- openapi:object Page -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `cursor` | nullable string | always | Cursor supplied for this page, or null for the first page. |
+| `next_cursor` | nullable string | always | Continuation cursor, or null when there is no next page. |
+| `page_size` | integer | always | Requested maximum number of rows. |
+| `total_count` | nullable integer | always | Exact count where supported and requested; null when unavailable or above the route count cap. |
+| `has_more` | boolean | always | Whether another page exists. |
+
+### Meta
+
+<!-- openapi:object Meta -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `as_of` | map of string to object AsOf | optional | Readable per-chain positions keyed by decimal chain ID. |
+| `as_of_completeness` | map of string to object AsOfCompleteness | optional | Reasons for request-scope chain positions suppressed from `as_of`; the key sets are disjoint. |
+| `as_of_token` | string | optional | Opaque selector for replaying the served positions on routes that support `at`. |
+| `completeness` | enum Completeness | optional | How completely the response can answer the requested capability. |
+| `unsupported_fields` | array of string | optional | Names of fields or sections this answer could not serve. |
+| `unsupported_reason` | string | optional | Open product reason vocabulary explaining an unsupported answer. |
+| `unlisted_permission_surfaces` | array of enum UnlistedPermissionSurface | optional | Sorted permission surfaces whose holders the response does not enumerate. |
+| `source` | enum Source | optional | Answer origin. |
+
+### AsOf
+
+<!-- openapi:object AsOf -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `block_number` | integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
+| `block_hash` | string | always | EVM block hash. |
+| `timestamp` | string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+
+### AsOfCompleteness
+
+<!-- openapi:object AsOfCompleteness -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `completeness` | enum Completeness | always | How completely the response can answer the requested capability. |
+| `unsupported_reason` | string | always | Open product reason vocabulary explaining an unsupported answer. |
+
+### ContractRef
+
+<!-- openapi:object ContractRef -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `chain_id` | integer | always | Numeric EVM chain ID. |
+| `address` | string | always | EVM address in hexadecimal form. |
+
+### WrapperFuses
+
+Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); each boolean reports whether the corresponding fuse is burnt.
+
+<!-- openapi:object WrapperFuses -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `fuses` | integer | always | Expiry-effective uint32 fuse word. |
+| `cannot_unwrap` | boolean | always | True when CANNOT_UNWRAP is burnt in the effective fuse word. |
+| `cannot_burn_fuses` | boolean | always | True when CANNOT_BURN_FUSES is burnt in the effective fuse word. |
+| `cannot_transfer` | boolean | always | True when CANNOT_TRANSFER is burnt in the effective fuse word. |
+| `cannot_set_resolver` | boolean | always | True when CANNOT_SET_RESOLVER is burnt in the effective fuse word. |
+| `cannot_set_ttl` | boolean | always | True when CANNOT_SET_TTL is burnt in the effective fuse word. |
+| `cannot_create_subdomain` | boolean | always | True when CANNOT_CREATE_SUBDOMAIN is burnt in the effective fuse word. |
+| `cannot_approve` | boolean | always | True when CANNOT_APPROVE is burnt in the effective fuse word. |
+| `parent_cannot_control` | boolean | always | True when PARENT_CANNOT_CONTROL is burnt in the effective fuse word. |
+| `is_dot_eth` | boolean | always | True when IS_DOT_ETH is burnt in the effective fuse word. |
+| `can_extend_expiry` | boolean | always | True when CAN_EXTEND_EXPIRY is burnt in the effective fuse word. |
+
+### NameRecord
+
+Flat name-detail object, also used by resolver bound names. An identity-only unsupported record omits registration fields. A verified unsupported record may retain registration fields, but all unsupported name-level records omit counts and subregistry. Current constructors omit manager.
+
+<!-- openapi:object NameRecord -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `registration_id` | string | only when registration_held | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `token_id` | string | optional | Decimal-string token identifier. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `manager` | string | optional | Optional manager address. Current forward-read constructors do not emit this field; no null placeholder is served. |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `registered_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registration_status` | enum RegistrationStatus | when full_record | Current registration and control lifecycle label. |
+| `wrapper_state` | enum WrapperState | when wrapper_backed | Current [NameWrapper lifecycle](#naming-dictionary) value. |
+| `wrapper_fuses` | object WrapperFuses | when wrapper_backed | Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word). |
+| `authority` | enum Authority | optional | Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding. |
+| `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
+| `migrated_at` | string | when migration_proven | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `name` | string | always | ENSIP-15 normalized name. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`. |
+| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
+| `records` | object RecordGroups | optional | Grouped resolver keys and known values when the name may serve resolver records and an inventory or verified read supplies them. |
+| `primary_name` | string | optional | Selected primary name when known. |
+| `primary_address` | string | optional | Primary address when the read can serve it. |
+| `chain_id` | integer | optional | Numeric EVM chain ID. |
+| `network` | string | when full_record | Display network slug. |
+| `subname_count` | integer | when name_counts_requested | Direct readable subname count, only with the counts expansion. |
+| `record_count` | integer | only when name_counts_requested | Known record-selector count, only with counts requested and a current inventory. |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+| `unsupported_fields` | array of string | optional | Names of fields or sections this answer could not serve. |
+
+### LapsedRegistration
+
+<!-- openapi:object LapsedRegistration -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `registrant` | string | optional | Holder when the registration ended; this is historical information, not the current registrant. |
+| `held_through` | enum LapsedHeldThrough | optional | Contract through which the ended registration was held. |
+| `released_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `release_kind` | enum LapsedReleaseKind | optional | Whether the registration expired or was explicitly unregistered. |
+
+### LookupRequest
+
+<!-- openapi:object LookupRequest -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `profile` | enum LookupProfile | optional | Field budget: feed or detail; omission defaults to detail. |
+| `namespace` | string | optional | Optional override: ens or basenames; auto, public or omission infer the public namespace set. |
+| `inputs` | array of one of object LookupNameInput, object LookupAddressInput | always | One name or address input per result, preserving caller order. Batch limit defaults to 1000 and is deployment configurable. |
+
+### LookupNameInput
+
+<!-- openapi:object LookupNameInput -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `id` | string | optional | Optional caller correlation ID, echoed without synthesis. |
+| `name` | string | always | Caller-supplied name; normalization failure is an in-band invalid_name result. |
+
+### LookupAddressInput
+
+<!-- openapi:object LookupAddressInput -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `id` | string | optional | Optional caller correlation ID, echoed without synthesis. |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `coin_type` | integer | optional | Numeric coin type, default 60; no evm literal on this route. |
+| `relation` | string | optional | Comma-separated owner, manager, registrant or any, or resolves_to alone. Omission asks for the selected primary name. role_holder and former_registrant are not supported here. |
+| `page_size` | integer | optional | Reverse result page size, default 50 and maximum 200. |
+| `cursor` | string | optional | Per-input reverse continuation token, omitted when none was supplied. |
+
+### LookupResult
+
+<!-- openapi:object LookupResult -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `input` | object LookupResultInput | always | Caller input echoed with normalized reverse relation selection. |
+| `kind` | enum LookupKind | always | Discriminator for this object. |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+| `normalization` | object NormalizationInfo | optional | Name normalization result, only when normalization changed the input or failed. |
+| `record` | object LookupRecord | optional | One name result when an indexed answer exists. |
+| `records` | array of object LookupRecord | optional | Address-result rows, empty when no name matches. |
+| `page` | object Page | optional | Per-input pagination for reverse collections, never top-level batch pagination. |
+
+### LookupResultInput
+
+<!-- openapi:object LookupResultInput -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `id` | string | optional | Optional caller correlation ID, echoed without synthesis. |
+| `name` | string | optional | Original caller-supplied name, before normalization. |
+| `address` | string | optional | EVM address in hexadecimal form. |
+| `coin_type` | integer | optional | Numeric ENS/SLIP-44 coin type. |
+| `relation` | string | optional | Normalized comma-separated reverse relation set; any expands to owner,manager,registrant. |
+| `page_size` | integer | optional | Requested maximum number of rows. |
+| `cursor` | string | optional | Per-input reverse continuation token, omitted when none was supplied. |
+
+### NormalizationInfo
+
+<!-- openapi:object NormalizationInfo -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `changed` | boolean | always | Whether normalization changed the input spelling. |
+| `input_name` | string | always | Original input name. |
+| `reason` | enum `case_normalized`, `invalid_normalized_name` | always | Normalization outcome reason. |
+
+### LookupRecord
+
+Shared lookup feed/detail record. Detail adds supported registration and grouped resolver fields; reverse records additionally carry matching relations and primary-name information. Current constructors omit manager.
+
+<!-- openapi:object LookupRecord -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `name` | string | always | ENSIP-15 normalized name. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `registration_id` | string | optional | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `token_id` | string | optional | Decimal-string token identifier. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `manager` | string | optional | Optional manager address. Current forward-read constructors do not emit this field; no null placeholder is served. |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `registered_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registration_status` | enum RegistrationStatus | optional | Current registration and control lifecycle label. |
+| `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `unresolvable_reason` | string | optional | Why the retained resolver cannot resolve this name; currently `no_live_ens_v2_entry`. |
+| `subregistry` | object ContractRef | only when supported_name | Current subregistry pointer. Absent on every status=unsupported record, including verified unsupported records that retain registration fields. |
+| `records` | object RecordGroups | optional | Grouped records on detail results when a current inventory is available; absent on feed results. |
+| `primary_name` | string | optional | Selected primary name when known. |
+| `primary_address` | string | optional | Primary address when the read can serve it. |
+| `chain_id` | integer | optional | Numeric EVM chain ID. |
+| `network` | string | optional | Display network slug. |
+| `is_primary` | boolean | optional | Whether this name is the selected primary answer for the requested address and coin type. |
+| `relations` | array of enum Relation | optional | Address-to-name relations that matched the row. |
+| `resolution` | object AddressNameResolution | optional | Single-coin resolver match; present on a decimal-coin `resolves_to` result. |
+| `authority` | enum Authority | optional | Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding. |
+| `migrated_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+| `unsupported_fields` | array of string | optional | Names of fields or sections this answer could not serve. |
+
+### StatusData
+
+<!-- openapi:object StatusData -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `status` | enum OpsStatus | always | Result status; the route defines which outcomes are possible. |
+| `pending_invalidation_count` | integer | always | Always zero under the current phase architecture. |
+| `pending_invalidation_count_capped` | boolean | always | Always false under the current phase architecture. |
+| `dead_letter_count` | integer | always | Always zero under the current phase architecture. |
+| `chains` | map of string to object ChainStatus | always | Per-chain readiness, keyed by decimal chain ID. |
+
+### ChainStatus
+
+<!-- openapi:object ChainStatus -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `latest_block` | nullable integer | always | Latest block. |
+| `indexed_block` | nullable integer | always | Indexed block. |
+| `safe_block` | nullable integer | always | Safe block. |
+| `finalized_block` | nullable integer | always | Finalized block. |
+| `lag_blocks` | nullable integer | always | Nonnegative indexing lag, or null when evidence is missing or a redo is active. |
+| `lag_seconds` | nullable integer | always | Nonnegative indexing lag, or null when evidence is missing or a redo is active. |
+| `network_block` | nullable integer | always | Network block. |
+| `network_head_observed_at` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `network_head_age_seconds` | nullable integer | always | Network head age seconds. |
+| `network_head_status` | enum NetworkHeadStatus | always | Network head status. |
+| `ingestion_lag_blocks` | nullable integer | always | Ingestion lag blocks. |
+| `ingestion_lag_seconds` | nullable integer | always | Ingestion lag seconds. |
+| `status` | enum OpsStatus | always | Result status; the route defines which outcomes are possible. |
+
+### SearchName
+
+Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration; search omits it.
+
+<!-- openapi:object SearchName -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `name` | string | always | ENSIP-15 normalized name. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
+| `registered_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
+
+### Subname
+
+<!-- openapi:object Subname -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `labelhash` | string | optional | Hexadecimal labelhash when the readable label is not known. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
+| `registered_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `subregistry` | object ContractRef | optional | Current subregistry pointer, omitted when no current pointer is known. |
+| `subname_count` | integer | optional | Direct readable subname count, only with the counts expansion. |
+
+### AddressName
+
+<!-- openapi:object AddressName -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `permission_resource_id` | string | optional | Opaque handle for requesting the selected registration's permissions. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
+| `registered_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `grace_ends_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `authority` | enum Authority | optional | Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding. |
+| `migrated_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `relations` | array of enum Relation | always | Address-to-name relations that matched the row. |
+| `is_primary` | boolean | always | Whether this name is the selected primary answer for the requested address and coin type. |
+| `resolution` | object AddressNameResolution | optional | Single-coin resolver match; present on a decimal-coin `resolves_to` result. |
+| `resolutions` | array of object AddressNameResolution | optional | Resolver matches for `coin_type=evm`, ascending by coin type; at most 100 per row. |
+| `lapsed_registration` | object LapsedRegistration | optional | Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names. |
+| `subname_count` | integer | optional | Direct readable subname count, only with the counts expansion. |
+| `record_count` | integer | optional | Known record-selector count, only with counts requested and a current inventory. |
+| `role_summary` | array of object AddressNameRoleSummary | optional | Per-address grants requested with `include=role_summary`. |
+| `restrictions` | one of object WrapperRestrictions, object RegistryRestrictions | optional | [Resource restrictions](glossary.md#resource-restrictions) of the selected registration when that model applies. |
+
+### AddressNameRoleSummary
+
+<!-- openapi:object AddressNameRoleSummary -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `grants` | array of object AddressNameGrant | always | Grants. |
+
+### AddressNameGrant
+
+<!-- openapi:object AddressNameGrant -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `grant_relation` | enum GrantRelation | optional | `operator` for an effective account approval; direct grants omit it. |
+| `grant_scope` | object GrantScope | always | Scope in which these powers apply. |
+| `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
+
+### NameRecords
+
+<!-- openapi:object NameRecords -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `resolver` | nullable object ContractRef | always | Resolver contract for this answer. |
+| `records` | map of string to object RecordAnswer | always | Resolver records or reverse result rows in the route-specific shape. |
+| `inventory` | object RecordInventory | optional | Optional record inventory requested with `include=inventory`. |
+
+### RecordAnswer
+
+<!-- openapi:object RecordAnswer -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `value` | string | only when record_ok | Successful record value as a string; text is decoded text and binary record families use hex. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+| `meta` | object RecordAnswerMeta | optional | Response metadata; present even when empty. |
+
+### RecordAnswerMeta
+
+<!-- openapi:object RecordAnswerMeta -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `basis` | enum `derived` | always | The answer was derived from a stored resolver read rule. |
+| `rule` | enum ResolverReadFeature | always | Rule. |
+| `source_record_key` | string | always | Source record key. |
+
+### RecordInventory
+
+<!-- openapi:object RecordInventory -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `known_keys` | array of string | always | Record keys observed in the selected inventory. |
+| `unset_keys` | array of string | always | Keys whose absence is authoritatively retained; currently empty for phase inventory reads. |
+| `unsupported_keys` | array of string | always | Requested or inventoried keys that the inventory cannot answer. |
+| `abi_content_types` | nullable array of string | always | Known decimal ABI content types, or null with abi_unsupported_reason when unavailable. |
+| `abi_unsupported_reason` | string | optional | Why ABI content types cannot be enumerated; present instead of their key list. |
+
+### PrimaryName
+
+<!-- openapi:object PrimaryName -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `coin_type` | integer | always | Numeric ENS/SLIP-44 coin type. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `answers` | array of object PrimaryNameAnswer | always | Answers ordered by indexed, then verified source. |
+| `verification` | object PrimaryNameVerification | optional | Cross-source verification, absent from indexed-only reads. |
+
+### PrimaryNameAnswer
+
+<!-- openapi:object PrimaryNameAnswer -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `source` | enum Source | always | Answer origin. |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `raw_claim_name` | string | optional | Stored reverse claim before product normalization when it differs from the served name. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+
+### PrimaryNameVerification
+
+<!-- openapi:object PrimaryNameVerification -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
+| `failure_reason` | string | only when failure_status | Open product reason vocabulary explaining a failed, stale, missing or mismatched answer. |
+
+### RegistryName
+
+<!-- openapi:object RegistryName -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `display_name` | string | always | Display form of the name. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+
+### RegistryCounts
+
+<!-- openapi:object RegistryCounts -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `labels` | nullable integer | always | Exact current label count, or null for a historical selection where a current label count is not meaningful. |
+| `roles` | integer | optional | Count of observed nonzero declared role assignments; only with include=counts. |
+| `events` | integer | optional | Count of product-visible events emitted by the registry; only with include=counts. |
+
+### ReferencedBy
+
+<!-- openapi:object ReferencedBy -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object RegistryName | always | Data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### RegistryOverview
+
+<!-- openapi:object RegistryOverview -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `chain_id` | integer | always | Numeric EVM chain ID. |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `name` | nullable object RegistryName | always | Earliest current name that points to this registry, or null when no current pointer names it. |
+| `parent_registry` | nullable object ContractRef | always | Registry that emitted the selected name pointer, or null when name is null. |
+| `created_block_number` | nullable integer | always | Block of the first registry observation, or the declaration start block; null when unknown. |
+| `created_at` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `created_transaction_hash` | nullable string | always | Creation or first-pointer transaction; null for a declaration or missing transaction evidence. |
+| `created_basis` | enum `registry_created`, `subregistry_pointer`, `declared` | always | Evidence used for the registry creation fields. |
+| `counts` | object RegistryCounts | always | Current label count and optional role/event totals. |
+| `referenced_by` | object ReferencedBy | always | Nested page of current names pointing to this registry. |
+
+### ResolverOverview
+
+<!-- openapi:object ResolverOverview -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `chain_id` | integer | always | Numeric EVM chain ID. |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `mirror` | object ResolverMirror | optional | Registry followed by an admitted mirror resolver; absent for other resolver kinds. |
+| `bound_names` | object BoundNames | always | Nested page of names whose current serving resource selects this resolver. |
+
+### ResolverMirror
+
+<!-- openapi:object ResolverMirror -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `ensv1_registry` | always | Discriminator for this object. |
+| `registry` | object ContractRef | always | Registry followed by this mirror resolver. |
+
+### BoundNames
+
+<!-- openapi:object BoundNames -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object NameRecord | always | Data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### Namespace
+
+<!-- openapi:object Namespace -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `capabilities` | map of string to object NamespaceCapability | always | Capability names mapped to completeness and per-chain support. |
+| `networks` | array of object NamespaceNetwork | always | Networks. |
+
+### NamespaceCapability
+
+<!-- openapi:object NamespaceCapability -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `completeness` | enum Completeness | always | How completely the response can answer the requested capability. |
+| `unsupported_reason` | string | optional | Open product reason vocabulary explaining an unsupported answer. |
+| `chains` | map of string to object NamespaceChainCapability | optional | Per-chain capability results, keyed by decimal chain ID; absent when no per-chain split applies. |
+
+### NamespaceChainCapability
+
+<!-- openapi:object NamespaceChainCapability -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `completeness` | enum Completeness | always | How completely the response can answer the requested capability. |
+| `unsupported_reason` | string | optional | Open product reason vocabulary explaining an unsupported answer. |
+
+### NamespaceNetwork
+
+<!-- openapi:object NamespaceNetwork -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `network` | string | always | Display network slug. |
+| `chain_id` | integer | optional | Numeric EVM chain ID. |
+
+### PermissionRow
+
+Extends AddressNameGrant.
+
+<!-- openapi:object PermissionRow -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `record_resource` | object RecordResource | optional | Record selector described by the grant; only current setter powers contribute. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `authority_context` | enum AuthorityContext | always | Whether the row is current for the named registration selection or an audit by registration handle. |
+| `wrapper_state` | enum WrapperState | optional | Current [NameWrapper lifecycle](#naming-dictionary) value. |
+| `wrapper_fuses` | object WrapperFuses | optional | Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word). |
+| `lineage` | object PermissionLineage | optional | Lineage. |
+
+### PermissionLineage
+
+<!-- openapi:object PermissionLineage -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `grant` | object LineageItem | always | Allowlisted evidence describing the grant. |
+| `revocation` | object LineageItem | optional | Allowlisted evidence describing a retained revocation when present. |
+| `inheritance_path` | array of object LineageItem | optional | Allowlisted grant inheritance steps; absent for an empty path. |
+| `transfer_behavior` | one of string, object LineageItem | optional | Retained transfer rule string (currently replace_on_authority_change or cleared_on_transfer_unless_cannot_approve), or an allowlisted lineage object. An object with no surviving fields is omitted. |
+
+### Event
+
+<!-- openapi:object Event -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `id` | string | always | Opaque 64-character event identity; identical for the same event across the product history routes. |
+| `type` | enum HistoryEventType | always | Type. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `registration_id` | nullable string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `block_number` | nullable integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
+| `timestamp` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `transaction_hash` | nullable string | always | Transaction hash; null or absent, as indicated, for a row without a transaction. |
+| `log_index` | nullable integer | always | Log index; null or absent, as indicated, for a row without a log. |
+| `kind` | enum HistoryEventKind | when history_raw_requested | Raw event kind, only with include=raw. |
+| `contract_address` | nullable string | when history_data_requested | Emitter address, or null for a state-derived row. |
+| `data` | object HistoryEventData | when history_data_requested | Friendly retained event payload. |
+
+### HistoryEvent
+
+<!-- openapi:object HistoryEvent -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `id` | string | always | Opaque 64-character event identity; identical for the same event across the product history routes. |
+| `type` | enum HistoryEventType | always | Type. |
+| `name` | string | always | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `subject` | enum HistoryRowSubject | when child_registrations_requested | Whether the history row concerns the named parent or one of its direct children. |
+| `namespace` | string | always | Resolved public namespace slug. |
+| `registration_id` | nullable string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `block_number` | nullable integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
+| `timestamp` | nullable string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `transaction_hash` | nullable string | always | Transaction hash; null or absent, as indicated, for a row without a transaction. |
+| `log_index` | nullable integer | always | Log index; null or absent, as indicated, for a row without a log. |
+| `kind` | enum HistoryEventKind | when history_raw_requested | Raw event kind, only with include=raw. |
+| `contract_address` | nullable string | when history_data_requested | Emitter address, or null for a state-derived row. |
+| `data` | object HistoryEventData | when history_data_requested | Friendly retained event payload. |
+
+### RegistryLabel
+
+Extends Subname.
+
+<!-- openapi:object RegistryLabel -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `role_holder_count` | integer | optional | Distinct direct role-holder count, present with `include=counts`. |
+
+### RecordGroups
+
+Grouped resolver keys and values shared by name detail and lookup detail; see [grouped name-profile records](api-v1-routes.md#grouped-name-profile-records).
+
+<!-- openapi:object RecordGroups -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `seen_addresses` | array of string | always | Observed canonical decimal coin types. |
+| `addresses` | map of string to nullable string | always | Known address values by coin type. Null means cleared; a seen key absent from this map has an unknown value. |
+| `seen_texts` | array of string | always | Observed text keys, including keys outside the request selector grammar. |
+| `texts` | map of string to nullable string | always | Known text values. Null means cleared; absent means unknown. |
+| `seen_abis` | array of string | optional | Observed decimal ABI content types; absent when enumeration is unsupported. |
+| `abi_unsupported_reason` | string | optional | Why ABI content types cannot be enumerated; present instead of their key list. |
+| `abis` | map of string to nullable string | always | Known ABI values by content type. Currently empty because ABI bytes are not retained. |
+| `seen_singletons` | array of enum `contenthash`, `name` | always | Singletons whose write was observed or whose key was verified. |
+| `contenthash` | nullable string | optional | Contenthash bytes as a hex string, null when cleared or authoritatively unset, absent when unknown. |
+| `name` | nullable string | optional | Forward name record, null when cleared or authoritatively unset, absent when unknown. |
+
+### AddressNameResolution
+
+<!-- openapi:object AddressNameResolution -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `coin_type` | integer | always | Numeric ENS/SLIP-44 coin type. |
+| `record_key` | string | always | Public resolver-record key that answered the request. |
+
+### GrantScope
+
+<!-- openapi:object GrantScope -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `root`, `registry`, `registration`, `resolver`, `record_manager`, `account`, `registrar_controller` | always | Discriminator for this object. |
+| `detail` | object GrantScopeDetail | always | Scope-specific fields; empty for root, registry and registration. Registrar-controller is history-only. |
+
+### GrantScopeDetail
+
+Closed union of scope detail fields. Each scope uses exactly the shape listed in [permissions](api-v1-routes.md#get-v1permissions).
+
+<!-- openapi:object GrantScopeDetail -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `chain_id` | integer | optional | Numeric EVM chain ID. |
+| `manager` | string | optional | Record-manager address, only for record_manager scope. |
+| `authority_kind` | enum `registry`, `registrar`, `wrapper` | optional | Account approval authority kind. |
+| `authority_contract` | string | optional | Account approval contract address. |
+| `owner` | string | optional | Account whose approval grants the powers. |
+| `registrar` | object ContractRef | optional | Registrar contract, only for the history registrar_controller scope. |
+
+### RecordResource
+
+<!-- openapi:object RecordResource -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `address`, `text`, `data`, `abi`, `interface`, `argument` | always | Discriminator for this object. |
+| `hash` | string | always | Hexadecimal hash of the setter argument. |
+| `coin_type` | integer | optional | Numeric ENS/SLIP-44 coin type. |
+| `coin_type_decimal` | string | optional | Coin type beyond uint64, as exact decimal text; mutually exclusive with coin_type. |
+| `key` | string | optional | Printable UTF-8 text/data key. |
+| `key_bytes` | string | optional | Raw hex key when it cannot be presented as text; mutually exclusive with key. |
+| `content_type` | integer | optional | Numeric ABI content type. |
+| `content_type_decimal` | string | optional | ABI content type beyond uint64; mutually exclusive with content_type. |
+| `interface_id` | string | optional | Hex interface ID. |
+| `selectors` | array of object RecordResource | optional | Current setter interpretations when kind is argument; at least two entries. |
+
+### LineageItem
+
+<!-- openapi:object LineageItem -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `event`, `permission`, `registration_authority`, `registration_rebound`, `ens_v1_authority`, `resolver_root_fallback`, `registry_root_fallback` | optional | Discriminator for this object. |
+| `registration_id` | string | optional | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `powers` | array of enum PermissionPower | optional | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
+| `relation` | enum `holder`, `operator`, `token_approval` | optional | NameWrapper relationship behind the grant or revocation. |
+
+### WrapperRestrictions
+
+<!-- openapi:object WrapperRestrictions -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `ens_v1_wrapper` | always | Discriminator for this object. |
+| `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `wrapper_state` | enum WrapperState | always | Current [NameWrapper lifecycle](#naming-dictionary) value. |
+| `wrapper_fuses` | object WrapperFuses | always | Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word). |
+| `wrapper_expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `wrapper_expires_at_reason` | enum `no_expiry`, `not_set` | when null_wrapper_expiry | Reason for a classified null wrapper expiry. |
+
+### RegistryRestrictions
+
+<!-- openapi:object RegistryRestrictions -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `kind` | enum `ens_v2_registry` | always | Discriminator for this object. |
+| `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `locked_roles` | array of enum `unregister`, `renew`, `set_subregistry`, `set_resolver`, `transfer` | always | Token-scoped roles whose assignment can no longer change. |
+
+### HexBytes
+
+<!-- openapi:object HexBytes -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `encoding` | enum `hex` | always | Encoding. |
+| `bytes` | string | always | Lowercase 0x-prefixed bytes. |
+
+### DeletedRecordValue
+
+<!-- openapi:object DeletedRecordValue -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `deleted` | boolean | always | True for a retained DNS record deletion. |
+
+### DnsZonehashValue
+
+<!-- openapi:object DnsZonehashValue -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `previous` | object HexBytes | always | Previous DNS zone hash. |
+| `current` | object HexBytes | always | New DNS zone hash. |
+
+### DataHashValue
+
+<!-- openapi:object DataHashValue -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `indexed_data_hash` | string | always | Hexadecimal hash retained by a data-record event. |
+
+### HistoryEventData
+
+Closed history payload fields. The event type and retained evidence determine which fields appear; an empty object is valid. See [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw).
+
+<!-- openapi:object HistoryEventData -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `registrant` | string | optional | Current registrant address; omitted on released names. |
+| `owner` | string | optional | Current token or registry owner address, when known. |
+| `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `subregistry` | object ContractRef | optional | New subregistry pointer; omitted for a cleared pointer. |
+| `action_id` | string | optional | Opaque registration action grouping key. |
+| `action_role` | enum `registered`, `linked`, `reachable` | optional | Role of this row in its registration action. |
+| `fuses` | integer | optional | Retained uint32 NameWrapper fuse word. |
+| `from` | string | optional | Previous owner or transfer sender. |
+| `to` | string | optional | Transfer recipient. |
+| `coin_type` | integer | optional | Numeric ENS/SLIP-44 coin type. |
+| `key` | string | optional | Retained record key; history can contain families unavailable on the records read route. |
+| `value` | one of string, object HexBytes, object DeletedRecordValue, object DnsZonehashValue, object DataHashValue | optional | Retained record write value. Text and hex strings, raw bytes, DNS changes and data hashes keep their current wire forms. |
+| `record_id` | string | optional | Decimal record ID on a record-ID resolver. |
+| `node` | string | optional | Lowercase hex node on a node-keyed resolver. |
+| `address` | string | optional | Primary-name subject or permission holder. |
+| `name` | string | optional | Recorded primary-name value when available. |
+| `name_status` | enum `set`, `cleared`, `unknown` | optional | Whether the primary-name event set, cleared or did not retain a name. |
+| `grant_scope` | object GrantScope | optional | Scope in which these powers apply. |
+| `approved` | boolean | optional | Registrar-controller approval after the change. |
+| `powers` | array of enum PermissionPower | optional | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
+| `added_powers` | array of enum PermissionPower | optional | Powers added, when the log supplies the old set. |
+| `removed_powers` | array of enum PermissionPower | optional | Powers removed, when the log supplies the old set. |
+| `migration_path` | enum `unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, `emancipated_child` | optional | Migration path retained by the event. |
+
+### ResolverAlias
+
+A supported resolver binding or alias-event item; the route defines the two forms.
+
+<!-- openapi:object ResolverAlias -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `namespace` | string | optional | Resolved public namespace slug. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `display_name` | string | optional | Display form of the name. |
+| `namehash` | string | optional | Hexadecimal ENS namehash. |
+| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `state` | enum `active`, `removed`, `unknown` | optional | Latest alias state on an alias-event row. |
+| `from_name` | nullable string | optional | Alias source name; always present on alias-event rows. |
+| `to_name` | nullable string | optional | Alias target name; null for a removed or unknown target. |
+| `from_display_name` | string | optional | Display form of the alias source when retained. |
+| `to_display_name` | string | optional | Display form of the alias target when retained. |
+| `to_registration_id` | string | optional | Target registration handle when retained. |
+
+### LinkEvent
+
+<!-- openapi:object LinkEvent -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `block_number` | integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
+| `timestamp` | string | always | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `transaction_hash` | string | always | Transaction hash; null or absent, as indicated, for a row without a transaction. |
+| `log_index` | integer | always | Log index; null or absent, as indicated, for a row without a log. |
+
+### GrantEvent
+
+<!-- openapi:object GrantEvent -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `block_number` | nullable integer | always | EVM block number; nullable only where the table type permits an unknown block position. |
+| `timestamp` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `transaction_hash` | string | optional | Transaction hash; null or absent, as indicated, for a row without a transaction. |
+| `log_index` | integer | optional | Log index; null or absent, as indicated, for a row without a log. |
+
+### ResolverLink
+
+<!-- openapi:object ResolverLink -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `record_id` | string | always | Decimal record ID. |
+| `namehash` | string | always | Hexadecimal ENS namehash. |
+| `default` | boolean | always | True for the empty-name node. |
+| `namespace` | string | optional | Resolved public namespace slug. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `display_name` | string | optional | Display form of the name. |
+| `link_event` | object LinkEvent | always | Current link observation. |
+
+### ResolverRole
+
+<!-- openapi:object ResolverRole -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `address` | string | always | EVM address in hexadecimal form. |
+| `registration_id` | string | always | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
+| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
+| `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
+| `grant_event` | object GrantEvent | optional | Earliest canonical permission event for the holder in the row provenance. |
+| `record_resource` | object RecordResource | optional | Record selector described by the grant; only current setter powers contribute. |
+
+### ErrorEnvelope
+
+<!-- openapi:object ErrorEnvelope -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `error` | object ErrorBody | always | Uniform error body. |
+
+### ErrorBody
+
+<!-- openapi:object ErrorBody -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `code` | enum ErrorCode | always | Stable code whose HTTP mapping is defined in Error Model. |
+| `message` | string | always | Human-readable error message. |
+| `details` | map of string to json | always | Extensible structured error details. Keys and JSON value types are open; current handlers commonly return an empty object. |
+
+### NameDetailResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object NameDetailResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object NameRecord | always | Requested result data. |
+
+### LookupResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object LookupResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object LookupResult | always | Requested result data. |
+
+### StatusResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object StatusResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object StatusData | always | Requested result data. |
+
+### NamesResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object NamesResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object SearchName | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### SearchResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object SearchResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object SearchName | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### SubnamesResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object SubnamesResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object Subname | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### AddressNamesResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object AddressNamesResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object AddressName | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### RecordsResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object RecordsResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object NameRecords | always | Requested result data. |
+
+### PrimaryNameResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object PrimaryNameResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object PrimaryName | always | Requested result data. |
+
+### EventsResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object EventsResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object Event | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### NameHistoryResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object NameHistoryResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object HistoryEvent | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### PermissionsResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object PermissionsResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object PermissionRow | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+| `restrictions` | one of object WrapperRestrictions, object RegistryRestrictions | optional | [Resource restrictions](glossary.md#resource-restrictions) of the selected registration when that model applies. |
+
+### ResolverResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object ResolverResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object ResolverOverview | always | Requested result data. |
+
+### ResolverAliasesResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object ResolverAliasesResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object ResolverAlias | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### ResolverLinksResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object ResolverLinksResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object ResolverLink | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### ResolverRolesResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object ResolverRolesResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object ResolverRole | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### RegistryResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object RegistryResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object RegistryOverview | always | Requested result data. |
+
+### RegistryLabelsResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object RegistryLabelsResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | array of object RegistryLabel | always | Requested result data. |
+| `page` | object Page | always | Standard collection pagination metadata. |
+
+### NamespaceResponse
+
+Success envelope for the corresponding product operation.
+
+Extends Envelope.
+
+<!-- openapi:object NamespaceResponse -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `data` | object Namespace | always | Requested result data. |
+
+### Presence conditions
+
+<!-- openapi:conditions -->
+| Condition | Holds when |
+| --- | --- |
+| full_record | The record is not the identity-only unsupported name object. Indexed coverage downgrades produce that identity-only object; a verified lookup failure can retain the registration summary even when its result status is unsupported. |
+| supported_name | The name-level record has status other than unsupported. This excludes both identity-only unsupported records and verified unsupported records that retain registration fields. |
+| status_unsupported | The object status is unsupported. |
+| failure_status | The object status is failed, stale, not_found or mismatch. |
+| registration_held | The record is full and its registration_status is not unregistered. |
+| wrapper_backed | The full record has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together. |
+| migration_proven | The full record selects authority ens_v2 and retains the block time of its latest activated MigrationApplied transition. |
+| name_counts_requested | The request to name detail carries include=counts and the record status is not unsupported. Counts are absent on every unsupported name-level record. |
+| null_expiry | The object contains expires_at with JSON null. Absent expires_at and finite strings do not satisfy this condition. |
+| null_wrapper_expiry | The object contains wrapper_expires_at with JSON null. |
+| history_data_requested | The history request includes data in include. |
+| history_raw_requested | The history request includes raw in include. |
+| child_registrations_requested | The name-history request includes child_registrations in include. |
+| record_ok | The per-key record status is ok. |
+
+## Enums
+
+Closed vocabularies used by the object and operation tables. The result status,
+error code, expiry reason, permission power, and unlisted permission surface
+vocabularies are marked at their existing canonical tables above.
+
+### RegistrationStatus
+
+<!-- openapi:enum RegistrationStatus -->
+| Value |
+| --- |
+| `active` |
+| `wrapped` |
+| `registered` |
+| `released` |
+| `unregistered` |
+
+### WrapperState
+
+<!-- openapi:enum WrapperState -->
+| Value |
+| --- |
+| `wrapped` |
+| `emancipated` |
+| `locked` |
+
+### Authority
+
+<!-- openapi:enum Authority -->
+| Value |
+| --- |
+| `ens_v0` |
+| `ens_v1` |
+| `ens_v2` |
+
+### Source
+
+<!-- openapi:enum Source -->
+| Value |
+| --- |
+| `indexed` |
+| `verified` |
+
+### Completeness
+
+<!-- openapi:enum Completeness -->
+| Value |
+| --- |
+| `full` |
+| `partial` |
+| `unsupported` |
+
+### Finality
+
+<!-- openapi:enum Finality -->
+| Value |
+| --- |
+| `latest` |
+| `safe` |
+| `finalized` |
+
+### OpsStatus
+
+<!-- openapi:enum OpsStatus -->
+| Value |
+| --- |
+| `ready` |
+| `degraded` |
+| `stale` |
+
+### HistoryScope
+
+<!-- openapi:enum HistoryScope -->
+| Value |
+| --- |
+| `name` |
+| `registration` |
+| `both` |
+
+### AuthorityContext
+
+<!-- openapi:enum AuthorityContext -->
+| Value |
+| --- |
+| `current_for_name` |
+| `resource_audit` |
+
+### Relation
+
+<!-- openapi:enum Relation -->
+| Value |
+| --- |
+| `owner` |
+| `manager` |
+| `registrant` |
+| `role_holder` |
+| `resolves_to` |
+| `former_registrant` |
+
+### AddressNamesDedupe
+
+<!-- openapi:enum AddressNamesDedupe -->
+| Value |
+| --- |
+| `name` |
+| `registration` |
+
+### AddressNamesSort
+
+<!-- openapi:enum AddressNamesSort -->
+| Value |
+| --- |
+| `name` |
+| `expires_at` |
+| `registered_at` |
+| `created_at` |
+
+### HistoryEventType
+
+<!-- openapi:enum HistoryEventType -->
+| Value |
+| --- |
+| `registration` |
+| `renewal` |
+| `release` |
+| `expiry` |
+| `transfer` |
+| `authority` |
+| `resolver` |
+| `record` |
+| `primary_name` |
+| `permission` |
+| `subregistry` |
+| `migration` |
+
+### NameMatch
+
+<!-- openapi:enum NameMatch -->
+| Value |
+| --- |
+| `prefix` |
+| `contains` |
+
+### SortOrder
+
+<!-- openapi:enum SortOrder -->
+| Value |
+| --- |
+| `asc` |
+| `desc` |
+
+### LookupKind
+
+<!-- openapi:enum LookupKind -->
+| Value |
+| --- |
+| `name` |
+| `address` |
+
+### LookupProfile
+
+<!-- openapi:enum LookupProfile -->
+| Value |
+| --- |
+| `feed` |
+| `detail` |
+
+### LapsedReleaseKind
+
+<!-- openapi:enum LapsedReleaseKind -->
+| Value |
+| --- |
+| `expired` |
+| `unregistered` |
+
+### LapsedHeldThrough
+
+<!-- openapi:enum LapsedHeldThrough -->
+| Value |
+| --- |
+| `registrar` |
+| `wrapper` |
+| `registry` |
+
+### GrantRelation
+
+<!-- openapi:enum GrantRelation -->
+| Value |
+| --- |
+| `operator` |
+
+### NetworkHeadStatus
+
+<!-- openapi:enum NetworkHeadStatus -->
+| Value |
+| --- |
+| `fresh` |
+| `stale` |
+| `unavailable` |
+| `pending` |
+| `unconfigured` |
+
+### ResolverReadFeature
+
+<!-- openapi:enum ResolverReadFeature -->
+| Value |
+| --- |
+| `ensip19_default_address` |
+| `ensip10_extended_resolver` |
+
+### HistoryRowSubject
+
+<!-- openapi:enum HistoryRowSubject -->
+| Value |
+| --- |
+| `name` |
+| `child` |
+
+### HistoryEventKind
+
+<!-- openapi:enum HistoryEventKind -->
+| Value |
+| --- |
+| `RegistrationGranted` |
+| `LabelRegistered` |
+| `RegistrationRenewed` |
+| `RegistrationReleased` |
+| `ExpiryChanged` |
+| `TokenControlTransferred` |
+| `AuthorityTransferred` |
+| `AuthorityEpochChanged` |
+| `ResolverChanged` |
+| `RecordChanged` |
+| `RecordVersionChanged` |
+| `ReverseChanged` |
+| `PermissionChanged` |
+| `PermissionScopeChanged` |
+| `RolesChanged` |
+| `EACRolesChanged` |
+| `SubregistryChanged` |
+| `MigrationApplied` |

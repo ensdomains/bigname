@@ -30,6 +30,7 @@ bigname-metrics.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]
+jsonschema = { version = "=0.57.0", default-features = false }
 phase-runner = { path = "../phase-runner" }
 tokio-util.workspace = true
 alloy-sol-types.workspace = true

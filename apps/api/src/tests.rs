@@ -1,5 +1,12 @@
 include!("tests/support.rs");
 
+#[path = "tests/openapi_contract.rs"]
+pub(crate) mod openapi_contract;
+#[path = "tests/openapi_responses.rs"]
+mod openapi_responses;
+#[path = "tests/openapi_surface.rs"]
+mod openapi_surface;
+
 #[tokio::test]
 async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

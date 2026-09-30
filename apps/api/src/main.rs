@@ -20,6 +20,7 @@ mod errors;
 mod health;
 mod metrics;
 mod name_filter;
+mod openapi;
 #[path = "support/service.rs"]
 mod service;
 mod startup_preflight;
@@ -177,7 +178,9 @@ pub(crate) fn app_router(state: AppState) -> Router {
         request_timeout_ms: TEST_REQUEST_TIMEOUT_MS,
         ..ApiBoundsConfig::default()
     };
-    app_router_with_bounds(state, health_pool, &bounds)
+    app_router_with_bounds(state, health_pool, &bounds).layer(axum::middleware::from_fn(
+        tests::openapi_contract::validate_response,
+    ))
 }
 
 fn app_router_with_bounds(
@@ -187,6 +190,7 @@ fn app_router_with_bounds(
 ) -> Router {
     let bounded_router = v2::router()
         .with_state(state.clone())
+        .route("/openapi.json", get(openapi::get_openapi))
         .route_layer(CorsLayer::permissive());
     let health_router = Router::new()
         .route("/healthz", get(health))

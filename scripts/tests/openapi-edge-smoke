@@ -20,8 +20,8 @@ does to GET and HEAD /openapi.json once the API answers them:
   - HEAD checks status and headers only
   - / is answered by the edge itself: 404, no fixture body, no CORS header
 
-The public-edge smoke cannot show the 200 case, because the API answers 404
-until the OpenAPI document ships (TYR-18).
+The successful fixture uses the checked-in generated OpenAPI document.
+Matching validators also exercise GET/HEAD 304 and preserved caching headers.
 
 Needs docker, python3 and curl, and the Caddy image available locally. On
 Linux, Caddy uses host networking; elsewhere (Docker Desktop) it publishes the
@@ -123,14 +123,16 @@ last_body=""
 
 request() {
   local label="$1" method="$2" path="$3"
+  shift 3
   last_headers="${work}/${label}.headers"
   last_body="${work}/${label}.body"
+  : > "$last_body"
   local method_args=(--request "$method")
   if [ "$method" = HEAD ]; then
     method_args=(--head)
   fi
   last_status="$(curl --disable --silent --show-error --noproxy '*' --max-time 10 \
-    "${method_args[@]}" --dump-header "$last_headers" --output "$last_body" \
+    "${method_args[@]}" "$@" --dump-header "$last_headers" --output "$last_body" \
     --write-out '%{http_code}' "${edge_url}${path}")"
 }
 
@@ -191,7 +193,7 @@ expect_body() {
 }
 
 missing_body='openapi-fixture-upstream-404'
-ok_body='{"openapi":"3.1.0","fixture":"openapi-edge-smoke"}'
+ok_body="$(PYTHONDONTWRITEBYTECODE=1 python3 -c 'from scripts.tests.openapi_fixture_upstream import OK_BODY; print(OK_BODY.decode(), end="")')"
 
 check() {
   local label="$1" method="$2" path="$3" status="$4" body="$5"
@@ -205,10 +207,33 @@ check() {
   log "${label}: ${method} ${path} -> ${last_status}, one wildcard origin"
 }
 
-check openapi-404-get GET /openapi.json 404 "$missing_body"
-check openapi-404-head HEAD /openapi.json 404 "$missing_body"
-check openapi-200-get GET '/openapi.json?case=ok' 200 "$ok_body"
-check openapi-200-head HEAD '/openapi.json?case=ok' 200 "$ok_body"
+check openapi-404-get GET '/openapi.json?case=missing' 404 "$missing_body"
+check openapi-404-head HEAD '/openapi.json?case=missing' 404 "$missing_body"
+check openapi-200-get GET /openapi.json 200 "$ok_body"
+[ "$(header_count '^content-type:[[:space:]]*application/json$')" = 1 ] || fail "JSON content type missing"
+[ "$(header_count '^cache-control:[[:space:]]*public, max-age=300$')" = 1 ] || fail "cache policy missing"
+etag="$(tr -d '\r' < "$last_headers" | sed -n 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//p')"
+[ -n "$etag" ] || fail "ETag missing"
+check openapi-200-head HEAD /openapi.json 200 "$ok_body"
+for method in GET HEAD; do
+  request "openapi-304-${method}" "$method" /openapi.json --header "If-None-Match: ${etag}"
+  expect_status "openapi-304-${method}" 304
+  expect_proxied "openapi-304-${method}"
+  expect_one_wildcard "openapi-304-${method}"
+  [ "$(header_count '^cache-control:[[:space:]]*public, max-age=300$')" = 1 ] || fail "304 cache policy missing"
+  if [ "$method" = GET ]; then expect_body "openapi-304-${method}" ''; fi
+done
+request openapi-stale GET /openapi.json --header 'If-None-Match: W/"stale"'
+expect_status openapi-stale 200
+expect_body openapi-stale "$ok_body"
+for method in POST PUT PATCH DELETE OPTIONS; do
+  request "openapi-denied-${method}" "$method" /openapi.json
+  expect_status "openapi-denied-${method}" 404
+  [ "$(header_count '^x-openapi-fixture:')" = 0 ] || fail "wrong method reached upstream"
+done
+request openapi-trailing-slash GET /openapi.json/
+expect_status openapi-trailing-slash 404
+[ "$(header_count '^x-openapi-fixture:')" = 0 ] || fail "trailing slash reached upstream"
 
 # Control: the edge answers / itself, so the fixture body and the CORS header
 # above are not something every response carries.
