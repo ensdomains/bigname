@@ -1,6 +1,4 @@
-use bigname_lookup::{
-    LedgerAction, LookupPosition, LookupRecordResult, LookupRecordStatus, LookupResponse,
-};
+use bigname_lookup::{LedgerAction, LookupRecordResult, LookupRecordStatus};
 
 use super::*;
 
@@ -76,12 +74,8 @@ fn verified_statuses_preserve_reason_defaults_and_mapping() {
         result.value = Some(json!({"value":"answer"}));
         result.failure_reason = reason.map(str::to_owned);
         result.unsupported_reason = reason.map(str::to_owned);
-        let answers = verified_answers(&["text:url"], vec![result]).expect("answer must map");
-        assert_eq!(
-            json!(answers["text:url"]),
-            expected,
-            "{status:?}, {reason:?}"
-        );
+        let answer = verified_answer_from_result(&result).expect("answer must map");
+        assert_eq!(json!(answer), expected, "{status:?}, {reason:?}");
     }
 }
 
@@ -107,12 +101,12 @@ fn verified_success_preserves_scalar_and_nested_value_formatting() {
     ] {
         let mut result = lookup_result("text:url", LookupRecordStatus::Success);
         result.value = value.clone();
-        let answers = verified_answers(&["text:url"], vec![result]).expect("value must map");
+        let answer = verified_answer_from_result(&result).expect("value must map");
         let expected = match expected {
             Some(value) => json!({"status":"ok","value":value}),
             None => json!({"status":"ok"}),
         };
-        assert_eq!(json!(answers["text:url"]), expected, "{value:?}");
+        assert_eq!(json!(answer), expected, "{value:?}");
     }
 }
 
@@ -126,7 +120,9 @@ fn verified_selection_keeps_last_duplicate_and_missing_result_reason() {
     unrequested.unsupported_reason = Some("raw_log_missing_record_cache".to_owned());
     let results = vec![discarded, selected, unrequested];
 
-    let answers = verified_answers(&["text:url", "text:missing", "text:url"], results.clone())
+    let records = ["text:url", "text:missing", "text:url"]
+        .map(|key| parse_resolution_record_key(key).expect("test selector must parse"));
+    let answers = verified_answers_from_results(&results, &records)
         .expect("unrequested and replaced results must not be mapped");
     assert_eq!(
         json!(answers),
@@ -139,7 +135,7 @@ fn verified_selection_keeps_last_duplicate_and_missing_result_reason() {
         })
     );
     assert!(
-        verified_answers(&[], results)
+        verified_answers_from_results(&results, &[])
             .expect("empty selection must map")
             .is_empty()
     );
@@ -155,7 +151,7 @@ fn verified_failure_reasons_still_reject_pipeline_vocabulary() {
         let mut result = lookup_result("text:url", status);
         result.failure_reason = Some("raw_log_missing_record_cache".to_owned());
         result.unsupported_reason = result.failure_reason.clone();
-        let error = verified_answers(&["text:url"], vec![result])
+        let error = verified_answer_from_result(&result)
             .expect_err("selected pipeline reason must fail the request");
         assert_eq!(error.code(), ErrorCode::InternalError, "{status:?}");
     }
@@ -174,40 +170,4 @@ fn lookup_result(key: &str, status: LookupRecordStatus) -> LookupRecordResult {
         ccip_read: false,
         ledger_action: LedgerAction::None,
     }
-}
-
-fn verified_answers(
-    keys: &[&str],
-    results: Vec<LookupRecordResult>,
-) -> V2Result<BTreeMap<String, RecordAnswer>> {
-    let records = keys
-        .iter()
-        .map(|key| parse_resolution_record_key(key).unwrap())
-        .collect::<Vec<_>>();
-    let position = LookupPosition {
-        chain_id: "ethereum-mainnet".to_owned(),
-        block_number: 1,
-        block_hash: "0xblock".to_owned(),
-        timestamp: "1717171719".to_owned(),
-    };
-    let response = LookupResponse {
-        logical_name_id: "ens:alice.eth".to_owned(),
-        name: "alice.eth".to_owned(),
-        resolver_chain_id: position.chain_id.clone(),
-        resolver_address: "0xresolver".to_owned(),
-        entrypoint_chain_id: position.chain_id.clone(),
-        entrypoint_address: "0xresolver".to_owned(),
-        authoritative_position: position.clone(),
-        execution_position: position,
-        observed_positions: json!({}),
-        records: results,
-    };
-    verified_record_answers(
-        &current_name_row(OffsetDateTime::from_unix_timestamp(1_717_171_719).unwrap()),
-        &records,
-        Some(VerifiedRecordLookup::Found {
-            response: Box::new(response),
-        }),
-        false,
-    )
 }
