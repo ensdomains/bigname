@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "resolvers/generation_test_hooks.rs"]
+pub(crate) mod generation_test_hooks;
+
 #[path = "resolvers/collections.rs"]
 mod collections;
 pub(crate) use collections::{get_resolver_aliases, get_resolver_links, get_resolver_roles};
@@ -37,7 +41,9 @@ mod role_grants;
 
 #[path = "resolvers/snapshot_checks.rs"]
 mod snapshot_checks;
-use snapshot_checks::{require_phase_name_snapshot, require_phase_target_snapshot};
+use snapshot_checks::{
+    require_phase_name_snapshot, require_phase_target_snapshot, revalidate_project_generations,
+};
 
 use super::{
     Envelope, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist, SnapshotReadResource,
@@ -178,17 +184,14 @@ pub(crate) async fn get_resolver(
         ))
     }))?;
     let Some(row) = row else {
-        let current = load_resolver_project_generations(
+        revalidate_project_generations(
             &state.pool,
             &selected_snapshot,
-            require_selected_head,
+            &project_generations,
+            params.at.is_some(),
+            "served resolver data changed while the request was being read",
         )
         .await?;
-        if current != project_generations {
-            return Err(V2Error::stale(
-                "served resolver data changed while the request was being read",
-            ));
-        }
         if !require_selected_head {
             return Err(V2Error::stale(
                 "resolver data is unavailable at the selected historical position",
@@ -212,14 +215,14 @@ pub(crate) async fn get_resolver(
     for bound_name_row in &bound_name_rows {
         require_phase_name_snapshot(bound_name_row, &selected_snapshot)?;
     }
-    let current =
-        load_resolver_project_generations(&state.pool, &selected_snapshot, require_selected_head)
-            .await?;
-    if current != project_generations {
-        return Err(V2Error::stale(
-            "served resolver data changed while the request was being read",
-        ));
-    }
+    revalidate_project_generations(
+        &state.pool,
+        &selected_snapshot,
+        &project_generations,
+        params.at.is_some(),
+        "served resolver data changed while the request was being read",
+    )
+    .await?;
 
     let next_cursor = storage_next_cursor
         .as_ref()

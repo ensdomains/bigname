@@ -35,6 +35,8 @@ mod primary_name;
 pub(crate) mod record_groups;
 mod registries;
 mod resolvers;
+#[cfg(test)]
+pub(crate) use resolvers::generation_test_hooks as resolver_generation_test_hooks;
 mod restrictions;
 mod router;
 mod search;

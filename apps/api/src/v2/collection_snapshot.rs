@@ -172,7 +172,7 @@ pub(super) fn restart_required() -> V2Error {
 }
 
 /// The same request and cursor can be retried against the new publication.
-fn changed_during_read() -> V2Error {
+pub(super) fn changed_during_read() -> V2Error {
     V2Error::stale("collection publication changed during the read; retry the request")
 }
 

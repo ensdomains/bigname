@@ -182,13 +182,14 @@ async fn collection(
             _ => data.push(compact_resolver_binding_item(&item)?),
         }
     }
-    if crate::v2::lookup::head::load_selected_project_generations(&state.pool, &selected).await?
-        != generations
-    {
-        return Err(V2Error::stale(
-            "resolver collection changed while reading; retry the request",
-        ));
-    }
+    super::revalidate_project_generations(
+        &state.pool,
+        &selected,
+        &generations,
+        params.at.is_some(),
+        "resolver collection changed while reading; retry the request",
+    )
+    .await?;
     publication.finish(&state).await?;
     Ok(Json(Envelope {
         data,

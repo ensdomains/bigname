@@ -436,6 +436,7 @@ mod v2_history_bounded_regeneration;
 mod v2_registry_permission_identity;
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_resolver_collections.rs");
+include!("tests/v2_resolver_generation_races.rs");
 include!("tests/v2_registries.rs");
 include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
