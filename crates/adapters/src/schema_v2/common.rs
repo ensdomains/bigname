@@ -1,6 +1,6 @@
 use alloy_primitives::{B256, keccak256};
 use anyhow::{Context, bail};
-use bigname_domain::normalization::normalize_label_under_suffix;
+use bigname_domain::normalization::normalized_label_verdict;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -195,21 +195,12 @@ pub(super) fn normalization_flag(raw_label: Option<&str>) -> NormalizationFlag {
             error: Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
         };
     };
-    match normalize_label_under_suffix(raw_label, &[]) {
-        Ok(normalized) if normalized.normalized_name.as_bytes() == raw_label.as_bytes() => {
-            NormalizationFlag {
-                normalized: true,
-                error: None,
-            }
-        }
-        Ok(_) => NormalizationFlag {
-            normalized: false,
-            error: Some("raw label is not byte-identical to its normalized form".to_owned()),
-        },
-        Err(error) => NormalizationFlag {
-            normalized: false,
-            error: Some(error.to_string()),
-        },
+    let error = normalized_label_verdict(raw_label)
+        .err()
+        .map(|error| error.to_string());
+    NormalizationFlag {
+        normalized: error.is_none(),
+        error,
     }
 }
 

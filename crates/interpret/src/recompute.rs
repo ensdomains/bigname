@@ -1,7 +1,7 @@
 use std::str;
 
 use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND};
-use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_label_under_suffix};
+use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalized_label_verdict};
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
@@ -473,21 +473,12 @@ fn normalization_flag(raw_label: &[u8]) -> NormalizationFlag {
             error: Some("raw label has no PostgreSQL-safe UTF-8 decoding".to_owned()),
         };
     };
-    match normalize_label_under_suffix(raw_label, &[]) {
-        Ok(normalized) if normalized.normalized_name.as_bytes() == raw_label.as_bytes() => {
-            NormalizationFlag {
-                normalized: true,
-                error: None,
-            }
-        }
-        Ok(_) => NormalizationFlag {
-            normalized: false,
-            error: Some("raw label is not byte-identical to its normalized form".to_owned()),
-        },
-        Err(error) => NormalizationFlag {
-            normalized: false,
-            error: Some(error.to_string()),
-        },
+    let error = normalized_label_verdict(raw_label)
+        .err()
+        .map(|error| error.to_string());
+    NormalizationFlag {
+        normalized: error.is_none(),
+        error,
     }
 }
 

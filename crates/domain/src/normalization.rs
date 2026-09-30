@@ -69,6 +69,19 @@ pub fn normalize_label_under_suffix(
     normalize_name(&input_name)
 }
 
+/// Whether the decoded raw label is byte-identical to its normalized form.
+/// Returns only a verdict so callers retain the raw bytes as identity evidence.
+pub fn normalized_label_verdict(raw_label: &str) -> Result<()> {
+    let normalized = normalize_label_under_suffix(raw_label, &[])?;
+    if normalized.normalized_name.as_bytes() == raw_label.as_bytes() {
+        Ok(())
+    } else {
+        Err(EnsNameNormalizationError::new(
+            "raw label is not byte-identical to its normalized form",
+        ))
+    }
+}
+
 pub fn normalize_dns_encoded_name(bytes: &[u8]) -> Result<NormalizedEnsName> {
     let input_name = decode_dns_encoded_name(bytes)?;
     normalize_name(&input_name)
@@ -235,6 +248,32 @@ mod tests {
             .expect_err("dot-containing label rejects");
 
         assert_eq!(error.message(), "name label must not contain dots");
+    }
+
+    #[test]
+    fn label_verdict_accepts_only_byte_identical_normalized_text() {
+        for label in ["alice", "🅰🅱"] {
+            assert_eq!(normalized_label_verdict(label), Ok(()));
+        }
+        for label in ["Alice", "🅰️🅱"] {
+            assert_eq!(
+                normalized_label_verdict(label).unwrap_err().message(),
+                "raw label is not byte-identical to its normalized form"
+            );
+        }
+    }
+
+    #[test]
+    fn label_verdict_preserves_normalization_errors() {
+        for (label, message) in [
+            ("sub.name".to_owned(), "name label must not contain dots"),
+            ("a".repeat(256), "name label exceeds DNS length"),
+        ] {
+            assert_eq!(
+                normalized_label_verdict(&label).unwrap_err().message(),
+                message
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,14 @@ fn label_flag_matches_the_interpreter_normalization_gate() {
         normalization_flag(b"Alice").error.as_deref(),
         Some("raw label is not byte-identical to its normalized form")
     );
-    assert!(normalization_flag(&[0xff]).error.is_some());
+    for raw_label in [&[0xff][..], b"alice\0"] {
+        let flag = normalization_flag(raw_label);
+        assert!(!flag.normalized);
+        assert_eq!(
+            flag.error.as_deref(),
+            Some("raw label has no PostgreSQL-safe UTF-8 decoding")
+        );
+    }
 }
 
 #[test]

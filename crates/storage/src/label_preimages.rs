@@ -7,7 +7,7 @@
 
 use alloy_primitives::keccak256;
 use anyhow::{Context, Result};
-use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_label_under_suffix};
+use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalized_label_verdict};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -98,28 +98,16 @@ fn proven_rainbow_preimage(hash: &str, name: &str) -> Option<RainbowPreimage> {
     if labelhash != hash.to_ascii_lowercase() {
         return None;
     }
-    let (normalized_under_version, normalization_error) = normalization_verdict(name);
+    let normalization_error = normalized_label_verdict(name)
+        .err()
+        .map(|error| error.to_string());
     Some(RainbowPreimage {
         labelhash,
         raw_label: name.as_bytes().to_vec(),
         decoded_label: Some(name.to_owned()),
-        normalized_under_version,
+        normalized_under_version: normalization_error.is_none(),
         normalization_error,
     })
-}
-
-// Same verdict the interpreter stores for a decodable chain-observed label:
-// normalized only when the raw bytes are byte-identical to their normalized
-// form. A failing verdict does not discard a proof-checked preimage.
-fn normalization_verdict(name: &str) -> (bool, Option<String>) {
-    match normalize_label_under_suffix(name, &[]) {
-        Ok(normalized) if normalized.normalized_name.as_bytes() == name.as_bytes() => (true, None),
-        Ok(_) => (
-            false,
-            Some("raw label is not byte-identical to its normalized form".to_owned()),
-        ),
-        Err(error) => (false, Some(error.to_string())),
-    }
 }
 
 async fn insert_label_preimages(pool: &PgPool, preimages: &[RainbowPreimage]) -> Result<u64> {
