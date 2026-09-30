@@ -167,7 +167,7 @@ family row.
 
 ## Service heartbeats
 
-`service_heartbeats` stores one liveness row for each service instance, chain, and phase. The new phase-runner services write it. Health checks and `/v2/status` read it. The schema leaves `service_name` open because the [phase-runner design](../../../docs/internal/archive/a2-phase-runner-design-20260731.md) assigns the new names; it does not admit the retired indexer or worker names by default. The [indexer heartbeat absorption](../../../docs/internal/archive/simplification-audit-20260730.md#appsindexer-fable) and the [service-heartbeat storage census](../../../docs/internal/archive/simplification-audit-20260730.md#cratesstorage-fable) authorize this table; build-plan amendment F defines its per-chain and per-phase shape.
+`service_heartbeats` stores one liveness row for each service instance, chain, and phase. The new phase-runner services write it. Health checks and `/v1/status` read it. The schema leaves `service_name` open because the [phase-runner design](../../../docs/internal/archive/a2-phase-runner-design-20260731.md) assigns the new names; it does not admit the retired indexer or worker names by default. The [indexer heartbeat absorption](../../../docs/internal/archive/simplification-audit-20260730.md#appsindexer-fable) and the [service-heartbeat storage census](../../../docs/internal/archive/simplification-audit-20260730.md#cratesstorage-fable) authorize this table; build-plan amendment F defines its per-chain and per-phase shape.
 
 ## Live/indexed resolution differences
 

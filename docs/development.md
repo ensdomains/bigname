@@ -10,8 +10,8 @@ binaries. `./scripts/dev-up` starts the API and, when
 1. Copy `.env.example` to `.env` and apply any local overrides.
 2. Run `docker compose up -d --wait` so PostgreSQL passes its healthcheck before
    phase initialization.
-3. Before the first configured phase-runner start, export the checked-in
-   environment and initialize the phase schema once:
+3. Export the local environment and initialize the phase schema once, before
+   starting either the API or the phase runner:
 
    ```sh
    set -a
@@ -19,8 +19,10 @@ binaries. `./scripts/dev-up` starts the API and, when
    set +a
    cargo phase init-schema
    ```
-4. Provision the separate SELECT-only verification login described in
-   [`deployment.md`](deployment.md#phase-runner-configuration).
+4. For indexing, configure the phase runner and provision the separate
+   SELECT-only verification login described in
+   [`deployment.md`](deployment.md#phase-runner-configuration). The sample
+   configuration leaves indexing disabled and starts only the API.
 5. Run `./scripts/dev-up`.
 
 This bootstrap assumes a disposable fresh local database volume. For a retained

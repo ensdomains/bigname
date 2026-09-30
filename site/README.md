@@ -65,7 +65,8 @@ python3 -m http.server 8765
 
 Then open `http://127.0.0.1:8765/`, or
 `http://127.0.0.1:8765/?api=http://127.0.0.1:3000` to use a local API started
-with `cargo run -p bigname-api`.
+with `cargo api serve` from the repository root, after completing the
+[local bootstrap](../docs/development.md#bootstrap) and loading its environment.
 
 ## Checks
 

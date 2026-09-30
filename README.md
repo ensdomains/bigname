@@ -33,22 +33,33 @@ outcomes or durable [execution traces](docs/glossary.md).
 
 ## Local development
 
+For a fresh, disposable local database:
+
 ```sh
-cp .env.example .env                       # optional, for custom ports/creds
-docker compose up -d                       # PostgreSQL
-cargo phase -- init-schema                 # initialize bigname_phase once
-./scripts/dev-up                           # boot api + configured phase runner
+cp .env.example .env
+# Edit local settings before loading them.
+set -a
+. ./.env
+set +a
+docker compose up -d --wait
+cargo phase init-schema
+./scripts/dev-up
 ```
 
-The API binds to `127.0.0.1:3000` by default. Use `/v1` routes for REST and
-`/healthz` for readiness. The API and phase runner use `bigname_phase` in the same database.
-Initialize that namespace once with `cargo phase -- init-schema`.
+The sample configuration starts only the API, on `127.0.0.1:3000`. Use `/v1`
+routes for REST and `/healthz` for readiness. To run indexing too, complete the
+[phase-runner configuration](docs/development.md#bootstrap), including its
+separate SELECT-only verification login, before starting `dev-up`.
 
-Useful one-shots:
+`init-schema` refuses a nonempty schema. For a retained database, follow the
+[upgrade procedure](docs/runbooks/production-docker.md) instead of initializing
+it again.
 
-- `cargo api -- serve`
-- `cargo phase -- init-schema`
-- `cargo phase -- redo --help`
+Useful one-shots, with the environment loaded:
+
+- `cargo api serve`
+- `cargo phase init-schema`
+- `cargo phase redo --help`
 
 Set `BIGNAME_API_CHAIN_RPC_URLS` for schema-v2 verified ENS resolution and
 ENS/60 primary-name lookup. The phase runner owns ingest, interpret, project,
