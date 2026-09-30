@@ -1064,7 +1064,7 @@ its value map:
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `source` | query | enum `indexed`, `verified`, `auto` | no | `indexed` | Answer origin. |
-| `keys` | query | array of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
+| `keys` | query | array [0, 200] of string | no | none | Comma-separated record selectors: addr:<decimal>, text:<key>, contenthash or avatar; omitted/blank uses the inventory-derived default keys. At most 200 keys. |
 | `include` | query | array of enum `inventory` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 

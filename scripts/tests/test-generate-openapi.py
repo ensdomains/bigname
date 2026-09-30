@@ -154,6 +154,34 @@ class GenerationTests(unittest.TestCase):
             example = {"name": value, "status": "ok"}
             self.reject(api=api + "\n```json openapi-example Record\n" + json.dumps(example) + "\n```\n", match="(minimum|maximum)")
 
+    def test_bounded_arrays_keep_query_serialization_and_validate_defaults(self):
+        routes = ROUTES.replace("array of enum", "array [1, 2] of enum")
+        generator = Generator(API, routes)
+        param = generator.generate()["paths"]["/v1/names/{name}"]["get"]["parameters"][1]
+        self.assertEqual((param["style"], param["explode"]), ("form", False))
+        schema = param["schema"]
+        self.assertEqual((schema["minItems"], schema["maxItems"]), (1, 2))
+        for value in (["counts"], ["counts", "roles"]):
+            generator.validate(value, schema, "include")
+        for value in ([], ["counts", "roles", "counts"]):
+            with self.assertRaisesRegex(ContractError, "include.*(minItems|maxItems)"):
+                generator.validate(value, schema, "include")
+        self.reject(routes=routes.replace("`counts,roles`", "`counts,roles,counts`"), match="default of include.*maxItems")
+        self.reject(routes=routes.replace("array [1, 2]", "array [2, 2]").replace("`counts,roles`", "`counts`"), match="default of include.*minItems")
+        for expr in ("array [2, 1]", "array [-1, 2]", "array [0, 2.5]", "array [00, 2]", "array [0,]"):
+            self.reject(routes=routes.replace("array [1, 2]", expr))
+
+    def test_bounded_array_object_examples_and_nullable_values(self):
+        api = API.replace("array of string", "nullable array [0, 2] of integer [1, 200]")
+        for value in (None, [], [1], [1, 200]):
+            example = {"name": "alice.eth", "status": "ok", "labels": value}
+            doc = self.generate(api=api + "\n```json openapi-example Record\n" + json.dumps(example) + "\n```\n")
+            schema = doc["components"]["schemas"]["Record"]["properties"]["labels"]
+            self.assertEqual((schema["type"], schema["minItems"], schema["maxItems"]), (["array", "null"], 0, 2))
+        for value in ([1, 2, 3], [201]):
+            example = {"name": "alice.eth", "status": "ok", "labels": value}
+            self.reject(api=api + "\n```json openapi-example Record\n" + json.dumps(example) + "\n```\n", match="(maxItems|maximum)")
+
     def test_error_responses_restrict_codes_and_keep_the_envelope_closed(self):
         generator = Generator(API, ROUTES)
         responses = generator.generate()["paths"]["/v1/names/{name}"]["get"]["responses"]

@@ -2598,7 +2598,9 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "minItems": 0,
+              "maxItems": 200
             },
             "style": "form",
             "explode": false
