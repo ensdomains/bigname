@@ -109,6 +109,22 @@ async fn openapi_get_and_head_are_stable_json_without_database_or_provider() {
     assert_eq!(document["openapi"], "3.1.0");
     assert_eq!(document["info"]["version"], crate::SOFTWARE_VERSION);
     assert_eq!(document["info"]["x-build-sha"], crate::BUILD_SHA);
+    let docs_ref = if crate::BUILD_SHA.len() == 40
+        && crate::BUILD_SHA
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        crate::BUILD_SHA
+    } else {
+        "main"
+    };
+    let docs_base = format!("https://github.com/ensdomains/bigname/blob/{docs_ref}/docs/");
+    assert!(
+        document["paths"]["/v1/lookup"]["post"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(&docs_base)
+    );
     assert!(!String::from_utf8_lossy(&body).contains("__BIGNAME_"));
     assert_eq!(
         headers[header::ETAG],
