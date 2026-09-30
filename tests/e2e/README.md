@@ -14,7 +14,8 @@ the real API from the same source and checks indexed-name HTTP. The single
 sale and both batch sales assert owner and registrant separately from the
 on-chain getter checks. A directly authenticated SELECT-only role supplies
 verification reads. The HTTP proof grants that reader only the API's additional
-nine-argument lookup-guard EXECUTE capability; it receives no ledger-writer grant.
+fixed read-only lookup-guard EXECUTE capability; it receives no boolean-core or
+ledger-writer grant.
 Every produced phase table must remain unchanged across HTTP. The harness stops
 and reaps its runner and API on success and early return. This local Sepolia scenario does not establish Mainnet intake
 or deployment readiness. Its original fixture and projection assertions remain.

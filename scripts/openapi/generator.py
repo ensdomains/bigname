@@ -13,6 +13,7 @@ from .markdown import ContractError, NAME, description, literal, literals, requi
 DOCS_BASE = "https://github.com/ensdomains/bigname/blob/main/docs/"
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCALARS = {"string", "integer", "boolean"}
+BOUNDED_INTEGER = r"integer \[(-?(?:0|[1-9][0-9]*)), (-?(?:0|[1-9][0-9]*))\]"
 
 
 class Generator:
@@ -54,6 +55,11 @@ class Generator:
             return {"anyOf": [inner, {"type": "null"}]}
         if expr in SCALARS:
             return {"type": expr}
+        match = re.fullmatch(BOUNDED_INTEGER, expr)
+        if match:
+            minimum, maximum = map(int, match.groups())
+            require(minimum <= maximum, f"integer minimum exceeds maximum: {expr}")
+            return {"type": "integer", "minimum": minimum, "maximum": maximum}
         if expr.startswith("array of "):
             return {"type": "array", "items": self.type_schema(expr[9:])}
         if expr.startswith("map of string to "):
@@ -170,7 +176,7 @@ class Generator:
     def is_parameter_type(self, expr):
         if expr.startswith("array of "):
             expr = expr[9:]
-        return expr in SCALARS or expr.startswith("enum ")
+        return expr in SCALARS or expr.startswith("enum ") or bool(re.fullmatch(BOUNDED_INTEGER, expr))
 
     def parse_default(self, raw, schema):
         raw = literal(raw)
@@ -307,6 +313,11 @@ class Generator:
                   "string" if isinstance(value, str) else "array" if isinstance(value, list) else
                   "object" if isinstance(value, dict) else "number")
         require(actual in kinds, f"{context}: expected {kind}, found {actual}")
+        if actual == "integer":
+            if "minimum" in schema:
+                require(value >= schema["minimum"], f"{context}: below minimum {schema['minimum']}")
+            if "maximum" in schema:
+                require(value <= schema["maximum"], f"{context}: above maximum {schema['maximum']}")
         if actual == "array":
             for index, item in enumerate(value):
                 self.validate(item, schema["items"], f"{context}[{index}]")

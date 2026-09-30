@@ -779,6 +779,20 @@ async fn least_privileged_non_api_writer_keeps_its_existing_function_grants() ->
         .max_connections(2)
         .connect_with(connect_options)
         .await?;
+    let guard_access: (bool, bool, bool) = sqlx::query_as(
+        "SELECT has_function_privilege(current_user,
+           'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)',
+           'EXECUTE'),
+         has_function_privilege(current_user,
+           'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+           'EXECUTE'),
+         has_function_privilege(current_user,
+           'bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)',
+           'EXECUTE')",
+    )
+    .fetch_one(&writer_pool)
+    .await?;
+    assert_eq!(guard_access, (true, false, false));
 
     let request = lookup_request(&fixture.logical_name_id)?;
     let snapshot = crate::store::load_snapshot(&writer_pool, &request).await?;
@@ -1061,9 +1075,9 @@ async fn lookup_publication_migration_preserves_guard_writer_and_privileges() ->
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     let before: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
-         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
+         AND proname IN ('revalidate_resolution_lookup_state', 'revalidate_resolution_lookup_state_read_only', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
     ).fetch_all(fixture.pool()).await?;
-    // Upgrade through the Project-row guard, family inputs, and read-only overload.
+    // Upgrade through the Project-row guard, family inputs, and fixed read-only entry point.
     for migration in [
         include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
         include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
@@ -1075,7 +1089,7 @@ async fn lookup_publication_migration_preserves_guard_writer_and_privileges() ->
     }
     let after: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
-         AND proname IN ('revalidate_resolution_lookup_state', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
+         AND proname IN ('revalidate_resolution_lookup_state', 'revalidate_resolution_lookup_state_read_only', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
     ).fetch_all(fixture.pool()).await?;
     assert_eq!(
         before, after,

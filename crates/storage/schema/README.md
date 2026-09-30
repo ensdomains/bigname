@@ -212,10 +212,13 @@ including for admitted shadow execution declarations. This guard runs when
 wildcard or CCIP behavior precludes a ledger mutation. It then mutates the
 ledger through `write_resolution_divergence`. This locking writer is retained
 for non-API callers. Both are fixed-`search_path`, security-definer functions
-with default `PUBLIC` execution revoked. The API uses the shared guard with
-locking disabled in a fresh repeatable-read, read-only transaction after RPC,
-and never mutates the ledger. Deployment grants its role only the nine-argument
-guard overload, with no writer-function or ledger-table privilege. ENS/60 primary-name verification uses the same
+with default `PUBLIC` execution revoked. The API uses
+`revalidate_resolution_lookup_state_read_only`, a security-definer wrapper that
+fixes locking to false, in a fresh repeatable-read, read-only transaction after
+RPC, and never mutates the ledger. Deployment grants its role only that wrapper,
+with no access to the private boolean core, writer function or ledger table.
+Both wrappers call one security-invoker core with their owner's privileges.
+ENS/60 primary-name verification uses the same
 head, lineage, family-publication, and manifest-authority guard after its live
 calls without passing a name or inventory comparison or mutating the ledger.
 Project's only write to the ledger retires active direct observations for a name

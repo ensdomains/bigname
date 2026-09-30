@@ -7,8 +7,9 @@ BEGIN
     END IF;
     EXECUTE $definition$
 -- Share every state predicate between API snapshot reads and locking ledger writes.
+-- The boolean core is private; callers receive only a fixed-mode wrapper.
 -- Read-only callers use a fresh REPEATABLE READ, READ ONLY transaction after RPC.
--- The eight-argument wrapper retains locks through the ledger transaction's commit.
+-- The original eight-argument entry point retains locks through ledger commit.
 CREATE OR REPLACE FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     requested_authoritative_chain_id text,
     requested_authoritative_block_number bigint,
@@ -22,7 +23,7 @@ CREATE OR REPLACE FUNCTION bigname_phase.revalidate_resolution_lookup_state(
 )
 RETURNS text
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = pg_catalog, bigname_phase, pg_temp
 AS $$
 DECLARE
@@ -223,6 +224,29 @@ $$;
 
 REVOKE ALL ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
+) FROM PUBLIC;
+
+-- Only this fixed-mode entry point is granted to the API role.
+CREATE OR REPLACE FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
+    requested_authoritative_chain_id text,
+    requested_authoritative_block_number bigint,
+    requested_authoritative_block_hash text,
+    requested_observed_positions jsonb,
+    compared_execution_authority jsonb,
+    compared_resource_id uuid,
+    compared_boundary_key text,
+    compared_row_xmin text
+)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+    SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6, $7, $8, false)
+$$;
+
+REVOKE ALL ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
 ) FROM PUBLIC;
 
 -- Preserve the locking entry point used by the diagnostic ledger writer.

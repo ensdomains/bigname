@@ -904,11 +904,12 @@ operators and may still be retired by Project or reorg handling. No serving
 path reads them.
 
 The API role needs `USAGE` on `bigname_phase`, `SELECT` on the serving relations
-below, and `EXECUTE` only on the nine-argument snapshot guard below. This
+below, and `EXECUTE` only on the fixed read-only snapshot guard below. This
 fixed-`search_path`, security-definer function is owned by the schema owner; its
 installer revokes default `PUBLIC` execution. Do not grant the API role
 `CREATE` on `bigname_phase` or `public`, writes on any application relation, or
-execution of the retained diagnostic ledger writer.
+execution of the retained diagnostic ledger writer. The nine-argument boolean
+core is private to the schema owner and must not be granted to the API role.
 
 API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
@@ -988,14 +989,14 @@ GRANT SELECT ON TABLE
     bigname_phase.project_name_history,
     bigname_phase.project_name_summary
 TO bigname_api;
-GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
-    text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
+GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
 ```
 
 For an existing deployment, apply
 `20260930100000_read_only_lookup_guard.sql` on the primary, wait for it to replay
-on any serving standby, and grant the nine-argument function above before
+on any serving standby, and grant the fixed read-only function above before
 restarting the API. Existing eight-argument and writer-function grants remain
 on upgrade for non-API callers; remove them specifically from the API role once
 all API instances use the read-only build:
@@ -1003,6 +1004,9 @@ all API instances use the read-only build:
 ```sql
 REVOKE EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
+) FROM bigname_api;
+REVOKE EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
 ) FROM bigname_api;
 REVOKE EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
     uuid, text, text, text, bigint, text, jsonb, text, text, text,

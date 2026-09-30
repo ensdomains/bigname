@@ -114,11 +114,11 @@ async fn revalidate_lookup_state(
     lock_rows: bool,
 ) -> Result<()> {
     // Retain the old entry point for writers so existing non-API EXECUTE grants
-    // remain sufficient. Only read-only callers need the new overload.
+    // remain sufficient. Read-only callers use their fixed-mode entry point.
     let query = if lock_rows {
         "SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6::uuid, $7, $8)"
     } else {
-        "SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6::uuid, $7, $8, false)"
+        "SELECT revalidate_resolution_lookup_state_read_only($1, $2, $3, $4, $5, $6::uuid, $7, $8)"
     };
     let status: String = sqlx::query_scalar(query)
         .bind(&authoritative_position.chain_id)
