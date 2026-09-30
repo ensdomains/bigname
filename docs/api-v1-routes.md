@@ -2852,14 +2852,14 @@ introduces it rebuilds Project from full history before serving the option; see
 | `coin_type` | query | string | no | none | Decimal coin type or evm, only with relation=resolves_to; omission defaults to 60 on that relation. evm matches all EVM coin types. |
 | `expires_after` | query | string | no | none | Inclusive expiry lower bound, only with relation=former_registrant. |
 | `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_registrant. |
-| `authority` | query | array of enum Authority | no | none | Comma-separated selected authority arms. Rows without an authority arm do not match. |
-| `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with resolves_to. |
-| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. |
+| `authority` | query | array of enum Authority | no | none | Comma-separated selected authority arms. Rows without an authority arm do not match. Not accepted with relation=former_registrant. |
+| `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_registrant. |
+| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_registrant. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
-| `sort` | query | enum AddressNamesSort | no | `name` | Row sort key; ties use the route's stable identity order. |
+| `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_registrant. Former registrants accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
-| `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. |
-| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_registrant accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
+| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. Nonempty include is not accepted with relation=former_registrant. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -2999,7 +2999,7 @@ introduces it rebuilds Project from full history before serving the option; see
   expiry last ascending and first descending. Finite values and cursor
   positions compare numerically without calendar or safe-integer caps.
   `coin_type`,
-  `authority`, `is_migrated`, `q` and `include` return `400 invalid_input` with
+  `authority`, `is_migrated`, `q` and nonempty `include` return `400 invalid_input` with
   it. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
   are equivalent; `dedupe=registration` returns `400 invalid_input`, including
   with a continuation cursor. Released names have no current registration resource

@@ -404,6 +404,19 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
 #[tokio::test]
 async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    let parameters = openapi_contract::document()["paths"]["/v1/addresses/{address}/names"]["get"]
+        ["parameters"]
+        .as_array()
+        .expect("address-name contract parameters");
+    let sort = parameters
+        .iter()
+        .find(|parameter| parameter["name"] == "sort")
+        .expect("address-name sort contract");
+    assert!(
+        sort["schema"].get("default").is_none(),
+        "GET /v1/addresses/{{address}}/names sort default depends on relation; \
+         advertising name unconditionally breaks former_registrant requests"
+    );
     let database = TestDatabase::new_migrated().await?;
     let released = seed_names_registration(
         &database,
@@ -532,6 +545,12 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     )
     .await?;
     assert_eq!(v2_names_listed(&former), vec!["lapsed-listed.eth"], "{former}");
+    let explicit_expiry = v2_names_payload(
+        &database,
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&sort=expires_at"),
+    )
+    .await?;
+    assert_eq!(explicit_expiry["data"], former["data"]);
     let row = &former["data"][0];
     assert_eq!(row["relations"], json!(["former_registrant"]));
     assert_eq!(row["registration_status"], json!("released"));
