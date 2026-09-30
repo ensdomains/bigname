@@ -30,7 +30,7 @@ fn coverage_query_binds_the_same_manifest_and_admission_evidence_as_project() {
     assert!(query.contains("marker.input_content_hash = $1"));
     assert!(query.contains("marker.state = 'live'"));
     assert!(query.contains("publication_lineage.block_number = marker.current_block_number"));
-    assert!(query.contains("input_phase.redo_from_block_number <= marker.current_block_number"));
+    assert!(query.contains("COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number"));
     assert!(query.contains("resolver.manifest_id = expected.manifest_id"));
     assert!(query.contains("resolver.manifest_event_id = expected.manifest_event_id"));
     assert!(query.contains("manifest_event.manifest_version = expected.manifest_version"));

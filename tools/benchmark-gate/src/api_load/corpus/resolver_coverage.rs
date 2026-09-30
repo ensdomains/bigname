@@ -56,7 +56,7 @@ WITH current_projects AS (
           WHERE input_phase.chain_id = marker.chain_id
             AND input_phase.phase_name IN ('interpret', 'project')
             AND input_phase.redo_in_progress
-            AND input_phase.redo_from_block_number <= marker.current_block_number
+            AND COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number
       )
 ), stored_resolver_manifests AS (
     SELECT manifest.*

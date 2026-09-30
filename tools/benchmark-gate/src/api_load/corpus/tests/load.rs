@@ -1010,6 +1010,7 @@ async fn ensure_project_state_schema(pool: &PgPool) {
              input_content_hash text,
              redo_in_progress boolean NOT NULL DEFAULT false,
              redo_from_block_number bigint,
+             redo_requested_from_block_number bigint,
              PRIMARY KEY (chain_id, phase_name)
          )",
     )
@@ -1266,6 +1267,26 @@ async fn resolver_coverage_requires_a_current_project_publication() {
             "invalidated_input",
             "UPDATE project_family_marker SET input_content_hash = 'different-generation'",
             false,
+        ),
+        (
+            "redo_predecessor_checkpoint",
+            "UPDATE chain_phase_state SET redo_in_progress=true, redo_from_block_number=101, redo_requested_from_block_number=102",
+            true,
+        ),
+        (
+            "overlapping_requested_redo",
+            "UPDATE chain_phase_state SET redo_in_progress=true, redo_from_block_number=100, redo_requested_from_block_number=101",
+            false,
+        ),
+        (
+            "overlapping_legacy_redo",
+            "UPDATE chain_phase_state SET redo_in_progress=true, redo_from_block_number=101",
+            false,
+        ),
+        (
+            "nonoverlapping_legacy_redo",
+            "UPDATE chain_phase_state SET redo_in_progress=true, redo_from_block_number=102",
+            true,
         ),
     ] {
         let database = TestDatabase::create(
