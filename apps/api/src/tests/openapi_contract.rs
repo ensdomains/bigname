@@ -211,7 +211,7 @@ fn openapi_error_responses_constrain_codes_for_the_operation_and_status() {
     for (method, path, status, allowed) in [
         ("post", "/v1/lookup", "400", &["invalid_input"][..]),
         ("post", "/v1/lookup", "409", &["conflict", "stale"][..]),
-        ("get", "/v1/names/{name}", "409", &["stale"][..]),
+        ("get", "/v1/names", "409", &["stale"][..]),
         ("get", "/v1/names/{name}", "500", &["internal_error"][..]),
     ] {
         let schema = &document()["paths"][path][method]["responses"][status]["content"]["application/json"]
