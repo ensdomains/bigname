@@ -1,13 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 
 use super::{
     decode::decode_address_names_current_summary,
     query::{
-        push_address_names_current_cursor_after, push_address_names_current_cursor_identity_match,
-        push_address_names_current_cursor_sort_value_match,
-        push_address_names_current_grouped_entries_cte, push_address_names_current_order,
-        push_address_names_current_sortable_entries_cte,
+        push_address_names_current_cursor_after, push_address_names_current_grouped_entries_cte,
+        push_address_names_current_order, push_address_names_current_sortable_entries_cte,
     },
     source::RowSource,
     types::{
@@ -86,15 +84,13 @@ pub async fn load_address_names_current_page_sorted_for_relations(
 ) -> Result<AddressNamesCurrentSortedPage> {
     load_address_names_current_page_filtered(
         pool, address, namespace, relations, dedupe_by, q, authority, None, sort, order, cursor,
-        None, page_size,
+        page_size,
     )
     .await
 }
 
-/// The page is read from the owned key families
-/// (`families::records::load_family_address_names_page`). `expected_registry_children_digest`
-/// is the digest a continuation's cursor was issued with; when the page's differs, the read fails
-/// with [`crate::AddressNamesRegistryChildrenChanged`] before validating the cursor's anchor.
+/// The page is read from the owned key families. A cursor holds a sort position; its
+/// original row need not still exist in the current collection.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_names_current_page_filtered(
     pool: &PgPool,
@@ -108,7 +104,6 @@ pub async fn load_address_names_current_page_filtered(
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
-    expected_registry_children_digest: Option<&str>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     crate::families::records::load_family_address_names_page(
@@ -123,13 +118,12 @@ pub async fn load_address_names_current_page_filtered(
         sort,
         order,
         cursor,
-        expected_registry_children_digest,
         page_size,
     )
     .await
 }
 
-/// The page over `source`: the summary, the cursor check and the page, three statements on
+/// The page over `source`: the summary and the page, two statements on
 /// `conn`, which a composed read holds in one snapshot.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_address_names_page_from(
@@ -173,20 +167,6 @@ pub(crate) async fn load_address_names_page_from(
 
     if let Some(cursor) = cursor {
         ensure_address_names_current_cursor_matches_sort(sort, cursor)?;
-        ensure_address_names_current_cursor_exists(
-            &mut *conn,
-            source,
-            address,
-            namespace,
-            relations,
-            dedupe_by,
-            q,
-            authority,
-            is_migrated,
-            sort,
-            cursor,
-        )
-        .await?;
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
@@ -272,7 +252,6 @@ pub(crate) async fn load_address_names_page_from(
         entries,
         next_cursor,
         summary,
-        registry_children_digest: String::new(),
     })
 }
 
@@ -475,68 +454,4 @@ async fn load_address_names_current_summary(
     })?;
 
     decode_address_names_current_summary(row)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn ensure_address_names_current_cursor_exists(
-    conn: &mut PgConnection,
-    source: RowSource<'_>,
-    address: &str,
-    namespace: Option<&str>,
-    relations: Option<&[AddressNameRelation]>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<NameQuery<'_>>,
-    authority: Option<&[&str]>,
-    is_migrated: Option<bool>,
-    sort: AddressNamesCurrentSort,
-    cursor: &AddressNamesCurrentSortedCursor,
-) -> Result<()> {
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_address_names_current_grouped_entries_cte(
-        &mut builder,
-        source,
-        address,
-        namespace,
-        relations,
-        dedupe_by,
-        q,
-        authority,
-        is_migrated,
-    );
-    push_address_names_current_sortable_entries_cte(&mut builder, source.names(), sort);
-    builder.push(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM
-        "#,
-    );
-    builder.push(if sort.is_timestamp() {
-        "sortable_entries"
-    } else {
-        "entries"
-    });
-    builder.push(" WHERE ");
-    push_address_names_current_cursor_identity_match(&mut builder, cursor);
-    push_address_names_current_cursor_sort_value_match(&mut builder, sort, cursor);
-    builder.push(
-        r#"
-        ) AS cursor_exists
-        "#,
-    );
-
-    let row = builder.build().fetch_one(conn).await.with_context(|| {
-        let mut parts = load_context_parts(address, namespace, relations, dedupe_by, q, authority);
-        parts.push(format!("sort {}", sort.as_str()));
-        format!(
-            "failed to validate address_names_current grouped page cursor for {}",
-            parts.join(" ")
-        )
-    })?;
-
-    if crate::sql_row::get::<bool>(&row, "cursor_exists")? {
-        Ok(())
-    } else {
-        bail!("address_names_current page cursor does not match a grouped entry")
-    }
 }

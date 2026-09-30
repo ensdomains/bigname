@@ -428,10 +428,10 @@ async fn v2_registry_child_stays_listed_until_its_new_surface_is_published() -> 
 }
 
 /// A label preimage that arrives between two requests renames a registry child, which can move
-/// it across a name-sorted cursor, so the continuation asks for a restart; a fresh read then
+/// it across a name-sorted cursor. The continuation retains its saved position; a fresh walk
 /// serves the new name once.
 #[tokio::test]
-async fn v2_registry_child_rename_restarts_a_name_sorted_read() -> Result<()> {
+async fn v2_registry_child_rename_continues_a_name_sorted_read() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_children_fixture(&database).await?;
     let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=2");
@@ -449,8 +449,8 @@ async fn v2_registry_child_rename_restarts_a_name_sorted_read() -> Result<()> {
     insert_family_label_preimage(&database.pool, b"unknown").await?;
     let (status, error) =
         read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
-    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+    assert_eq!(status, StatusCode::OK, "{error:#}");
+    assert_eq!(error["data"][0]["name"], json!("gains.alpha.eth"));
 
     let rows = rows_of(&read_family_pages(&database, &uri).await?);
     let mut expected = vec![
@@ -467,10 +467,10 @@ async fn v2_registry_child_rename_restarts_a_name_sorted_read() -> Result<()> {
 }
 
 /// When the renamed registry child is the continuation's anchor itself, the cursor's saved sort
-/// value no longer matches the child. The read still answers the restart (409 stale) that a
-/// rendering change calls for, not an invalid cursor; a cursor that is malformed stays invalid.
+/// value no longer matches the child. The read continues after the saved position; a malformed
+/// cursor stays invalid.
 #[tokio::test]
-async fn v2_registry_child_rename_of_the_cursor_anchor_restarts_the_read() -> Result<()> {
+async fn v2_registry_child_rename_of_the_cursor_anchor_continues_from_its_position() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_children_fixture(&database).await?;
     let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=1");
@@ -490,8 +490,8 @@ async fn v2_registry_child_rename_of_the_cursor_anchor_restarts_the_read() -> Re
     insert_family_label_preimage(&database.pool, b"unknown").await?;
     let (status, error) =
         read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
-    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+    assert_eq!(status, StatusCode::OK, "{error:#}");
+    assert_eq!(error["data"][0]["name"], json!("alpha.eth"));
 
     let (status, error) =
         read_family_response(&database, &format!("{uri}&cursor=not-a-cursor")).await?;
@@ -509,11 +509,9 @@ fn stale_address_names_cursor(cursor: &str, change: impl FnOnce(&mut Value)) -> 
     Ok(hex::encode(serde_json::to_vec(&payload)?))
 }
 
-/// The ownership cursor's shape and binding are checked before its publication: a legacy
-/// eight-key cursor, or one whose anchor is malformed, is invalid input (400) even when the
-/// publication it came from is gone, and only a well-formed stale cursor restarts (409).
+/// Legacy publication and digest fields are ignored only after the query and position validate.
 #[tokio::test]
-async fn v2_a_stale_malformed_ownership_cursor_is_invalid_before_it_is_stale() -> Result<()> {
+async fn v2_legacy_ownership_cursor_continues_but_wrong_filter_and_bad_anchor_fail() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_children_fixture(&database).await?;
     let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&page_size=1");
@@ -526,19 +524,21 @@ async fn v2_a_stale_malformed_ownership_cursor_is_invalid_before_it_is_stale() -
 
     let stale = stale_address_names_cursor(&cursor, |_| {})?;
     let (status, error) = read_family_response(&database, &format!("{uri}&cursor={stale}")).await?;
-    assert_eq!(status, StatusCode::CONFLICT, "{error:#}");
-    assert_eq!(error["error"]["code"], json!("stale"), "{error:#}");
+    assert_eq!(status, StatusCode::OK, "{error:#}");
 
     let legacy = stale_address_names_cursor(&cursor, |payload| {
-        let removed = payload["filters"]
-            .as_object_mut()
-            .and_then(|filters| filters.remove("registry_children"));
-        assert!(removed.is_some(), "an issued cursor binds the registry children");
+        payload["filters"]["registry_children"] = json!("old-rendering");
+        payload["evaluated_at"] = json!("2020-01-01T00:00:00Z");
+    })?;
+    let (status, body) = read_family_response(&database, &format!("{uri}&cursor={legacy}")).await?;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let wrong_filter = stale_address_names_cursor(&cursor, |payload| {
+        payload["filters"]["address"] = json!("0x0000000000000000000000000000000000000001");
     })?;
     let bad_anchor = stale_address_names_cursor(&cursor, |payload| {
         payload["last_item"]["resource_id"] = json!("not-a-uuid");
     })?;
-    for (case, cursor) in [("legacy eight-key", legacy), ("malformed anchor", bad_anchor)] {
+    for (case, cursor) in [("wrong address", wrong_filter), ("malformed anchor", bad_anchor)] {
         let (status, error) =
             read_family_response(&database, &format!("{uri}&cursor={cursor}")).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {error:#}");

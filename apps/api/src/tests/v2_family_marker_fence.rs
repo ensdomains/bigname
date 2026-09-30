@@ -50,26 +50,26 @@ async fn v2_collection_refuses_a_family_block_committed_during_the_read() -> Res
         "collection publication changed during the read; retry the request"
     );
 
-    let first = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let _first = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         None,
         Some("ens"),
     )
     .await
     .expect("capture the new generation");
-    let cursor = crate::v2::encode(&first.bind_cursor(crate::v2::CursorPayload::new(
+    let cursor = crate::v2::encode(&crate::v2::CursorPayload::new(
         "test",
         Default::default(),
         Default::default(),
         None,
-    )));
+    ));
     let continued = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         Some(&cursor),
         Some("ens"),
     )
     .await
-    .expect("the cursor belongs to the current generation");
+    .expect("the continuation reads the current publication");
     commit_family_block(&database.pool).await?;
     let error = continued
         .finish(&state)
@@ -77,7 +77,7 @@ async fn v2_collection_refuses_a_family_block_committed_during_the_read() -> Res
         .expect_err("the generation changed");
     assert_eq!(
         error.envelope().error.message,
-        "collection publication is no longer available; restart pagination without a cursor"
+        "collection publication changed during the read; retry the request"
     );
     database.cleanup().await
 }
@@ -116,12 +116,12 @@ async fn v2_collection_expiry_clock_is_the_published_block_time() -> Result<()> 
     .await
     .expect("the publication is servable");
     assert_eq!(first.evaluated_at(), block_time);
-    let mut payload = first.bind_cursor(crate::v2::CursorPayload::new(
+    let mut payload = crate::v2::CursorPayload::new(
         "test",
         Default::default(),
         Default::default(),
         None,
-    ));
+    );
     payload.evaluated_at = Some(bigname_storage::UnixSeconds::from(carried).internal_string());
     let cursor = crate::v2::encode(&payload);
     let continued = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
@@ -208,35 +208,25 @@ fn collection_next_cursor(payload: &Value) -> Option<String> {
     payload["page"]["next_cursor"].as_str().map(str::to_owned)
 }
 
-/// An issued publication-bound continuation keeps refusing after the generation changes;
-/// restarting from the first page issues a usable continuation.
-async fn assert_family_publication_restarts(
-    database: &TestDatabase,
-    first_page: &str,
-) -> Result<()> {
+/// A continuation remains usable after the family publication sequence advances.
+async fn assert_family_publication_continues(database: &TestDatabase, first_page: &str) -> Result<()> {
     let page = v2_resolver_payload_for_database(database, first_page).await?;
     let cursor = collection_next_cursor(&page).context("a continuation")?;
+    let payload = crate::v2::decode(&cursor).expect("issued position");
+    assert!(payload.snapshot.is_none());
+    assert!(payload.evaluated_at.is_none());
+    let before = v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={cursor}")).await?;
     commit_family_block(&database.pool).await?;
-    for attempt in ["first", "second"] {
-        let response =
-            v2_resolver_response_for_database(database, &format!("{first_page}&cursor={cursor}"))
-                .await?;
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{attempt}");
-        let body: Value = read_json(response).await?;
-        assert_eq!(body["error"]["code"], json!("stale"));
-        assert_eq!(body["error"]["message"], json!(RESTART_WITHOUT_CURSOR));
-    }
-    let restarted = v2_resolver_payload_for_database(database, first_page).await?;
-    let cursor = collection_next_cursor(&restarted).context("a fresh continuation")?;
-    v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={cursor}")).await?;
+    let after = v2_resolver_payload_for_database(database, &format!("{first_page}&cursor={cursor}")).await?;
+    assert_eq!(before["data"], after["data"]);
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_a_subnames_cursor_restarts_after_family_publication_changes() -> Result<()> {
+async fn v2_a_subnames_cursor_continues_after_family_publication_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_children_fixture(&database).await?;
-    assert_family_publication_restarts(&database, "/v1/names/alpha.eth/subnames?page_size=1")
+    assert_family_publication_continues(&database, "/v1/names/alpha.eth/subnames?page_size=1")
         .await?;
     database.cleanup().await
 }
@@ -269,37 +259,22 @@ async fn v2_a_resolver_overview_cursor_continues_after_family_publication_change
 }
 
 #[tokio::test]
-async fn v2_a_resolver_collection_cursor_binds_its_family_generation() -> Result<()> {
+async fn v2_a_resolver_collection_cursor_continues_and_rejects_old_generation_shape() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_permissions_fixture(&database).await?;
     let base = format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles?page_size=1");
-    assert_family_publication_restarts(&database, &base).await?;
+    assert_family_publication_continues(&database, &base).await?;
     let page = v2_resolver_payload_for_database(&database, &base).await?;
     let mut spliced = crate::v2::decode(&collection_next_cursor(&page).context("a continuation")?)
         .expect("issued cursor decodes");
-    assert!(spliced.last_item.contains_key("generation"));
-    commit_family_block(&database.pool).await?;
-    let fresh = v2_resolver_payload_for_database(&database, &base).await?;
-    let fresh = collection_next_cursor(&fresh).context("a continuation")?;
-    let publication = crate::v2::decode(&fresh)
-        .expect("fresh cursor decodes")
-        .last_item["publication"]
-        .clone();
-    spliced
-        .last_item
-        .insert("publication".to_owned(), publication);
+    assert!(!spliced.last_item.contains_key("generation"));
+    spliced.last_item.insert("generation".to_owned(), "old-generation".to_owned());
     let response = v2_resolver_response_for_database(
         &database,
         &format!("{base}&cursor={}", crate::v2::encode(&spliced)),
     )
     .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: Value = read_json(response).await?;
-    assert_eq!(
-        body["error"]["message"],
-        json!("resolver collection changed; restart pagination")
-    );
-    v2_resolver_payload_for_database(&database, &format!("{base}&cursor={fresh}")).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     database.cleanup().await
 }
 

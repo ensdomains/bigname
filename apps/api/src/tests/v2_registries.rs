@@ -434,6 +434,8 @@ async fn v2_get_registry_labels_pages_held_labels_with_bound_cursor_and_counts()
         .expect("first page must carry a cursor")
         .to_owned();
 
+    rebuild_fixture_families(&database.pool, REGISTRY_CHAIN_ID, 83, "0xregistry83").await?;
+
     let second = registry_payload(
         &database,
         &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels?page_size=1&cursor={next_cursor}"),

@@ -30,47 +30,6 @@ impl PublicNamespaceSet {
             .collect();
         Self::new(deployments, request_scope, manifests)
     }
-
-    pub(crate) fn collection_fingerprint(&self) -> String {
-        let deployments = self
-            .deployments
-            .iter()
-            .map(|deployment| {
-                let read = deployment.read_token.as_ref().map(|token| {
-                    json!({
-                        "positions": token.selected.chain_positions.to_value(),
-                        "generations": token.project_generations,
-                    })
-                });
-                json!({"namespace": deployment.namespace, "read": read})
-            })
-            .collect::<Vec<_>>();
-        let manifests = self
-            .manifest_tokens
-            .iter()
-            .map(|token| {
-                json!({
-                    "namespace": token.namespace,
-                    "manifests": token.manifests,
-                    "revisions": token.declaration_revisions,
-                })
-            })
-            .collect::<Vec<_>>();
-        let encoded = publication_source_tagged(
-            serde_json::to_string(&json!({
-                "version": 1, "deployments": deployments, "manifests": manifests,
-            }))
-            .expect("collection read identity must serialize"),
-        );
-        format!("publication-{}", alloy_primitives::keccak256(encoded))
-    }
-}
-
-/// Prefixes publication-bound cursor identities with `families:`. Legacy cursor generations
-/// from the removed serving tables cannot collide with a family sequence. History cursors do
-/// not bind a publication and are not tagged.
-pub(crate) fn publication_source_tagged(identity: String) -> String {
-    format!("families:{identity}")
 }
 
 pub(crate) async fn revalidate_collection_namespace_set(

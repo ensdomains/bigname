@@ -644,27 +644,27 @@ async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
         "collection publication changed during the read; retry the request"
     );
 
-    // A continued page must restart without its cursor.
-    let first = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    // A continued page retries with the same cursor.
+    let _first = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         None,
         Some("ens"),
     )
     .await
     .expect("capture republished publication");
-    let cursor = crate::v2::encode(&first.bind_cursor(crate::v2::CursorPayload::new(
+    let cursor = crate::v2::encode(&crate::v2::CursorPayload::new(
         "test",
         Default::default(),
         Default::default(),
         None,
-    )));
+    ));
     let continued = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         Some(&cursor),
         Some("ens"),
     )
     .await
-    .expect("cursor bound to the current publication");
+    .expect("the continuation reads the current publication");
     publish_v2_names_fixture(&database).await?;
     let error = continued
         .finish(&state)
@@ -673,7 +673,7 @@ async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
     assert_eq!(error.code(), crate::v2::ErrorCode::Stale);
     assert_eq!(
         error.envelope().error.message,
-        "collection publication is no longer available; restart pagination without a cursor"
+        "collection publication changed during the read; retry the request"
     );
     database.cleanup().await
 }

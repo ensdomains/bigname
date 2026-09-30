@@ -22,8 +22,7 @@
 //! Only a publication that lands during one request's own read refuses that request
 //! (`CollectionSnapshot::finish`, 409 asking for a retry); the same cursor then continues.
 //!
-//! Adopting it in a route, replacing `CollectionSnapshot::validate_cursor`/`bind_cursor` and
-//! any publication or generation field the route wrote into its cursor:
+//! Adopting it in a route, replacing any publication or generation cursor field:
 //!
 //! ```ignore
 //! let list = ListCursor::new(SORT, filters);            // .pinned_at(Some(at_token)) with `at`

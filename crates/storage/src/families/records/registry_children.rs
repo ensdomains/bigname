@@ -25,7 +25,7 @@ use crate::families::{
 
 /// The composed rows of the surface-less registry children `address` owns, in `namespace` when
 /// given, in the relation-row shape of `address_names.rs` with `registry_child` set and the
-/// served owner, and a digest of how they render (`rendering_digest`).
+/// served owner.
 ///
 /// "Surface-less" is relative to the chain's Project publication: a surface Interpret wrote
 /// after it is not part of it, exactly as the ordinary compositor leaves such a surface out
@@ -35,7 +35,7 @@ pub(super) async fn compose_registry_child_rows(
     conn: &mut PgConnection,
     address: &str,
     namespace: Option<&str>,
-) -> Result<(Vec<Value>, String)> {
+) -> Result<Vec<Value>> {
     let chains: Vec<String> = sqlx::query_scalar(
         "/* storage:families.records.address_registry_child_chains */
          SELECT DISTINCT indexed.chain_id
@@ -73,7 +73,6 @@ pub(super) async fn compose_registry_child_rows(
         }
     }
     let mut rows = Vec::new();
-    let mut rendered = Vec::new();
     for (chain_id, (published_block, ids)) in by_chain {
         let children =
             load_owned_registry_children(conn, &chain_id, address, &ids, published_block).await?;
@@ -81,11 +80,6 @@ pub(super) async fn compose_registry_child_rows(
             continue;
         }
         let publication = servable_publication(conn, &chain_id).await?;
-        rendered.extend(
-            children
-                .iter()
-                .map(|child| (child.logical_name_id.clone(), child.display_name.clone())),
-        );
         let (provenance, chain_positions, canonicality_summary) = publication_stamps(&publication);
         let last_recomputed_at = crate::time::format_timestamp(publication.block_timestamp);
         rows.extend(children.into_iter().map(|child: RegistryChildRow| {
@@ -114,16 +108,5 @@ pub(super) async fn compose_registry_child_rows(
             })
         }));
     }
-    Ok((rows, rendering_digest(rendered)))
-}
-
-/// A digest of the listed children and the names they render: a verified label preimage, else a
-/// non-name form. The label table is read live and a preimage can arrive (from Interpret, or a
-/// rainbow import) without any publication changing, which can move a child in a name-sorted
-/// page. The route binds its cursors to this digest, so such a change restarts a continuation
-/// instead of repeating or skipping a row.
-fn rendering_digest(mut rendered: Vec<(String, String)>) -> String {
-    rendered.sort();
-    let encoded = serde_json::to_vec(&rendered).expect("registry child renderings serialize");
-    format!("{:x}", alloy_primitives::keccak256(encoded))
+    Ok(rows)
 }

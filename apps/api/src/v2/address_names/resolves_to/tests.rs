@@ -71,7 +71,6 @@ fn resolves_to_cursor_binds_relation_and_coin_type() {
             sort: AddressNamesSort::Name,
             order: SortOrder::Asc,
         },
-        "",
     );
     assert!(resolves_to_storage_cursor(&authority, &binding("60")).is_err());
 }

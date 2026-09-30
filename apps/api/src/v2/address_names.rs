@@ -9,7 +9,6 @@ use bigname_storage::{EffectivePermissionRow, PrimaryNameClaimStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::cursor::invalid_cursor_error;
 use super::permission_support::{
     apply_role_summary_support_meta, permission_support_for_resources,
 };
@@ -227,8 +226,7 @@ pub(crate) async fn get_address_names(
         sort: params.sort,
         order,
     };
-    // The cursor's shape and binding come before its publication, so a malformed or legacy
-    // cursor is invalid input (400) even when the publication that issued it is gone (409).
+    // Validate the position and request filters before publication admission.
     let cursor_payload = params.cursor.as_deref().map(decode).transpose()?;
     let storage_cursor = cursor_payload
         .as_ref()
@@ -255,28 +253,10 @@ pub(crate) async fn get_address_names(
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
-        cursor_payload
-            .as_ref()
-            .and_then(self::cursor::registry_children_digest),
         params.page_size,
     )
     .await
     .map_err(|error| {
-        // A changed registry-child rendering restarts the read, even when the renamed child is
-        // the cursor's anchor, which the page's anchor check would otherwise reject.
-        if error
-            .downcast_ref::<bigname_storage::AddressNamesRegistryChildrenChanged>()
-            .is_some()
-        {
-            return super::collection_snapshot::restart_required();
-        }
-        if storage_cursor.is_some()
-            && error
-                .to_string()
-                .contains("page cursor does not match a grouped entry")
-        {
-            return invalid_cursor_error();
-        }
         // A chain whose families are not published is stale.
         super::name_rows_error(super::SnapshotReadResource::Resource, |_| {
             V2Error::internal_error(format!(
@@ -408,13 +388,10 @@ pub(crate) async fn get_address_names(
         BTreeMap::new()
     };
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(address_names_cursor_payload(
-            cursor,
-            &cursor_binding,
-            &storage_page.registry_children_digest,
-        )))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&address_names_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let data = storage_page
         .entries

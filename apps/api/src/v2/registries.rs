@@ -140,8 +140,13 @@ pub(crate) async fn get_registry(
         .as_deref()
         .map(|cursor| {
             let mut payload = decode(cursor)?;
-            collection.validate_cursor(&payload)?;
-            if payload.filters.remove("at").as_deref() != Some(selected_token.as_str()) {
+            let cursor_at = payload.filters.remove("at");
+            if params.at.is_some() {
+                if cursor_at.as_deref() != Some(selected_token.as_str()) {
+                    return Err(invalid_cursor_error());
+                }
+            } else if cursor_at.is_some() {
+                // Old implicit and explicit pins are indistinguishable: never silently drop one.
                 return Err(invalid_cursor_error());
             }
             referenced_by_storage_cursor(&payload, numeric_chain_id, &normalized_address)
@@ -203,10 +208,12 @@ pub(crate) async fn get_registry(
     let next_cursor = references.next_cursor.as_ref().map(|cursor| {
         let mut payload =
             referenced_by_cursor_payload(cursor, numeric_chain_id, &normalized_address);
-        payload
-            .filters
-            .insert("at".to_owned(), selected_token.clone());
-        encode(&collection.bind_cursor(payload))
+        if params.at.is_some() {
+            payload
+                .filters
+                .insert("at".to_owned(), selected_token.clone());
+        }
+        encode(&payload)
     });
     let referenced_by = ReferencedBy {
         page: Page {

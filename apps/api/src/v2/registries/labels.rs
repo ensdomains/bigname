@@ -104,7 +104,6 @@ pub(crate) async fn get_registry_labels(
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            collection.validate_cursor(&payload)?;
             labels_storage_cursor(&payload, numeric_chain_id, &normalized_address, owner)
         })
         .transpose()?;
@@ -187,12 +186,12 @@ pub(crate) async fn get_registry_labels(
     let mut subregistries = load_subregistry_refs(&state.pool, &child_ids, as_of_block).await?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&collection.bind_cursor(labels_cursor_payload(
+        encode(&labels_cursor_payload(
             cursor,
             numeric_chain_id,
             &normalized_address,
             owner,
-        )))
+        ))
     });
     let data = storage_page
         .rows

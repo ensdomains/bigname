@@ -14,8 +14,7 @@ use uuid::Uuid;
 
 use super::{
     query::{
-        push_address_names_current_cursor_after, push_address_names_current_cursor_identity_match,
-        push_address_names_current_cursor_sort_value_match, push_address_names_current_order,
+        push_address_names_current_cursor_after, push_address_names_current_order,
         push_address_names_current_sortable_entries_cte,
     },
     resolves_to_evm::{
@@ -96,7 +95,6 @@ pub(super) async fn load_sorted_entries(
 
     if let Some(cursor) = cursor {
         ensure_cursor_matches_sort(sort, cursor)?;
-        ensure_cursor_exists(&mut *conn, filter, sort, cursor).await?;
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
@@ -416,49 +414,6 @@ fn push_entries_cte<'a>(
         )
         "#,
     );
-}
-
-async fn ensure_cursor_exists(
-    conn: &mut PgConnection,
-    filter: &AddressRecordsFilter<'_>,
-    sort: AddressNamesCurrentSort,
-    cursor: &AddressNamesCurrentSortedCursor,
-) -> Result<()> {
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_cursor_exists_statement(&mut builder, filter, sort, cursor);
-    let row = builder.build().fetch_one(conn).await.with_context(|| {
-        format!(
-            "failed to validate address_records_current page cursor for {} sort {}",
-            filter.context(),
-            sort.as_str()
-        )
-    })?;
-    if crate::sql_row::get::<bool>(&row, "cursor_exists")? {
-        Ok(())
-    } else {
-        bail!("address_records_current page cursor does not match a grouped entry")
-    }
-}
-
-/// The continuation check: the cursor row must still be one of the grouped entries.
-pub(super) fn push_cursor_exists_statement<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    filter: &AddressRecordsFilter<'a>,
-    sort: AddressNamesCurrentSort,
-    cursor: &'a AddressNamesCurrentSortedCursor,
-) {
-    push_entries_cte(builder, filter);
-    push_address_names_current_sortable_entries_cte(builder, filter.source.names(), sort);
-    builder.push(" SELECT EXISTS (SELECT 1 FROM ");
-    builder.push(if sort.is_timestamp() {
-        "sortable_entries"
-    } else {
-        "entries"
-    });
-    builder.push(" WHERE ");
-    push_address_names_current_cursor_identity_match(builder, cursor);
-    push_address_names_current_cursor_sort_value_match(builder, sort, cursor);
-    builder.push(") AS cursor_exists");
 }
 
 fn ensure_cursor_matches_sort(

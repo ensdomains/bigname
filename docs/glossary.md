@@ -372,17 +372,15 @@ makes no current-name claim.
 
 ## Current-state list cursor
 
-The cursor of `GET /v1/search`, `GET /v1/names`, and the resolver overview's
-`bound_names`: it holds the list's sort and filters, the sort position of the
-last row returned, and the `at` token when the request pinned `at`, and no
-publication, generation, or evaluation time. A continuation reads the
-publication current when it runs and returns the rows after that position, so
-a newer publication does not refuse it and a row that changed between pages can
-repeat or be skipped. With `at` pinned, the cursor is tied to that block, and
-publishing a later block refuses it. Contrast the publication-bound cursors of the other
-current-state collections, which a newer publication refuses, and the
-[history walk](#history-walk). See
-[api-v1.md](api-v1.md#current-state-list-cursors).
+The cursor of a current-state collection, including nested resolver `bound_names`
+and registry `referenced_by`: it holds the list's sort and filters, the sort
+position of the last row returned, and an `at` token only when the request
+explicitly pinned one. It carries no publication generation or evaluation time.
+A continuation reads the current data after that position; a changed or deleted
+row, a newer publication or a completed rebuild does not invalidate it. Rows can
+repeat or be skipped when data changes. Each request retains its own publication
+consistency check. Explicit `at` and finality constraints remain route-specific.
+See [api-v1.md](api-v1.md#current-state-list-cursors) and [history walk](#history-walk).
 
 ## Declared vs verified
 

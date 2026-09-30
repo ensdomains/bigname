@@ -3895,7 +3895,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_subnames_requires_restart_for_unbound_legacy_cursors() -> Result<()> {
+async fn v2_get_subnames_accepts_legacy_position_but_rejects_wrong_sort() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
@@ -3925,7 +3925,7 @@ async fn v2_get_subnames_requires_restart_for_unbound_legacy_cursors() -> Result
         )
         .await
         .context("v2 wrong-sort subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let legacy_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
         "display_name_asc",
@@ -3956,9 +3956,9 @@ async fn v2_get_subnames_requires_restart_for_unbound_legacy_cursors() -> Result
         )
         .await
         .context("v2 legacy-snapshot subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
+    assert!(payload["data"].is_array());
 
     database.cleanup().await?;
     Ok(())

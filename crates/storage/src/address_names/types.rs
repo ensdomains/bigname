@@ -221,21 +221,6 @@ pub enum AddressNamesCurrentSortedCursorValue {
     Timestamp(Option<UnixSeconds>),
 }
 
-/// A continuation whose cursor was issued over registry-child renderings that have since changed
-/// (`AddressNamesCurrentSortedPage::registry_children_digest`). The read checks this before it
-/// validates the cursor's anchor, which a renamed child can no longer match, so the caller
-/// restarts instead of failing the cursor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AddressNamesRegistryChildrenChanged;
-
-impl std::fmt::Display for AddressNamesRegistryChildrenChanged {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the address's registry children render differently from the cursor")
-    }
-}
-
-impl std::error::Error for AddressNamesRegistryChildrenChanged {}
-
 /// Sort-specific keyset cursor for v2 address-name collection reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressNamesCurrentSortedCursor {
@@ -279,8 +264,4 @@ pub struct AddressNamesCurrentSortedPage {
     pub entries: Vec<AddressNameCurrentEntry>,
     pub next_cursor: Option<AddressNamesCurrentSortedCursor>,
     pub summary: AddressNamesCurrentSummary,
-    /// A digest of the address's surface-less registry children and the names they render
-    /// (`families::records::registry_children`). A continuation cursor carries it; when it
-    /// changed, a late label preimage may have moved a child in the order, so the read restarts.
-    pub registry_children_digest: String,
 }

@@ -133,19 +133,11 @@ pub(super) async fn get_address_resolves_to(
         .map(|cursor| {
             let payload = decode(cursor)?;
             let cursor = resolves_to_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
             Ok(cursor)
         })
         .transpose()?;
 
     let load_error = |error: anyhow::Error| {
-        if storage_cursor.is_some()
-            && error
-                .to_string()
-                .contains("page cursor does not match a grouped entry")
-        {
-            return invalid_cursor_error();
-        }
         // A chain whose families are not published is stale.
         let message = format!("failed to load names resolving to {normalized_address}");
         name_rows_error(Resource, |_| V2Error::internal_error(message))(error)
@@ -317,9 +309,9 @@ pub(super) async fn get_address_resolves_to(
         BTreeMap::new()
     };
 
-    let next_cursor = next_storage_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(resolves_to_cursor_payload(cursor, &cursor_binding)))
-    });
+    let next_cursor = next_storage_cursor
+        .as_ref()
+        .map(|cursor| encode(&resolves_to_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let data = rows
         .iter()

@@ -403,49 +403,6 @@ pub(super) fn push_address_names_current_order(
     }
 }
 
-pub(super) fn push_address_names_current_cursor_identity_match<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    cursor: &'a AddressNamesCurrentSortedCursor,
-) {
-    builder.push("logical_name_id = ");
-    builder.push_bind(&cursor.logical_name_id);
-    builder.push(" AND resource_id::TEXT = ");
-    builder.push_bind(cursor.resource_id.to_string());
-}
-
-pub(super) fn push_address_names_current_cursor_sort_value_match<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    sort: AddressNamesCurrentSort,
-    cursor: &'a AddressNamesCurrentSortedCursor,
-) {
-    match sort {
-        AddressNamesCurrentSort::Name => {
-            let AddressNamesCurrentSortedCursorValue::Name(sort_value) = &cursor.sort_value else {
-                return;
-            };
-            builder.push(" AND canonical_display_name = ");
-            builder.push_bind(sort_value);
-        }
-        AddressNamesCurrentSort::ExpiresAt
-        | AddressNamesCurrentSort::RegisteredAt
-        | AddressNamesCurrentSort::CreatedAt => {
-            let AddressNamesCurrentSortedCursorValue::Timestamp(sort_value) = &cursor.sort_value
-            else {
-                return;
-            };
-            match *sort_value {
-                None => {
-                    builder.push(" AND sort_timestamp IS NULL");
-                }
-                Some(value) => {
-                    builder.push(" AND sort_timestamp = ");
-                    builder.push_bind(value);
-                }
-            };
-        }
-    }
-}
-
 fn push_address_names_current_name_tie_after<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     sort_value: &'a str,

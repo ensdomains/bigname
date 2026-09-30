@@ -110,6 +110,7 @@ async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result
     let mut all = first["data"].as_array().unwrap().clone();
     let mut page = first;
     while let Some(cursor) = page["page"]["next_cursor"].as_str() {
+        publish_resolver_collection_inputs(&database).await?;
         page =
             v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
         assert_eq!(page["meta"]["as_of_token"], token);
@@ -189,7 +190,7 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
     let response =
         v2_resolver_response_for_database(&database, &format!("{base}&cursor={first_cursor}"))
             .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::OK);
     database.cleanup().await
 }
 
@@ -321,6 +322,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
     let mut all = first["data"].as_array().unwrap().clone();
     let mut page = first;
     while let Some(cursor) = page["page"]["next_cursor"].as_str() {
+        publish_resolver_collection_inputs(&database).await?;
         page =
             v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
         assert_eq!(page["meta"]["as_of_token"], token);
@@ -502,8 +504,6 @@ async fn resolver_publication_replaced_before_finish(
     Ok(payload["error"]["message"].as_str().unwrap().to_owned())
 }
 
-const RESTART_WITHOUT_CURSOR: &str =
-    "collection publication is no longer available; restart pagination without a cursor";
 const RETRY_REQUEST: &str = "collection publication changed during the read; retry the request";
 
 // A publication during the continuation's own read still refuses it, but its cursor is
@@ -532,7 +532,7 @@ async fn v2_resolver_overview_continuation_retries_when_publication_changes_befo
 }
 
 #[tokio::test]
-async fn v2_resolver_collection_continuation_restarts_when_publication_changes_before_finish()
+async fn v2_resolver_collection_continuation_retries_when_publication_changes_before_finish()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_roles_pages(&database).await?;
@@ -545,7 +545,8 @@ async fn v2_resolver_collection_continuation_restarts_when_publication_changes_b
     let continued =
         resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
             .await?;
-    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
+    assert_eq!(continued, RETRY_REQUEST);
+    v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
     let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
     assert_eq!(cursorless, RETRY_REQUEST);
     database.cleanup().await

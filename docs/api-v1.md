@@ -158,14 +158,14 @@ For a registrar lease first identified by a later readable observation, registra
 
 `GET /v1/permissions` and `GET /v1/addresses/{address}/names?include=role_summary`
 read current permission rows and per-resource permission summaries. Canonical
-identity checks exclude rows from an orphaned chain lineage. These routes bind
-pagination to the captured project publication and revalidate it before returning.
+identity checks exclude rows from an orphaned chain lineage. These routes capture
+the project publication for each request and revalidate it before returning.
 Rows use the binding selected by Project. A later Interpret binding closure does
 not change the published collection's membership or count; the next Project
 publication installs the replacement or removal. Canonicality checks still apply.
-A changed publication, including replacement at the same block, requires a
-pagination restart with `409 stale`. The base address-name collection remains
-available without the expansion.
+A publication changed during the request returns `409 stale` asking to retry
+with the same cursor. Publication changes between pages do not invalidate it.
+The base address-name collection remains available without the expansion.
 
 An approved ENSv1 or Basenames registry `ApprovalForAll` row is effective for a
 resource when its chain, emitter-derived registry contract address, and owner
@@ -601,14 +601,11 @@ Rules:
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Product name, subname, ownership,
   and permission collections disclose `meta.as_of` and omit `meta.as_of_token`
-  because old publications are not retained for collection replay. Subname,
-  ownership, and permission collections bind cursors to the current
-  publication: a changed publication returns `409 stale` requiring a restart
-  without the cursor; a first page, sent without one, is simply retried.
-  `GET /v1/names` binds none: its
-  [current-state list cursor](glossary.md#current-state-list-cursor) holds a
-  position that a continuation reads from the current publication (see
-  [current-state list cursors](#current-state-list-cursors)). History collections (`/v1/events`, name history, and address
+  because old publications are not retained for collection replay. Their
+  [current-state list cursors](glossary.md#current-state-list-cursor) hold a
+  position that each continuation reads from the current publication; a
+  publication changed during the request asks to retry with the same cursor
+  (see [current-state list cursors](#current-state-list-cursors)). History collections (`/v1/events`, name history, and address
   history) disclose in `meta.as_of` the publication captured when the request
   was admitted and do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
   `/v1/search` reports request-scoped `meta.as_of` as
@@ -860,12 +857,10 @@ the publication in `meta.as_of`. A publication further behind, from another
 interpreter generation or on an orphaned fork is unavailable.
 
 The API captures and rechecks the marker's `sequence` around indexed reads.
-Publication-bound cursors (subnames, address names other than `former_registrant`, `resolves_to`, permissions,
-registries and labels, and resolver `/aliases`, `/links` and `/roles`) retain
-their family publication token. Legacy cursors carrying the removed serving
-source return `409 stale` until the client restarts pagination. History and
-[current-state list cursors](#current-state-list-cursors) carry no publication
-token.
+Collection cursors carry no publication generation. Each current-state page
+captures and rechecks its own publication; later pages read the then-current
+rows after the cursor position. See [current-state list cursors](#current-state-list-cursors)
+for explicit `at` pins and legacy cursor compatibility.
 
 Collection expiry filters, including `include_expired=false`, use the published
 block's timestamp on every page; a multi-chain scope uses the earliest selected
@@ -1262,29 +1257,28 @@ from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
 `chain_lineage` rows.
 
-Top-level collections page over mutable latest-state tables. They omit
+Latest-only collections (names, subnames, address names, permissions, search,
+registry labels and product history) page over current data. They omit
 `meta.as_of_token`, because old publications are not retained for replay
-through `at`. Subname, ownership, and permission collections
-report in `meta.as_of` the publication their cursors are bound to;
-`GET /v1/names` reports the publication each page read, since its cursor holds
-only a position; history
+through `at`. Resolver collections and registry references retain their
+route-specific selectors and position tokens. Current-state collections report in `meta.as_of` the publication
+each page read, since their cursors hold only a position; history
 collections report the publication captured when the request was admitted,
 as a [history walk](glossary.md#history-walk) whose cursor holds only a
 position; search reports request-scoped `meta.as_of` for staleness
 attribution. No collection cursor claims a snapshot bound that `at` could
 replay. A history cursor carries no publication token, and the token of a
 history cursor issued before the walk rule is ignored rather than treated as
-a validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
+a validity condition. For the latest-only collections, omitted `finality` and
+explicit `finality=latest` are accepted.
 An `at` selector returns `400 invalid_input` with
 `at is not supported because collection routes read latest state`.
 `finality=safe` and `finality=finalized` return `400 invalid_input` with
 `finality must be latest because collection routes read latest state`.
 
-This is issue #188 option 2. Option 1 is the storage follow-up: bind every page
-to an immutable publication revision and return explicit cursor-expired
-semantics when that revision is no longer available. Once revision-bound
-cursors and row reads land, the collection `at` and historical `finality`
-restrictions lift and collection snapshot metadata can be restored.
+A cursor does not preserve historical rows or freeze ordering. Supporting a
+historical collection selection would require retained historical data; it is
+not implied by continuation or by the request's publication metadata.
 
 `POST /v1/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and
@@ -1321,19 +1315,14 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort.
-The cursors of `GET /v1/search`, `GET /v1/names`, and the resolver overview's
-`bound_names` hold a position in current state and bind no publication; see
-[current-state list cursors](#current-state-list-cursors). The other
-current-state product collection cursors (subnames, address names, `resolves_to`,
-permissions, registries and their labels, and the resolver `/aliases`, `/links`,
-and `/roles` collections) still bind the publication they read, as described
-under `meta` above. History collection cursors bind no snapshot or
+Current-state collection cursors, including nested resolver `bound_names` and
+registry `referenced_by`, hold positions and bind no publication; see
+[current-state list cursors](#current-state-list-cursors). History collection cursors bind no snapshot or
 publication, and the publication token of a history cursor issued before the
 walk rule is ignored. A bare search cursor uses the request's derived namespace
 set as its namespace anchor and fails closed if that set has changed. Cursors
 preserve keyset position across requests without claiming that the mutable
-dataset is frozen. Snapshot-bound cursor semantics remain on single-resource responses with nested
-pagination where documented.
+dataset is frozen. The per-input lookup cursor contract remains separately documented.
 
 History collections (`/v1/events`, name history including
 `include=child_registrations`, and address history) are
@@ -1504,10 +1493,12 @@ readable surface answers `404 not_found`.
 ### Current-state list cursors
 
 A [current-state list cursor](glossary.md#current-state-list-cursor), the
-cursor of `GET /v1/search`, `GET /v1/names`, the address-name relation
-`former_registrant`, or the resolver overview's `bound_names`, holds the list's
+cursor of every current-state product collection (search, names, subnames,
+address names, permissions, registry labels, resolver aliases/links/roles,
+and nested resolver `bound_names` and registry `referenced_by`), holds the list's
 sort and filters, the sort position of the last row it returned, and, when the
-request pinned `at`, that `at` token (only the resolver overview accepts `at`). It holds no publication,
+request pinned `at`, that `at` token. Only resolver and registry overviews and
+resolver aliases/links/roles accept `at`. It holds no publication,
 generation, or evaluation time. A continuation reads whatever is published when
 it runs and returns the rows that sort after that position:
 
@@ -1524,21 +1515,33 @@ it runs and returns the rows that sort after that position:
 - A cursor that does not decode, comes from another list, carries different
   filters or sort, or carries a field this contract does not write returns
   `400 invalid_input` with `cursor must be a valid pagination cursor`; restart
-  without the cursor. That includes the publication token, evaluation time, or
+  without the cursor when correcting the request is insufficient. That includes
+  the publication token, evaluation time, or
   resolver generation that `GET /v1/names` and `bound_names` cursors carried
   before this contract, and the snapshot field of `GET /v1/search` cursors
-  issued before July 2026, so such a cursor is refused once.
+  issued before July 2026, so such a cursor is refused once. Resolver
+  aliases/links/roles likewise reject their old publication/generation layout.
+  Subnames, address names, permissions, registry labels and `referenced_by`
+  accept their previous position layout after validating sort, filters and
+  anchors, ignoring only the old publication/evaluation fields. Address names
+  also ignore the old `registry_children` digest. Old permissions cursors did
+  not distinguish a name's inferred registration from an explicit registration
+  filter, and old registry-reference cursors did not distinguish automatically
+  selected `at` from an explicit pin. These stored selectors must be supplied
+  and match on continuation, or the legacy cursor returns `400 invalid_input`
+  once. Restarting without it issues an unpinned position cursor for an unpinned
+  request. New name-only permissions cursors follow the current registration.
 - With `at`, the continuation must send the same `at`, or it returns
-  `400 invalid_input`. The cursor is then pinned to that block: once a later
-  block is published, the continuation returns `409 stale` with
-  `resolver data is unavailable at the selected historical position`, whatever
-  rows the later block changed. The pin is a chain position, not a publication
-  generation: a rebuild that republishes the same block (same number and hash)
-  is not detected, and the continuation reads the rebuilt rows.
+  `400 invalid_input`. Resolver collections read current projections, so after
+  a later block is published their pinned continuation returns `409 stale`.
+  Registry references keep their documented historical pointer reads at that
+  selected position. The pin is a chain position, not a publication generation:
+  a same-block rebuild does not invalidate the cursor. See each route's
+  historical availability and finality constraints.
 - A publication that lands while one page is being read still refuses that
   request with a retryable error, and retrying with the same cursor then
-  continues. The error is route-specific: `GET /v1/names` and `bound_names`
-  return `409 stale` with a message asking to retry; `GET /v1/search` keeps its
+  continues. Current-state product collections return `409 stale` with a message
+  asking to retry; `GET /v1/search` keeps its
   documented request-scope recheck, which returns `409 conflict` for a head,
   publication, or readiness change and `409 stale` when an Interpret redo is
   involved (see [`GET /v1/search`](api-v1-routes.md#get-v1search)).

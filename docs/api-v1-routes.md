@@ -45,26 +45,16 @@ The product collections `GET /v1/names`, subnames, address names, and
 permissions read current state. Every one of them revalidates the publication
 before returning and discloses `meta.as_of`; a page whose publication changed
 while it was read returns `409 stale`. Counts and rows use the same filters. No
-historical projection is retained by a pagination token. Their cursors differ:
-
-- `GET /v1/names` and `GET /v1/addresses/{address}/names?relation=former_registrant` use a
-  [current-state list cursor](glossary.md#current-state-list-cursor): it binds
-  the namespace, window, order, and address when applicable, and holds only the last row's position. A
-  continuation reads the publication current when it runs, so a newer
-  publication does not refuse it, and the `409 stale` of a page whose
-  publication changed during its read asks for a retry with the same cursor.
-  A cursor carrying the publication fields that cursors issued before that
-  contract carried returns `400 invalid_input` once. See
-  [current-state list cursors](api-v1.md#current-state-list-cursors).
-- Subnames, address names other than `former_registrant`, and permissions cursors bind anchors, filters,
-  sorting, the served project publication (including same-height replacement)
-  and manifest revisions. A changed or unavailable publication, or an older
-  cursor without that binding, returns `409 stale` and requires restarting
-  without the cursor. A first page, which has no cursor to drop, whose
-  publication changed while it was read returns the same `409 stale` with a
-  message saying so; retrying the same request reads the new publication.
-  Subnames' time-dependent expiry filtering evaluates at the published block's
-  timestamp on every page.
+historical projection is retained by a pagination token. All use a
+[current-state list cursor](glossary.md#current-state-list-cursor): the cursor
+binds the collection anchor, filters and sort, and continues after the last
+row's position against the current publication. A newer publication, same-block
+rebuild, removed row or changed sort key does not require a restart. Rows may
+move, disappear or appear between pages. A publication that changes during one
+request returns `409 stale` asking to retry that request with the same cursor.
+Subnames' expiry filtering uses the published block's timestamp on every page.
+See [current-state list cursors](api-v1.md#current-state-list-cursors) for
+legacy decoding and explicit `at` constraints on routes that accept it.
 
 The publication fence of these four lists conservatively covers the requested
 namespace, or all active public namespaces when none is selected. A count
@@ -1555,9 +1545,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Pagination behavior: standard collection pagination in the requested sort
   and order. Cursors are bound to namespace, parent, `q`, `match=contains`
   when it narrows a `q`, `include_expired`, sort, and order; a cursor replayed under different controls returns
-  `400 invalid_input`. A cursor must also carry the current publication and
-  expiry evaluation time; older cursors without them return `409 stale` and
-  require restarting without a cursor.
+  `400 invalid_input`. Legacy publication and expiry evaluation fields are ignored.
   `page.total_count` is populated with the parent's direct readable subname
   count — the same bounded per-parent aggregate that already annotates the page,
   so it costs no extra scan — when the page admits every child, that is
@@ -1565,12 +1553,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   reports the exact filtered total, computed with the same child-name and expiry
   predicates as its list, before the cursor.
 - Snapshot behavior: the parent, child rows and filtered count use one
-  revalidated publication, disclosed in `meta.as_of`. Continuations retain its
-  identity; the expiry evaluation time is the published block's timestamp on
-  every page. A changed publication returns `409 stale`
-  requiring a restart without the cursor; a first page whose publication changes
-  during the read can simply be retried. Historical child enumeration is not
-  supported.
+  revalidated publication, disclosed in `meta.as_of`. The cursor holds only its
+  sort position and query filters; expiry uses each page's published block time.
+  A publication changed during the read returns `409 stale`; retry with the same
+  cursor. Changes between pages do not invalidate it. Historical child
+  enumeration is not supported.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
@@ -2477,14 +2464,15 @@ introduces it rebuilds Project from full history before serving the option; see
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, normalized `name` when supplied, the selected public
-  `registration_id` (the one named, else the registration the name serves,
-  which for a wrapped `.eth` name is the lease and never the NameWrapper
-  resource that holds its rows),
-  namespace when explicit or implied by a name (and namespace absence for an
-  address-only request, matching its all-namespace result set),
-  `include=lineage`, the fixed sort, the last keyset tuple, and the captured
-  publication. Malformed cursor
+  `address`, normalized `name` when supplied, and an explicitly requested public
+  `registration_id`. It also binds the namespace when explicit or implied by a
+  name (and namespace absence for an address-only request, matching its
+  all-namespace result set), `include=lineage`, the fixed sort and the last
+  keyset tuple. A name-only request follows its current registration; a replacement
+  registration does not change the query or invalidate its position. Legacy cursors
+  cannot distinguish an inferred registration from an explicit filter: a stored
+  `registration_id` must still be supplied and match, or returns `400 invalid_input`
+  once. Malformed cursor
   encoding, a different bound filter anchor or sort, and a missing or malformed
   keyset tuple are rejected. A well-formed edited keyset tuple is accepted as a
   caller-supplied resume position; the cursor is opaque but is not
@@ -2494,11 +2482,10 @@ introduces it rebuilds Project from full history before serving the option; see
   omits a row.
 - Snapshot behavior: a `name` filter resolves its current registration anchor
   and permission rows under the same revalidated publication, disclosed in
-  `meta.as_of`. Completeness metadata remains available. Continuations bind the
-  publication; a change returns `409 stale` requiring a restart without the
-  cursor. A first page whose publication changes during the read returns
-  `409 stale` too and can simply be retried. Historical permission enumeration
-  is not supported.
+  `meta.as_of`. Completeness metadata remains available. Continuations read the
+  current publication after their saved position. A publication changed during
+  the request returns `409 stale`; retry with the same cursor. Historical
+  permission enumeration is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`;
@@ -2952,10 +2939,9 @@ introduces it rebuilds Project from full history before serving the option; see
   minted for one relation set never resumes another. `resolves_to` reads
   return `page.total_count: null`.
 - Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+  publication. The response discloses `meta.as_of`; continuation cursors retain
+  only query filters and sort position. A publication changed during the request
+  returns `409 stale`; retry with the same cursor.
   Historical replay through `at` is not supported.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
@@ -3021,15 +3007,11 @@ introduces it rebuilds Project from full history before serving the option; see
   publication that includes its block, so a surface Interpret commits after the
   served publication leaves the child listed here until Project publishes it.
   A label preimage can arrive without a new publication and rename such a row,
-  which can move it across a `sort=name` cursor, so every continuation cursor
-  is bound to the served renderings of the address's registry children: when
-  any changed since the cursor was issued, the continuation fails as `stale`
-  (409) and the read restarts without a cursor. That holds when the renamed
-  child is the cursor's own anchor too: the renderings are compared before the
-  anchor is checked. A malformed cursor, or one issued before this binding,
-  stays `invalid_input` (400), even when the publication that issued it has
-  since changed: the cursor's shape and binding are checked before its
-  publication. The listing covers the ENSv1 arm: a
+  which can move it across a `sort=name` cursor. The continuation starts after
+  the saved position even when the renamed child was its anchor, so a renamed
+  row can be repeated or skipped. The old registry-child rendering digest is
+  ignored after validating the cursor's query filters and position.
+  The listing covers the ENSv1 arm: a
   Basenames registry child with no surface is listed only on its parent's
   subnames page. Reverse inputs of `POST /v1/lookup` still list only names
   with a current name row.
@@ -3706,16 +3688,15 @@ For a registrar lease first identified by a later readable observation, registra
   statement and predicates as the page. Unsupported enumeration returns an
   empty page with `total_count: null`, explicit unsupported completeness, and
   a reason; it never claims that a resolver has no mappings or holders.
-- Pagination is bound to the resolver, chain, collection, selected snapshot,
-  and completed projection generation. A cursor automatically selects its
-  snapshot when `at` is omitted. A different route or explicit snapshot is
-  `400 invalid_input`; a generation no longer available is `409 stale` and the
-  client must restart. These routes read current projections, so they do not
-  synthesize historical permission/binding tables. A same-height rebuild also
-  invalidates prior cursors. The generation is checked again after reading. A
-  publication change during a continuation returns `409 stale` and requires
-  restarting without a cursor; a request without a cursor whose publication
-  changes during the read returns `409 stale` too and can simply be retried.
+- Pagination binds the resolver, chain, collection and last sort position. Only
+  an explicit `at` selector pins a position; a continuation must repeat it.
+  Without `at`, every page selects the current publication. A completed rebuild
+  or newer publication does not invalidate the cursor, and its original row need
+  not survive. These routes read current projections and do not synthesize
+  historical permission/binding tables. The generation is still checked within
+  each request; a change returns `409 stale` asking to retry with the same cursor.
+  Legacy cursors carrying generation/publication fields return `400 invalid_input`
+  once. See [current-state list cursors](api-v1.md#current-state-list-cursors).
 - Alias and link events come from activated canonical normalized events
   bounded to the selected height; bindings and permissions come from current
   projections using their existing canonical-lineage predicates. Resolver classification
@@ -3782,11 +3763,12 @@ For a registrar lease first identified by a later readable observation, registra
   holds exactly the served `name`; it is empty when `name` is `null`.
 - Pagination behavior: standard collection pagination applies to the nested
   `referenced_by.page` object; its cursor binds the chain and registry. The
-  top-level response has no `page`. Continuations bind both the selected block
-  and the current publication; a publication change returns `409 stale` and
-  requires restarting without a cursor. A request without a cursor whose
-  publication changes during the read returns `409 stale` too and can simply be
-  retried.
+  top-level response has no `page`. Continuations bind only an explicitly
+  requested `at` position; without one, each page selects the current publication.
+  A publication changed during the request returns `409 stale`; retry with the
+  same cursor. Legacy publication fields are ignored, but an old `at` field must
+  be supplied and match: old cursors cannot distinguish an implicit selection
+  from an explicit pin. Dropping or changing it returns `400 invalid_input` once.
 - Snapshot behavior: the route selects the chain's served position like the
   resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
   creation, pointer, and event-count evidence is bounded to that position, so
@@ -3855,10 +3837,9 @@ For a registrar lease first identified by a later readable observation, registra
   `total_count` alone. The cursor binds the chain, the registry and the owner
   filter.
 - Snapshot behavior: rows and totals come from one revalidated current
-  publication, reported in `meta.as_of`. Cursors bind that publication; if it
-  changes, return `409 stale` and restart pagination without the cursor. A first
-  page whose publication changes during the read returns `409 stale` too and can
-  simply be retried.
+  publication, reported in `meta.as_of`. A publication changed during the request
+  returns `409 stale`; retry with the same cursor. Changes between pages do not
+  invalidate its position.
 - Status semantics: an unknown registry returns `404 not_found`; a known
   registry with no labels, or none the owner filter admits, returns `200` with
   empty `data` and `total_count` `0`, a complete answer for the reported

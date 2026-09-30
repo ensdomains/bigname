@@ -1445,11 +1445,12 @@ runner and the API, and finishes the full-history Interpret redo and the
 Project redo it installs before the matching API serves, as for any rotation;
 an API upgraded alone refuses the old build's family publication with
 `409 stale`. It ships inside the TYR-61 batch, whose single Interpret redo and
-Project rebuild discharge this obligation. The rebuild publishes a new Project
-generation, so every collection cursor that binds the publication, including
-address-name and subname cursors, returns `409 stale` after the switch and
-clients restart pagination without it. No cursor compatibility is carried
-across this deploy.
+Project rebuild discharge this obligation. Once the matching publication is
+readable, [current-state collection cursors](api-v1.md#current-state-list-cursors)
+continue after their saved positions across the rebuild. While the publication
+is unavailable, clients retry with the same cursor. Known legacy cursor layouts
+follow the compatibility rules in that contract; the generation change itself
+requires no pagination restart.
 
 ### Registry label owner filters
 
@@ -1479,5 +1480,5 @@ composition that fills it lives in hashed storage sources
 [interpreter content hash](glossary.md#interpreter-content-hash) and its first
 family run rebuilds the families anyway; the reset adds no second rebuild when
 the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
-redo and Project rebuild discharge this, and collection cursors restart as
+redo and Project rebuild discharge this; collection cursors continue as
 described above.

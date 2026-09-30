@@ -203,10 +203,7 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
-    // A name-only page binds the name's public registration, the lease, not the NameWrapper
-    // resource that holds its rows. The same name continues it, the same name with the lease
-    // continues it (one collection), and the same name with the NameWrapper resource, the
-    // proven-empty pair, is a different request and is rejected.
+    // A name-only page binds the name; adding any explicit registration changes the query.
     let first = v2_permissions_payload_for_database(
         &database,
         "/v1/permissions?name=perms.eth&page_size=1",
@@ -224,14 +221,14 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     .await?;
     assert_eq!(continued["data"].as_array().expect("second name page").len(), 1);
     assert_ne!(continued["data"][0], first["data"][0]);
-    let with_lease = v2_permissions_payload_for_database(
+    let with_lease = v2_permissions_response_for_database(
         &database,
         &format!(
             "/v1/permissions?name=perms.eth&registration_id={lease_resource_id}&page_size=1&cursor={cursor}"
         ),
     )
     .await?;
-    assert_eq!(with_lease["data"], continued["data"], "{with_lease}");
+    assert_eq!(with_lease.status(), StatusCode::BAD_REQUEST);
     let response = v2_permissions_response_for_database(
         &database,
         &format!(

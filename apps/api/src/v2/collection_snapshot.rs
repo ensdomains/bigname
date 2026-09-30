@@ -7,19 +7,13 @@ use super::support::{
 };
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
-/// The publication a collection read is admitted against. Current projections are not retained
-/// after publication, so a continuation whose cursor binds the publication (`validate_cursor`,
-/// `bind_cursor`) must restart when it changes. A current-state list cursor (`list_cursor`) binds
-/// none: its route captures without the cursor and only `finish`'s same-request recheck can
-/// refuse it, with a retry. History collections (`capture_history`, `finish_history`) are walks:
-/// they are bounded by the captured publication but never refused because a newer one exists.
+/// The publication captured for one request. Current-state pages revalidate it before
+/// returning, but their continuation positions survive later publications. History pages
+/// retain their separately documented bounded-walk behavior.
 pub(crate) struct CollectionSnapshot {
     namespaces: PublicNamespaceSet,
-    token: String,
     evaluated_at: OffsetDateTime,
     namespace: Option<String>,
-    /// Whether the request continued an earlier page with a cursor.
-    continues_cursor: bool,
 }
 
 impl CollectionSnapshot {
@@ -33,10 +27,7 @@ impl CollectionSnapshot {
         cursor: Option<&str>,
         namespace: Option<&str>,
     ) -> V2Result<Self> {
-        let (snapshot, cursor) = Self::capture_scope(state, cursor, namespace).await?;
-        if let Some(cursor) = cursor.as_ref() {
-            snapshot.validate_cursor(cursor)?;
-        }
+        let (snapshot, _) = Self::capture_scope(state, cursor, namespace).await?;
         Ok(snapshot)
     }
 
@@ -65,7 +56,7 @@ impl CollectionSnapshot {
         if let Some(namespace) = namespace {
             ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
         }
-        let cursor = cursor.map(super::decode).transpose()?;
+        let cursor = cursor.map(super::cursor::decode_collection).transpose()?;
         let namespaces = derive_public_namespace_set(state)
             .await
             .map_err(api_error_to_v2)?
@@ -80,25 +71,14 @@ impl CollectionSnapshot {
                 "collection publication is not available; retry after indexing is ready",
             ));
         }
-        let token = namespaces.collection_fingerprint();
 
         let evaluated_at = { publication_clock(&namespaces)? };
         let snapshot = Self {
             namespaces,
-            token,
             evaluated_at,
             namespace: namespace.map(str::to_owned),
-            continues_cursor: cursor.is_some(),
         };
         Ok((snapshot, cursor))
-    }
-
-    /// Records that the request carried a cursor that this snapshot did not decode, for
-    /// routes whose cursors have their own layout and validate the publication token
-    /// themselves. A continuation must be told to restart, not to retry.
-    pub(crate) fn continuing_from_request_cursor(mut self, present: bool) -> Self {
-        self.continues_cursor |= present;
-        self
     }
 
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
@@ -140,28 +120,6 @@ impl CollectionSnapshot {
             }))
     }
 
-    pub(crate) fn validate_cursor(&self, cursor: &CursorPayload) -> V2Result<()> {
-        self.validate_token(cursor.snapshot.as_deref())
-    }
-
-    pub(crate) fn token(&self) -> &str {
-        &self.token
-    }
-
-    pub(crate) fn validate_token(&self, token: Option<&str>) -> V2Result<()> {
-        if token != Some(self.token()) {
-            return Err(restart_required());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn bind_cursor(&self, mut cursor: CursorPayload) -> CursorPayload {
-        cursor.snapshot = Some(self.token.clone());
-        cursor.evaluated_at =
-            Some(bigname_storage::UnixSeconds::from(self.evaluated_at).internal_string());
-        cursor
-    }
-
     pub(crate) async fn finish(&self, state: &AppState) -> V2Result<Meta> {
         #[cfg(test)]
         finish_test_hooks::run(&state.pool).await?;
@@ -170,8 +128,6 @@ impl CollectionSnapshot {
             .map_err(|error| {
                 if error.status != axum::http::StatusCode::CONFLICT {
                     api_error_to_v2(error)
-                } else if self.continues_cursor {
-                    restart_required()
                 } else {
                     changed_during_read()
                 }
@@ -191,8 +147,8 @@ impl CollectionSnapshot {
 }
 
 /// The expiry clock: the published block's time, on a first
-/// page and every continuation alike (a cursor's `evaluated_at` is still written but no longer
-/// read). Every selected position is the family marker's block, since the fence admits a scope
+/// page and every continuation alike. Every selected position is the family marker's block,
+/// since the fence admits a scope
 /// only when the marker sits exactly there, so its lineage timestamp is the marker's
 /// `block_timestamp`. A scope spanning chains takes the earliest, as `block_bounds` takes the
 /// lowest block.
@@ -215,8 +171,7 @@ pub(super) fn restart_required() -> V2Error {
     )
 }
 
-/// A request without a cursor has nothing to restart: the next attempt reads the new
-/// publication.
+/// The same request and cursor can be retried against the new publication.
 fn changed_during_read() -> V2Error {
     V2Error::stale("collection publication changed during the read; retry the request")
 }

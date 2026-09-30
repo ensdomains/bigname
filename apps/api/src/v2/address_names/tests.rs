@@ -29,7 +29,7 @@ fn address_names_cursor_payload_round_trips_name_cursor() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
 
     assert_eq!(
         address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name))
@@ -48,7 +48,7 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
         resource_id: Uuid::from_u128(0x1235),
     };
     let null_payload =
-        address_names_cursor_payload(&null_cursor, &binding(AddressNamesSort::ExpiresAt), "");
+        address_names_cursor_payload(&null_cursor, &binding(AddressNamesSort::ExpiresAt));
     assert_eq!(
         null_payload.last_item[SORT_KIND_CURSOR_KEY],
         SORT_KIND_TIMESTAMP_NULL
@@ -69,7 +69,7 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
         resource_id: Uuid::from_u128(0x1236),
     };
     let value_payload =
-        address_names_cursor_payload(&value_cursor, &binding(AddressNamesSort::ExpiresAt), "");
+        address_names_cursor_payload(&value_cursor, &binding(AddressNamesSort::ExpiresAt));
     assert_eq!(
         value_payload.last_item[SORT_KIND_CURSOR_KEY],
         SORT_KIND_TIMESTAMP_VALUE
@@ -93,17 +93,17 @@ fn address_names_cursor_rejects_cross_sort_filter_or_order() {
         resource_id: Uuid::from_u128(0x1234),
     };
 
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
     assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::ExpiresAt)).is_err());
 
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
     payload.filters.insert(
         ADDRESS_FILTER_KEY.to_owned(),
         "0x00000000000000000000000000000000000000bb".to_owned(),
     );
     assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
 
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
     payload
         .filters
         .insert(ORDER_FILTER_KEY.to_owned(), "desc".to_owned());
@@ -117,7 +117,7 @@ fn address_names_cursor_ignores_legacy_snapshot_component() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
     payload.snapshot = Some("legacy-snapshot".to_owned());
 
     assert_eq!(
@@ -138,7 +138,7 @@ fn address_names_cursor_rejects_cross_timestamp_sort_reuse() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::ExpiresAt), "");
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::ExpiresAt));
 
     assert!(
         address_names_storage_cursor(&payload, &binding(AddressNamesSort::RegisteredAt)).is_err()
@@ -159,11 +159,11 @@ fn address_names_cursor_binds_contains_match_only_when_it_narrows_q() {
         name_match: NameMatch::Contains,
         ..prefix.clone()
     };
-    let prefix_payload = address_names_cursor_payload(&cursor, &prefix, "");
-    // The eight request filters and the registry-children digest.
-    assert_eq!(prefix_payload.filters.len(), 9);
+    let prefix_payload = address_names_cursor_payload(&cursor, &prefix);
+    // Only the eight request filters.
+    assert_eq!(prefix_payload.filters.len(), 8);
     assert!(!prefix_payload.filters.contains_key("match"));
-    let contains_payload = address_names_cursor_payload(&cursor, &contains, "");
+    let contains_payload = address_names_cursor_payload(&cursor, &contains);
     assert_eq!(contains_payload.filters["match"], "contains");
     assert!(address_names_storage_cursor(&prefix_payload, &contains).is_err());
     assert!(address_names_storage_cursor(&contains_payload, &prefix).is_err());
@@ -178,7 +178,7 @@ fn address_names_cursor_binds_contains_match_only_when_it_narrows_q() {
         q: None,
         ..contains
     };
-    let payload = address_names_cursor_payload(&cursor, &unfiltered_contains, "");
+    let payload = address_names_cursor_payload(&cursor, &unfiltered_contains);
     assert!(address_names_storage_cursor(&payload, &unfiltered).is_ok());
 }
 
@@ -195,7 +195,7 @@ fn address_names_cursor_binds_the_authority_set() {
         authority: Some(&v0_v1),
         ..binding(AddressNamesSort::CreatedAt)
     };
-    let payload = address_names_cursor_payload(&cursor, &v0_v1_binding, "");
+    let payload = address_names_cursor_payload(&cursor, &v0_v1_binding);
     assert_eq!(payload.filters["authority"], "ens_v0,ens_v1");
     assert_eq!(payload.sort, "created_at");
     assert_eq!(
@@ -207,7 +207,7 @@ fn address_names_cursor_binds_the_authority_set() {
     assert!(
         address_names_storage_cursor(&payload, &binding(AddressNamesSort::RegisteredAt)).is_err()
     );
-    let single = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::CreatedAt), "");
+    let single = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::CreatedAt));
     assert_eq!(single.filters["authority"], "ens_v1");
 }
 
@@ -218,7 +218,7 @@ fn address_names_cursor_token_decodes_to_bound_payload() {
         logical_name_id: "ens:alice.eth".to_owned(),
         resource_id: Uuid::from_u128(0x1234),
     };
-    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name), "");
+    let payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
     let encoded = crate::v2::encode(&payload);
 
     assert_eq!(

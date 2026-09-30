@@ -50,6 +50,29 @@ pub(crate) fn decode(cursor: &str) -> V2Result<Payload> {
     Ok(payload)
 }
 
+/// Decode a current-state collection's legacy positional layout, accepting only its known
+/// top-level fields. Routes still validate every filter and position field separately.
+pub(crate) fn decode_collection(cursor: &str) -> V2Result<Payload> {
+    let bytes = hex::decode(cursor).map_err(|_| invalid_cursor_error())?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_cursor_error())?;
+    let object = value.as_object().ok_or_else(invalid_cursor_error)?;
+    if object.keys().any(|key| {
+        ![
+            "version",
+            "sort",
+            "filters",
+            "last_item",
+            "snapshot",
+            "evaluated_at",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(invalid_cursor_error());
+    }
+    decode(cursor)
+}
+
 pub(crate) fn cursor_value(
     payload: &Payload,
     key: &str,

@@ -165,7 +165,6 @@ pub(crate) async fn get_subnames(
         .map(|cursor| {
             let payload = decode(cursor)?;
             let cursor = subname_storage_cursor(&payload, &binding)?;
-            snapshot.validate_cursor(&payload)?;
             Ok(cursor)
         })
         .transpose()?;
@@ -245,7 +244,7 @@ pub(crate) async fn get_subnames(
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
-        .map(|cursor| encode(&snapshot.bind_cursor(subname_cursor_payload(cursor, &binding))));
+        .map(|cursor| encode(&subname_cursor_payload(cursor, &binding)));
     let has_more = next_cursor.is_some();
     let data = storage_page
         .rows

@@ -185,15 +185,9 @@ pub(super) async fn resolve_permissions_filter(
     if let Some(address) = params.address.as_ref() {
         cursor_filters.insert(ADDRESS_FILTER_KEY.to_owned(), address.clone());
     }
-    // The cursor is bound to the public registration the request selected: the handle it named,
-    // else the registration the name serves (the lease of a wrapped `.eth` name). The resource
-    // that registration reads is a storage detail, and a read of that resource is a different
-    // request.
-    if let Some(registration_id) = inputs
-        .requested_resource_id
-        .or(name_registration_id)
-        .or(resource_id)
-    {
+    // Bind only an explicit registration selector. A name-only query follows its current
+    // registration, which may change between pages without changing the query.
+    if let Some(registration_id) = inputs.requested_resource_id {
         cursor_filters.insert(
             REGISTRATION_ID_FILTER_KEY.to_owned(),
             registration_id.to_string(),

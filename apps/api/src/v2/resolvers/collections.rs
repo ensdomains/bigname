@@ -6,12 +6,13 @@ use super::{
     parse_numeric_chain_id, product_resolver_reason, require_phase_target_snapshot,
     resolver_snapshot_scope,
 };
+use crate::v2::list_cursor::{ListCursor, ListPosition};
 use crate::{
     AppState,
     v2::{
-        AtSelector, CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams,
-        SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode,
-        encode_at_token, permission_powers_value, resolve_v2_snapshot_for, snapshot_meta,
+        Envelope, Page, QueryParamAllowlist, QueryParams, SnapshotReadResource, StrictQueryParams,
+        V2Error, V2Result, encode_at_token, permission_powers_value, resolve_v2_snapshot_for,
+        snapshot_meta,
     },
 };
 use axum::{
@@ -67,71 +68,38 @@ async fn collection(
         ("resolver".to_owned(), address.clone()),
         ("section".to_owned(), section.to_owned()),
     ]);
-    let cursor = params.cursor.as_deref().map(decode).transpose()?;
-    if let Some(cursor) = &cursor
-        && (cursor.filters != filters || cursor.sort != "identity_asc")
-    {
-        return Err(V2Error::invalid_input(
-            "cursor does not match this resolver collection",
-        ));
-    }
+    let list = ListCursor::new("identity_asc", filters);
+    list.check_shape(
+        params.cursor.as_deref(),
+        &["key1", "key2"],
+        params.at.is_some(),
+    )?;
     let publication = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         None,
         Some(super::resolver_namespace(slug)?),
     )
-    .await?
-    .continuing_from_request_cursor(params.cursor.is_some());
-    if let Some(cursor) = &cursor {
-        publication.validate_token(cursor.last_item.get("publication").map(String::as_str))?;
-    }
-    let cursor_at = cursor
-        .as_ref()
-        .and_then(|cursor| cursor.snapshot.clone())
-        .map(AtSelector::SnapshotToken);
+    .await?;
     let selected = resolve_v2_snapshot_for(
         &state.pool,
         &resolver_snapshot_scope(slug)?,
-        params.at.as_ref().or(cursor_at.as_ref()),
+        params.at.as_ref(),
         params.finality,
         SnapshotReadResource::Resolver,
     )
     .await?;
-    // Current projections are not historical tables. Reject old generations rather than
-    // combining old cursor positions with newly published permission/name rows.
     let generations =
         crate::v2::lookup::head::load_selected_project_generations(&state.pool, &selected).await?;
-    let token = encode_at_token(&selected);
-    let generation = crate::v2::support::publication_source_tagged(
-        serde_json::to_string(&generations).expect("generation map serializes"),
-    );
-    let key = if let Some(cursor) = &cursor {
-        if cursor.snapshot.as_ref() != Some(&token) {
-            return Err(V2Error::invalid_input("cursor snapshot does not match at"));
-        }
-        if cursor.last_item.get("generation") != Some(&generation) {
-            return Err(V2Error::stale(
-                "resolver collection changed; restart pagination",
-            ));
-        }
-        if cursor.last_item.len() != 4 {
-            return Err(V2Error::invalid_input("invalid resolver collection cursor"));
-        }
-        Some((
-            cursor
-                .last_item
-                .get("key1")
-                .cloned()
-                .ok_or_else(invalid_cursor)?,
-            cursor
-                .last_item
-                .get("key2")
-                .cloned()
-                .ok_or_else(invalid_cursor)?,
-        ))
-    } else {
-        None
-    };
+    let list = list.pinned_at(params.at.is_some().then(|| encode_at_token(&selected)));
+    let key = list
+        .read(params.cursor.as_deref(), &["key1", "key2"])?
+        .map(|position| {
+            Ok((
+                position.get("key1")?.to_owned(),
+                position.get("key2")?.to_owned(),
+            ))
+        })
+        .transpose()?;
     let row = bigname_storage::load_phase_resolver_current(&state.pool, slug, &address)
         .await
         .map_err(crate::v2::name_rows_error(
@@ -187,19 +155,10 @@ async fn collection(
     rows.truncate(params.page_size as usize);
     let next_cursor = if has_more {
         rows.last().map(|row| {
-            encode(&bind_publication(
-                &publication,
-                CursorPayload::new(
-                    "identity_asc",
-                    filters,
-                    BTreeMap::from([
-                        ("key1".to_owned(), row.0.clone()),
-                        ("key2".to_owned(), row.1.clone()),
-                        ("generation".to_owned(), generation),
-                    ]),
-                    Some(token),
-                ),
-            ))
+            list.next(ListPosition::new([
+                ("key1", row.0.clone()),
+                ("key2", row.1.clone()),
+            ]))
         })
     } else {
         None
@@ -227,7 +186,7 @@ async fn collection(
         != generations
     {
         return Err(V2Error::stale(
-            "resolver collection changed while reading; restart pagination",
+            "resolver collection changed while reading; retry the request",
         ));
     }
     publication.finish(&state).await?;
@@ -244,23 +203,6 @@ async fn collection(
     }))
 }
 
-fn invalid_cursor() -> V2Error {
-    V2Error::invalid_input("invalid resolver collection cursor")
-}
 fn read_error() -> V2Error {
     V2Error::internal_error("failed to read resolver collection")
-}
-
-// Resolver cursors retain their ordinary `at` token; the shared collection
-// fingerprint additionally binds publication/manifest revisions.
-pub(super) fn bind_publication(
-    snapshot: &crate::v2::collection_snapshot::CollectionSnapshot,
-    mut cursor: CursorPayload,
-) -> CursorPayload {
-    cursor
-        .last_item
-        .insert("publication".to_owned(), snapshot.token().to_owned());
-    cursor.evaluated_at =
-        Some(bigname_storage::UnixSeconds::from(snapshot.evaluated_at()).internal_string());
-    cursor
 }

@@ -217,7 +217,10 @@ pub(crate) async fn get_permissions(
     .await
     .map_err(|_| V2Error::internal_error("failed to load permission registrations"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(permissions_cursor_payload(cursor, &resolved.cursor_filters)))
+        encode(&permissions_cursor_payload(
+            cursor,
+            &resolved.cursor_filters,
+        ))
     });
     let has_more = next_cursor.is_some();
     let data = storage_page
