@@ -5,7 +5,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 
 use super::{
-    JsonRpcProvider, PROVIDER_PARALLELISM,
+    JsonRpcProvider,
     decode::normalize_hash,
     request::BatchCall,
     types::{
@@ -14,7 +14,6 @@ use super::{
     },
 };
 
-const BATCH_LIMIT: usize = 32;
 const MAX_RECEIPT_FALLBACK: usize = 256;
 
 impl JsonRpcProvider {
@@ -50,15 +49,14 @@ impl JsonRpcProvider {
         .transpose()
     }
 
-    /// Runs `calls` as JSON-RPC batches of [`BATCH_LIMIT`], at most
-    /// [`PROVIDER_PARALLELISM`] in flight, and returns the results in call order.
+    /// Runs calls at the configured batch width and parallelism, preserving call order.
     async fn parallel_batches(&self, calls: Vec<BatchCall>) -> Result<Vec<Option<Value>>> {
         let chunks = calls
-            .chunks(BATCH_LIMIT)
+            .chunks(self.config.rpc_batch_size())
             .map(<[BatchCall]>::to_vec)
             .collect::<Vec<_>>();
         let results = stream::iter(chunks.into_iter().map(|chunk| self.batch(chunk)))
-            .buffered(PROVIDER_PARALLELISM)
+            .buffered(self.config.rpc_max_in_flight())
             .try_collect::<Vec<_>>()
             .await?;
         Ok(results.into_iter().flatten().collect())
@@ -318,7 +316,7 @@ impl JsonRpcProvider {
                         params: vec![json!(transaction.hash)],
                     })
                     .collect();
-                self.batch(calls)
+                self.parallel_batches(calls)
                     .await?
                     .into_iter()
                     .map(|value| {

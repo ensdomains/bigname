@@ -40,6 +40,13 @@ impl JsonRpcProvider {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
+        if self.config.rpc_batch_size() == 1 {
+            let mut values = Vec::with_capacity(calls.len());
+            for call in calls {
+                values.push(self.request(call.method, call.params).await?);
+            }
+            return Ok(values);
+        }
         for attempt in 0..MAX_ATTEMPTS {
             match self.batch_once(&calls).await {
                 Ok(values) => return Ok(values),
@@ -122,6 +129,9 @@ impl JsonRpcProvider {
     }
 
     async fn send(&self, request: Value) -> Result<Value> {
+        // Bound actual HTTP work, including retries and standalone fallback calls.
+        // Release the permit after the body is read, before any retry backoff.
+        let permit = self.in_flight.acquire().await?;
         self.request_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (client, client_id) = self.client.snapshot();
@@ -143,6 +153,7 @@ impl JsonRpcProvider {
             .text()
             .await
             .context("failed to read JSON-RPC response")?;
+        drop(permit);
         if !status.is_success() {
             bail!(
                 "provider request failed with HTTP {status}: {}",

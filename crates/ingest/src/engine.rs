@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use crate::{
-    IngestError, Result,
+    IngestConfig, IngestError, Result,
     coinbase_sql::CoinbaseSqlSource,
     plan::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
@@ -109,6 +109,7 @@ pub struct LiveBatchOutcome {
 
 pub struct Engine {
     pool: PgPool,
+    config: IngestConfig,
     providers: Mutex<BTreeMap<String, SharedProvider>>,
     coinbase_sources: Mutex<BTreeMap<String, Arc<CoinbaseSqlSource>>>,
     range_logs: Mutex<RangeLogCache>,
@@ -117,8 +118,15 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(pool: PgPool) -> Self {
+        Self::with_config(pool, IngestConfig::default())
+    }
+
+    /// Configures normal RPC windows and the shared window used by all redo sources.
+    /// Live follow keeps its window size but shares the configured RPC providers.
+    pub fn with_config(pool: PgPool, config: IngestConfig) -> Self {
         Self {
             pool,
+            config,
             providers: Mutex::new(BTreeMap::new()),
             coinbase_sources: Mutex::new(BTreeMap::new()),
             range_logs: Mutex::new(RangeLogCache::default()),
@@ -192,10 +200,10 @@ impl Engine {
             let to = state
                 .next
                 .saturating_add(
-                    if normalized_kind(&state.source.kind) == ProviderKind::Coinbase {
-                        COINBASE_BLOCKS_PER_BATCH
-                    } else {
-                        BLOCKS_PER_BATCH
+                    match normalized_kind(&state.source.kind) {
+                        ProviderKind::Coinbase => COINBASE_BLOCKS_PER_BATCH,
+                        ProviderKind::Rpc => self.config.blocks_per_batch(),
+                        ProviderKind::Reth => BLOCKS_PER_BATCH,
                     } - 1,
                 )
                 .min(state.target.number);
@@ -271,7 +279,8 @@ impl Engine {
         // range. A marker at i64::MAX has no successor: nothing remains, no window loads.
         let from = effective_redo_start(range_from, request.resume_current.as_ref(), 0);
         let to = from.map_or(range_to, |from| {
-            from.saturating_add(BLOCKS_PER_BATCH - 1).min(range_to)
+            from.saturating_add(self.config.blocks_per_batch() - 1)
+                .min(range_to)
         });
         let complete = to >= range_to;
         self.require_independent_base_source_seam(&request).await?;
@@ -454,19 +463,22 @@ impl Engine {
 
     async fn provider(&self, chain_id: &str, source: &SourceDescriptor) -> Result<SharedProvider> {
         let key = format!("{}\0{}\0{}", chain_id, source.kind, source.endpoint);
-        if let Some(provider) = self.providers.lock().await.get(&key).cloned() {
+        // Publish exactly one provider (and HTTP request limit) for each configured key.
+        let mut providers = self.providers.lock().await;
+        if let Some(provider) = providers.get(&key).cloned() {
             return Ok(provider);
         }
         let provider = Arc::new(
-            ChainProvider::new(chain_id, &source.kind, &source.endpoint).map_err(|error| {
-                IngestError::with_source(
-                    crate::ErrorKind::Configuration,
-                    format!("failed to configure source {}", source.key),
-                    error,
-                )
-            })?,
+            ChainProvider::with_config(chain_id, &source.kind, &source.endpoint, self.config)
+                .map_err(|error| {
+                    IngestError::with_source(
+                        crate::ErrorKind::Configuration,
+                        format!("failed to configure source {}", source.key),
+                        error,
+                    )
+                })?,
         );
-        self.providers.lock().await.insert(key, provider.clone());
+        providers.insert(key, provider.clone());
         Ok(provider)
     }
 

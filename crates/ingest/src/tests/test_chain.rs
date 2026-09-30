@@ -273,7 +273,12 @@ impl TestNode {
         let number = params
             .first()
             .and_then(Value::as_str)
-            .and_then(parse_quantity);
+            .and_then(|tag| match tag {
+                "latest" | "safe" | "finalized" => {
+                    self.chain.blocks.last().map(|block| block.number)
+                }
+                _ => parse_quantity(tag),
+            });
         number
             .and_then(|number| self.chain.block(number))
             .map_or(Value::Null, |block| {
@@ -540,6 +545,7 @@ pub(crate) const BLOCK_RECEIPTS: &str = "eth_getBlockReceipts";
 pub(crate) const EXACT_BLOCK_LOGS: &str = "eth_getLogs(blockHash)";
 
 pub(crate) struct TestEndpoint {
+    pub(crate) endpoint: String,
     pub(crate) provider: ChainProvider,
     pub(crate) counts: Arc<RequestCounts>,
 }
@@ -583,11 +589,12 @@ pub(crate) async fn serve(chain: TestChain, tamper: Tamper) -> AnyResult<TestEnd
     });
     Ok(TestEndpoint {
         provider: ChainProvider::new("test-chain", "rpc", &endpoint)?,
+        endpoint,
         counts,
     })
 }
 
-async fn read_request_body(socket: &mut tokio::net::TcpStream) -> Option<String> {
+pub(crate) async fn read_request_body(socket: &mut tokio::net::TcpStream) -> Option<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {

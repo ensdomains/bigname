@@ -1,4 +1,5 @@
 mod coinbase_sql;
+mod config;
 mod engine;
 mod error;
 mod event_signatures;
@@ -12,6 +13,7 @@ mod test_chain;
 mod verification;
 mod write;
 
+pub use config::IngestConfig;
 pub use engine::{
     BatchOutcome, BatchRequest, Engine, HeadMarkers, LiveBatchOutcome, LiveBatchRequest,
     LiveContinuation, Marker, SourceCursor, SourceDescriptor, SourceProgress,

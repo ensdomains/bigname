@@ -8,6 +8,9 @@ use std::{
 
 use anyhow::{Result, bail};
 use reqwest::Url;
+use tokio::sync::Semaphore;
+
+use crate::IngestConfig;
 
 mod bloom;
 mod decode;
@@ -15,6 +18,8 @@ mod http_client;
 mod request;
 mod reth_db;
 mod rpc;
+#[cfg(test)]
+mod tuning_tests;
 mod types;
 
 pub use bloom::bloom_contains;
@@ -30,11 +35,7 @@ pub(crate) use reth_db::RethDbProvider;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// How many JSON-RPC batches or range log queries a provider keeps in flight.
-///
-/// Remote endpoints answer one round trip at a time; a window's hash lookups, header
-/// lookups, range queries and per-transaction fetches are independent, so they overlap up
-/// to this bound rather than running strictly in sequence.
+/// Existing range-query parallelism for the direct database reader.
 pub const PROVIDER_PARALLELISM: usize = 8;
 
 #[derive(Clone)]
@@ -54,14 +55,22 @@ pub struct JsonRpcProvider {
     endpoint: Url,
     client: RecoveringHttpClient,
     request_attempts: Arc<AtomicUsize>,
+    config: IngestConfig,
+    in_flight: Arc<Semaphore>,
 }
 
 impl JsonRpcProvider {
     pub fn new(endpoint: &str) -> Result<Self> {
+        Self::with_config(endpoint, IngestConfig::default())
+    }
+
+    pub(super) fn with_config(endpoint: &str, config: IngestConfig) -> Result<Self> {
         Ok(Self {
             endpoint: validate_endpoint(endpoint)?,
             client: RecoveringHttpClient::new(CONNECT_TIMEOUT, REQUEST_TIMEOUT)?,
             request_attempts: Arc::new(AtomicUsize::new(0)),
+            config,
+            in_flight: Arc::new(Semaphore::new(config.rpc_max_in_flight())),
         })
     }
 
@@ -76,6 +85,27 @@ impl ChainProvider {
             ProviderKind::Rpc => Ok(Self::JsonRpc(JsonRpcProvider::new(endpoint)?)),
             ProviderKind::Reth => Ok(Self::RethDb(RethDbProvider::new(chain_id, endpoint)?)),
             ProviderKind::Coinbase => bail!("Coinbase SQL is not a chain block provider"),
+        }
+    }
+
+    pub(crate) fn with_config(
+        chain_id: &str,
+        kind: &str,
+        endpoint: &str,
+        config: IngestConfig,
+    ) -> Result<Self> {
+        match normalized_kind(kind) {
+            ProviderKind::Rpc => Ok(Self::JsonRpc(JsonRpcProvider::with_config(
+                endpoint, config,
+            )?)),
+            _ => Self::new(chain_id, kind, endpoint),
+        }
+    }
+
+    pub(crate) fn query_parallelism(&self) -> usize {
+        match self {
+            Self::JsonRpc(provider) => provider.config.rpc_max_in_flight(),
+            Self::RethDb(_) => PROVIDER_PARALLELISM,
         }
     }
 

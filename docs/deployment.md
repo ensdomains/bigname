@@ -379,6 +379,46 @@ before starting a release that contains the loader. If interpretation reads a
 name the loader did not restore, the batch stops before publication; it never
 publishes output from partial state.
 
+Ingest throughput can be tuned at process startup for both `run` and `redo`:
+
+| Environment variable | CLI option | Default | Allowed values |
+| --- | --- | --- | --- |
+| `BIGNAME_INGEST_BLOCKS_PER_BATCH` | `--ingest-blocks-per-batch` | 256 | 1–4096 |
+| `BIGNAME_INGEST_RPC_BATCH_SIZE` | `--ingest-rpc-batch-size` | 32 | 1–256 |
+| `BIGNAME_INGEST_RPC_MAX_IN_FLIGHT` | `--ingest-rpc-max-in-flight` | 8 | 1–32 |
+
+The block limit applies to normal RPC Ingest and the shared window used by
+Ingest redo. Normal Coinbase SQL keeps its 1024-block window; normal direct-Reth
+and Live keep their existing block limits. RPC request settings apply to the
+shared Ingest/Live engine, including Coinbase's companion RPC. They do not tune
+the separate verification provider or API requests. CLI options override the
+environment; invalid limits fail configuration before database startup.
+
+RPC batch size counts JSON-RPC calls within one HTTP request; a value of 1 sends
+standalone calls. The in-flight limit is shared across HTTP requests to each
+provider instance, including range-log queries, retries and batch fallbacks.
+It is not a process-wide limit across different chains/providers. All header,
+source-boundary and reorg checks still run, regardless of window size.
+
+For a first historical-ingest comparison, set these in the server Compose env
+file, or export them when launching `phase-runner` directly:
+
+```dotenv
+BIGNAME_INGEST_BLOCKS_PER_BATCH=1024
+BIGNAME_INGEST_RPC_BATCH_SIZE=128
+BIGNAME_INGEST_RPC_MAX_IN_FLIGHT=8
+```
+
+Confirm the RPC endpoint accepts that batch width, then compare throughput,
+request failures, memory and batch duration against the defaults. Larger windows
+reduce per-window work and commits, but still fetch and verify every block.
+They retain more data, extend transactions and increase work retried after a
+failure. The settings do not impose a log-count or memory-byte cap, and the
+provider's per-response log limit is not an aggregate memory budget. Normal
+finalized-history log prefetch remains 10000 blocks; redo does not use it.
+Changes require a runner restart, but no schema migration or redo of completed
+history. Reset to 256 / 32 / 8 to restore the default tuning.
+
 `BIGNAME_INTERPRET_BLOCKS_PER_BATCH` (`--interpret-blocks-per-batch`) sets how
 many canonical blocks one Interpret [batch](glossary.md#batch-grid) reads,
 interprets and publishes in one transaction. It defaults to 500 and must be at

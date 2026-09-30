@@ -863,3 +863,119 @@ fn run_cli_rejects_an_interpret_batch_of_zero_blocks() {
     .expect_err("a batch must hold at least one block");
     assert!(error.to_string().contains("--interpret-blocks-per-batch"));
 }
+
+fn ingest_options(command: &str, extra: &[&str]) -> RunnerResult<bigname_ingest::IngestConfig> {
+    let mut args = vec![
+        "phase-runner",
+        command,
+        "--database-url",
+        "postgres://fixture.invalid/db",
+        "--chain",
+        "ethereum-mainnet",
+    ];
+    if command == "run" {
+        args.extend([
+            "--verification-database-url",
+            "postgres://fixture.invalid/verify",
+        ]);
+    } else {
+        args.extend([
+            "--phase",
+            "ingest",
+            "--from-block",
+            "0",
+            "--to-block",
+            "4096",
+        ]);
+    }
+    args.extend_from_slice(extra);
+    let capacity = match Cli::try_parse_from(args).unwrap().command {
+        Command::Run(args) => args.capacity,
+        Command::Redo(args) => args.capacity,
+        _ => unreachable!(),
+    };
+    Ok(resolve_capacity(capacity)?.ingest)
+}
+
+#[test]
+fn ingest_options_reach_both_run_and_redo_configuration() {
+    for command in ["run", "redo"] {
+        assert_eq!(
+            ingest_options(command, &[]).unwrap(),
+            bigname_ingest::IngestConfig::default()
+        );
+        let config = ingest_options(
+            command,
+            &[
+                "--ingest-blocks-per-batch",
+                "1024",
+                "--ingest-rpc-batch-size",
+                "128",
+                "--ingest-rpc-max-in-flight",
+                "4",
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.blocks_per_batch(), 1024);
+        assert_eq!(config.rpc_batch_size(), 128);
+        assert_eq!(config.rpc_max_in_flight(), 4);
+        for (flag, too_large) in [
+            ("--ingest-blocks-per-batch", "4097"),
+            ("--ingest-rpc-batch-size", "257"),
+            ("--ingest-rpc-max-in-flight", "33"),
+        ] {
+            for value in ["0", too_large] {
+                let error = ingest_options(command, &[flag, value]).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Configuration);
+            }
+        }
+    }
+}
+
+#[test]
+fn ingest_environment_and_cli_precedence() {
+    if std::env::var_os("BIGNAME_TEST_INGEST_ENV_CHILD").is_some() {
+        for command in ["run", "redo"] {
+            let config = ingest_options(command, &[]).unwrap();
+            assert_eq!(config.blocks_per_batch(), 1024);
+            assert_eq!(config.rpc_batch_size(), 128);
+            assert_eq!(config.rpc_max_in_flight(), 4);
+            let override_config = ingest_options(
+                command,
+                &[
+                    "--ingest-blocks-per-batch",
+                    "4096",
+                    "--ingest-rpc-batch-size",
+                    "1",
+                    "--ingest-rpc-max-in-flight",
+                    "2",
+                ],
+            )
+            .unwrap();
+            assert_eq!(override_config.blocks_per_batch(), 4096);
+            assert_eq!(override_config.rpc_batch_size(), 1);
+            assert_eq!(override_config.rpc_max_in_flight(), 2);
+        }
+        return;
+    }
+    // A child process exercises environment parsing without mutating the test runner's environment.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "cli::tests::ingest_environment_and_cli_precedence",
+            "--nocapture",
+        ])
+        .env("BIGNAME_TEST_INGEST_ENV_CHILD", "1")
+        .env("BIGNAME_INGEST_BLOCKS_PER_BATCH", "1024")
+        .env("BIGNAME_INGEST_RPC_BATCH_SIZE", "128")
+        .env("BIGNAME_INGEST_RPC_MAX_IN_FLIGHT", "4")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}

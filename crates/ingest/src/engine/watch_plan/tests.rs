@@ -94,6 +94,72 @@ async fn engine(db: &TestDatabase, chain: TestChain) -> Result<(Engine, BatchReq
 }
 
 #[tokio::test]
+async fn configured_windows_keep_normal_and_redo_progress_and_facts_complete() -> Result<()> {
+    let db = declared_database("ingest_configured_windows").await?;
+    let node = test_chain::serve(transfer_chain(8), Tamper::None).await?;
+    let config = crate::IngestConfig::new(3, 2, 2)?;
+    let engine = Engine::with_config(db.pool().clone(), config);
+    let source = SourceDescriptor {
+        key: "rpc".into(),
+        kind: "rpc".into(),
+        start_block: 0,
+        endpoint: node.endpoint.clone(),
+    };
+    let initial = BatchRequest {
+        chain_id: CHAIN.into(),
+        sources: vec![source],
+        cursors: vec![],
+        redo_range: None,
+        resume_current: None,
+    };
+    let mut request = initial.clone();
+    for to in [2, 5, 7] {
+        let outcome = engine.run_batch(request.clone()).await?;
+        assert_eq!(outcome.current.number, to);
+        assert_eq!(outcome.target.number, 7);
+        assert_eq!(outcome.complete, to == 7);
+        request.cursors = vec![crate::SourceCursor {
+            key: "rpc".into(),
+            next_block: to + 1,
+            target_block: Some(7),
+            last_processed: Some(outcome.current),
+            redo_loaded_boundary: None,
+        }];
+    }
+    // Both ordinary and prepared redo paths must use the same configured window,
+    // repeat every block, and retain identical immutable raw facts.
+    for prepared in [false, true] {
+        let mut request = initial.clone();
+        request.redo_range = Some((0, 7));
+        for to in [2, 5, 7] {
+            let outcome = if prepared {
+                engine.run_redo_attempt_batch(request.clone(), 1).await?
+            } else {
+                engine.run_batch(request.clone()).await?
+            };
+            assert_eq!(outcome.current.number, to);
+            assert_eq!(outcome.complete, to == 7);
+            request.resume_current = Some(outcome.current);
+        }
+    }
+    let blocks: Vec<i64> = sqlx::query_scalar(
+        "SELECT block_number FROM chain_lineage WHERE chain_id=$1 ORDER BY block_number",
+    )
+    .bind(CHAIN)
+    .fetch_all(db.pool())
+    .await?;
+    assert_eq!(blocks, (0..8).collect::<Vec<_>>());
+    let logs: Vec<i64> =
+        sqlx::query_scalar("SELECT log_index FROM raw_logs WHERE chain_id=$1 ORDER BY log_index")
+            .bind(CHAIN)
+            .fetch_all(db.pool())
+            .await?;
+    assert_eq!(logs, vec![1, 2, 3]);
+    assert!(engine.redo_watch_plans.lock().await.is_empty());
+    db.cleanup().await
+}
+
+#[tokio::test]
 async fn adjacent_redo_batches_reuse_the_plan_and_keep_address_interval_boundaries() -> Result<()> {
     let db = declared_database("redo_watch_reuse").await?;
     sqlx::query(

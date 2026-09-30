@@ -6,7 +6,7 @@ use crate::{
     IngestError, Result,
     coinbase_sql::{CoinbaseSqlSource, source_error},
     manifest::WatchQuery,
-    provider::{Log, PROVIDER_PARALLELISM, ResolvedBlock, SharedProvider},
+    provider::{Log, ResolvedBlock, SharedProvider},
 };
 
 use super::prefetch::{Prefetcher, window_logs};
@@ -83,7 +83,7 @@ pub(crate) async fn fetch_into(
     let parallelism = if context.coinbase.is_some() {
         1
     } else {
-        PROVIDER_PARALLELISM
+        context.provider.query_parallelism()
     };
     let mut pending = Vec::with_capacity(queries.len());
     for query in queries {

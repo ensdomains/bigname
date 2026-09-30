@@ -9,6 +9,15 @@ use crate::{
 
 #[derive(Clone, Debug, Args)]
 pub(super) struct CapacityArgs {
+    /// Blocks per RPC Ingest window or redo window (1..=4096).
+    #[arg(long, env = "BIGNAME_INGEST_BLOCKS_PER_BATCH", default_value_t = 256)]
+    ingest_blocks_per_batch: u32,
+    /// Maximum JSON-RPC calls in one request (1..=256); 1 sends standalone calls.
+    #[arg(long, env = "BIGNAME_INGEST_RPC_BATCH_SIZE", default_value_t = 32)]
+    ingest_rpc_batch_size: usize,
+    /// Concurrent HTTP requests per Ingest/Live RPC provider (1..=32).
+    #[arg(long, env = "BIGNAME_INGEST_RPC_MAX_IN_FLIGHT", default_value_t = 8)]
+    ingest_rpc_max_in_flight: usize,
     /// Always restore Interpret's prior state with the full-state loader instead of
     /// letting each chain choose the per-batch ENSv1 lookahead loader automatically.
     #[arg(long, env = "BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER")]
@@ -58,7 +67,14 @@ pub(super) fn resolve_capacity(args: CapacityArgs) -> RunnerResult<CapacityConfi
             "capacity poll interval must be positive",
         ));
     }
+    let ingest = bigname_ingest::IngestConfig::new(
+        args.ingest_blocks_per_batch,
+        args.ingest_rpc_batch_size,
+        args.ingest_rpc_max_in_flight,
+    )
+    .map_err(|error| RunnerError::new(ErrorKind::Configuration, error.to_string()))?;
     Ok(CapacityConfig {
+        ingest,
         interpret_blocks_per_batch: args.interpret_blocks_per_batch,
         interpret_force_full_state_loader: args.interpret_force_full_state_loader,
         interpret_lookahead_statement_timeout_secs: NonZeroU32::new(
