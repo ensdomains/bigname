@@ -2022,9 +2022,11 @@ runs for the current request at the selected block identity. See
 API verification starts a fresh `REPEATABLE READ, READ ONLY` transaction after
 provider calls and revalidates the captured state without advisory or row locks.
 Its fixed-`search_path`, security-definer guard checks the same predicates as the
-retained locking ledger writer. The API role needs `EXECUTE` only on the
-nine-argument `revalidate_resolution_lookup_state` overload; it needs no access
-to the ledger or its writer. API requests never create, refresh or clear a
+retained locking ledger writer. The API role needs `EXECUTE` only on
+`revalidate_resolution_lookup_state_read_only`, which fixes locking to false.
+The shared boolean core remains private to the schema owner; clients cannot
+choose its locking mode. The API role needs no access to the ledger or its
+writer. API requests never create, refresh or clear a
 divergence, on either primary databases or physical streaming standbys.
 Existing ledger rows remain diagnostic observations and can still be retired
 by Project publication and reorg handling. No serving path consumes them.

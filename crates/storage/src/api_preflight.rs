@@ -100,7 +100,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.project_name_summary'),
                 (
                     'function',
-                    'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)'
+                    'bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)'
                 ),
                 ('type', 'bigname_phase.canonicality_state')
         )
