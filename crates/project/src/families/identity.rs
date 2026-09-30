@@ -244,7 +244,7 @@ fn binding_position(binding: &Row, opening: Option<&BlockEvent>) -> Position {
 /// the surface binding id for two bindings one event opened.
 fn candidate_order(row: &Row) -> (Option<Position>, String) {
     (
-        Position::of_row(row),
+        Position::from_map(row),
         row.get("surface_binding_id")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -365,7 +365,7 @@ async fn candidates(
         }) {
             let mut row = candidate.clone();
             handoff(&mut row, Some(&earlier));
-            if let Some(block) = Position::of_row(&row).map(|position| position.block_number) {
+            if let Some(block) = Position::from_map(&row).map(|position| position.block_number) {
                 converted
                     .entry(name.clone())
                     .and_modify(|from| *from = (*from).min(block))
@@ -582,7 +582,7 @@ fn handoff(row: &mut Row, earlier: Option<&[Row]>) {
         return;
     }
     let position = predecessor
-        .and_then(Position::of_row)
+        .and_then(Position::from_map)
         .map_or(Value::Null, |position| position.to_json());
     set(row, "predecessor_resource_id", field("resource_id"));
     set(row, "predecessor_position", position.clone());

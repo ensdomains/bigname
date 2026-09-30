@@ -14,6 +14,8 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, Row};
 
+use crate::families::position::emission_ordinal_sql;
+
 use super::{
     facts::{ResolverClassification, load_classification_on as load_classification},
     is_cleared,
@@ -263,31 +265,11 @@ fn latest_registry_first(alias: &str) -> String {
     format!(
         "{alias}.block_number DESC, {alias}.transaction_index DESC NULLS LAST,
          {alias}.log_index DESC NULLS LAST, {} DESC, {alias}.event_identity COLLATE \"C\" DESC",
-        emission_ordinal(
+        emission_ordinal_sql(
             &format!("{alias}.event_identity"),
             &format!("{alias}.transaction_index"),
             &format!("{alias}.log_index"),
         )
-    )
-}
-
-/// The emission ordinal of the identity expression `identity` (docs/glossary.md, "Emission
-/// ordinal"), in the checked SQL form the family writer uses
-/// (crates/project/tests/families_ordinal_sql.rs checks it against the Rust parse): strip
-/// leading zeros, check the significant length against the ten-digit bound, and only then cast,
-/// so no suffix errors where the Rust parse yields none. Absent is -1 rather than null so the row
-/// value stays decisive; every valid ordinal is at least 0, so -1 sorts last under `DESC`.
-fn emission_ordinal(identity: &str, transaction: &str, log: &str) -> String {
-    format!(
-        "COALESCE(CASE WHEN {transaction} IS NOT NULL AND {log} IS NOT NULL THEN (
-            SELECT CASE WHEN digits.d = '' THEN 0::bigint
-                        WHEN length(digits.d) < 10
-                          OR (length(digits.d) = 10
-                              AND digits.d COLLATE \"C\" <= '4294967295' COLLATE \"C\")
-                            THEN digits.d::bigint END
-            FROM (SELECT ltrim(m[1], '0') AS d
-                  FROM regexp_match(({identity}) COLLATE \"C\", ':([0-9]+)$') m) digits
-        ) END, -1::bigint)"
     )
 }
 

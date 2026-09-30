@@ -352,7 +352,24 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
 
 /// The production selection query, run as the Follow path runs it with no block changes.
 async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
-    let rows: Vec<Value> = sqlx::query_scalar(include_str!("../src/families/hydrate/text.sql"))
+    let sql = include_str!("../src/families/hydrate/text.sql")
+        .replace(
+            "{value_emission_ordinal}",
+            &bigname_storage::families::position::emission_ordinal_sql(
+                "value.event_identity",
+                "value.transaction_index",
+                "value.log_index",
+            ),
+        )
+        .replace(
+            "{boundary_emission_ordinal}",
+            &bigname_storage::families::position::emission_ordinal_sql(
+                "boundary.event_identity",
+                "boundary.transaction_index",
+                "boundary.log_index",
+            ),
+        );
+    let rows: Vec<Value> = sqlx::query_scalar(&sql)
         .bind(CHAIN)
         .bind(block)
         .bind(json!([]))
@@ -463,7 +480,7 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
     fixture.cleanup().await
 }
 
-// The query reads a record version position as Position::of_row does, part by part through
+// The query reads a record version position as Position::from_map does, part by part through
 // serde_json's `as_i64`: a fractional or out-of-range block number leaves no boundary, and an
 // out-of-range transaction or log index reads as absent (families/position_tests.rs, SHARED_JSON).
 #[tokio::test]

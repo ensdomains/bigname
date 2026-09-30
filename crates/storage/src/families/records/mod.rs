@@ -31,9 +31,6 @@ mod rows;
 pub mod seams;
 mod serving;
 
-use std::cmp::Ordering;
-
-use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
@@ -73,31 +70,9 @@ pub(crate) fn is_cleared(address: Option<&str>) -> bool {
     address.is_none_or(|address| address.is_empty() || address == ZERO_ADDRESS)
 }
 
-/// A position in the canonical event order (docs/glossary.md#canonical-event-order; the project
-/// crate's families/position.rs): block number, transaction index, log index, then, when the event has
-/// both a transaction and a log index, the emission ordinal its identity ends with
-/// (docs/glossary.md#emission-ordinal), then the event identity by its bytes. `None` sorts first
-/// at each step. Equality is field equality; the order ends with the full identity, so two
-/// positions compare equal exactly when they are equal.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FamilyPosition {
-    pub block_number: i64,
-    pub transaction_index: Option<i64>,
-    pub log_index: Option<i64>,
-    pub event_identity: String,
-}
+pub use super::position::Position as FamilyPosition;
 
 impl FamilyPosition {
-    /// A secondary position stored as a JSON object beside a row's own position.
-    pub fn from_json(value: &Value) -> Option<Self> {
-        Some(Self {
-            block_number: value.get("block_number")?.as_i64()?,
-            transaction_index: value.get("transaction_index").and_then(Value::as_i64),
-            log_index: value.get("log_index").and_then(Value::as_i64),
-            event_identity: value.get("event_identity")?.as_str()?.to_owned(),
-        })
-    }
-
     /// The four position columns every family row carries for its last owning event.
     pub(crate) fn from_row(row: &PgRow) -> anyhow::Result<Self> {
         Ok(Self {
@@ -106,42 +81,6 @@ impl FamilyPosition {
             log_index: row.try_get("log_index")?,
             event_identity: row.try_get("event_identity")?,
         })
-    }
-
-    /// The emission ordinal, as the project crate's `families::emission_ordinal` reads it
-    /// (docs/glossary.md#emission-ordinal): the identity's final `:`-separated segment when
-    /// the event has a transaction and a log index and that segment is a nonempty run of ASCII
-    /// digits no greater than `u32::MAX` (leading zeros allowed). Boundary facts and
-    /// family-internal identities have none. A copy, since storage does not depend on project.
-    pub fn emission_ordinal(&self) -> Option<u32> {
-        self.transaction_index?;
-        self.log_index?;
-        let (_, tail) = self.event_identity.rsplit_once(':')?;
-        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        tail.parse().ok()
-    }
-}
-
-impl Ord for FamilyPosition {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.block_number
-            .cmp(&other.block_number)
-            .then_with(|| self.transaction_index.cmp(&other.transaction_index))
-            .then_with(|| self.log_index.cmp(&other.log_index))
-            .then_with(|| self.emission_ordinal().cmp(&other.emission_ordinal()))
-            .then_with(|| {
-                self.event_identity
-                    .as_bytes()
-                    .cmp(other.event_identity.as_bytes())
-            })
-    }
-}
-
-impl PartialOrd for FamilyPosition {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 

@@ -1,11 +1,12 @@
 //! F12 refresh work owns the tuple's existing hydration columns. Empty string is a successful
 //! not-found response; null is no overlay (a failed call or a no-longer-eligible selector).
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
     ChainRpcUrls, EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest,
     EnsReverseNameMulticallResult, MULTICALL3_ADDRESS, execute_ens_reverse_name_multicall,
 };
+use bigname_storage::families::position::emission_ordinal_sql;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -40,12 +41,19 @@ fn changed(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
     )
 }
 
+static SELECT_SQL: LazyLock<String> = LazyLock::new(|| {
+    include_str!("reverse.sql").replace(
+        "{pointer_emission_ordinal}",
+        &emission_ordinal_sql("p.event_identity", "p.transaction_index", "p.log_index"),
+    )
+});
+
 pub(super) async fn select(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
     rows: &RowSet,
 ) -> Result<Vec<Candidate>> {
-    let work: Vec<Value> = sqlx::query_scalar(include_str!("reverse.sql"))
+    let work: Vec<Value> = sqlx::query_scalar(SELECT_SQL.as_str())
         .bind(context.chain_id)
         .bind(context.block.number)
         .bind(&context.block.hash)

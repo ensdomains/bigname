@@ -76,14 +76,7 @@ WITH tuple_changes AS (
         ) p
         ORDER BY p.block_number DESC, p.transaction_index DESC NULLS LAST,
                  p.log_index DESC NULLS LAST,
-                 COALESCE(CASE WHEN p.transaction_index IS NOT NULL AND p.log_index IS NOT NULL THEN (
-                     SELECT CASE WHEN digits.d = '' THEN 0::bigint
-                         WHEN length(digits.d) < 10 OR (length(digits.d) = 10
-                             AND digits.d COLLATE "C" <= '4294967295' COLLATE "C")
-                         THEN digits.d::bigint END
-                     FROM (SELECT ltrim(m[1], '0') AS d
-                         FROM regexp_match(p.event_identity COLLATE "C", ':([0-9]+)$') m) digits
-                 ) END, -1::bigint) DESC, p.event_identity COLLATE "C" DESC
+                 {pointer_emission_ordinal} DESC, p.event_identity COLLATE "C" DESC
         LIMIT 1
     ) pointer ON true
     LEFT JOIN nodes node ON t.source_event = 'ReverseClaimed'

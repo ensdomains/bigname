@@ -119,7 +119,7 @@ fn stored_positions_order_as_they_did() {
     let through_json: Vec<Position> = positions
         .iter()
         .map(|position| match position.to_json() {
-            Value::Object(object) => Position::of_row(&object).expect("a stored position reads"),
+            Value::Object(object) => Position::from_map(&object).expect("a stored position reads"),
             other => panic!("not an object: {other}"),
         })
         .collect();
@@ -128,7 +128,7 @@ fn stored_positions_order_as_they_did() {
         .map(|position| {
             let mut row = Map::new();
             position.write_columns(&mut row);
-            Position::of_row(&row).expect("stored columns read")
+            Position::from_map(&row).expect("stored columns read")
         })
         .collect();
     for mut read in [through_json, through_columns] {
@@ -139,10 +139,8 @@ fn stored_positions_order_as_they_did() {
     }
 }
 
-// The shared vectors. Their twin, the same three lists asserted against the storage crate's
-// comparator and reader (`Ord` and `from_json`), is in
-// crates/storage/src/families/control/position.rs; keep the two copies identical, since a drift
-// between the comparators moves the family read and the canonical excuse read together.
+// Literal expected values for the Project facade and its map/JSON adapters.
+// Keep these expectations independent of the shared implementation.
 type Place = (i64, Option<i64>, Option<i64>, &'static str);
 /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
 /// decimal point, and far past `u32::MAX`: no ordinal.
@@ -266,6 +264,6 @@ fn the_shared_json_vector_holds() {
     for (text, expected) in SHARED_JSON {
         let value: Value = serde_json::from_str(text).expect("the vector is JSON");
         let row: &Map<String, Value> = value.as_object().expect("the vector holds objects");
-        assert_eq!(Position::of_row(row), expected.map(place), "{text}");
+        assert_eq!(Position::from_map(row), expected.map(place), "{text}");
     }
 }

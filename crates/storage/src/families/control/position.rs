@@ -1,78 +1,9 @@
-//! The canonical event order (docs/glossary.md#canonical-event-order, the project crate's
-//! families/position.rs): block number, transaction index, log index, then, when the event has
-//! both a transaction and a log index, the emission ordinal its identity ends with, then the
-//! event identity compared as a byte string. `None` sorts first at each step, so an event with
-//! no transaction or log position (a block-boundary event the interpreter synthesises) sorts
-//! before every transaction of its block. Generated normalized event ids never take part.
-use std::cmp::Ordering;
-
+//! Authority-admission bounds alongside the shared canonical family position.
 use serde_json::Value;
 
-/// One event's place in the canonical order.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Position {
-    pub block_number: i64,
-    pub transaction_index: Option<i64>,
-    pub log_index: Option<i64>,
-    pub event_identity: String,
-}
-
-impl Ord for Position {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // `None < Some`, so a synthesised event sorts first within its block.
-        self.block_number
-            .cmp(&other.block_number)
-            .then(self.transaction_index.cmp(&other.transaction_index))
-            .then(self.log_index.cmp(&other.log_index))
-            .then_with(|| self.emission_ordinal().cmp(&other.emission_ordinal()))
-            .then_with(|| {
-                self.event_identity
-                    .as_bytes()
-                    .cmp(other.event_identity.as_bytes())
-            })
-    }
-}
-
-impl PartialOrd for Position {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
+pub use super::super::position::Position;
 
 impl Position {
-    /// The emission ordinal, as the project crate reads it: the identity's final `:`-separated
-    /// segment when the event has a transaction and a log index and that segment is a nonempty
-    /// run of ASCII digits no greater than `u32::MAX`. The adapter's raw-log identities end with
-    /// the fact's index in its log (adapters schema_v2/normalized.rs:118-131); boundary facts
-    /// and family-internal identities have none.
-    pub fn emission_ordinal(&self) -> Option<u32> {
-        self.transaction_index?;
-        self.log_index?;
-        let (_, tail) = self.event_identity.rsplit_once(':')?;
-        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        tail.parse().ok()
-    }
-
-    /// A position stored as one JSON object: the family rows' secondary positions and the
-    /// `position` member of their jsonb maxima. Like the project crate's `Position::of_row`, it
-    /// needs a numeric block and a string identity, and reads a missing or non-numeric
-    /// transaction or log index as none.
-    pub fn from_json(value: &Value) -> Option<Self> {
-        Some(Self {
-            block_number: value.get("block_number")?.as_i64()?,
-            transaction_index: value.get("transaction_index").and_then(Value::as_i64),
-            log_index: value.get("log_index").and_then(Value::as_i64),
-            event_identity: value.get("event_identity")?.as_str()?.to_owned(),
-        })
-    }
-
-    /// The position a family row carries in its own four columns.
-    pub fn of_row(row: &Value) -> Option<Self> {
-        Self::from_json(row)
-    }
-
     /// The three-part bound the authority admission compares against: block, then transaction and
     /// log with a missing one read as -1. For nonnegative transaction and log indexes, it agrees
     /// with the canonical order except that it ignores both the emission ordinal and the identity,
@@ -151,11 +82,8 @@ mod tests {
         assert!(at(5, None, "x:RegistrationReleased:a") < at(5, None, "x:ResolverChanged:a"));
     }
 
-    // The shared vectors. Their twin, the same three lists asserted against the project crate's
-    // comparator and reader (`Ord` and `of_row`), is in
-    // crates/project/src/families/position_tests.rs. The two copies' literal lists and their
-    // order and partial tests are identical; keep them so, since a drift between the comparators
-    // moves the storage reads away from the families they read.
+    // Literal expected values also exercised through the Project and records facades.
+    // Keep these expectations independent of the shared implementation.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
     /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
     /// decimal point, and far past `u32::MAX`: no ordinal.
@@ -280,6 +208,19 @@ mod tests {
             let value: Value = serde_json::from_str(text).expect("the vector is JSON");
             assert_eq!(Position::from_json(&value), expected.map(place), "{text}");
         }
+    }
+
+    #[test]
+    fn admission_bound_ignores_ordinal_and_identity() {
+        let earlier = at(5, Some((1, 1)), "event:9");
+        let later = at(5, Some((1, 1)), "event:10");
+        assert!(earlier < later);
+        assert_eq!(earlier.bound(), later.bound());
+
+        let missing = at(5, None, "boundary");
+        let negative = at(5, Some((-2, -2)), "event:0");
+        assert!(missing < negative);
+        assert!(missing.bound() > negative.bound());
     }
 
     #[test]

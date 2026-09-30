@@ -296,7 +296,7 @@ fn write(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {
         let column = |name: &str| previous.get(name).cloned().unwrap_or(Value::Null);
         [
             column("value"),
-            super::input::Position::of_row(&previous)
+            super::input::Position::from_map(&previous)
                 .map_or(Value::Null, |position| position.to_json()),
             column("status"),
             column("address_bytes_hex"),

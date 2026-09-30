@@ -57,28 +57,12 @@ WITH value_changes AS (
             AND (boundary.block_number IS NULL OR (
                 value.block_number, COALESCE(value.transaction_index, -1),
                 COALESCE(value.log_index, -1),
-                COALESCE(CASE WHEN value.transaction_index IS NOT NULL
-                        AND value.log_index IS NOT NULL THEN (
-                    SELECT CASE WHEN digits.d = '' THEN 0::bigint
-                        WHEN length(digits.d) < 10 OR (length(digits.d) = 10
-                            AND digits.d COLLATE "C" <= '4294967295' COLLATE "C")
-                        THEN digits.d::bigint END
-                    FROM (SELECT ltrim(m[1], '0') AS d FROM regexp_match(
-                        value.event_identity COLLATE "C", ':([0-9]+)$') m) digits
-                ) END, -1::bigint),
+                {value_emission_ordinal},
                 value.event_identity COLLATE "C"
             ) > (
                 boundary.block_number, COALESCE(boundary.transaction_index, -1),
                 COALESCE(boundary.log_index, -1),
-                COALESCE(CASE WHEN boundary.transaction_index IS NOT NULL
-                        AND boundary.log_index IS NOT NULL THEN (
-                    SELECT CASE WHEN digits.d = '' THEN 0::bigint
-                        WHEN length(digits.d) < 10 OR (length(digits.d) = 10
-                            AND digits.d COLLATE "C" <= '4294967295' COLLATE "C")
-                        THEN digits.d::bigint END
-                    FROM (SELECT ltrim(m[1], '0') AS d FROM regexp_match(
-                        boundary.event_identity COLLATE "C", ':([0-9]+)$') m) digits
-                ) END, -1::bigint),
+                {boundary_emission_ordinal},
                 boundary.event_identity COLLATE "C"
             )), false) AS _active,
         EXISTS (SELECT 1 FROM chain_lineage lineage
@@ -112,7 +96,7 @@ WITH value_changes AS (
     LEFT JOIN partitions partition USING (chain_id, resolver_address, arm, arm_identity)
     LEFT JOIN admissions admission USING (chain_id, resolver_address)
     LEFT JOIN name_surfaces surface ON surface.logical_name_id = value.logical_name_id
-    -- The record version as a position, when it is one (Position::of_row). A part reads as
+    -- The record version as a position, when it is one (Position::from_map). A part reads as
     -- serde_json's `as_i64` reads it: an integer JSON number in the i64 range, else absent, so
     -- a fractional or out-of-range block number leaves no boundary.
     LEFT JOIN LATERAL (

@@ -29,7 +29,7 @@ pub(crate) async fn successor_grant(
     grant: &Row,
 ) -> Result<()> {
     let text = |column: &str| grant.get(column).and_then(Value::as_str).map(str::to_owned);
-    let (Some(resource), Some(position)) = (text("resource_id"), Position::of_row(grant)) else {
+    let (Some(resource), Some(position)) = (text("resource_id"), Position::from_map(grant)) else {
         return Ok(());
     };
     if text("source_family").as_deref() != Some("ens_v1_registrar_l1")
@@ -89,7 +89,7 @@ pub(crate) async fn successor_grant(
         if !registry_only {
             continue;
         }
-        if Position::of_row(&row).is_none_or(|binding| binding >= position) {
+        if Position::from_map(&row).is_none_or(|binding| binding >= position) {
             later.push(row);
             continue;
         }
@@ -97,7 +97,7 @@ pub(crate) async fn successor_grant(
         let later = row
             .get("lease_position")
             .and_then(Value::as_object)
-            .and_then(Position::of_row)
+            .and_then(Position::from_map)
             .is_none_or(|lease| lease < position);
         if (current_successor && !later)
             || !released_before(transaction, context, rows, &predecessor, &position).await?
@@ -188,7 +188,7 @@ pub(super) async fn retained_grants(
     );
     let mut grants: Vec<(Position, Row)> = stored
         .into_iter()
-        .filter_map(|row| Some((Position::of_row(&row)?, row)))
+        .filter_map(|row| Some((Position::from_map(&row)?, row)))
         .collect();
     grants.sort_by(|left, right| left.0.cmp(&right.0));
     for (_, grant) in grants {
@@ -211,7 +211,7 @@ async fn released_before(
             && row.get("state_key").and_then(Value::as_str) == Some(resource)
             && row.get("event_kind").and_then(Value::as_str) == Some("RegistrationReleased")
             && row.get("source_family").and_then(Value::as_str) == Some("ens_v1_registrar_l1")
-            && Position::of_row(row).is_some_and(|release| &release < position)
+            && Position::from_map(row).is_some_and(|release| &release < position)
     };
     if rows
         .changes_in(&tables::LIFECYCLE_EVENT)

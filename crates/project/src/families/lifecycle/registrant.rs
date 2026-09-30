@@ -113,7 +113,7 @@ pub(super) async fn fold_registrants(
             .filter(|row| {
                 row.get("decoded_logical_name_id").and_then(Value::as_str) == Some(name.as_str())
             })
-            .filter_map(|row| Some((Position::of_row(row)?, reported_registrant(row)?)))
+            .filter_map(|row| Some((Position::from_map(row)?, reported_registrant(row)?)))
             .max_by(|left, right| left.0.cmp(&right.0));
         // The name's latest retained registrar transfer. One the adapter emitted unnamed reached
         // no fold row on arrival (addresses.rs keys the fold by the event's own name), so a row
@@ -131,7 +131,7 @@ pub(super) async fn fold_registrants(
                     .get("to_address")
                     .and_then(Value::as_str)
                     .map(str::to_ascii_lowercase);
-                Some((Position::of_row(row)?, recipient))
+                Some((Position::from_map(row)?, recipient))
             })
             .max_by(|left, right| left.0.cmp(&right.0));
         let key = key_of(fold, [chain.clone(), json!(name)]);
@@ -167,7 +167,7 @@ pub(super) async fn fold_registrants(
             let held = row
                 .get("token_holder_position")
                 .and_then(Value::as_object)
-                .and_then(Position::of_row);
+                .and_then(Position::from_map);
             if held.is_none_or(|held| transfer_position > held) {
                 set(
                     &mut row,

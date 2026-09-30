@@ -2,6 +2,7 @@
 //! Names, control, records and topology share the selected family publication.
 pub mod control;
 pub mod name;
+pub mod position;
 pub mod records;
 pub mod topology;
 

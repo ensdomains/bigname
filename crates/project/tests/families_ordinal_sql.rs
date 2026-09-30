@@ -7,6 +7,7 @@ mod families_support;
 
 use anyhow::Result;
 use bigname_project::families::emission_ordinal;
+use bigname_storage::families::position::emission_ordinal_sql;
 use families_support::Fixture;
 
 /// The glossary's SQL form, with the identity and both indexes as parameters.
@@ -60,6 +61,11 @@ async fn the_sql_parse_matches_the_rust_parse() -> Result<()> {
         ("131073 nines", both, nines.clone()),
         ("long zero-prefixed 7", both, zero_prefixed),
     ];
+    // Keep ORDINAL_SQL independent of the production renderer: it is the nullable SQL oracle.
+    let production_sql = format!(
+        "SELECT {}",
+        emission_ordinal_sql("$1::text", "$2::bigint", "$3::bigint")
+    );
     for (label, (transaction, log), identity) in &cases {
         let sql: Option<i64> = sqlx::query_scalar(ORDINAL_SQL)
             .bind(identity)
@@ -69,6 +75,13 @@ async fn the_sql_parse_matches_the_rust_parse() -> Result<()> {
             .await?;
         let rust = emission_ordinal(*transaction, *log, identity).map(i64::from);
         assert_eq!(sql, rust, "{label}");
+        let production: i64 = sqlx::query_scalar(&production_sql)
+            .bind(identity)
+            .bind(transaction)
+            .bind(log)
+            .fetch_one(&fixture.pool)
+            .await?;
+        assert_eq!(production, sql.unwrap_or(-1), "production SQL: {label}");
     }
     // The earlier form casts to numeric before its range check, so 131073 digits error in
     // PostgreSQL where Rust yields no ordinal.

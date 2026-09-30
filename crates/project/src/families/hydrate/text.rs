@@ -13,12 +13,13 @@
 //! still rank first: while 250 or more change every block, the unchanged backlog waits, as it
 //! did before the cut moved into the query, and a steady stream of never-read selectors likewise
 //! delays failed retries.
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
     ChainRpcUrls, EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest,
     EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, execute_ens_text_record_multicall,
 };
+use bigname_storage::families::position::emission_ordinal_sql;
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -65,12 +66,32 @@ fn changes(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
     )
 }
 
+static SELECT_SQL: LazyLock<String> = LazyLock::new(|| {
+    include_str!("text.sql")
+        .replace(
+            "{value_emission_ordinal}",
+            &emission_ordinal_sql(
+                "value.event_identity",
+                "value.transaction_index",
+                "value.log_index",
+            ),
+        )
+        .replace(
+            "{boundary_emission_ordinal}",
+            &emission_ordinal_sql(
+                "boundary.event_identity",
+                "boundary.transaction_index",
+                "boundary.log_index",
+            ),
+        )
+});
+
 pub(super) async fn select(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
     rows: &RowSet,
 ) -> Result<Vec<Candidate>> {
-    let values: Vec<Value> = sqlx::query_scalar(include_str!("text.sql"))
+    let values: Vec<Value> = sqlx::query_scalar(SELECT_SQL.as_str())
         .bind(context.chain_id)
         .bind(context.block.number)
         .bind(changes(rows, &tables::NODE_RECORD_VALUE))

@@ -289,7 +289,7 @@ fn registration_position(
         .and_then(|row| row.get("last_active"))
         .and_then(|active| active.get("position"))
         .and_then(Value::as_object)
-        .and_then(Position::of_row)
+        .and_then(Position::from_map)
     };
     in_block
         .or_else(stored)
