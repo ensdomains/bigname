@@ -470,8 +470,7 @@ pub(super) async fn load_chain(
         let event_resource = shadow.trace.get("event_resource").and_then(Value::as_str);
         let resolver_resource = decided.selection.resource_id.as_deref();
         let token = event_resource.and_then(|resource| readable.get(resource));
-        // A bound row whose token lineage is not readable is not served
-        // (DEFAULT_NAME_CURRENT_READ_FILTER).
+        // A bound row whose token lineage is not readable is not served.
         if decided.binding.is_some() && token.is_some_and(|(_, readable)| !readable) {
             out.insert(
                 name.to_owned(),

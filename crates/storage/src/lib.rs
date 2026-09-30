@@ -60,8 +60,7 @@ pub use api_preflight::{
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
     ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
-    ChildrenCurrentSummary, DEFAULT_CHILDREN_CURRENT_IDENTITY_JOINS,
-    DEFAULT_CHILDREN_CURRENT_READ_FILTER, RegistryChildrenPage, RegistryLabelOwnerFilter,
+    ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
     count_registry_children_current, load_children_current_page,
     load_children_current_page_filtered, load_children_current_summaries,
     load_registry_children_current_page,
@@ -122,17 +121,15 @@ pub use lineage::{
     load_highest_canonical_chain_lineage_block,
 };
 pub use name_current::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
-    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
-    MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, NameCurrentAddressFilter,
-    NameCurrentAddressRelationFilter, NameCurrentExpiringFilter, NameCurrentListCursor,
-    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
-    NameCurrentListRow, NameCurrentListSort, NameCurrentRow, load_current_names_by_resource_ids,
-    load_name_current, load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
-    load_name_migration_transition_timestamps, name_current_authority_arm,
-    name_current_is_ownerless_registry, name_current_list_cursor_from_row,
-    name_current_public_authority, name_current_registry_generation,
-    name_current_registry_handoff_block_number,
+    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND,
+    NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,
+    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
+    NameCurrentListPage, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
+    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
+    load_name_current_for_snapshot, load_name_migration_transition_timestamps,
+    name_current_authority_arm, name_current_is_ownerless_registry,
+    name_current_list_cursor_from_row, name_current_public_authority,
+    name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub use normalized_events::*;
 pub use permissions::{
@@ -148,10 +145,9 @@ pub use permissions::{
     resource_wrapped_a_registrar_lease,
 };
 pub use phase_projection_reads::{
-    DEFAULT_RESOLVER_CURRENT_READ_FILTER, PHASE_EXPECTED_CHAIN_IDS_SELECT,
-    load_phase_expected_status_chain_ids, load_phase_identity_name_feed_records_by_ids,
-    load_phase_identity_records_by_ids, load_phase_indexing_status,
-    load_phase_name_current_rows_by_ids, load_phase_resolver_current,
+    PHASE_EXPECTED_CHAIN_IDS_SELECT, load_phase_expected_status_chain_ids,
+    load_phase_identity_name_feed_records_by_ids, load_phase_identity_records_by_ids,
+    load_phase_indexing_status, load_phase_name_current_rows_by_ids, load_phase_resolver_current,
 };
 pub use primary_name::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
