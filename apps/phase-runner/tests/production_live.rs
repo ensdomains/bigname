@@ -3518,6 +3518,9 @@ async fn rewind_refuses_to_overlap_a_downstream_writer() -> Result<()> {
 #[path = "production_live/hydration.rs"]
 mod hydration;
 
+#[path = "production_live/project_reorg.rs"]
+mod project_reorg;
+
 fn live_request(
     chain: &str,
     endpoint: &str,

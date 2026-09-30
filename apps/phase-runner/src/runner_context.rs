@@ -338,6 +338,9 @@ impl PhaseRunner {
     ) -> RunnerResult<PhaseContext> {
         self.before_phase_context(phase).await;
         let available_heads = match mode.range() {
+            Some(_) if phase == PhaseName::Project => {
+                load_available_heads(self.store.pool(), &chain.chain_id).await?
+            }
             Some(_) if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) => {
                 interpret_redo_heads(self.store.pool(), &chain.chain_id).await?
             }

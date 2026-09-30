@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=54
+expected_predecessor_shape_proof_count=55
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -617,6 +617,15 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20260930220000_project_hydration_work.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260930220000_project_hydration_work.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                # Restore this table's exact predecessor shape before testing the additive upgrade.
+                printf 'ALTER TABLE chain_phase_state DROP CONSTRAINT chain_phase_state_project_redo_request_check, DROP COLUMN redo_requested_from_block_number, DROP COLUMN redo_requested_to_block_number;\n'
+                printf "COMMENT ON COLUMN chain_phase_state.redo_from_block_number IS 'This value is the first block in the explicit redo range.';\n"
+                printf "COMMENT ON COLUMN chain_phase_state.redo_to_block_number IS 'This value is the last block in the explicit redo range.';\n"
+                emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -735,7 +744,8 @@ for migration_file in \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \
     "$ROOT/migrations/20260930100000_read_only_lookup_guard.sql" \
-    "$ROOT/migrations/20260930220000_project_hydration_work.sql"
+    "$ROOT/migrations/20260930220000_project_hydration_work.sql" \
+    "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done

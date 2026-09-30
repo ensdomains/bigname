@@ -32,6 +32,7 @@ mod undo;
 mod universal_resolver;
 mod wrapper;
 
+pub use driver::redo_extent;
 pub use input::{InputToken, Revision, input_token};
 pub use position::emission_ordinal;
 

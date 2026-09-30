@@ -22,7 +22,9 @@ impl PhaseRunner {
         recovery_all_range: Option<BlockRange>,
     ) -> RunnerResult<()> {
         let pending: Vec<PendingRedoRow> = sqlx::query_as(
-            "SELECT phase_name, redo_mode, redo_from_block_number, redo_to_block_number, last_error
+            "SELECT phase_name, redo_mode,
+                    COALESCE(redo_requested_from_block_number, redo_from_block_number),
+                    COALESCE(redo_requested_to_block_number, redo_to_block_number), last_error
              FROM chain_phase_state
              WHERE chain_id = $1
                AND redo_in_progress

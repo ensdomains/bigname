@@ -626,6 +626,27 @@ before that connection failed, the next start reads the durable phase state
 again. An unlock or connection-close error after an acknowledged update is also
 reported.
 
+Project redo retains its requested invalidation in
+`redo_requested_from_block_number` and `redo_requested_to_block_number`.
+Its existing `redo_from_block_number` and `redo_to_block_number` describe the
+execution extent: undo can reach a journal predecessor below the request, a
+rebuild starts from retained inputs, and replay can reach a standing marker
+above the request. Before beginning the attempt, the runner asks Project to
+plan that extent from its marker, repair record and undo journal. Every saved
+marker remains inside the execution extent under the existing database check;
+progress writes still require the exact attempt generation, mode and execution
+bounds. Required stamps union requested invalidations while retaining automatic
+ownership, clear stale progress, and advance the generation. Completion and
+prior-hash supersession clear both pairs of bounds.
+
+The additive `20260930230000_project_redo_execution_extent.sql` migration leaves
+existing rows unchanged. An active legacy Project row with NULL requested
+bounds uses its existing redo bounds as the request at its next begin. A
+same-hash interrupted rebuild can therefore resume after the runner atomically
+plans its full execution extent; it does not need manual progress edits.
+The request columns are otherwise limited to active Project redo and must be
+contained in its execution extent. They are not a separate work authority.
+
 Startup settlement for a chain absent from runtime configuration records
 `settled_while_unconfigured = true` on every active phase row that it changes to
 `completed`. This nullable marker distinguishes a row deliberately settled

@@ -108,6 +108,8 @@ pub(crate) async fn supersede(
             redo_previous_finished_at = NULL,
             redo_from_block_number = NULL,
             redo_to_block_number = NULL,
+            redo_requested_from_block_number = NULL,
+            redo_requested_to_block_number = NULL,
             redo_current_block_number = NULL,
             redo_current_block_hash = NULL,
             redo_target_block_number = NULL,

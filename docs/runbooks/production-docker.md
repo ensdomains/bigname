@@ -1398,6 +1398,26 @@ add back the `--source` options the chain runs with and
 interrupted Project redo with the same range under the same binary can resume an
 unfinished family rebuild from its family marker, under the conditions in step 8
 of the [planned boundary](#planned-migration-and-fingerprint-boundary).
+For Project, the reported rerun command uses the requested invalidation range.
+`redo_from_block_number` and `redo_to_block_number` can be wider because they
+contain actual undo, rebuild and replay progress; the request is retained in
+`redo_requested_from_block_number` and `redo_requested_to_block_number`. Do not
+substitute the expanded execution range into the recovery command.
+
+The TYR-114 repair (`20260930230000_project_redo_execution_extent.sql`) also
+accepts an already-reset, same-hash Project rebuild whose last batch committed
+but could not record progress inside a narrow redo range. Rerunning its original
+requested command plans the full execution extent and resumes the existing
+rebuild when the step 8 adoption conditions hold. Legacy rows with NULL request
+columns retain their original request in the existing redo bounds until that
+begin. Keep serving unavailable until repair completes; do not clear the redo
+marker, edit progress, remove `chain_phase_state_check4`, or reset raw facts.
+This fix changes hash-covered Project code. Upgrading the affected older binary
+therefore requires the planned full-history Interpret-to-Project hash adoption
+above, including any required attestation. The prior-hash partial prefix cannot
+be adopted by the new binary. A successful same-hash recovery test is not
+permission to skip that release boundary.
+
 `recompute-flags` needs neither intake sources nor hydration RPC. Bounded
 Project redo/rebuild also needs no hydration RPC; current enrichment is repaired
 by later Project Follow work. A redo over several chains that is stopped between two of them exits

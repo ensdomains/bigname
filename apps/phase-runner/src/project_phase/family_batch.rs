@@ -162,8 +162,14 @@ impl ProjectPhase {
                 ));
             }
             RunMode::Redo(range) => (
-                self.family_redo_target(chain_id, range.to, latest.number)
-                    .await?,
+                self.family_redo_target(
+                    chain_id,
+                    context
+                        .redo_attempt
+                        .map_or(range.to, |attempt| attempt.execution_range.to),
+                    latest.number,
+                )
+                .await?,
                 FamilyMode::Redo {
                     from: range.from,
                     to: range.to,

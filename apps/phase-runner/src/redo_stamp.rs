@@ -25,7 +25,8 @@ pub(crate) async fn required_range(
     phase: PhaseName,
 ) -> RunnerResult<Option<BlockRange>> {
     let row: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT redo_from_block_number, redo_to_block_number
+        "SELECT COALESCE(redo_requested_from_block_number, redo_from_block_number),
+                COALESCE(redo_requested_to_block_number, redo_to_block_number)
          FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress
            AND last_error LIKE $3",
@@ -189,6 +190,10 @@ async fn extend_active(
     sqlx::query(
         "UPDATE chain_phase_state
          SET redo_attempt_generation = redo_attempt_generation + 1,
+             redo_requested_from_block_number = CASE WHEN phase_name = 'project'
+                 THEN LEAST(COALESCE(redo_requested_from_block_number, redo_from_block_number), $5) END,
+             redo_requested_to_block_number = CASE WHEN phase_name = 'project'
+                 THEN GREATEST(COALESCE(redo_requested_to_block_number, redo_to_block_number), $6) END,
              redo_from_block_number = $3, redo_to_block_number = $4,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
@@ -201,6 +206,8 @@ async fn extend_active(
     .bind(phase.as_str())
     .bind(from)
     .bind(to)
+    .bind(requested_from)
+    .bind(through)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {
@@ -229,6 +236,8 @@ async fn create_stamp(
              redo_previous_started_at = started_at,
              redo_previous_finished_at = finished_at,
              redo_from_block_number = $3, redo_to_block_number = $4,
+             redo_requested_from_block_number = CASE WHEN phase_name = 'project' THEN $3 END,
+             redo_requested_to_block_number = CASE WHEN phase_name = 'project' THEN $4 END,
              redo_current_block_number = NULL, redo_current_block_hash = NULL,
              redo_target_block_number = NULL, redo_target_block_hash = NULL,
              redo_source_boundary_markers = NULL,

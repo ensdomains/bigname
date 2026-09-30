@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     redo_previous_finished_at timestamptz,
     redo_from_block_number bigint,
     redo_to_block_number bigint,
+    redo_requested_from_block_number bigint,
+    redo_requested_to_block_number bigint,
     redo_current_block_number bigint,
     redo_current_block_hash text,
     redo_target_block_number bigint,
@@ -125,6 +127,17 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
     CHECK (
         redo_mode IS NULL
         OR redo_mode IN ('redo', 'recompute_flags')
+    ),
+    CONSTRAINT chain_phase_state_project_redo_request_check CHECK (
+        (redo_requested_from_block_number IS NULL AND redo_requested_to_block_number IS NULL)
+        OR (
+            phase_name = 'project' AND redo_in_progress
+            AND redo_requested_from_block_number IS NOT NULL
+            AND redo_requested_to_block_number IS NOT NULL
+            AND redo_requested_from_block_number >= redo_from_block_number
+            AND redo_requested_to_block_number <= redo_to_block_number
+            AND redo_requested_to_block_number >= redo_requested_from_block_number
+        )
     ),
     CONSTRAINT chain_phase_state_redo_attempt_generation_check
         CHECK (redo_attempt_generation >= 0),
@@ -336,9 +349,13 @@ COMMENT ON COLUMN chain_phase_state.redo_previous_started_at IS
 COMMENT ON COLUMN chain_phase_state.redo_previous_finished_at IS
     'This value preserves the normal phase finish time while an explicit redo is active.';
 COMMENT ON COLUMN chain_phase_state.redo_from_block_number IS
-    'This value is the first block in the explicit redo range.';
+    'This value is the first block in the active redo execution extent; Project retains requested invalidation separately.';
 COMMENT ON COLUMN chain_phase_state.redo_to_block_number IS
-    'This value is the last block in the explicit redo range.';
+    'This value is the last block in the active redo execution extent; Project retains requested invalidation separately.';
+COMMENT ON COLUMN chain_phase_state.redo_requested_from_block_number IS
+    'For Project redo, the first requested invalidation block; execution may undo or rebuild below it. NULL on legacy active rows until the next begin.';
+COMMENT ON COLUMN chain_phase_state.redo_requested_to_block_number IS
+    'For Project redo, the last requested invalidation block; execution may replay above it to the standing publication. NULL on legacy active rows until the next begin.';
 COMMENT ON COLUMN chain_phase_state.redo_current_block_number IS
     'This value is the latest block completed only by the active redo.';
 COMMENT ON COLUMN chain_phase_state.redo_current_block_hash IS

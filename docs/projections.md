@@ -1745,7 +1745,7 @@ range's last block.
 A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the frozen replay target. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
-journal, a redo attempt the families never saw, or an explicit reset rebuild clears the
+journal, a completed operator redo attempt the families never saw, or an explicit reset rebuild clears the
 families and rebuilds them from the blocks that carry events or surface
 bindings or start or stop a resolver activation, so a rebuild visits every
 block the normal path writes a binding candidate in. So do families whose marker records a content hash
@@ -1755,6 +1755,17 @@ fails with a data-integrity error and changes nothing, and the Project run
 fails and is retried, until an operator runs a rebuild or a redo below the kept
 journal. That is deliberate: a
 malformed journal is a defect to look at, not state to rebuild over silently.
+Required redo stamps can advance the attempt generation several times before
+Project begins: Live stamps the orphaned suffix, Interpret can extend it, and
+begin advances it again. Their durable range unions all pending invalidation;
+these generation gaps alone do not require resetting families. A shallow
+required reorg uses the retained undo journal and replays canonical input.
+The runner preserves the requested invalidation separately from the execution
+extent, so a bounded undo can truthfully report the predecessor below the
+request, and replay can reach the standing publication above its end. A rebuild
+uses an extent beginning at zero and visits only retained work blocks. The
+requested bounds, rather than those expanded execution bounds, select the undo
+floor on restart.
 The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding` or `complete`) and, once done, the marker, generation and input
@@ -1764,7 +1775,7 @@ move to replaying, and the final replayed or rebuilt block with the
 completion. A run that stops between blocks is resumed by the next. Each
 start of a Project redo moves the Project row to a new redo attempt, so a
 rebuild records the attempt it began under. When the runner reruns an
-interrupted redo with the same range while the Project row still records the
+interrupted redo with the same requested range while the Project row still records the
 running binary's interpreter content hash (no other hash and no manifest or
 authority invalidation marker in between), keeping its saved progress, a rebuild the attempt just before it left is
 carried over to the new attempt and resumes from the family marker, provided

@@ -278,8 +278,8 @@ pub(crate) async fn load_redo_marker(
     sqlx::query_as(
         "
         SELECT redo_mode,
-               redo_from_block_number,
-               redo_to_block_number
+               COALESCE(redo_requested_from_block_number, redo_from_block_number),
+               COALESCE(redo_requested_to_block_number, redo_to_block_number)
         FROM chain_phase_state
         WHERE chain_id = $1
           AND phase_name = $2

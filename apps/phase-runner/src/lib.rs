@@ -30,6 +30,7 @@ mod redo_manifest_attestation;
 mod redo_manifest_audit;
 mod redo_manifest_authority;
 mod redo_presence;
+mod redo_project;
 mod redo_recompute;
 mod redo_required_boundary;
 mod redo_stamp;

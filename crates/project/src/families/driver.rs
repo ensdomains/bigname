@@ -3,8 +3,11 @@
 //! per transaction, stopping when the run's block budget is spent. The repair record says which
 //! of these is under way, so a run that stops between two blocks is resumed by the next; every
 //! transaction fences on the marker generation and on the repair record it planned from.
+mod planning;
 mod ranges;
 mod transitions;
+
+pub use planning::redo_extent;
 
 use sqlx::PgPool;
 
@@ -68,7 +71,6 @@ pub(super) async fn run(
     let family = marker::read(pool, chain_id).await?;
     let record = repair::read(pool, chain_id).await?;
     let attempt = token.project_redo_attempt_generation;
-    let recorded = record.as_ref().map_or(0, |record| record.attempt);
     let active = record.as_ref().filter(|record| record.active());
 
     // A retried redo whose repair completed at this target, with no block or undo since and
@@ -93,41 +95,14 @@ pub(super) async fn run(
     // not on its attempt: carry it over to this attempt and resume it. Another range, a moved
     // input revision or families written under another hash start it again below.
     if matches!(mode, FamilyMode::Redo { .. })
-        && options.resumes_interrupted_redo
-        && let Some(record) = rebuilding.filter(|record| {
-            record.attempt + 1 == attempt
-                && token
-                    .revision()
-                    .is_some_and(|revision| record.prefix_revision.as_ref() == Some(&revision))
-                && family
-                    .input_content_hash
-                    .as_deref()
-                    .is_none_or(|hash| hash == options.input_content_hash)
-        })
+        && let Some(record) =
+            rebuilding.filter(|record| planning::resumes_rebuild(record, &family, &token, options))
     {
         let adopted = run.adopt_rebuild(&family, record, attempt).await?;
         return run.resume_rebuild(&adopted, &family, &token, outcome).await;
     }
-    let rebuild = match mode {
-        FamilyMode::Rebuild => Some(Reason::ContentHashRebuild),
-        // A redo attempt the families never saw (an earlier one was lost) cannot be undone from
-        // the journal, and neither can a redo that lands on an unfinished rebuild.
-        FamilyMode::Redo { .. } if attempt > recorded + 1 || rebuilding.is_some() => {
-            Some(Reason::of_redo(session))
-        }
-        FamilyMode::Redo { from, .. } if *from < 1 => Some(Reason::of_redo(session)),
-        FamilyMode::Normal if attempt > recorded => Some(Reason::OperatorRedo),
-        // Families another binary wrote: a served rebuild whose family run never finished leaves
-        // them, and nothing else would rebuild them.
-        _ if family.current.is_some()
-            && family.input_content_hash.as_deref()
-                != Some(options.input_content_hash.as_str()) =>
-        {
-            Some(Reason::ContentHashRebuild)
-        }
-        _ if family.current.is_none() && rebuilding.is_none() => Some(Reason::ContentHashRebuild),
-        _ => None,
-    };
+    let rebuild =
+        planning::rebuild_reason(mode, &family, record.as_ref(), &token, session, options);
     if let Some(reason) = rebuild {
         return run
             .rebuild(reason, attempt, &family, record.as_ref(), &token, outcome)

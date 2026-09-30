@@ -102,7 +102,20 @@ pub(crate) async fn begin(
         adopts_new_hash,
     )
     .await?;
-    let execution_range = if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
+    let same_project_request = phase == PhaseName::Project
+        && previous.redo_in_progress
+        && previous.redo_mode.as_deref() == Some("redo")
+        && previous.requested_redo_range() == Some(range);
+    let execution_range = if phase == PhaseName::Project {
+        crate::redo_project::execution_range(
+            pool,
+            chain_id,
+            &previous,
+            range,
+            same_project_request && recorded_hash == Some(current_interpreter_hash),
+        )
+        .await?
+    } else if phase == PhaseName::Interpret && matches!(mode, RunMode::Redo(_)) {
         crate::redo_presence::interpret_replay_range(&previous, range)?
     } else {
         range
@@ -125,7 +138,17 @@ pub(crate) async fn begin(
         crate::ingest_cursor_config::validate_completed_tx(&mut transaction, chain_id, sources)
             .await?;
     }
-    require_interrupted_redo_coverage(chain_id, phase, mode, &previous, execution_range)?;
+    require_interrupted_redo_coverage(
+        chain_id,
+        phase,
+        mode,
+        &previous,
+        if phase == PhaseName::Project {
+            range
+        } else {
+            execution_range
+        },
+    )?;
     if !status.can_transition_to(PhaseStatus::Running, true) {
         return Err(invalid_transition(
             chain_id,
@@ -135,8 +158,11 @@ pub(crate) async fn begin(
         ));
     }
     let redo_mode = redo_mode(mode)?;
-    let same_active_redo =
-        matches_active_redo(&previous, redo_mode, execution_range) && !unbound_required_ingest;
+    let same_active_redo = (if phase == PhaseName::Project {
+        same_project_request
+    } else {
+        matches_active_redo(&previous, redo_mode, execution_range)
+    }) && !unbound_required_ingest;
     let attestation_audit = crate::redo_manifest_audit::record_or_resume(
         &mut transaction,
         chain_id,
@@ -196,6 +222,8 @@ pub(crate) async fn begin(
             END,
             redo_from_block_number = $4,
             redo_to_block_number = $5,
+            redo_requested_from_block_number = CASE WHEN phase_name = 'project' THEN $14 END,
+            redo_requested_to_block_number = CASE WHEN phase_name = 'project' THEN $15 END,
             redo_current_block_number = CASE WHEN $6 THEN redo_current_block_number END,
             redo_current_block_hash = CASE WHEN $6 THEN redo_current_block_hash END,
             redo_target_block_number = CASE WHEN $6 THEN redo_target_block_number END,
@@ -233,6 +261,8 @@ pub(crate) async fn begin(
     .bind(crate::redo_stamp::REQUIRED_REDO_ACTIVE_PREFIX)
     .bind(crate::redo_stamp::REQUIRED_REDO_PREFIX)
     .bind(current_ingest_authority.as_deref())
+    .bind(range.from)
+    .bind(range.to)
     .fetch_one(&mut *transaction)
     .await
     .map_err(|error| {
@@ -297,8 +327,8 @@ fn require_interrupted_redo_coverage(
     }
     let requested_mode = redo_mode(mode)?;
     let interrupted_range = previous
-        .redo_from_block_number
-        .zip(previous.redo_to_block_number);
+        .requested_redo_range()
+        .map(|range| (range.from, range.to));
     let covers_interrupted_range =
         interrupted_range.is_some_and(|(from, to)| range.from <= from && range.to >= to);
     if previous.redo_mode.as_deref() == Some(requested_mode) && covers_interrupted_range {
@@ -432,6 +462,8 @@ pub(crate) async fn finish(
             redo_previous_finished_at = NULL,
             redo_from_block_number = NULL,
             redo_to_block_number = NULL,
+            redo_requested_from_block_number = NULL,
+            redo_requested_to_block_number = NULL,
             redo_current_block_number = NULL,
             redo_current_block_hash = NULL,
             redo_target_block_number = NULL,

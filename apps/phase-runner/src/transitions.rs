@@ -26,6 +26,8 @@ pub(crate) struct PhaseStateRow {
     pub redo_previous_finished_at: Option<String>,
     pub redo_from_block_number: Option<i64>,
     pub redo_to_block_number: Option<i64>,
+    pub redo_requested_from_block_number: Option<i64>,
+    pub redo_requested_to_block_number: Option<i64>,
     pub redo_manifest_authority_fingerprint: Option<String>,
     pub live_handoff_block_number: Option<i64>,
     pub live_handoff_block_hash: Option<String>,
@@ -35,6 +37,16 @@ pub(crate) struct PhaseStateRow {
 }
 
 impl PhaseStateRow {
+    pub(crate) fn requested_redo_range(&self) -> Option<BlockRange> {
+        self.redo_requested_from_block_number
+            .or(self.redo_from_block_number)
+            .zip(
+                self.redo_requested_to_block_number
+                    .or(self.redo_to_block_number),
+            )
+            .map(|(from, to)| BlockRange { from, to })
+    }
+
     pub(crate) fn status(&self) -> RunnerResult<PhaseStatus> {
         self.phase_status.parse()
     }
@@ -72,6 +84,8 @@ pub(crate) async fn lock_chain_phase_state(
                redo_previous_finished_at::text AS redo_previous_finished_at,
                redo_from_block_number,
                redo_to_block_number,
+               redo_requested_from_block_number,
+               redo_requested_to_block_number,
                redo_manifest_authority_fingerprint,
                live_handoff_block_number,
                live_handoff_block_hash,
@@ -145,9 +159,7 @@ fn require_no_interrupted_redo(
         chain_id,
         phase,
         row.redo_mode.as_deref(),
-        row.redo_from_block_number
-            .zip(row.redo_to_block_number)
-            .map(|(from, to)| BlockRange { from, to }),
+        row.requested_redo_range(),
     );
     Err(RunnerError::new(
         ErrorKind::InvalidTransition,
