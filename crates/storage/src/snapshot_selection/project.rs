@@ -89,7 +89,8 @@ pub(crate) use servable_family_marker;
 /// can change that identity before Project republishes it. Keep the old marker unavailable
 /// through the Interpret-to-Project handoff, even after Interpret has cleared its own redo.
 /// This predicate is for composed reads and their generation fences; raw diagnostic snapshot
-/// selection still uses `servable_family_marker` alone.
+/// selection still uses `servable_family_marker` alone. Project execution can include an
+/// unchanged predecessor checkpoint; only its requested invalidation determines overlap.
 macro_rules! family_inputs_not_in_redo {
     () => {
         r#"
@@ -98,7 +99,7 @@ macro_rules! family_inputs_not_in_redo {
               WHERE input_phase.chain_id = marker.chain_id
                 AND input_phase.phase_name IN ('interpret', 'project')
                 AND input_phase.redo_in_progress
-                AND input_phase.redo_from_block_number <= marker.current_block_number
+                AND COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number
           )
         "#
     };

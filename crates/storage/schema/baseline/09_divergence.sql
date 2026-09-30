@@ -151,7 +151,7 @@ BEGIN
               WHERE input_phase.chain_id = marker.chain_id
                 AND input_phase.phase_name IN ('interpret', 'project')
                 AND input_phase.redo_in_progress
-                AND input_phase.redo_from_block_number <= marker.current_block_number
+                AND COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number
           )
     $guard$ || CASE WHEN lock_rows THEN ' FOR SHARE OF marker, lineage' ELSE '' END
     INTO state_matches

@@ -1077,13 +1077,15 @@ async fn lookup_publication_migration_preserves_guard_writer_and_privileges() ->
         "SELECT pg_get_functiondef(oid), proacl::text FROM pg_proc WHERE pronamespace = 'bigname_phase'::regnamespace
          AND proname IN ('revalidate_resolution_lookup_state', 'revalidate_resolution_lookup_state_read_only', 'write_resolution_divergence') ORDER BY proname, pg_get_function_identity_arguments(oid)"
     ).fetch_all(fixture.pool()).await?;
-    // Upgrade through the Project-row guard, family inputs, and fixed read-only entry point.
+    // Upgrade through the Project-row guard, family inputs, fixed read-only entry point,
+    // and the separation of requested invalidation from Project execution checkpoints.
     for migration in [
         include_str!("../../../migrations/20260914120000_lookup_publication_revalidation.sql"),
         include_str!("../../../migrations/20260929120000_lookup_guard_family_marker.sql"),
         include_str!("../../../migrations/20260929130000_lookup_family_inputs.sql"),
         include_str!("../../../migrations/20260929160000_remove_served_projections.sql"),
         include_str!("../../../migrations/20260930100000_read_only_lookup_guard.sql"),
+        include_str!("../../../migrations/20260930230000_project_redo_execution_extent.sql"),
     ] {
         raw_sql(migration).execute(fixture.pool()).await?;
     }

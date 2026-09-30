@@ -637,13 +637,22 @@ marker remains inside the execution extent under the existing database check;
 progress writes still require the exact attempt generation, mode and execution
 bounds. Required stamps union requested invalidations while retaining automatic
 ownership, clear stale progress, and advance the generation. Completion and
-prior-hash supersession clear both pairs of bounds.
+prior-hash supersession clear both pairs of bounds. Composed reads and lookup
+revalidation use the requested lower bound to detect publication overlap, with
+the existing lower bound as the fallback on legacy rows. A progress checkpoint
+below the request does not itself invalidate that publication. Actual undo or
+reset changes the family marker and sequence atomically with its rows, so an
+earlier captured publication still fails revalidation.
 
 The additive `20260930230000_project_redo_execution_extent.sql` migration leaves
 existing rows unchanged. An active legacy Project row with NULL requested
 bounds uses its existing redo bounds as the request at its next begin. A
 same-hash interrupted rebuild can therefore resume after the runner atomically
 plans its full execution extent; it does not need manual progress edits.
+An accepted restart with a wider request retains the interrupted execution's
+replay endpoint, capped by the current readable head. Retaining that pending
+work does not authorize reuse of its partial prefix: reuse still requires the
+same request, content hash, immediate attempt and unchanged input revision.
 The request columns are otherwise limited to active Project redo and must be
 contained in its execution extent. They are not a separate work authority.
 

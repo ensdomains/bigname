@@ -126,14 +126,17 @@ async fn lookup_answer(
     database: &TestDatabase,
     id: &str,
     address: &str,
+    read_only: bool,
 ) -> Result<bigname_lookup::LookupResponse> {
     let (url, handle) =
         spawn_primary_name_mock_rpc(vec![resolution_universal_resolver_addr60_response(address)])
             .await?;
-    let engine = bigname_lookup::LookupEngine::new(
-        database.pool.clone(),
-        bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
-    );
+    let urls = bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?;
+    let engine = if read_only {
+        bigname_lookup::LookupEngine::read_only(database.pool.clone(), urls)
+    } else {
+        bigname_lookup::LookupEngine::new(database.pool.clone(), urls)
+    };
     let response = engine
         .lookup(bigname_lookup::LookupRequest::new(id, ["addr:60"])?)
         .await?;
@@ -150,7 +153,10 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
             let redo = RedoFixture::new(&database, phase).await?;
             if clearing {
                 assert_eq!(
-                    lookup_answer(&database, &id, FAMILY_BOB).await?.records[0].ledger_action,
+                    lookup_answer(&database, &id, FAMILY_BOB, false)
+                        .await?
+                        .records[0]
+                        .ledger_action,
                     bigname_lookup::LedgerAction::Written
                 );
             }
@@ -186,6 +192,35 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
                 before, after,
                 "redo start must leave captured lookup inputs fixed"
             );
+            let served = bigname_storage::load_served_project_generation(
+                &database.pool,
+                FAMILY_CHAIN,
+                240,
+                "0xhistory240",
+                true,
+                false,
+            )
+            .await?;
+            assert_eq!(served.is_some(), from > 240, "phase={phase} from={from}");
+            if from > 240 {
+                // A new read exercises publication capture and the read-only guard while
+                // the original lookup below exercises the retained locking writer guard.
+                let answer = lookup_answer(&database, &id, FAMILY_BOB, true).await?;
+                assert_eq!(
+                    answer.records[0].ledger_action,
+                    bigname_lookup::LedgerAction::None
+                );
+                if phase == PhaseName::Project {
+                    let bounds: (i64, i64) = sqlx::query_as(
+                        "SELECT redo_from_block_number, redo_requested_from_block_number
+                         FROM chain_phase_state WHERE chain_id=$1 AND phase_name='project'",
+                    )
+                    .bind(FAMILY_CHAIN)
+                    .fetch_one(&database.pool)
+                    .await?;
+                    assert_eq!(bounds, (240, 241), "checkpoint is not changed work");
+                }
+            }
             release
                 .send(())
                 .map_err(|_| anyhow::anyhow!("RPC response gate closed"))?;
@@ -202,7 +237,12 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
                 );
             } else {
                 assert_eq!(
-                    result?.records[0].ledger_action,
+                    result
+                        .with_context(|| format!(
+                            "nonoverlap phase={phase} from={from} clearing={clearing}"
+                        ))?
+                        .records[0]
+                        .ledger_action,
                     if clearing {
                         bigname_lookup::LedgerAction::Cleared
                     } else {

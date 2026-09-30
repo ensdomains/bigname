@@ -1,6 +1,81 @@
 use super::*;
 
 #[tokio::test]
+async fn covering_restart_retains_the_interrupted_undo_replay_target() -> Result<()> {
+    covering_restart(false).await
+}
+
+#[tokio::test]
+async fn covering_restart_retains_the_interrupted_rebuild_replay_target() -> Result<()> {
+    covering_restart(true).await
+}
+
+async fn covering_restart(rebuild: bool) -> Result<()> {
+    let chain = if rebuild {
+        "project-covering-rebuild"
+    } else {
+        "project-covering-undo"
+    };
+    let (scratch, fixture) = ready(chain).await?;
+    let before = pointers(&scratch, chain).await?;
+    if rebuild {
+        sqlx::query("DELETE FROM project_family_undo WHERE chain_id=$1 AND block_number<=20")
+            .bind(chain)
+            .execute(scratch.pool())
+            .await?;
+    }
+    stop_at(
+        &scratch,
+        &fixture,
+        chain,
+        BlockRange::new(10, 11)?,
+        if rebuild { 3 } else { 9 },
+        if rebuild { 3 } else { 1 },
+    )
+    .await?;
+    let pending = bounds(&scratch, chain).await?;
+    assert_eq!(pending.1, HEAD);
+    // A request that fails to cover the interrupted demand cannot discard it.
+    let refused = runner(&scratch, chain, 2)?
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(11, 15)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("noncovering restart must retain pending work");
+    assert!(
+        refused.to_string().contains("interrupted redo"),
+        "{refused}"
+    );
+    assert_eq!(bounds(&scratch, chain).await?, pending);
+    runner(&scratch, chain, 2)?
+        .redo(
+            &live_chain(chain, &fixture.endpoint)?,
+            RedoPhase::Phase(PhaseName::Project),
+            BlockRange::new(8, 15)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        family_marker(&scratch, chain).await?,
+        HEAD,
+        "a covering restart must restore the outstanding publication before clearing redo"
+    );
+    assert_eq!(pointers(&scratch, chain).await?, before);
+    let active: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state WHERE chain_id=$1 AND phase_name='project'",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(!active);
+    fixture.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn partial_request_replays_above_its_end_after_restart() -> Result<()> {
     let chain = "project-short-request";
     let (scratch, fixture) = ready(chain).await?;
@@ -95,10 +170,37 @@ async fn undo_of_a_range_transaction_records_its_actual_predecessor() -> Result<
     );
     let before = pointers(&scratch, chain).await?;
     let range = BlockRange::new(28, 28)?;
+    let before_sequence: i64 =
+        sqlx::query_scalar("SELECT sequence FROM project_family_marker WHERE chain_id=$1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
     stop_at(&scratch, &fixture, chain, range, base, 1).await?;
     assert_eq!(
         bounds(&scratch, chain).await?,
         (base, HEAD, Some(28), Some(28), Some(base))
+    );
+    let after_sequence: i64 =
+        sqlx::query_scalar("SELECT sequence FROM project_family_marker WHERE chain_id=$1")
+            .bind(chain)
+            .fetch_one(scratch.pool())
+            .await?;
+    assert!(
+        after_sequence > before_sequence,
+        "range undo invalidates captured publication"
+    );
+    assert!(
+        bigname_storage::load_served_project_generation(
+            scratch.pool(),
+            chain,
+            HEAD,
+            &block_hash(1, HEAD),
+            true,
+            false,
+        )
+        .await?
+        .is_none(),
+        "undo below the request cannot serve the old publication"
     );
     runner(&scratch, chain, 3)?
         .redo(

@@ -35,7 +35,12 @@ pub(crate) async fn execution_range(
     let target = [
         Some(requested.to),
         standing,
-        resumes.then_some(previous.redo_to_block_number).flatten(),
+        // A covering restart can change the request while the family marker has already
+        // moved back. Retain all pending replay work independently of prefix reuse below.
+        previous
+            .redo_in_progress
+            .then_some(previous.redo_to_block_number)
+            .flatten(),
     ]
     .into_iter()
     .flatten()

@@ -111,7 +111,7 @@ pub(super) async fn publication(
                 WHERE input_phase.chain_id = marker.chain_id
                   AND input_phase.phase_name IN ('interpret', 'project')
                   AND input_phase.redo_in_progress
-                  AND input_phase.redo_from_block_number <= marker.current_block_number
+                  AND COALESCE(input_phase.redo_requested_from_block_number, input_phase.redo_from_block_number) <= marker.current_block_number
             )")
         .bind(&head.chain_id).bind(head.block_number).bind(&head.block_hash)
         .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
