@@ -5464,7 +5464,7 @@
             }
           },
           "409": {
-            "description": "`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
+            "description": "`conflict`: The deployment has no servable public namespace for a search without namespace, or the selected namespace set, manifest, publication readiness or served position changes during the read.\n\n`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5480,6 +5480,7 @@
                           "properties": {
                             "code": {
                               "enum": [
+                                "conflict",
                                 "stale"
                               ]
                             }
