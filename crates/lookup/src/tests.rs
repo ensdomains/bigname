@@ -892,7 +892,9 @@ async fn least_privileged_non_api_writer_keeps_its_existing_function_grants() ->
         Some("42501")
     );
 
-    let response = lookup_engine(&writer_pool, &rpc_url)?.lookup(request).await?;
+    let response = lookup_engine(&writer_pool, &rpc_url)?
+        .lookup(request)
+        .await?;
     assert_eq!(response.records[0].ledger_action, LedgerAction::Written);
     assert_eq!(ledger_count(fixture.pool()).await?, 1);
 
