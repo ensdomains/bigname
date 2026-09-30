@@ -13,9 +13,10 @@ runs normal local RPC intake through Interpret, Project, and Live, then starts
 the real API from the same source and checks indexed-name HTTP. The single
 sale and both batch sales assert owner and registrant separately from the
 on-chain getter checks. A directly authenticated SELECT-only role supplies
-verification and API reads; every produced phase table must remain unchanged
-across HTTP. The harness stops and reaps its runner and API on success and
-early return. This local Sepolia scenario does not establish Mainnet intake
+verification reads. The HTTP proof grants that reader only the API's additional
+nine-argument lookup-guard EXECUTE capability; it receives no ledger-writer grant.
+Every produced phase table must remain unchanged across HTTP. The harness stops
+and reaps its runner and API on success and early return. This local Sepolia scenario does not establish Mainnet intake
 or deployment readiness. Its original fixture and projection assertions remain.
 
 `ens_v2_lifecycle::a_replaced_subregistry_stops_serving_its_old_child` runs the
