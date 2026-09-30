@@ -115,12 +115,7 @@ pub use label_preimages::{
     ENS_RAINBOW_SOURCE_KIND, LabelPreimageImportSummary,
     import_label_preimages_from_ens_names_table,
 };
-pub use lineage::{
-    CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
-    chain_lineage_contains_ancestor_at_block, chain_lineage_contains_canonical_ancestor_position,
-    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
-    load_highest_canonical_chain_lineage_block,
-};
+pub use lineage::{CanonicalityState, ChainLineageBlock, load_chain_lineage_block};
 pub use name_current::{
     DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
     DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER,
