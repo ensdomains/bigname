@@ -87,6 +87,20 @@ survives head advancement while its selectors remain valid. Inventory readers
 reject mismatched or orphaned overlays immediately, before another write.
 Reverse claims use the bounded refresh policy under [Primary names](#primary-names).
 
+Project maintains two derived work indexes with publication and undo. Text work contains only
+selectors needing a read or an obsolete overlay cleared; successful canonical overlays leave
+that index. Reverse work retains every eligible tuple for continuous refresh, plus obsolete
+overlays awaiting clearing. Indexed attempt order chooses the rolling share before loading its
+source rows. The block's changed selectors and dependents of changed record versions,
+admissions, resolver pointers and claims join that share before the existing priority cut.
+Refreshing these indexes touches only changed source keys and their dependents. Since reverse
+keys are shared across chains, any chain's publication or undo refreshes affected mainnet work
+entries; only the current mainnet source row is eligible. Rebuild ranges
+refresh from their final written rows; reset clears both indexes. They retain no provider
+response or independent history. Installing them on an existing database atomically resets
+Project's families and publication marker; the normal rebuild repopulates them before Follow.
+
+
 ## Rules
 
 - Project alone owns family rows, derived indexes, child-registration membership,

@@ -222,8 +222,25 @@ latency still require production-scale qualification before activation.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
+| `project_text_hydration_work`, `project_reverse_hydration_work` | Project | Derived indexes of pending text hydration and continuously refreshed reverse tuples. Keyed like their source rows, with indexed attempt order. Publication and undo refresh affected keys transactionally; reset clears them and rebuild repopulates them. No provider payloads or separate history. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `resolution_divergences` | guarded non-API lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
+
+`project:families.hydrate.text.select` reads changed selector keys and the ordered share from
+`project_text_hydration_work_order_idx`. The reverse selector uses
+`project_reverse_hydration_work_active_idx` and `_stale_idx` before joining tuple state.
+`project:families.hydrate.reverse.keys` finds dependents through
+`project_reverse_tuple_node_idx`, `project_reverse_tuple_claim_idx`, and
+`project_reverse_node_claim_event_idx`; the reverse selector's resource-pointer lookup uses
+`project_resource_pointer_hydration_node_idx`. All are indexes on Project-owned tables.
+Text dependency selection uses the existing value primary-key prefixes for resolver and
+partition. Work-table deletion and insertion use the same source primary keys.
+
+Schema-migration `20260930220000_project_hydration_work.sql` takes the family marker lock
+and resets family state on first installation, atomically with creating both derived work
+tables. Fresh baselines have the same tables and indexes. Reapplying the migration when both
+tables exist preserves publication. The changed Project source rotates the interpreter content
+hash; adoption follows the existing Interpret redo and installed Project rebuild policy.
 
 Family indexes serve these concrete readers:
 

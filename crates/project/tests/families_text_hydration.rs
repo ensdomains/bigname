@@ -352,7 +352,27 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
 
 /// The production selection query, run as the Follow path runs it with no block changes.
 async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
-    let sql = include_str!("../src/families/hydrate/text.sql")
+    let sql = text_selection_sql();
+    let rows: Vec<Value> = sqlx::query_scalar(&sql)
+        .bind(CHAIN)
+        .bind(block)
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(vec![RESOLVER])
+        .bind(250_i64)
+        .bind(json!([]))
+        .bind(false)
+        .fetch_all(&fixture.pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| row["selector_key"].as_str().unwrap().to_owned())
+        .collect())
+}
+
+fn text_selection_sql() -> String {
+    include_str!("../src/families/hydrate/text.sql")
         .replace(
             "{value_emission_ordinal}",
             &bigname_storage::families::position::emission_ordinal_sql(
@@ -368,8 +388,17 @@ async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
                 "boundary.transaction_index",
                 "boundary.log_index",
             ),
-        );
-    let rows: Vec<Value> = sqlx::query_scalar(&sql)
+        )
+}
+
+/// Restore the derived index after this test deliberately writes source rows outside Project.
+async fn sync_text_work(fixture: &Fixture, block: i64) -> Result<()> {
+    let targets: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(v)), '[]') FROM project_node_record_value v",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let work: Vec<Value> = sqlx::query_scalar(&text_selection_sql())
         .bind(CHAIN)
         .bind(block)
         .bind(json!([]))
@@ -377,12 +406,21 @@ async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
         .bind(json!([]))
         .bind(vec![RESOLVER])
         .bind(250_i64)
+        .bind(targets)
+        .bind(true)
         .fetch_all(&fixture.pool)
         .await?;
-    Ok(rows
-        .iter()
-        .map(|row| row["selector_key"].as_str().unwrap().to_owned())
-        .collect())
+    sqlx::query("DELETE FROM project_text_hydration_work")
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO project_text_hydration_work SELECT * FROM
+        jsonb_populate_recordset(NULL::project_text_hydration_work, $1)",
+    )
+    .bind(json!(work))
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
 }
 
 /// Copies the hydrated `url` row under `count` new keys `{prefix}{index:05}`, overriding columns.
@@ -451,6 +489,8 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
     orphaned["block_hash"] = json!(fork);
     copies(&fixture, "r", 5, json!({"hydrated_value": orphaned})).await?;
 
+    sync_text_work(&fixture, 2).await?;
+
     // The query itself returns only the block's share: never-read selectors, in key order.
     assert_eq!(selected(&fixture, 2).await?, keys("n", 1, 250));
     rpc.answer(2, Some("fresh"));
@@ -514,6 +554,7 @@ async fn text_selection_reads_the_version_position_as_rust_does() -> Result<()> 
         .bind(&version)
         .fetch_one(&fixture.pool)
         .await?;
+        sync_text_work(&fixture, 2).await?;
         let boundary = stored["block_number"]
             .as_i64()
             .filter(|_| stored["event_identity"].is_string());
@@ -525,5 +566,384 @@ async fn text_selection_reads_the_version_position_as_rust_does() -> Result<()> 
         };
         assert_eq!(selected(&fixture, 2).await?, expected, "{stored}");
     }
+    fixture.cleanup().await
+}
+
+#[path = "families_hydration/plans.rs"]
+mod plans;
+
+async fn pending_text(fixture: &Fixture) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM project_text_hydration_work")
+            .fetch_one(&fixture.pool)
+            .await?,
+    )
+}
+
+async fn text_plan(fixture: &Fixture, block: i64) -> Result<Value> {
+    Ok(sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        text_selection_sql()
+    ))
+    .bind(CHAIN)
+    .bind(block)
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(json!([]))
+    .bind(vec![RESOLVER])
+    .bind(250_i64)
+    .bind(json!([]))
+    .bind(false)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn text_selection_visits_only_pending_rows_among_fifty_thousand_completed_values()
+-> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    rpc.answer(1, Some("complete"));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(pending_text(&fixture).await?, 0);
+    copies(&fixture, "complete", 50_000, json!({})).await?;
+    // A small pending set must also avoid retained dependencies and canonical chain history.
+    sqlx::raw_sql(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         SELECT 'ethereum-mainnet', 'extra-' || n, n, now(), 'canonical'
+         FROM generate_series(100, 50099) n;
+         INSERT INTO project_node_record_partition
+         SELECT (jsonb_populate_record(NULL::project_node_record_partition,
+             to_jsonb(p) || jsonb_build_object('arm_identity', 'extra-' || n))).*
+         FROM (SELECT * FROM project_node_record_partition LIMIT 1) p,
+             generate_series(1, 50000) n;
+         INSERT INTO project_resolver_classification
+         SELECT (jsonb_populate_record(NULL::project_resolver_classification,
+             to_jsonb(c) || jsonb_build_object('resolver_address', 'extra-' || n))).*
+         FROM (SELECT * FROM project_resolver_classification LIMIT 1) c,
+             generate_series(1, 50000) n;
+         INSERT INTO name_surfaces
+         SELECT (jsonb_populate_record(NULL::name_surfaces,
+             to_jsonb(s) || jsonb_build_object('logical_name_id', 'ens:extra-' || n,
+                 'namehash', 'extra-' || n))).*
+         FROM (SELECT * FROM name_surfaces LIMIT 1) s, generate_series(1, 50000) n;
+         ANALYZE chain_lineage; ANALYZE project_node_record_partition;
+         ANALYZE project_resolver_classification; ANALYZE name_surfaces",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    copies(
+        &fixture,
+        "pending",
+        8,
+        json!({"hydrated_value": null, "hydrated_at_block": null}),
+    )
+    .await?;
+    sync_text_work(&fixture, 2).await?;
+    sqlx::raw_sql("ANALYZE project_node_record_value; ANALYZE project_text_hydration_work")
+        .execute(&fixture.pool)
+        .await?;
+    assert_eq!(pending_text(&fixture).await?, 8);
+    // A text write changes the partition's event position, but not its record version. That
+    // must not expand one new key into every retained sibling in the same partition.
+    let mut partition: Value =
+        sqlx::query_scalar("SELECT to_jsonb(p) FROM project_node_record_partition p LIMIT 1")
+            .fetch_one(&fixture.pool)
+            .await?;
+    partition["block_number"] = json!(2);
+    let target_plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        include_str!("../src/families/hydrate/text_keys.sql")
+    ))
+    .bind(CHAIN)
+    .bind(json!([]))
+    .bind(json!([partition]))
+    .bind(json!([]))
+    .fetch_one(&fixture.pool)
+    .await?;
+    plans::save("text-unchanged-version-among-50000", &target_plan)?;
+    assert_eq!(
+        plans::visits(&target_plan, "project_node_record_value"),
+        0.0,
+        "{target_plan}"
+    );
+    let plan = text_plan(&fixture, 50_100).await?;
+    plans::save("text-pending-among-50000", &plan)?;
+    let generic = plans::generic(
+        &fixture.pool,
+        &text_selection_sql(),
+        &format!(
+            "'ethereum-mainnet', 50100, '[]', '[]', '[]', ARRAY['{RESOLVER}'], 250, '[]', false"
+        ),
+    )
+    .await?;
+    plans::save("text-pending-generic-among-50000", &generic)?;
+    for relation in [
+        "chain_lineage",
+        "project_node_record_partition",
+        "project_resolver_classification",
+        "name_surfaces",
+    ] {
+        assert!(
+            plans::visits(&generic, relation) <= 8.0,
+            "unbounded {relation}"
+        );
+        assert!(
+            plans::visits(&plan, relation) <= 8.0,
+            "unbounded {relation}"
+        );
+    }
+    assert!(
+        plans::visits(&generic, "project_node_record_value") <= 8.0,
+        "{generic}"
+    );
+    let dependency_generic = plans::generic(
+        &fixture.pool,
+        include_str!("../src/families/hydrate/text_keys.sql"),
+        &format!(
+            "'ethereum-mainnet', '[]', '{}', '[]'",
+            json!([partition]).to_string().replace('\'', "''")
+        ),
+    )
+    .await?;
+    plans::save(
+        "text-unchanged-version-generic-among-50000",
+        &dependency_generic,
+    )?;
+    assert_eq!(
+        plans::visits(&dependency_generic, "project_node_record_value"),
+        0.0,
+        "{dependency_generic}"
+    );
+    assert!(
+        plans::visits(&plan, "project_node_record_value") <= 8.0,
+        "{plan}"
+    );
+    keyed_text(&fixture, 2, 1, "new-same-partition").await?;
+    rpc.answer(2, Some("filled"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(rpc.calls(), vec![(hash(1), 1), (hash(2), 9)]);
+    assert_eq!(pending_text(&fixture).await?, 0);
+    let plan = text_plan(&fixture, 3).await?;
+    plans::save("text-drained-among-50000", &plan)?;
+    assert_eq!(
+        plans::visits(&plan, "project_node_record_value"),
+        0.0,
+        "{plan}"
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn undo_requeues_a_completed_text_read_after_its_block_is_orphaned() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(pending_text(&fixture).await?, 1);
+    rpc.answer(2, Some("completed"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(pending_text(&fixture).await?, 0);
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_number=2")
+        .bind(CHAIN).execute(&fixture.pool).await?;
+    assert_eq!(entry(&fixture).await?["status"], "unsupported");
+    assert_eq!(families::undo_to(&fixture.pool, CHAIN, 1).await?, 1);
+    assert_eq!(
+        pending_text(&fixture).await?,
+        1,
+        "undo re-derives pending work from the restored baseline"
+    );
+    assert!(value_row(&fixture).await?["hydrated_value"].is_null());
+    // The same branch becomes canonical again. A new run resumes only from committed work.
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='canonical' WHERE chain_id=$1 AND block_number=2")
+        .bind(CHAIN).execute(&fixture.pool).await?;
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(
+        pending_text(&fixture).await?,
+        1,
+        "repair replays without RPC"
+    );
+    rpc.answer(4, Some("refreshed"));
+    run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(entry(&fixture).await?["value"], "refreshed");
+    assert_eq!(pending_text(&fixture).await?, 0);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_work() -> Result<()>
+{
+    const MIGRATION: &str =
+        include_str!("../../../migrations/20260930220000_project_hydration_work.sql");
+    let reset_tables: std::collections::BTreeSet<_> = MIGRATION
+        .split_once("ARRAY ARRAY[")
+        .unwrap()
+        .1
+        .split_once(']')
+        .unwrap()
+        .0
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .collect();
+    let expected: std::collections::BTreeSet<_> = families::family_tables()
+        .chain([
+            "project_family_marker",
+            "project_family_undo",
+            "project_repair_record",
+        ])
+        .collect();
+    assert_eq!(
+        reset_tables, expected,
+        "the first installation resets every owned table"
+    );
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    rpc.answer(1, Some("complete"));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let before = fixture.exact().await?;
+    for _ in 0..2 {
+        sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
+    }
+    assert_eq!(
+        fixture.exact().await?,
+        before,
+        "fresh baseline and reruns preserve publication"
+    );
+    sqlx::raw_sql(
+        "DROP TABLE project_text_hydration_work; DROP TABLE project_reverse_hydration_work",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mut tx = fixture.pool.begin().await?;
+    sqlx::raw_sql(MIGRATION).execute(&mut *tx).await?;
+    let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM project_family_marker")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(markers, 0);
+    tx.rollback().await?;
+    assert_eq!(
+        value_row(&fixture).await?["hydrated_value"]["value"],
+        "complete"
+    );
+    let table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('project_text_hydration_work')::text")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert!(
+        table.is_none(),
+        "interrupted upgrade restores both schema and publication"
+    );
+    sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
+    let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM project_family_marker")
+        .fetch_one(&fixture.pool)
+        .await?;
+    assert_eq!(markers, 0);
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(
+        pending_text(&fixture).await?,
+        1,
+        "bootstrap repopulates work without RPC"
+    );
+    assert_eq!(rpc.calls().len(), 1);
+    rpc.answer(2, Some("rebuilt"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(entry(&fixture).await?["value"], "rebuilt");
+    assert_eq!(pending_text(&fixture).await?, 0);
+    let rebuilt = fixture.exact().await?;
+    sqlx::raw_sql(MIGRATION).execute(&fixture.pool).await?;
+    assert_eq!(fixture.exact().await?, rebuilt);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn range_and_per_block_rebuilds_derive_identical_work_after_dependency_changes() -> Result<()>
+{
+    use bigname_project::families::RebuildRanges;
+    let (fixture, rpc) = fixture().await?;
+    keyed_text(&fixture, 1, 2, "old-a").await?;
+    keyed_text(&fixture, 2, 1, "old-b").await?;
+    fixture
+        .event(
+            Event::new(
+                "range-version:3",
+                3,
+                1,
+                "RecordVersionChanged",
+                "ens_v1_resolver_l1",
+            )
+            .on(CHAIN)
+            .after(json!({"node":NODE,"resolver":RESOLVER})),
+        )
+        .await?;
+    keyed_text(&fixture, 4, 1, "current").await?;
+    manifest(&fixture, 5, false).await?;
+    manifest(&fixture, 6, true).await?;
+    let mut expected = None;
+    for ranges in [RebuildRanges::Through(6), RebuildRanges::Off] {
+        let token = families::input_token(&fixture.pool, CHAIN).await?;
+        let outcome = families::apply(
+            &fixture.pool,
+            CHAIN,
+            &marker(6),
+            FamilyMode::Rebuild,
+            &token,
+            &FamilyOptions::new(CONTENT_HASH)
+                .with_hydration(rpc.urls())
+                .with_rebuild_ranges(ranges),
+        )
+        .await?;
+        if matches!(ranges, RebuildRanges::Through(_)) {
+            assert!(outcome.ranges > 0);
+        }
+        assert!(rpc.calls().is_empty());
+        let work = selected(&fixture, 7).await?;
+        assert_eq!(work, vec!["current"]);
+        let state = fixture.exact().await?;
+        if let Some(expected) = &expected {
+            assert_eq!(&state, expected);
+        } else {
+            expected = Some(state);
+        }
+    }
+    rpc.answer(7, Some("rebuilt"));
+    run(&fixture, 7, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(pending_text(&fixture).await?, 0);
+    assert_eq!(rpc.calls(), vec![(hash(7), 1)]);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_delta_keys_do_not_consume_the_rolling_text_share() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    for index in 0..251 {
+        keyed_text(&fixture, 1, index + 2, &format!("key{index:03}")).await?;
+    }
+    run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
+    // The first 250 queued keys now have event-carried values. They need no RPC and must not
+    // hide the unchanged pending key behind an early work-index cut.
+    for index in 0..250 {
+        let key = format!("key{index:03}");
+        fixture
+            .event(
+                Event::new(
+                    &format!("value:2:{index}"),
+                    2,
+                    index + 1,
+                    "RecordChanged",
+                    "ens_v1_resolver_l1",
+                )
+                .on(CHAIN)
+                .after(json!({
+                    "node":NODE,"resolver":RESOLVER,"record_key":format!("text:{key}"),
+                    "record_family":"text","selector_key":key,"source_event":"TextChanged",
+                    "value":"from event"
+                })),
+            )
+            .await?;
+    }
+    rpc.answer(2, Some("last"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(rpc.calls(), vec![(hash(2), 1)]);
+    assert_eq!(pending_text(&fixture).await?, 0);
     fixture.cleanup().await
 }

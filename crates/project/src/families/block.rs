@@ -324,10 +324,16 @@ async fn write(
             inserts.push(Value::Object(after.clone()));
         }
     }
+    let hydration =
+        hydrate::work::Targets::read(transaction, chain_id, &hydrate::work::images(&changes))
+            .await?;
     for (name, (keys, inserts)) in by_table {
         let written = store::replace(transaction, super::tables::spec(name), keys, inserts).await?;
         stats.rows.insert(name, written);
     }
+    hydration
+        .refresh(transaction, chain_id, block.number)
+        .await?;
     refresh_derived(transaction, chain_id, block, after, &mut stats).await?;
     Ok(stats)
 }
