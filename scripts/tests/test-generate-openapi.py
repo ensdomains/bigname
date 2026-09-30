@@ -52,6 +52,11 @@ Extends Envelope.
 <!-- openapi:object ErrorEnvelope -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
+| `error` | object ErrorBody | always | Error. |
+### ErrorBody
+<!-- openapi:object ErrorBody -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
 | `code` | enum ErrorCode | always | Code. |
 ### Presence conditions
 <!-- openapi:conditions -->
@@ -121,6 +126,20 @@ class GenerationTests(unittest.TestCase):
     def test_link_resolution(self):
         doc = Generator(API, ROUTES, "https://docs.example.test/reference/").generate()
         self.assertIn("https://docs.example.test/reference/api-v1.md#objects", doc["components"]["schemas"]["Envelope"]["description"])
+
+    def test_error_responses_restrict_codes_and_keep_the_envelope_closed(self):
+        generator = Generator(API, ROUTES)
+        responses = generator.generate()["paths"]["/v1/names/{name}"]["get"]["responses"]
+        for status, allowed, rejected in [("400", ["invalid_input"], ["stale", "conflict"]),
+                                          ("409", ["stale", "conflict"], ["invalid_input"])]:
+            schema = responses[status]["content"]["application/json"]["schema"]
+            for code in allowed:
+                generator.validate({"error": {"code": code}}, schema, status)
+            for code in rejected:
+                with self.assertRaisesRegex(ContractError, "enum"):
+                    generator.validate({"error": {"code": code}}, schema, status)
+            with self.assertRaisesRegex(ContractError, "undeclared field"):
+                generator.validate({"error": {"code": allowed[0], "extra": True}}, schema, status)
 
     def test_body_parameter_is_request_body(self):
         routes = ROUTES.replace("GET ", "POST ").replace(

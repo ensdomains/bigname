@@ -18,21 +18,63 @@ struct Document {
 
 fn document() -> &'static Document {
     static DOCUMENT: OnceLock<Document> = OnceLock::new();
-    DOCUMENT.get_or_init(|| {
-        // JSON-escape build metadata too: an unusual build label must not corrupt the document.
-        let mut value: serde_json::Value =
-            serde_json::from_str(TEMPLATE).expect("checked-in OpenAPI JSON must parse");
-        value["info"]["version"] = crate::SOFTWARE_VERSION.into();
-        value["info"]["x-build-sha"] = crate::BUILD_SHA.into();
-        let body =
-            serde_json::to_string_pretty(&value).expect("OpenAPI JSON must serialize") + "\n";
-        let etag = HeaderValue::from_str(&format!(
-            "W/\"{}\"",
-            alloy_primitives::keccak256(body.as_bytes())
-        ))
-        .expect("hex digest is a valid ETag");
-        Document { body, etag }
-    })
+    DOCUMENT.get_or_init(|| render_document(crate::SOFTWARE_VERSION, crate::BUILD_SHA))
+}
+
+fn render_document(version: &str, build_sha: &str) -> Document {
+    // JSON-escape build metadata too: an unusual build label must not corrupt the document.
+    let mut value: serde_json::Value =
+        serde_json::from_str(TEMPLATE).expect("checked-in OpenAPI JSON must parse");
+    value["info"]["version"] = version.into();
+    value["info"]["x-build-sha"] = build_sha.into();
+    if build_sha.len() == 40 && build_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let pinned_base = format!("https://github.com/ensdomains/bigname/blob/{build_sha}/");
+        pin_documentation_links(&mut value, &pinned_base);
+    }
+    let body = serde_json::to_string_pretty(&value).expect("OpenAPI JSON must serialize") + "\n";
+    let etag = HeaderValue::from_str(&format!(
+        "W/\"{}\"",
+        alloy_primitives::keccak256(body.as_bytes())
+    ))
+    .expect("hex digest is a valid ETag");
+    Document { body, etag }
+}
+
+fn pin_documentation_links(value: &mut serde_json::Value, pinned_base: &str) {
+    const MAIN_BASE: &str = "https://github.com/ensdomains/bigname/blob/main/";
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                match key.as_str() {
+                    "description" if value.is_string() => {
+                        *value = value
+                            .as_str()
+                            .unwrap()
+                            .replace(MAIN_BASE, pinned_base)
+                            .into();
+                    }
+                    "x-enum-descriptions" => {
+                        if let Some(descriptions) = value.as_object_mut() {
+                            for value in descriptions.values_mut() {
+                                if let Some(description) = value.as_str() {
+                                    *value = description.replace(MAIN_BASE, pinned_base).into();
+                                }
+                            }
+                        }
+                    }
+                    // Examples are wire payloads, not documentation annotations.
+                    "example" | "examples" => {}
+                    _ => pin_documentation_links(value, pinned_base),
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                pin_documentation_links(value, pinned_base);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) async fn get_openapi(headers: HeaderMap) -> Response {

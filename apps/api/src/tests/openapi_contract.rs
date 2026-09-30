@@ -205,3 +205,40 @@ fn openapi_lookup_request_closes_both_input_alternatives() {
         assert!(!validator.is_valid(&invalid), "{invalid}");
     }
 }
+
+#[test]
+fn openapi_error_responses_constrain_codes_for_the_operation_and_status() {
+    for (method, path, status, allowed) in [
+        ("post", "/v1/lookup", "400", &["invalid_input"][..]),
+        ("post", "/v1/lookup", "409", &["conflict", "stale"][..]),
+        ("get", "/v1/names/{name}", "409", &["stale"][..]),
+        ("get", "/v1/names/{name}", "500", &["internal_error"][..]),
+    ] {
+        let schema = &document()["paths"][path][method]["responses"][status]["content"]["application/json"]
+            ["schema"];
+        let validator = validator(schema).unwrap();
+        for code in document()["components"]["schemas"]["ErrorCode"]["enum"]
+            .as_array()
+            .unwrap()
+        {
+            let code = code.as_str().unwrap();
+            let payload = json!({"error":{"code":code,"message":"failed","details":{}}});
+            assert_eq!(
+                validator.is_valid(&payload),
+                allowed.contains(&code),
+                "{method} {path} {status} error.code={code}"
+            );
+        }
+        let code = allowed[0];
+        for invalid in [
+            json!({"error":{"code":code,"message":"failed","details":{},"extra":true}}),
+            json!({"error":{"code":code,"message":"failed","details":{}},"extra":true}),
+            json!({"error":{"message":"failed","details":{}}}),
+        ] {
+            assert!(
+                !validator.is_valid(&invalid),
+                "{method} {path} {status}: {invalid}"
+            );
+        }
+    }
+}

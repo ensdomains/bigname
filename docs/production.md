@@ -23,6 +23,9 @@ are:
   the documentation site can read it from another origin. The API embeds the
   generated OpenAPI 3.1 document for the 20 product operations, including package
   version and build SHA. Diagnostics and health remain outside the document.
+  Its documentation links use that build's commit when a full Git SHA is
+  available; local builds with an unknown or non-commit build label retain
+  links to `main`.
   It answers without querying the database or providers, carries
   `Cache-Control: public, max-age=300` and a body-derived weak `ETag`, and answers
   a matching `If-None-Match` with a bodyless `304`. Regenerate with

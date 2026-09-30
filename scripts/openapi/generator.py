@@ -230,6 +230,7 @@ class Generator:
 
     def responses(self, table):
         responses, bodies, seen, success = {}, {}, set(), False
+        error_codes = {}
         for row in table.rows:
             status, body = row["Status"], row["Body"]
             require(re.fullmatch(r"[1-5][0-9]{2}", status), f"invalid response status {status}")
@@ -248,6 +249,7 @@ class Generator:
                 require(code is None and body == "none", "304 must have no code or body")
             else:
                 require(status.startswith(("4", "5")) and body == "object ErrorEnvelope" and self.error_status.get(code) == status, f"error code {code} does not map to response {status}")
+                error_codes.setdefault(status, []).append(code)
             note = self.prose(row["When"], True)
             if code:
                 note = f"`{code}`: {note}"
@@ -262,6 +264,14 @@ class Generator:
                     require(header in self.headers, f"undefined response header {header}")
                     responses[status].setdefault("headers", {})[header] = {"$ref": f"#/components/headers/{header}"}
         require(success, f"{table.key} has no success response")
+        for status, codes in error_codes.items():
+            content = responses[status]["content"]["application/json"]
+            # Intersect with the closed envelope: the overlay narrows only the code.
+            content["schema"] = {"allOf": [content["schema"], {
+                "type": "object", "properties": {"error": {
+                    "type": "object", "properties": {"code": {"enum": codes}}
+                }}
+            }]}
         return responses
 
     def validate(self, value, schema, context):
@@ -274,6 +284,8 @@ class Generator:
             name = schema["$ref"].rsplit("/", 1)[-1]
             require(name in self.schemas, f"unresolved reference {schema['$ref']}")
             self.validate(value, self.schemas[name], context)
+        for constraint in schema.get("allOf", []):
+            self.validate(value, constraint, context)
         for keyword in ("anyOf", "oneOf"):
             if keyword in schema:
                 matches = 0

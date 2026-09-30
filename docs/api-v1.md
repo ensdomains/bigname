@@ -93,7 +93,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `as_of_completeness` | per-chain positions suppressed from `as_of`, keyed by `chain_id`, with `{completeness, unsupported_reason}` | inferring request coverage from whichever rows happened to be returned |
 | `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
-| `include` | route-documented expansion allowlist; on `POST /v1/lookup` a body field with the same comma-separated grammar. One value selects rows instead of expanding them: name history's `child_registrations` adds direct child registration rows | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
+| `include` | route-documented query expansion allowlist. `POST /v1/lookup` has no expansion parameter; nonempty body `include` is rejected, while the parser tolerates an empty string as omission. One value selects rows instead of expanding them: name history's `child_registrations` adds direct child registration rows | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
@@ -2097,7 +2097,8 @@ Every operation has exactly one responses table, with exactly these columns:
 There is one row per status and code, so `409 stale` and `409 conflict` are
 two rows. Rows with the same status must have the same body; the generator
 merges them into one OpenAPI response whose description lists each code with
-its `When` text. An error row's code must map to its status in the `HTTP`
+its `When` text and whose schema constrains `error.code` to those codes while
+retaining the closed `ErrorEnvelope`. An error row's code must map to its status in the `HTTP`
 column of `ErrorCode`, and its body is `object ErrorEnvelope`. Every operation
 has a `2xx` row, and every `2xx` body is an object that extends `Envelope`.
 
@@ -2114,6 +2115,11 @@ such as `names`. The description is a link to the operation's section in
 [`api-v1-routes.md`](api-v1-routes.md). No summary is generated. Relative
 links in any description are resolved against the documentation base URL the
 generator is given.
+
+When serving the document, the API pins generated Bigname documentation links
+to its full hexadecimal build commit SHA. Builds whose SHA is unknown or is
+not a full commit identifier retain the generator's `main` links. Custom
+documentation hosts, existing pinned links and example values are preserved.
 
 ### Examples
 

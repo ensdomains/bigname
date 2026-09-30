@@ -8,6 +8,73 @@ use tower::ServiceExt;
 
 use super::*;
 
+#[test]
+fn openapi_documentation_links_follow_the_served_commit_with_unknown_build_fallback() {
+    const COMMIT: &str = "8a959700bf476a7b694ccf85568de42b415b391e";
+    const MAIN: &str = "https://github.com/ensdomains/bigname/blob/main/";
+    let pinned = format!("https://github.com/ensdomains/bigname/blob/{COMMIT}/");
+    let rendered = render_document("1.2.3", COMMIT);
+    let document: Value = serde_json::from_str(&rendered.body).unwrap();
+    assert_eq!(document["info"]["x-build-sha"], COMMIT);
+    assert!(
+        document["paths"]["/v1/lookup"]["post"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(&pinned)
+    );
+    assert!(rendered.body.contains(&pinned));
+    assert!(!rendered.body.contains(MAIN));
+    assert_ne!(rendered.etag, render_document("1.2.3", "unknown").etag);
+
+    for label in ["unknown", "", "dev", "8a959700b", "custom\"build\\label\n"] {
+        let rendered = render_document("version\"with\\escaping\n", label);
+        let document: Value = serde_json::from_str(&rendered.body).unwrap();
+        assert_eq!(document["info"]["x-build-sha"], label);
+        assert_eq!(document["info"]["version"], "version\"with\\escaping\n");
+        assert!(
+            document["paths"]["/v1/lookup"]["post"]["description"]
+                .as_str()
+                .unwrap()
+                .contains(MAIN)
+        );
+    }
+
+    let external = "https://docs.example.test/api.md";
+    let mut annotations = serde_json::json!({
+        "description": format!("[docs]({MAIN}docs/api-v1.md) [custom]({external}) [pinned]({pinned}docs/api-v1.md)"),
+        "properties": {"value": {"description": format!("[field]({MAIN}docs/api-v1.md#field)")}},
+        "x-enum-descriptions": {"ok": format!("[enum]({MAIN}docs/api-v1.md#enum)")},
+        "example": {"description": format!("{MAIN}literal-wire-value")},
+        "examples": [{"url": format!("{MAIN}literal-wire-value")}]
+    });
+    let examples = (
+        annotations["example"].clone(),
+        annotations["examples"].clone(),
+    );
+    pin_documentation_links(&mut annotations, &pinned);
+    for description in [
+        &annotations["description"],
+        &annotations["properties"]["value"]["description"],
+        &annotations["x-enum-descriptions"]["ok"],
+    ] {
+        assert!(description.as_str().unwrap().contains(&pinned));
+        assert!(!description.as_str().unwrap().contains(MAIN));
+    }
+    assert!(
+        annotations["description"]
+            .as_str()
+            .unwrap()
+            .contains(external)
+    );
+    assert_eq!(
+        (
+            annotations["example"].clone(),
+            annotations["examples"].clone()
+        ),
+        examples
+    );
+}
+
 fn app() -> axum::Router {
     crate::app_router(crate::AppState::new(
         PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused").unwrap(),
