@@ -1,6 +1,7 @@
 /* project:families.hydrate.text.select */
 -- Read changed/dependent keys and an indexed share of pending work before joining selectors.
 -- $9 refreshes the derived work index for $8 only, without the rolling share or result limit.
+-- Keyed lateral dependency probes keep custom and generic plans bounded by those candidates.
 WITH changed_keys AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $8)
 ), rolling_keys AS MATERIALIZED (
@@ -43,11 +44,14 @@ WITH changed_keys AS (
     UNION ALL SELECT * FROM classification_changes
 ), admissions AS MATERIALIZED (
     -- One verdict per resolver, built once rather than for every selector it serves.
-    SELECT chain_id, resolver_address, support_status,
-        jsonb_build_object('classification', classification, 'support_status', support_status,
-            'unsupported_reason', unsupported_reason, 'manifest_id', manifest_id) AS admission
-    FROM classifications
-    WHERE resolver_address IN (SELECT resolver_address FROM record_values)
+    SELECT c.chain_id, c.resolver_address, c.support_status,
+        jsonb_build_object('classification', c.classification, 'support_status', c.support_status,
+            'unsupported_reason', c.unsupported_reason, 'manifest_id', c.manifest_id) AS admission
+    FROM (SELECT DISTINCT chain_id, resolver_address FROM record_values) key
+    CROSS JOIN LATERAL (
+        SELECT c.* FROM classifications c
+        WHERE (c.chain_id, c.resolver_address) = (key.chain_id, key.resolver_address) OFFSET 0
+    ) c
 ), selected AS (
     SELECT value.*,
         -- What an overlay is read for, part by part; `_selector` below assembles it.
@@ -107,8 +111,13 @@ WITH changed_keys AS (
                    stored.support_status, stored.unsupported_reason, stored.manifest_id))
             AS _delta
     FROM record_values value
-    LEFT JOIN partitions partition USING (chain_id, resolver_address, arm, arm_identity)
-    LEFT JOIN admissions admission USING (chain_id, resolver_address)
+    LEFT JOIN LATERAL (
+        SELECT p.* FROM partitions p
+        WHERE (p.chain_id, p.resolver_address, p.arm, p.arm_identity) =
+            (value.chain_id, value.resolver_address, value.arm, value.arm_identity) OFFSET 0
+    ) partition ON true
+    LEFT JOIN admissions admission ON (admission.chain_id, admission.resolver_address) =
+        (value.chain_id, value.resolver_address)
     LEFT JOIN name_surfaces surface ON surface.logical_name_id = value.logical_name_id
     -- The record version as a position, when it is one (Position::from_map). A part reads as
     -- serde_json's `as_i64` reads it: an integer JSON number in the i64 range, else absent, so

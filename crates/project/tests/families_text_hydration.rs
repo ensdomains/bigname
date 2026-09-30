@@ -607,6 +607,31 @@ async fn text_selection_visits_only_pending_rows_among_fifty_thousand_completed_
     run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
     assert_eq!(pending_text(&fixture).await?, 0);
     copies(&fixture, "complete", 50_000, json!({})).await?;
+    // A small pending set must also avoid retained dependencies and canonical chain history.
+    sqlx::raw_sql(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         SELECT 'ethereum-mainnet', 'extra-' || n, n, now(), 'canonical'
+         FROM generate_series(100, 50099) n;
+         INSERT INTO project_node_record_partition
+         SELECT (jsonb_populate_record(NULL::project_node_record_partition,
+             to_jsonb(p) || jsonb_build_object('arm_identity', 'extra-' || n))).*
+         FROM (SELECT * FROM project_node_record_partition LIMIT 1) p,
+             generate_series(1, 50000) n;
+         INSERT INTO project_resolver_classification
+         SELECT (jsonb_populate_record(NULL::project_resolver_classification,
+             to_jsonb(c) || jsonb_build_object('resolver_address', 'extra-' || n))).*
+         FROM (SELECT * FROM project_resolver_classification LIMIT 1) c,
+             generate_series(1, 50000) n;
+         INSERT INTO name_surfaces
+         SELECT (jsonb_populate_record(NULL::name_surfaces,
+             to_jsonb(s) || jsonb_build_object('logical_name_id', 'ens:extra-' || n,
+                 'namehash', 'extra-' || n))).*
+         FROM (SELECT * FROM name_surfaces LIMIT 1) s, generate_series(1, 50000) n;
+         ANALYZE chain_lineage; ANALYZE project_node_record_partition;
+         ANALYZE project_resolver_classification; ANALYZE name_surfaces",
+    )
+    .execute(&fixture.pool)
+    .await?;
     copies(
         &fixture,
         "pending",
@@ -642,15 +667,32 @@ async fn text_selection_visits_only_pending_rows_among_fifty_thousand_completed_
         0.0,
         "{target_plan}"
     );
-    let plan = text_plan(&fixture, 2).await?;
+    let plan = text_plan(&fixture, 50_100).await?;
     plans::save("text-pending-among-50000", &plan)?;
     let generic = plans::generic(
         &fixture.pool,
         &text_selection_sql(),
-        &format!("'ethereum-mainnet', 2, '[]', '[]', '[]', ARRAY['{RESOLVER}'], 250, '[]', false"),
+        &format!(
+            "'ethereum-mainnet', 50100, '[]', '[]', '[]', ARRAY['{RESOLVER}'], 250, '[]', false"
+        ),
     )
     .await?;
     plans::save("text-pending-generic-among-50000", &generic)?;
+    for relation in [
+        "chain_lineage",
+        "project_node_record_partition",
+        "project_resolver_classification",
+        "name_surfaces",
+    ] {
+        assert!(
+            plans::visits(&generic, relation) <= 8.0,
+            "unbounded {relation}"
+        );
+        assert!(
+            plans::visits(&plan, relation) <= 8.0,
+            "unbounded {relation}"
+        );
+    }
     assert!(
         plans::visits(&generic, "project_node_record_value") <= 8.0,
         "{generic}"
