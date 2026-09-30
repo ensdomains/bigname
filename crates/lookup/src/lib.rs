@@ -1,4 +1,4 @@
-//! Schema-v2 live name lookup with divergence-only persistence.
+//! Request-scoped live lookup, with a retained diagnostic writer for non-API callers.
 
 use bigname_domain::vocabulary::{ChainId, Namespace, SourceFamily};
 

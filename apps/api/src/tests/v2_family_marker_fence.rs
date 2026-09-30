@@ -323,9 +323,8 @@ async fn api_preflight_requires_a_readable_family_marker() -> Result<()> {
     database.cleanup().await
 }
 
-/// The documented `bigname_api` grant covers every relation the family readers use, and the
-/// preflight lists a family relation, or a label or discovery relation the family readers join,
-/// that the login cannot read.
+/// The documented `bigname_api` grants cover the family reads and snapshot guard;
+/// preflight identifies any relation the family readers join that the login cannot read.
 #[tokio::test]
 async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -338,10 +337,18 @@ async fn api_preflight_and_documented_grant_cover_the_family_reads() -> Result<(
         .split_once("TO bigname_api;")
         .context("deployment docs must terminate the API SELECT grant")?
         .0;
+    let guard = deployment
+        .split_once("GRANT EXECUTE ON FUNCTION ")
+        .context("deployment docs must contain the API guard grant")?
+        .1
+        .split_once("TO bigname_api;")
+        .context("deployment docs must terminate the API guard grant")?
+        .0;
     for statement in [
         format!("CREATE ROLE {role} NOLOGIN"),
         format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"),
         format!("GRANT SELECT ON TABLE {grants} TO {role}"),
+        format!("GRANT EXECUTE ON FUNCTION {guard} TO {role}"),
     ] {
         sqlx::query(&statement)
             .execute(&database.lookup_pool)

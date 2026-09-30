@@ -11,14 +11,12 @@ pub(crate) async fn persist_comparisons(
     pool: &PgPool,
     snapshot: &LookupSnapshot,
     results: &mut [LookupRecordResult],
+    write_divergences: bool,
 ) -> Result<()> {
     for result in results.iter_mut().filter(|result| result.ccip_read) {
         result.ledger_action = LedgerAction::SkippedCcip;
     }
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(database("start divergence write"))?;
+    let mut transaction = revalidation_transaction(pool, write_divergences).await?;
     if snapshot.route == LookupRoute::EnsUniversalResolverDiscovery {
         revalidate_lookup_state(
             &mut transaction,
@@ -26,12 +24,12 @@ pub(crate) async fn persist_comparisons(
             &snapshot.revalidation_positions,
             &snapshot.execution_authority,
             None,
+            write_divergences,
         )
         .await?;
-        transaction
-            .commit()
-            .await
-            .map_err(database("commit null-resolver lookup revalidation"))?;
+        transaction.commit().await.map_err(lookup_state_error(
+            "commit null-resolver lookup revalidation",
+        ))?;
         return Ok(());
     }
     let comparable = results
@@ -43,13 +41,18 @@ pub(crate) async fn persist_comparisons(
         &snapshot.revalidation_positions,
         &snapshot.execution_authority,
         snapshot.comparison.as_ref(),
+        write_divergences,
     )
     .await?;
-    let Some(comparison) = snapshot.comparison.as_ref().filter(|_| comparable) else {
+    let Some(comparison) = snapshot
+        .comparison
+        .as_ref()
+        .filter(|_| comparable && write_divergences)
+    else {
         transaction
             .commit()
             .await
-            .map_err(database("commit lookup head revalidation"))?;
+            .map_err(lookup_state_error("commit lookup head revalidation"))?;
         return Ok(());
     };
 
@@ -63,26 +66,43 @@ pub(crate) async fn persist_comparisons(
 pub(crate) async fn revalidate_primary_name_position(
     pool: &PgPool,
     authority: &EnsPrimaryNameAuthority,
+    lock_rows: bool,
 ) -> Result<()> {
     let observed_positions = json!({
         super::positions::chain_slot(&authority.position.chain_id)?: authority.position
     });
-    let mut transaction = pool
-        .begin()
-        .await
-        .map_err(database("start primary-name position revalidation"))?;
+    let mut transaction = revalidation_transaction(pool, lock_rows).await?;
     revalidate_lookup_state(
         &mut transaction,
         &authority.position,
         &observed_positions,
         &authority.execution_authority,
         None,
+        lock_rows,
     )
     .await?;
-    transaction
-        .commit()
+    transaction.commit().await.map_err(lookup_state_error(
+        "commit primary-name position revalidation",
+    ))
+}
+
+async fn revalidation_transaction(
+    pool: &PgPool,
+    lock_rows: bool,
+) -> Result<Transaction<'_, Postgres>> {
+    // Start after RPC, rather than keeping the pre-RPC snapshot: changes committed
+    // during provider execution must be visible to the guard.
+    let mut transaction = pool
+        .begin()
         .await
-        .map_err(database("commit primary-name position revalidation"))
+        .map_err(database("start lookup revalidation"))?;
+    if !lock_rows {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(lookup_state_error("set lookup revalidation isolation"))?;
+    }
+    Ok(transaction)
 }
 
 async fn revalidate_lookup_state(
@@ -91,23 +111,27 @@ async fn revalidate_lookup_state(
     observed_positions: &Value,
     execution_authority: &Value,
     comparison: Option<&IndexedComparison>,
+    lock_rows: bool,
 ) -> Result<()> {
-    let status: String = sqlx::query_scalar(
-        "SELECT revalidate_resolution_lookup_state(
-             $1, $2, $3, $4, $5, $6::uuid, $7, $8
-         )",
-    )
-    .bind(&authoritative_position.chain_id)
-    .bind(authoritative_position.block_number)
-    .bind(&authoritative_position.block_hash)
-    .bind(observed_positions)
-    .bind(execution_authority)
-    .bind(comparison.map(|comparison| comparison.resource_id.as_str()))
-    .bind(comparison.map(|comparison| comparison.boundary_key.as_str()))
-    .bind(comparison.map(|comparison| comparison.row_xmin.as_str()))
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(lookup_state_error("revalidate lookup execution head"))?;
+    // Retain the old entry point for writers so existing non-API EXECUTE grants
+    // remain sufficient. Only read-only callers need the new overload.
+    let query = if lock_rows {
+        "SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6::uuid, $7, $8)"
+    } else {
+        "SELECT revalidate_resolution_lookup_state($1, $2, $3, $4, $5, $6::uuid, $7, $8, false)"
+    };
+    let status: String = sqlx::query_scalar(query)
+        .bind(&authoritative_position.chain_id)
+        .bind(authoritative_position.block_number)
+        .bind(&authoritative_position.block_hash)
+        .bind(observed_positions)
+        .bind(execution_authority)
+        .bind(comparison.map(|comparison| comparison.resource_id.as_str()))
+        .bind(comparison.map(|comparison| comparison.boundary_key.as_str()))
+        .bind(comparison.map(|comparison| comparison.row_xmin.as_str()))
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(lookup_state_error("revalidate lookup execution head"))?;
     match status.as_str() {
         "unchanged" => Ok(()),
         "head_changed" => Err(LookupError::concurrent_state(
@@ -199,6 +223,11 @@ async fn persist_result(
 pub(crate) fn divergence_write_error(error: sqlx::Error) -> LookupError {
     if let sqlx::Error::Database(database_error) = &error {
         match database_error.code().as_deref() {
+            Some("25006") => {
+                return LookupError::configuration(
+                    "lookup database connection does not permit ledger writes",
+                );
+            }
             Some("40P01" | "40001") => {
                 return LookupError::concurrent_state(format!(
                     "lookup state changed during divergence commit: {database_error}"
@@ -230,12 +259,20 @@ pub(crate) fn divergence_write_error(error: sqlx::Error) -> LookupError {
 
 fn lookup_state_error(context: &'static str) -> impl FnOnce(sqlx::Error) -> LookupError {
     move |error| {
-        if let sqlx::Error::Database(database_error) = &error
-            && matches!(database_error.code().as_deref(), Some("40P01" | "40001"))
-        {
-            return LookupError::concurrent_state(format!(
-                "lookup state changed during revalidation: {database_error}"
-            ));
+        if let sqlx::Error::Database(database_error) = &error {
+            match database_error.code().as_deref() {
+                Some("25006") => {
+                    return LookupError::configuration(
+                        "lookup state guard attempted a write on a read-only database",
+                    );
+                }
+                Some("40P01" | "40001") => {
+                    return LookupError::concurrent_state(format!(
+                        "lookup state changed during revalidation: {database_error}"
+                    ));
+                }
+                _ => {}
+            }
         }
         database(context)(error)
     }

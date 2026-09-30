@@ -29,8 +29,9 @@ For replayable-state work, state:
   rows or projections.
 - Projection workers own projection tables.
 - API reads projections, normalized events, and request-scoped lookup output
-  except explicit audit endpoints and the guarded [resolution divergence
-  ledger](../../../docs/glossary.md#resolution-divergence-ledger).
-  Provider responses are never persisted as reusable outcomes.
+  except explicit audit endpoints. API requests never write database state;
+  the guarded [resolution divergence ledger](../../../docs/glossary.md#resolution-divergence-ledger)
+  writer is retained for non-API callers. Provider responses are never persisted
+  as reusable outcomes.
 - Lookup uses declared topology and manifests, not adapter internals.
 - Replay or migration semantic changes require `$contract-impact`.

@@ -884,25 +884,38 @@ connection. `/v1/status`, snapshot selection,
 [verified lookup](glossary.md#verified-lookup), and all projection reads use
 phase relations. The `/v1/status` phase-runner heartbeat
 threshold uses `BIGNAME_API_PHASE_HEARTBEAT_MAX_AGE_SECS` (60 seconds by
-default). V2 record lookup may perform only the guarded
-[resolution divergence ledger](glossary.md#resolution-divergence-ledger) write;
-v2 primary-name lookup writes nothing. The API database role therefore needs
-`USAGE` on `bigname_phase`, `SELECT` on only the serving relations enumerated
-below, and `EXECUTE` on the guarded functions below. These fixed-`search_path`,
-security-definer functions are owned
-by their schema owner; their installers revoke default `PUBLIC` execution.
-Grant them only to the API role, and do not grant that role `CREATE` on
-`bigname_phase` or `public`. In particular, the API receives no direct `INSERT`
-or `UPDATE` on
-`resolution_divergences` and no `UPDATE` on the guarded head, lineage, or
-projection relations.
+default). Every API path is read-only, including verified records, automatic
+live fallback, primary names with an omitted `source`, and diagnostics.
+`BIGNAME_API_DATABASE_URL` may point at a primary or a physical streaming hot
+standby with the reviewed schema installed. Logical replicas are not supported:
+lookup authority checks compare PostgreSQL manifest row versions, which physical
+replication preserves. This does not change the phase runner's separate
+verification-database requirement: that URL must still point at the writer's
+same database, as described above.
+
+The API starts a fresh repeatable-read, read-only transaction after provider
+calls and revalidates the captured family publication, canonical positions and
+manifest authority without row or advisory locks. Changed state keeps the
+existing stale rejection; a standby replay conflict also refuses the answer.
+API requests do not create, refresh or clear the diagnostic
+[resolution divergence ledger](glossary.md#resolution-divergence-ledger), even
+when connected to a writable primary. Existing observations remain available to
+operators and may still be retired by Project or reorg handling. No serving
+path reads them.
+
+The API role needs `USAGE` on `bigname_phase`, `SELECT` on the serving relations
+below, and `EXECUTE` only on the nine-argument snapshot guard below. This
+fixed-`search_path`, security-definer function is owned by the schema owner; its
+installer revokes default `PUBLIC` execution. Do not grant the API role
+`CREATE` on `bigname_phase` or `public`, writes on any application relation, or
+execution of the retained diagnostic ledger writer.
 
 API startup tolerates a wholly absent phase schema so `/v1/status` can return
 its empty, `degraded` response. Once the phase schema exists, startup checks
 every phase-schema relation, function, and type its serving paths read:
-relations by name and `SELECT` privilege, both guarded functions by exact
-signature, and the `canonicality_state` type. If an object is missing or a
-serving relation is unreadable, the API refuses to start and its diagnostic
+relations by name and `SELECT` privilege, the snapshot guard by exact signature
+and `EXECUTE` privilege, and the `canonicality_state` type. If an object or its
+required privilege is unavailable, the API refuses to start and its diagnostic
 names every unavailable identity.
 
 After the phase schema exists, the schema owner provisions the dedicated login
@@ -976,13 +989,31 @@ GRANT SELECT ON TABLE
     bigname_phase.project_name_summary
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
-    text, bigint, text, jsonb, jsonb, uuid, text, text
-) TO bigname_api;
-GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
-    uuid, text, text, text, bigint, text, jsonb, text, text, text,
-    text, jsonb, jsonb, boolean
+    text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
 ) TO bigname_api;
 ```
+
+For an existing deployment, apply
+`20260930100000_read_only_lookup_guard.sql` on the primary, wait for it to replay
+on any serving standby, and grant the nine-argument function above before
+restarting the API. Existing eight-argument and writer-function grants remain
+on upgrade for non-API callers; remove them specifically from the API role once
+all API instances use the read-only build:
+
+```sql
+REVOKE EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+    text, bigint, text, jsonb, jsonb, uuid, text, text
+) FROM bigname_api;
+REVOKE EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
+    uuid, text, text, text, bigint, text, jsonb, text, text, text,
+    text, jsonb, jsonb, boolean
+) FROM bigname_api;
+```
+
+The existing non-API writer remains compatible. An older API build needs those
+old grants restored and a writable primary if rolled back; it cannot serve
+verified lookups on a standby. This schema-migration and API change do not alter
+the interpreter content hash or require a projection rebuild.
 
 This role cannot read raw facts, the divergence table, or unrelated operational
 tables directly. Its discovery-state reads are

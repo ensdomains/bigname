@@ -111,7 +111,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> R
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
         "ALTER FUNCTION bigname_phase.revalidate_resolution_lookup_state( \
-             text, bigint, text, jsonb, jsonb, uuid, text, text \
+             text, bigint, text, jsonb, jsonb, uuid, text, text, boolean \
          ) RENAME TO revalidate_resolution_lookup_state_preflight_missing",
     )
     .execute(&database.lookup_pool)
@@ -125,7 +125,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> R
     assert_eq!(
         format!("{error:#}"),
         "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
-         function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)"
+         function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)"
     );
     database.cleanup().await
 }
@@ -160,8 +160,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         .map(|object| format!("{}: {}", object.kind.as_str(), object.identity))
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
-        "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)",
-        "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
+        "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
@@ -216,7 +215,6 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_reverse_tuple",
         "relation: bigname_phase.project_universal_resolver_proxy",
         "relation: bigname_phase.project_wrapper_state",
-        "relation: bigname_phase.resolution_divergences",
         "relation: bigname_phase.resources",
         "relation: bigname_phase.service_heartbeats",
         "relation: bigname_phase.surface_bindings",
@@ -226,7 +224,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 62);
+    assert_eq!(actual.len(), 60);
     database.cleanup().await
 }
 
@@ -269,6 +267,8 @@ async fn api_preflight_reports_unreadable_account_approvals() -> Result<()> {
         == "bigname_phase.project_account_approval"));
     assert!(!missing.iter().any(|object| object.identity
         == "bigname_phase.resolution_divergences"));
+    assert!(missing.iter().any(|object| object.identity
+        == "bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)"));
     sqlx::query(&format!("REVOKE USAGE ON SCHEMA bigname_phase FROM {role}"))
         .execute(&database.lookup_pool).await?;
     let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;

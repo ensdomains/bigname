@@ -58,7 +58,6 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.discovery_edges'),
                 ('relation', 'bigname_phase.migration_discovery_associations'),
                 ('relation', 'bigname_phase.label_preimages'),
-                ('relation', 'bigname_phase.resolution_divergences'),
                 ('relation', 'bigname_phase.project_family_marker'),
                 ('relation', 'bigname_phase.project_family_undo'),
                 ('relation', 'bigname_phase.project_repair_record'),
@@ -101,11 +100,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.project_name_summary'),
                 (
                     'function',
-                    'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'
-                ),
-                (
-                    'function',
-                    'bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)'
+                    'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)'
                 ),
                 ('type', 'bigname_phase.canonicality_state')
         )
@@ -114,9 +109,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         WHERE CASE kind
             WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
                 WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
-                WHEN to_regclass(identity) IS NULL THEN TRUE ELSE identity <> 'bigname_phase.resolution_divergences'
-                    AND NOT has_table_privilege(current_user, identity, 'SELECT') END
-            WHEN 'function' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regprocedure(identity) IS NULL END
+                WHEN to_regclass(identity) IS NULL THEN TRUE ELSE NOT has_table_privilege(current_user, identity, 'SELECT') END
+            WHEN 'function' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE WHEN to_regprocedure(identity) IS NULL THEN TRUE ELSE NOT has_function_privilege(current_user, identity, 'EXECUTE') END
             WHEN 'type' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE ELSE to_regtype(identity) IS NULL END
         END
         ORDER BY kind, identity
