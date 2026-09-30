@@ -202,6 +202,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -597,6 +599,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -1326,6 +1330,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -1614,6 +1620,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -2327,6 +2335,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -3021,6 +3031,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -3489,6 +3501,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -3759,6 +3773,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -4051,6 +4067,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -4304,6 +4322,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           },
@@ -4586,6 +4606,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -4840,6 +4862,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -5094,6 +5118,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -5361,6 +5387,8 @@
             "description": "Maximum rows per page: 1 through 200.",
             "schema": {
               "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
               "default": 50
             }
           }
@@ -6774,7 +6802,9 @@
           },
           "page_size": {
             "type": "integer",
-            "description": "Reverse result page size, default 50 and maximum 200."
+            "minimum": 1,
+            "maximum": 200,
+            "description": "Reverse result page size from 1 through 200; default 50."
           },
           "cursor": {
             "type": "string",

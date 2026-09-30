@@ -1978,7 +1978,8 @@ types; every enum value is a string.
 
 ```text
 type        = "nullable " value-type | value-type
-value-type  = "string" | "integer" | "boolean" | "json"
+value-type  = "string" | "integer" | "integer [" bound ", " bound "]"
+            | "boolean" | "json"
             | "array of " type
             | "map of string to " type
             | "object " Name
@@ -1987,17 +1988,22 @@ value-type  = "string" | "integer" | "boolean" | "json"
             | "one of " alternative { ", " alternative }
 alternative = "string" | "integer" | "boolean" | "object " Name
 literal     = "`" wire-text "`"
+bound       = decimal integer, optionally negative, without leading zeros
 ```
 
 An inline enum and a one of consume the rest of the cell, so either may appear
 last in an array or map type but nothing may follow it. `nullable` may prefix
-any value type once; `nullable nullable` does not parse.
+any value type once; `nullable nullable` does not parse. Integer bounds must
+be ordered from minimum to maximum. They constrain defaults and executable
+examples as well as the generated schema. Use them for explicit contract
+limits, rather than inferring limits from a wire field’s implementation type.
 
 | Production | Example | Meaning | Generated schema |
 | --- | --- | --- | --- |
 | string | `string` | A JSON string. Formats such as RFC 3339 or `0x` hex are stated in the description. | `{"type": "string"}` |
 | json | `json` | Any JSON value, only for a deliberately extensible leaf such as error details. Success response objects remain closed. | `{}` |
 | integer | `integer` | A JSON number with no fractional part. | `{"type": "integer"}` |
+| bounded integer | `integer [1, 200]` | An integer from the inclusive minimum through the inclusive maximum. | `{"type": "integer", "minimum": 1, "maximum": 200}` |
 | boolean | `boolean` | `true` or `false`. | `{"type": "boolean"}` |
 | nullable | `nullable string` | The value may be JSON `null`. This is about the value, not about whether the key is present. | `{"type": ["string", "null"]}`; for an object, enum or one of, `anyOf` of that schema and `{"type": "null"}` |
 | array of | `array of string` | A JSON array whose items all have the inner type. | `{"type": "array", "items": {"type": "string"}}` |
@@ -2068,7 +2074,7 @@ with `400 invalid_input`, as [Parameters](#parameters) states.
 | --- | --- |
 | `Parameter` | The name as sent, in backticks. A header parameter uses its usual spelling, such as `If-None-Match`. A request body is the literal `body`. |
 | `In` | `path`, `query`, `header` or `body`. |
-| `Type` | A type expression. A query or header parameter is a string, integer, boolean, enum, or an array of one of those. A body is `object Name`. |
+| `Type` | A type expression. A query or header parameter is a string, integer (optionally bounded), boolean, enum, or an array of one of those. A body is `object Name`. |
 | `Required` | `yes` or `no`. A path parameter is always `yes`. |
 | `Default` | The value the server applies when the parameter is omitted, as a backticked literal, or `none`. A default that depends on other input, such as a namespace inferred from the name, is `none`, and the description says how it is chosen. |
 | `Description` | What the parameter does, including values the type does not rule out but the route rejects. |
@@ -2322,7 +2328,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `address` | string | always | EVM address in hexadecimal form. |
 | `coin_type` | integer | optional | Numeric coin type, default 60; no evm literal on this route. |
 | `relation` | string | optional | Comma-separated owner, manager, registrant or any, or resolves_to alone. Omission asks for the selected primary name. role_holder and former_registrant are not supported here. |
-| `page_size` | integer | optional | Reverse result page size, default 50 and maximum 200. |
+| `page_size` | integer [1, 200] | optional | Reverse result page size from 1 through 200; default 50. |
 | `cursor` | string | optional | Per-input reverse continuation token, omitted when none was supplied. |
 
 ### LookupResult
