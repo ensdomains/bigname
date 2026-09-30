@@ -1,6 +1,6 @@
 use super::*;
 
-const READ_ONLY_GUARD: &str = "bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)";
+const READ_ONLY_GUARD: &str = "bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)";
 
 async fn read_only_pool(database: &TestDatabase) -> Result<(PgPool, String)> {
     let role = format!("readonly_{}", database.database_name);
@@ -42,6 +42,19 @@ async fn read_only_pool(database: &TestDatabase) -> Result<(PgPool, String)> {
     let writable: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user, 'bigname_phase.resolution_divergences', 'INSERT,UPDATE,SELECT') OR has_function_privilege(current_user, 'bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)', 'EXECUTE')")
         .fetch_one(&pool).await?;
     assert!(!writable);
+    let guard_access: (bool, bool, bool) = sqlx::query_as(
+        "SELECT has_function_privilege(current_user, $1, 'EXECUTE'),
+         has_function_privilege(current_user,
+           'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+           'EXECUTE'),
+         has_function_privilege(current_user,
+           'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)',
+           'EXECUTE')",
+    )
+    .bind(READ_ONLY_GUARD)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(guard_access, (true, false, false));
     Ok((pool, role))
 }
 

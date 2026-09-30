@@ -128,8 +128,8 @@ impl HarnessDb {
             .as_deref()
             .context("API reader role was not installed")?;
         sqlx::raw_sql(&format!(
-            "GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
-                 text, bigint, text, jsonb, jsonb, uuid, text, text, boolean
+            "GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
+                 text, bigint, text, jsonb, jsonb, uuid, text, text
              ) TO {}",
             quote_identifier(role),
         ))
@@ -481,7 +481,7 @@ mod tests {
                 "SELECT current_user = session_user,
                  has_table_privilege(current_user, 'bigname_phase.chain_phase_state', 'UPDATE'),
                  has_function_privilege(current_user,
-                   'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+                   'bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)',
                    'EXECUTE')",
             )
             .fetch_one(&mut reader)
@@ -495,22 +495,25 @@ mod tests {
                 .await?
                 .is_empty()
         );
-        let writer_access: (bool, bool, bool) = sqlx::query_as(
+        let writer_access: (bool, bool, bool, bool) = sqlx::query_as(
             "SELECT has_function_privilege(current_user,
                'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)',
                'EXECUTE'),
              has_function_privilege(current_user,
                'bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)',
                'EXECUTE'),
+             has_function_privilege(current_user,
+               'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+               'EXECUTE'),
              has_table_privilege(current_user, 'bigname_phase.resolution_divergences', 'INSERT')",
         )
         .fetch_one(&api_pool)
         .await?;
-        assert_eq!(writer_access, (false, false, false));
+        assert_eq!(writer_access, (false, false, false, false));
         api_pool.close().await;
         let independent_verifier_can_execute: bool = sqlx::query_scalar(
             "SELECT has_function_privilege($1,
-               'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)',
+               'bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)',
                'EXECUTE')",
         )
         .bind(second.cleanup_guard.verification_role.as_deref())
