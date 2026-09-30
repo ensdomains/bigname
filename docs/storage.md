@@ -242,6 +242,12 @@ tables. Fresh baselines have the same tables and indexes. Reapplying the migrati
 tables exist preserves publication. The changed Project source rotates the interpreter content
 hash; adoption follows the existing Interpret redo and installed Project rebuild policy.
 
+Child pages and counts calculate authority-arm agreement once per child across the candidate
+relation. Exact filtered totals still require evaluating every eligible child, even for a small
+`page_size`. Display-name ordering uses label preimages with the documented placeholder
+fallback; keyset pagination bounds the returned rows, while the count and ordering evaluate
+the filtered child relation.
+
 Family indexes serve these concrete readers:
 
 - Expiring names use `project_lifecycle_event_expiry_idx`,

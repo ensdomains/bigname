@@ -5,16 +5,6 @@
 //! having no name row: no arm, no serving resource, no zero-owner transfer, and no
 //! registration status or timestamps.
 
-/// The child's selected authority arm (`ens_v1`, `basenames` or `ens_v2`), null when none is
-/// selected or the child has no summary, as a scalar subquery over the chain expression `chain`
-/// and the name id expression `child`.
-pub(super) fn selected_authority_arm(chain: &str, child: &str) -> String {
-    format!(
-        "(SELECT arm_summary.authority_arm FROM bigname_phase.project_name_summary arm_summary
-          WHERE arm_summary.chain_id = {chain} AND arm_summary.logical_name_id = {child})"
-    )
-}
-
 /// Whether the child has a serving resource, which admits an ownerless child.
 pub(super) fn serving(chain: &str, child: &str) -> String {
     format!(

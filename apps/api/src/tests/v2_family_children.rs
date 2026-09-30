@@ -173,6 +173,18 @@ async fn seed_family_children_fixture_expiring(
 async fn v2_subnames_from_families() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_children_fixture(&database).await?;
+    // A real unnamed registry event reaches the arm fallback: there is no surface for
+    // carol, so publication cannot compose a name summary for it. Large registry parents
+    // can have many such children; the page must not rescan them once per child.
+    let carol = bigname_storage::logical_name_id_for_name("ens", "carol.alpha.eth");
+    let has_summary: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM bigname_phase.project_name_summary
+         WHERE logical_name_id = $1)",
+    )
+    .bind(&carol)
+    .fetch_one(&database.pool)
+    .await?;
+    assert!(!has_summary, "the fixture must exercise the missing-summary arm fallback");
     let pages =
         read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=1")
             .await?;

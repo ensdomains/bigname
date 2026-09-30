@@ -218,25 +218,7 @@ pub(crate) async fn page(
             bail!("children shadow cursor sort value does not match the sort");
         }
     }
-    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
-    push_children(
-        &mut builder,
-        Parents::One(parent_logical_name_id),
-        filter,
-        registry,
-    );
-    builder.push("), page AS (SELECT * FROM children WHERE TRUE");
-    if let Some(cursor) = cursor {
-        push_cursor_after(&mut builder, filter.order, cursor);
-    }
-    push_order(&mut builder, filter.sort, filter.order, "");
-    builder.push(" LIMIT ");
-    builder.push_bind(limit);
-    builder.push(
-        ") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM children) total
-           LEFT JOIN page ON TRUE",
-    );
-    push_order(&mut builder, filter.sort, filter.order, "page.");
+    let mut builder = page_query(parent_logical_name_id, filter, registry, cursor, limit);
     let rows = builder
         .build()
         .fetch_all(&mut *conn)
@@ -273,6 +255,35 @@ pub(crate) async fn page(
         rows: decoded.into_iter().map(|(row, _)| row).collect(),
         next_cursor,
     })
+}
+
+fn page_query<'a>(
+    parent_logical_name_id: &'a str,
+    filter: &'a ChildrenCurrentPageFilter<'a>,
+    registry: Option<RegistryLabels<'a>>,
+    cursor: Option<&'a ChildrenCurrentKeysetCursor>,
+    limit: i64,
+) -> QueryBuilder<'a, Postgres> {
+    let mut builder = QueryBuilder::<Postgres>::new("WITH ");
+    push_children(
+        &mut builder,
+        Parents::One(parent_logical_name_id),
+        filter,
+        registry,
+    );
+    builder.push("), page AS (SELECT * FROM children WHERE TRUE");
+    if let Some(cursor) = cursor {
+        push_cursor_after(&mut builder, filter.order, cursor);
+    }
+    push_order(&mut builder, filter.sort, filter.order, "");
+    builder.push(" LIMIT ");
+    builder.push_bind(limit);
+    builder.push(
+        ") SELECT total.total_count, page.* FROM (SELECT count(*) AS total_count FROM children) total
+           LEFT JOIN page ON TRUE",
+    );
+    push_order(&mut builder, filter.sort, filter.order, "page.");
+    builder
 }
 
 /// The selected children CTEs and the `children` relation (left open, closed by the caller)
@@ -465,3 +476,6 @@ fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
         (false, ChildrenCurrentOrder::Asc) | (true, ChildrenCurrentOrder::Desc) => 0,
     }
 }
+
+#[cfg(test)]
+mod performance_tests;

@@ -10,7 +10,7 @@
 use sqlx::{Postgres, QueryBuilder};
 
 use super::{
-    name_summary::{selected_authority_arm, serving, zero_owner},
+    name_summary::{serving, zero_owner},
     shims::{effective_child_fuses, row_position},
 };
 
@@ -194,6 +194,10 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                 SELECT 1 FROM bigname_phase.project_child_edge_candidate other
                 WHERE other.chain_id = edge.chain_id AND other.namespace = edge.namespace
                   AND other.child_node = edge.child_node
+                  -- The same primary-key row cannot be newer. Exclude it before evaluating
+                  -- the canonical order, including its parsed emission ordinal.
+                  AND (other.parent_node, other.authority_arm)
+                      <> (edge.parent_node, edge.authority_arm)
                   AND {other_position} > {edge_position})
         ), candidates AS (
             SELECT parent.logical_name_id AS parent_logical_name_id, parent.chain_id,
@@ -260,21 +264,30 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
             LEFT JOIN bigname_phase.normalized_events registration_event
               ON registration_event.event_identity = registration.event_identity
             WHERE parent.raw_name <> ''
+        ), candidate_arms AS (
+            -- Compute agreement over every candidate before selecting an arm. A correlated
+            -- candidate scan here grows quadratically for parents whose children have no
+            -- name summary. The windows share one partition ordering and retain every row.
+            SELECT candidate.*,
+                   min(authority_arm) OVER child AS first_arm,
+                   max(authority_arm) OVER child AS last_arm
+            FROM candidates candidate
+            WINDOW child AS (PARTITION BY child_logical_name_id)
         ), selected AS (
-            -- publish's arm rule: the child's selected arm, or the only arm when none is selected;
-            -- the canonical event order picks within the arm: recency, the emission ordinal at
-            -- one log (docs/glossary.md#emission-ordinal), then event identity.
+            -- The child's selected arm, or its only arm when none is selected. Within that
+            -- arm, canonical event order picks the latest, including emission ordinal.
             SELECT candidate.*,
                    row_number() OVER (
                        PARTITION BY candidate.child_logical_name_id
                        ORDER BY {candidate_position} DESC
                    ) AS pair_rank
-            FROM candidates candidate
-            WHERE {arm} = candidate.authority_arm
-               OR ({arm} IS NULL AND NOT EXISTS (
-                   SELECT 1 FROM candidates other
-                   WHERE other.child_logical_name_id = candidate.child_logical_name_id
-                     AND other.authority_arm <> candidate.authority_arm))
+            FROM candidate_arms candidate
+            LEFT JOIN bigname_phase.project_name_summary arm_summary
+              ON arm_summary.chain_id = candidate.chain_id
+             AND arm_summary.logical_name_id = candidate.child_logical_name_id
+            WHERE arm_summary.authority_arm = candidate.authority_arm
+               OR (arm_summary.authority_arm IS NULL
+                   AND candidate.first_arm = candidate.last_arm)
         ),",
         parent_readable = readable_surface("surface"),
         child_readable = readable_surface("child"),
@@ -298,7 +311,6 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
             "edge.child_logical_name_id",
             "clock.epoch_seconds"
         ),
-        arm = selected_authority_arm("candidate.chain_id", "candidate.child_logical_name_id"),
         v1_raw_name = label_raw_name("parent.raw_name = ''"),
         v1_decoded_name = label_decoded_name("parent.raw_name = ''"),
         v2_raw_name = label_raw_name("FALSE"),
