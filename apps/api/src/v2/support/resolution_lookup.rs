@@ -30,8 +30,8 @@ pub(crate) enum ResolutionLookupOutcome {
     AuthorityArmNotAdmitted,
 }
 
-/// Executes a fresh schema-v2 lookup. The lookup engine owns any guarded
-/// divergence-ledger write; the API never writes a legacy execution outcome.
+/// Executes a fresh read-only schema-v2 lookup and revalidates the captured
+/// execution state after provider calls.
 pub(crate) async fn execute_resolution_lookup(
     state: &AppState,
     row: &NameCurrentRow,

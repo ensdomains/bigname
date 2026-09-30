@@ -127,6 +127,7 @@ fn token(label: &str) -> U256 {
 
 async fn database(prefix: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
+    database.create_phase_schema().await?;
     for statement in [
         include_str!("../../../storage/schema/baseline/01_chain.sql"),
         include_str!("../../../storage/schema/baseline/02_raw_facts.sql"),
