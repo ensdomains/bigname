@@ -71,7 +71,7 @@ UPDATE _sqlx_migrations SET checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512
 ```
 
 It must report `UPDATE 1`. Stop if the first query shows any other value.
-`schema-v2/apply-check.sh` proves that the new checksum here and in the production
+`scripts/check-schema` proves that the new checksum here and in the production
 runbook is the SHA-384 of the file as checked in.
 
 To roll back to a checkout whose `20260922010100` still has the earlier bytes and

@@ -311,9 +311,7 @@ impl Config {
         }
         let name = if roles { "roles.sql" } else { "checkpoint.sql" };
         file.write_all(&fs::read(
-            self.repo_root
-                .join("work/640-same-release-restore")
-                .join(name),
+            self.repo_root.join("tests/e2e/restore").join(name),
         )?)?;
         drop(file);
         self.pg(

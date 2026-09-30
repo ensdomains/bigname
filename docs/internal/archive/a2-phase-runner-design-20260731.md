@@ -1,5 +1,8 @@
 # A2 — phase runner design (for maintainer review, 2026-07-31)
 
+> Historical design record. See the [archive index](README.md) for current
+> documentation and the status of these plans.
+
 The one new component of the rewrite. Everything else is a port; this is
 the spine they hang from. Style: STE. Authority: build plan § A2 +
 amendments E/F; audit § Rewrite obligations.

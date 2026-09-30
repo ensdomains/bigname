@@ -13,10 +13,10 @@ const CHAIN: &str = "lookahead-test";
 async fn database() -> Result<TestDatabase> {
     let db = TestDatabase::create(TestDatabaseConfig::new("v1_lookahead_query")).await?;
     for sql in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
     ] {
         sqlx::raw_sql(sql).execute(db.pool()).await?;
     }
@@ -555,7 +555,7 @@ async fn events_sql_files_an_event_under_the_same_name_as_restore() -> Result {
         ("due_names.sql", super::DUE_NAMES.replace("event.", "")),
         (
             "the baseline index",
-            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql").to_owned(),
+            include_str!("../../../storage/schema/baseline/05_normalized_events.sql").to_owned(),
         ),
     ] {
         assert!(

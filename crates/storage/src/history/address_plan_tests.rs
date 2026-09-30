@@ -722,12 +722,12 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         .execute(&mut *connection)
         .await?;
     for baseline in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../schema/baseline/01_chain.sql"),
+        include_str!("../../schema/baseline/02_raw_facts.sql"),
+        include_str!("../../schema/baseline/03_identity.sql"),
+        include_str!("../../schema/baseline/04_manifests.sql"),
+        include_str!("../../schema/baseline/05_normalized_events.sql"),
+        include_str!("../../schema/baseline/06_projections.sql"),
     ] {
         sqlx::raw_sql(baseline).execute(&mut *connection).await?;
     }

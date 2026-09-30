@@ -57,7 +57,6 @@ COPY crates crates
 COPY tools tools
 COPY migrations migrations
 COPY manifests manifests
-COPY schema-v2 schema-v2
 
 # Declared after the dependency build so that a new commit does not invalidate it.
 ARG BIGNAME_BUILD_SHA=unknown

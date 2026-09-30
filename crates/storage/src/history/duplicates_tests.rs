@@ -27,11 +27,11 @@ async fn exercise_plan(connection: &mut PgConnection) -> Result<()> {
         .execute(&mut *connection)
         .await?;
     for baseline in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../schema/baseline/01_chain.sql"),
+        include_str!("../../schema/baseline/02_raw_facts.sql"),
+        include_str!("../../schema/baseline/03_identity.sql"),
+        include_str!("../../schema/baseline/04_manifests.sql"),
+        include_str!("../../schema/baseline/05_normalized_events.sql"),
     ] {
         sqlx::raw_sql(baseline).execute(&mut *connection).await?;
     }
@@ -157,14 +157,14 @@ async fn expanded_history_selectors_fit_postgres_bind_limit() -> Result<()> {
             .execute(&mut *connection)
             .await?;
         for baseline in [
-            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+            include_str!("../../schema/baseline/01_chain.sql"),
+            include_str!("../../schema/baseline/02_raw_facts.sql"),
+            include_str!("../../schema/baseline/03_identity.sql"),
+            include_str!("../../schema/baseline/04_manifests.sql"),
+            include_str!("../../schema/baseline/05_normalized_events.sql"),
             // Resource-scoped selectors read pointer-attributed record ids from the record
             // inventory projection.
-            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+            include_str!("../../schema/baseline/06_projections.sql"),
         ] {
             sqlx::raw_sql(baseline).execute(&mut *connection).await?;
         }
@@ -226,11 +226,11 @@ async fn registrar_snapshots_are_omitted_before_product_paging_but_remain_in_dia
         let mut connection = pool.acquire().await?;
         sqlx::raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public").execute(&mut *connection).await?;
         for baseline in [
-            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+            include_str!("../../schema/baseline/01_chain.sql"),
+            include_str!("../../schema/baseline/02_raw_facts.sql"),
+            include_str!("../../schema/baseline/03_identity.sql"),
+            include_str!("../../schema/baseline/04_manifests.sql"),
+            include_str!("../../schema/baseline/05_normalized_events.sql"),
         ] { sqlx::raw_sql(baseline).execute(&mut *connection).await?; }
         sqlx::raw_sql("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) SELECT 'ethereum-sepolia','block-'||n,n,to_timestamp(n),'canonical' FROM generate_series(1,8) n; INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ('70000000-0000-0000-0000-000000000001','ethereum-sepolia','block-1',1,'canonical')").execute(&mut *connection).await?;
         let states = [

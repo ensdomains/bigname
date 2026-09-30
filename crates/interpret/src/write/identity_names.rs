@@ -284,9 +284,9 @@ mod tests {
         ))
         .await?;
         for sql in [
-            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
+            include_str!("../../../storage/schema/baseline/01_chain.sql"),
+            include_str!("../../../storage/schema/baseline/03_identity.sql"),
+            include_str!("../../../storage/schema/baseline/07_labels.sql"),
         ] {
             sqlx::raw_sql(sql).execute(database.pool()).await?;
         }

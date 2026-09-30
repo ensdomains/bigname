@@ -1,5 +1,8 @@
 # bigname simplification audit — working doc (started 2026-07-30)
 
+> Historical design record. See the [archive index](README.md) for current
+> documentation and the status of these plans.
+
 Status update (2026-08-06): this is historical decision evidence, not a current
 runtime inventory. The schema-v2 C2 cutover deleted `apps/worker`,
 `crates/execution`, and the legacy `public` tables discussed below. Use the

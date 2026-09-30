@@ -1,5 +1,8 @@
 # bigname simplification build plan (2026-07-30)
 
+> Historical design record. See the [archive index](README.md) for current
+> documentation and the status of these plans.
+
 Converts `simplification-audit-20260730.md` (census + decisions, all seven
 maintainer questions decided) into an ordered build. Read that doc first;
 this one does not restate rationale.

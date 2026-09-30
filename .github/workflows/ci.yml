@@ -255,7 +255,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Apply and verify schema v2
-        run: ./schema-v2/apply-check.sh
+        run: ./scripts/check-schema
 
   test_shard:
     name: test (${{ matrix.name }})

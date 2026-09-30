@@ -27,6 +27,10 @@ both the full derivation and the resumed intake it starts the production API
 (`pipeline::ProductionApi`) on that database and checks name detail and records
 for both names over HTTP.
 
+The separate [same-release restore exercise](restore/README.md) retains the
+source and evidence contract from PR #882. It is not part of the regular CI
+scenario gate.
+
 ## Prerequisites
 
 - Foundry v1.7.1 with `anvil` on `PATH`.

@@ -8,7 +8,7 @@ if [ "${1:-}" != "--database-ready" ]; then
     if [ -n "${BIGNAME_TEST_DATABASE_URL:-}" ]; then
         export SCHEMA_V2_EXTERNAL_DATABASE=1
     fi
-    exec "$ROOT/scripts/test-db" -- "$ROOT/schema-v2/apply-check.sh" --database-ready
+    exec "$ROOT/scripts/test-db" -- "$ROOT/scripts/check-schema" --database-ready
 fi
 
 container="${BIGNAME_TEST_POSTGRES_CONTAINER:-bigname-test-postgres}"
@@ -557,12 +557,12 @@ printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
 
 apply_historical_baseline() {
     local sql_file
-    for sql_file in "$ROOT"/schema-v2/baseline/*.sql; do
+    for sql_file in "$ROOT"/crates/storage/schema/baseline/*.sql; do
         {
             printf 'SET client_min_messages TO warning;\n'
             printf 'SET search_path TO "%s";\n' "$scratch_schema"
-            if [ -f "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}" ]; then
-                cat "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}"
+            if [ -f "$ROOT/crates/storage/schema/fixtures/pre-7c/${sql_file##*/}" ]; then
+                cat "$ROOT/crates/storage/schema/fixtures/pre-7c/${sql_file##*/}"
             else
                 cat "$sql_file"
             fi
@@ -580,10 +580,10 @@ check_served_projection_removal() {
         for suffix in removal fresh; do
             local scratch_schema="${original_schema}_${suffix}"
             printf 'SET search_path TO "%s";\n' "$scratch_schema"
-            for sql_file in "$ROOT"/schema-v2/baseline/*.sql; do
+            for sql_file in "$ROOT"/crates/storage/schema/baseline/*.sql; do
                 fixture_file="$sql_file"
-                if [ "$suffix" = removal ] && [ -f "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}" ]; then
-                    fixture_file="$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}"
+                if [ "$suffix" = removal ] && [ -f "$ROOT/crates/storage/schema/fixtures/pre-7c/${sql_file##*/}" ]; then
+                    fixture_file="$ROOT/crates/storage/schema/fixtures/pre-7c/${sql_file##*/}"
                 fi
                 render_phase_migration "$fixture_file"
             done
@@ -609,7 +609,7 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
-        cat "$ROOT/schema-v2/fixtures/removal-parity.sql"
+        cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
         printf 'DROP SCHEMA "%s_removal" CASCADE; DROP SCHEMA "%s_fresh" CASCADE;\n' "$original_schema" "$original_schema"
     } | run_psql
 }
@@ -2648,7 +2648,7 @@ assert_index_install_refusal label-hash-function-body \
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' "DROP FUNCTION label_hashes(text[]);"
-    sed -n '/^CREATE OR REPLACE FUNCTION label_hashes/,/^\$\$;/p' "$ROOT/schema-v2/baseline/03_identity.sql"
+    sed -n '/^CREATE OR REPLACE FUNCTION label_hashes/,/^\$\$;/p' "$ROOT/crates/storage/schema/baseline/03_identity.sql"
     printf '%s\n' \
         "CREATE INDEX name_surfaces_project_label_hashes_idx ON name_surfaces USING gin (label_hashes(raw_labels));" \
         "DROP INDEX name_surfaces_project_suffix_hash_idx;" \

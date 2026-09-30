@@ -17,10 +17,10 @@ fn topic(signature: &str) -> String {
 async fn database(name: &str, family: &str, events: Value) -> Result<TestDatabase> {
     let db = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for schema in [
-        include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../../storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../../storage/schema/baseline/04_manifests.sql"),
     ] {
         sqlx::raw_sql(schema).execute(db.pool()).await?;
     }

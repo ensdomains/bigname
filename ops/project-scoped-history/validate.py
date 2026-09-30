@@ -50,7 +50,7 @@ SET LOCAL search_path TO bigname_phase, public;
 SET LOCAL statement_timeout = '2min';""")
     for name in ["01_chain.sql", "02_raw_facts.sql", "03_identity.sql",
                  "04_manifests.sql", "05_normalized_events.sql"]:
-        print((ROOT / "schema-v2/baseline" / name).read_text())
+        print((ROOT / "crates/storage/schema/baseline" / name).read_text())
     print((FIXTURES / "fixture.sql").read_text())
     pairs = []
     for label in ["names", "primary"]:

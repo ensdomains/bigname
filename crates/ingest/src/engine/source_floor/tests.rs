@@ -1272,10 +1272,10 @@ async fn single_block_database(name: &str) -> AnyResult<TestDatabase> {
 async fn intake_database(name: &str, chain_id: &str) -> AnyResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for schema in [
-        include_str!("../../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../../storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../../storage/schema/baseline/04_manifests.sql"),
     ] {
         sqlx::raw_sql(schema).execute(database.pool()).await?;
     }

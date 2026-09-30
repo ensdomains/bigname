@@ -76,7 +76,7 @@ run fails rather than recording success if the name is not an index on
 reviewed definition; recover as described above, then run the schema-migrations
 again. Without a prebuild on a populated table, that schema-migration builds the
 index with an ordinary `CREATE INDEX`, which blocks writes to `normalized_events`
-until it finishes. `schema-v2/apply-check.sh` proves each refusal for the script
+until it finishes. `scripts/check-schema` proves each refusal for the script
 and for the schema-migration, and that the fresh baseline, the schema-migration,
 and the script build the same definition. The fresh baseline also includes the
 index.

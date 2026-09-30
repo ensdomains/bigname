@@ -433,7 +433,7 @@ migration, and a fresh database would apply the edited text while the live one
 keeps the original's result. The later
 `20260917141000_discovery_self_edge_check_name.sql` and the index validity
 checks turn the setting off themselves, transaction-locally, and put the
-caller's value back; `schema-v2/apply-check.sh` proves that for each of them.
+caller's value back; `scripts/check-schema` proves that for each of them.
 
 Adding, editing, or deleting a covered interpreter input rotates the compiled
 [interpreter content hash](../glossary.md#interpreter-content-hash);
@@ -468,7 +468,7 @@ schema-migrations
 `20260813120000_reverse_hydration_attempt_state.sql` and
 `20260813120100_reverse_hydration_attempt_state_validate.sql`, followed by
 `20260814120000_project_redo_resolver_evidence.sql`. Fresh namespaces
-receive the same objects from `schema-v2/baseline`. For an initialized
+receive the same objects from `crates/storage/schema/baseline`. For an initialized
 production namespace, keep the API and every phase-runner or one-shot Project
 process stopped. Apply and validate the following concurrent indexes as step 3
 below, then apply all three schema-migrations in order as step 4. The first adds the
@@ -529,7 +529,7 @@ relationship, including closed ones. On an initialized production namespace,
 build `discovery_edges_observation_history_idx` concurrently in step 3 with the
 reviewed statement below. The source of that statement is
 [`ops/discovery-history-index/install.sql`](../../ops/discovery-history-index/install.sql);
-the copy below must stay identical to it. `schema-v2/apply-check.sh` proves
+the copy below must stay identical to it. `scripts/check-schema` proves
 that `install.sql`, the fresh baseline, and the schema-migration build the same
 definition, but nothing checks this runbook's copy, so compare the two before
 the release and treat `install.sql` as correct if they differ. Prefer running
@@ -574,7 +574,7 @@ ones included, before it inserts a new row. On an initialized production
 namespace, build `discovery_edges_reopen_idx` concurrently in step 3 with the
 reviewed statement below. The source of that statement is
 [`ops/discovery-reopen-index/install.sql`](../../ops/discovery-reopen-index/install.sql);
-the copy below must stay identical to it. `schema-v2/apply-check.sh` proves
+the copy below must stay identical to it. `scripts/check-schema` proves
 that `install.sql`, the fresh baseline, and the schema-migration build the same
 definition, but nothing checks this runbook's copy, so compare the two before
 the release and treat `install.sql` as correct if they differ. Prefer running
@@ -628,7 +628,7 @@ running
 [`ops/project-scoped-history/install.sql`](../../ops/project-scoped-history/install.sql)
 as [its runbook](../../ops/project-scoped-history/README.md) describes. This
 runbook carries no copy of the eight statements; `install.sql` is the only
-source, and `schema-v2/apply-check.sh` proves it builds what the fresh baseline
+source, and `scripts/check-schema` proves it builds what the fresh baseline
 and the schema-migration build. The builds are concurrent and permit writes, so
 they can finish while the existing runner is still processing, before the
 stop/start window opens; step 3 then only runs `install.sql` again as the check.
@@ -665,7 +665,7 @@ as [its runbook](../../ops/v1-lookahead-indexes/README.md) describes, then run
 `ANALYZE bigname_phase.normalized_events`, because expression indexes have no
 statistics until the table is analyzed and the loader's queries depend on them.
 This runbook carries no copy of the two statements; `install.sql` is the only
-source, and `schema-v2/apply-check.sh` proves it builds what the fresh baseline
+source, and `scripts/check-schema` proves it builds what the fresh baseline
 and the schema-migration build. The builds are concurrent and permit writes, so
 they can finish while the existing runner is still processing, before the
 stop/start window opens; step 3 then only runs `install.sql` again as the check.
@@ -742,7 +742,7 @@ and require `UPDATE 1`; a binary-only rollback needs nothing, because the
 binary does not run schema-migrations. Both UPDATEs are guarded against repeats
 but not idempotent: a repeated run reports `UPDATE 0`, so on `UPDATE 0` rerun the
 SELECT to see which checksum is stored before treating it as a failure. [The index runbook](../../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
-carries the same statements, and `schema-v2/apply-check.sh` proves both carry
+carries the same statements, and `scripts/check-schema` proves both carry
 the checksum of the file as checked in.
 
 The release containing
@@ -772,7 +772,7 @@ production namespace, build it in step 3 by running
 [`ops/events-order-index/install.sql`](../../ops/events-order-index/install.sql)
 as [its runbook](../../ops/events-order-index/README.md) describes. This runbook
 carries no copy of the statement; `install.sql` is the only source, and
-`schema-v2/apply-check.sh` proves it builds what the fresh baseline and the
+`scripts/check-schema` proves it builds what the fresh baseline and the
 schema-migration build. The build is concurrent and permits writes, so it can
 finish while the existing runner is still processing, before the stop/start
 window opens; step 3 then only runs `install.sql` again as the check. Keep the
@@ -791,7 +791,7 @@ initialized production namespace, build it in step 3 by running
 [`ops/mirror-pointer-index/install.sql`](../../ops/mirror-pointer-index/install.sql)
 as [its runbook](../../ops/mirror-pointer-index/README.md) describes. This
 runbook carries no copy of the statement; `install.sql` is the only source, and
-`schema-v2/apply-check.sh` proves it builds what the fresh baseline and the
+`scripts/check-schema` proves it builds what the fresh baseline and the
 schema-migration build. The build is concurrent and permits writes, so it can
 finish while the existing runner is still processing; step 3 then only runs
 `install.sql` again as the check. The script ends with
@@ -806,7 +806,7 @@ The release containing
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
 entry history. A fresh namespace receives the table and range index from
-`schema-v2/baseline`; an initialized namespace needs the schema-migration
+`crates/storage/schema/baseline`; an initialized namespace needs the schema-migration
 because its already-installed baseline is unchanged. Apply the schema-migration
 in step 4. The removal schema-migration later drops this handoff table, so there
 is nothing of it to validate once that has applied.

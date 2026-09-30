@@ -263,16 +263,16 @@ async fn audit_schema_migration_applies_on_top_of_the_pre_audit_phase_baseline()
         .execute(&mut *transaction)
         .await?;
     for sql in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/06_projections.sql"),
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/09_divergence.sql"),
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+        include_str!("../../../crates/storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../crates/storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../crates/storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../crates/storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/05_normalized_events.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/06_projections.sql"),
+        include_str!("../../../crates/storage/schema/baseline/07_labels.sql"),
+        include_str!("../../../crates/storage/schema/baseline/08_heartbeats.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/09_divergence.sql"),
+        include_str!("../../../crates/storage/schema/baseline/10_phase_state.sql"),
     ] {
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
     }
@@ -611,18 +611,22 @@ async fn interpret_decode_skip_audit_matches_between_baseline_and_schema_migrati
         .execute(&mut *transaction)
         .await?;
     for sql in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/06_projections.sql"),
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/09_divergence.sql"),
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-        include_str!("../../../schema-v2/fixtures/pre-7c/12_project_generation_failures.sql"),
+        include_str!("../../../crates/storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../crates/storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../crates/storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../crates/storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/05_normalized_events.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/06_projections.sql"),
+        include_str!("../../../crates/storage/schema/baseline/07_labels.sql"),
+        include_str!("../../../crates/storage/schema/baseline/08_heartbeats.sql"),
+        include_str!("../../../crates/storage/schema/fixtures/pre-7c/09_divergence.sql"),
+        include_str!("../../../crates/storage/schema/baseline/10_phase_state.sql"),
+        include_str!(
+            "../../../crates/storage/schema/baseline/11_manifest_authority_attestations.sql"
+        ),
+        include_str!(
+            "../../../crates/storage/schema/fixtures/pre-7c/12_project_generation_failures.sql"
+        ),
     ] {
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
     }

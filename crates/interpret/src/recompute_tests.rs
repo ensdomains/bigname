@@ -53,10 +53,10 @@ async fn surface_loader_ignores_orphaned_surfaces_and_fallback_events() -> TestR
     )
     .await?;
     for sql in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
     ] {
         sqlx::raw_sql(sql).execute(database.pool()).await?;
     }

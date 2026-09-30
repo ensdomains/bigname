@@ -256,7 +256,7 @@ async fn nearest(
 /// `project_registry_pointer` row: block, transaction and log (absent last), the emission
 /// ordinal (docs/glossary.md#emission-ordinal; absent last), then identity bytes, as
 /// `FamilyPosition` orders. It cannot decide a walk: the table's primary key is (chain_id,
-/// namespace, node) (schema-v2/baseline/06_projections.sql), so every row at one depth is the
+/// namespace, node) (crates/storage/schema/baseline/06_projections.sql), so every row at one depth is the
 /// same pointer row. It is kept so the walk states the same order as every other family
 /// comparison.
 fn latest_registry_first(alias: &str) -> String {

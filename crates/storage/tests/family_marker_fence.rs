@@ -22,20 +22,20 @@ const HASH_11_ORPHANED: &str = "0x11dead0000000000000000000000000000000000000000
 const SEQUENCE: i64 = 7;
 
 const BASELINE: &[&str] = &[
-    include_str!("../../../schema-v2/baseline/01_chain.sql"),
-    include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-    include_str!("../../../schema-v2/baseline/03_identity.sql"),
-    include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-    include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-    include_str!("../../../schema-v2/baseline/06_projections.sql"),
-    include_str!("../../../schema-v2/baseline/07_labels.sql"),
-    include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-    include_str!("../../../schema-v2/baseline/09_divergence.sql"),
-    include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-    include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-    include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
-    include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
-    include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+    include_str!("../schema/baseline/01_chain.sql"),
+    include_str!("../schema/baseline/02_raw_facts.sql"),
+    include_str!("../schema/baseline/03_identity.sql"),
+    include_str!("../schema/baseline/04_manifests.sql"),
+    include_str!("../schema/baseline/05_normalized_events.sql"),
+    include_str!("../schema/baseline/06_projections.sql"),
+    include_str!("../schema/baseline/07_labels.sql"),
+    include_str!("../schema/baseline/08_heartbeats.sql"),
+    include_str!("../schema/baseline/09_divergence.sql"),
+    include_str!("../schema/baseline/10_phase_state.sql"),
+    include_str!("../schema/baseline/11_manifest_authority_attestations.sql"),
+    include_str!("../schema/baseline/12_project_generation_failures.sql"),
+    include_str!("../schema/baseline/13_interpret_decode_skips.sql"),
+    include_str!("../schema/baseline/14_discovery_watch_admissions.sql"),
 ];
 
 /// A head at block 11 with both publications on it: the Project row (`completed`) and a live

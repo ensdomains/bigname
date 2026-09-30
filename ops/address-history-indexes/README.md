@@ -51,6 +51,6 @@ installs the same definitions on initialized databases and is a no-op before the
 phase schema exists. After a prebuild its `IF NOT EXISTS` adopts the indexes by
 name, and it ends with the same check, so the SQLx run fails rather than
 recording success over an index the read cannot use. The fresh baseline also
-includes all three indexes. `schema-v2/apply-check.sh` proves that the baseline,
+includes all three indexes. `scripts/check-schema` proves that the baseline,
 the schema-migration and this script build the same definitions, and proves each
 refusal.

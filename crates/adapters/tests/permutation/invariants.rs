@@ -85,7 +85,7 @@ impl IdentityReferences {
                 .insert((resource.chain_id.clone(), resource.resource_id));
         }
         // normalized_events carries foreign keys to both name_surfaces and resources
-        // (schema-v2/baseline/05_normalized_events.sql), which is the constraint the production
+        // (crates/storage/schema/baseline/05_normalized_events.sql), which is the constraint the production
         // lease-release crash violated.
         for event in &output.normalized_events {
             if let Some(resource) = event.resource_id

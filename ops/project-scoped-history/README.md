@@ -73,7 +73,7 @@ the script's final check again: the SQLx run fails, without recording that
 version, if `bigname_phase.normalized_events` exists and any of the eight names
 is missing, is not an index on that table, is not valid and ready, or does not
 have the reviewed definition. It changes nothing; recover as described above,
-then run the schema-migrations again. `schema-v2/apply-check.sh` proves each
+then run the schema-migrations again. `scripts/check-schema` proves each
 refusal for the script and for the schema-migration, and that the fresh baseline,
 the schema-migration, and the script build the same definitions.
 

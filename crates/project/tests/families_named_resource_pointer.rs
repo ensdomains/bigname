@@ -131,7 +131,7 @@ async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -
         .execute(&fixture.pool)
         .await?;
     raw_sql(include_str!(
-        "../../../schema-v2/fixtures/pre-7c/06_projections.sql"
+        "../../storage/schema/fixtures/pre-7c/06_projections.sql"
     ))
     .execute(&fixture.pool)
     .await?;

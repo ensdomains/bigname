@@ -83,55 +83,57 @@ const EXPECTED_TABLES: &[&str] = &[
 const BASELINE: &[(&str, &str)] = &[
     (
         "chain",
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
+        include_str!("../../../crates/storage/schema/baseline/01_chain.sql"),
     ),
     (
         "raw facts",
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+        include_str!("../../../crates/storage/schema/baseline/02_raw_facts.sql"),
     ),
     (
         "identity",
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
+        include_str!("../../../crates/storage/schema/baseline/03_identity.sql"),
     ),
     (
         "manifests",
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+        include_str!("../../../crates/storage/schema/baseline/04_manifests.sql"),
     ),
     (
         "normalized events",
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../crates/storage/schema/baseline/05_normalized_events.sql"),
     ),
     (
         "projections",
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
+        include_str!("../../../crates/storage/schema/baseline/06_projections.sql"),
     ),
     (
         "labels",
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
+        include_str!("../../../crates/storage/schema/baseline/07_labels.sql"),
     ),
     (
         "heartbeats",
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+        include_str!("../../../crates/storage/schema/baseline/08_heartbeats.sql"),
     ),
     (
         "resolution differences",
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+        include_str!("../../../crates/storage/schema/baseline/09_divergence.sql"),
     ),
     (
         "phase state",
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+        include_str!("../../../crates/storage/schema/baseline/10_phase_state.sql"),
     ),
     (
         "manifest authority attestations",
-        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+        include_str!(
+            "../../../crates/storage/schema/baseline/11_manifest_authority_attestations.sql"
+        ),
     ),
     (
         "interpret decode skips",
-        include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../crates/storage/schema/baseline/13_interpret_decode_skips.sql"),
     ),
     (
         "discovery watch admissions",
-        include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+        include_str!("../../../crates/storage/schema/baseline/14_discovery_watch_admissions.sql"),
     ),
 ];
 

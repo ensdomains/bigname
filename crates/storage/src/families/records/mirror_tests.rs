@@ -2,7 +2,7 @@
 //! positions. This proves the generated `ORDER BY` clause, not the walk's join over
 //! `name_surfaces` and `project_registry_pointer`. In the walk the emission ordinal
 //! (docs/glossary.md#emission-ordinal) term is inert: `project_registry_pointer` is keyed by
-//! (chain_id, namespace, node), its primary key in schema-v2/baseline/06_projections.sql, so
+//! (chain_id, namespace, node), its primary key in crates/storage/schema/baseline/06_projections.sql, so
 //! every row at one depth is the same pointer row.
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};

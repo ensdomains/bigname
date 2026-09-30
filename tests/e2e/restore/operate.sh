@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 base=045739d08ad4c27211f09f0141375e987df84ae8
 image=sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$root"
 : "${BIGNAME_RESTORE_RESERVATION:?Explicit serial reservation required}"
 : "${BIGNAME_RESTORE_EVIDENCE_DIR:?Absolute isolated evidence directory required}"
@@ -27,7 +27,7 @@ mkdir -m 700 "$BIGNAME_RESTORE_EVIDENCE_DIR"
 evidence=$BIGNAME_RESTORE_EVIDENCE_DIR
 private="$evidence/private"
 mkdir -m 700 "$private"
-paths=(tests/e2e/src/bin/same_release_restore.rs work/640-same-release-restore/operate.sh work/640-same-release-restore/checkpoint.sql work/640-same-release-restore/roles.sql work/640-same-release-restore/evidence-contract.md tests/e2e/src/harness/pipeline.rs)
+paths=(tests/e2e/src/bin/same_release_restore.rs tests/e2e/restore/operate.sh tests/e2e/restore/checkpoint.sql tests/e2e/restore/roles.sql tests/e2e/restore/evidence-contract.md tests/e2e/src/harness/pipeline.rs)
 caps=(1150 230 650 80 110 10)
 allowed() { local entry; for entry in "${paths[@]}"; do [[ $1 == "$entry" ]] && return 0; done; return 1; }
 while IFS= read -r changed; do
@@ -35,7 +35,7 @@ while IFS= read -r changed; do
 done < <(git diff --name-only "$base"; git ls-files --others --exclude-standard)
 while IFS= read -r authored; do
   allowed "$authored" || { echo "Undeclared ignored helper: $authored" >&2; exit 1; }
-done < <(find work/640-same-release-restore -type f | LC_ALL=C sort)
+done < <(find tests/e2e/restore -type f | LC_ALL=C sort)
 total=0
 for index in "${!paths[@]}"; do
   path=${paths[$index]}

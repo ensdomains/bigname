@@ -336,20 +336,20 @@ async fn cold_restore_retains_zero_clear_beside_later_state_tail() -> TestResult
 async fn database(prefix: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
     for statement in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../../schema-v2/baseline/06_projections.sql"),
-        include_str!("../../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
-        include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
-        include_str!("../../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-        include_str!("../../../../schema-v2/baseline/12_project_generation_failures.sql"),
-        include_str!("../../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
-        include_str!("../../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+        include_str!("../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
+        include_str!("../../../storage/schema/baseline/06_projections.sql"),
+        include_str!("../../../storage/schema/baseline/07_labels.sql"),
+        include_str!("../../../storage/schema/baseline/08_heartbeats.sql"),
+        include_str!("../../../storage/schema/baseline/09_divergence.sql"),
+        include_str!("../../../storage/schema/baseline/10_phase_state.sql"),
+        include_str!("../../../storage/schema/baseline/11_manifest_authority_attestations.sql"),
+        include_str!("../../../storage/schema/baseline/12_project_generation_failures.sql"),
+        include_str!("../../../storage/schema/baseline/13_interpret_decode_skips.sql"),
+        include_str!("../../../storage/schema/baseline/14_discovery_watch_admissions.sql"),
     ] {
         sqlx::raw_sql(statement).execute(database.pool()).await?;
     }

@@ -6,3 +6,6 @@
 /.refs/*/
 /.refs/*.zip
 *.pdf
+
+# Local scratch work belongs outside the tracked product tree.
+/work/

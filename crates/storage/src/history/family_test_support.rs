@@ -8,10 +8,10 @@ use sqlx::PgPool;
 
 pub(super) async fn publish(pool: &PgPool, chain: &str, head: i64) -> Result<()> {
     for baseline in [
-        include_str!("../../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
-        include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
+        include_str!("../../schema/baseline/07_labels.sql"),
+        include_str!("../../schema/baseline/08_heartbeats.sql"),
+        include_str!("../../schema/baseline/09_divergence.sql"),
+        include_str!("../../schema/baseline/10_phase_state.sql"),
     ] {
         sqlx::raw_sql(baseline).execute(pool).await?;
     }

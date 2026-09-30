@@ -71,10 +71,10 @@ fn reference_statement() -> String {
 async fn database() -> Result<TestDatabase> {
     let db = TestDatabase::create(TestDatabaseConfig::new("restore_narrow_winners")).await?;
     for sql in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
     ] {
         sqlx::raw_sql(sql).execute(db.pool()).await?;
     }

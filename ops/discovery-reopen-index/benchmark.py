@@ -62,8 +62,8 @@ for label, (block, manifest, successor, preserve, expected_end) in cases.items()
 run('CREATE DATABASE ' + name, database='bigname')
 try:
     run('CREATE SCHEMA bigname_phase; SET search_path=bigname_phase,public;' +
-        (root / 'schema-v2/baseline/01_chain.sql').read_text() +
-        (root / 'schema-v2/baseline/03_identity.sql').read_text())
+        (root / 'crates/storage/schema/baseline/01_chain.sql').read_text() +
+        (root / 'crates/storage/schema/baseline/03_identity.sql').read_text())
     run(f"""SET search_path=bigname_phase,public;
     INSERT INTO contract_instances(contract_instance_id,chain_id,contract_kind) VALUES
       ('{from_id}','fixture','root'),('{target_id}','fixture','contract'),('{other_id}','fixture','contract');
@@ -139,7 +139,7 @@ try:
     definition = run(definition_sql)
     run('DROP INDEX bigname_phase.discovery_edges_reopen_idx;' + (root / 'migrations/20260917130000_discovery_edges_reopen_idx.sql').read_text())
     assert run(definition_sql) == definition
-    run('DROP INDEX bigname_phase.discovery_edges_reopen_idx;SET search_path=bigname_phase,public;' + (root / 'schema-v2/baseline/03_identity.sql').read_text())
+    run('DROP INDEX bigname_phase.discovery_edges_reopen_idx;SET search_path=bigname_phase,public;' + (root / 'crates/storage/schema/baseline/03_identity.sql').read_text())
     assert run(definition_sql) == definition
     report['baseline_migration_online_identical'] = True
     report['index_definition'] = definition

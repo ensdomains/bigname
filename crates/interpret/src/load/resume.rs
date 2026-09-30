@@ -210,9 +210,11 @@ mod tests {
 
     async fn database(prefix: &str) -> TestResult<TestDatabase> {
         let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
-        sqlx::raw_sql(include_str!("../../../../schema-v2/baseline/01_chain.sql"))
-            .execute(database.pool())
-            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../storage/schema/baseline/01_chain.sql"
+        ))
+        .execute(database.pool())
+        .await?;
         sqlx::raw_sql(
             "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES
              ('resume-seed', 'block-0', 0, to_timestamp(0), 'finalized'),

@@ -1,7 +1,10 @@
 # Storage
 
 PostgreSQL is the durable indexing and serving store. Current runtime objects
-live in `bigname_phase`; the append-only SQLx history in `migrations/` records
+live in `bigname_phase`. The fresh baseline and schema fixtures live in
+[`crates/storage/schema/`](../crates/storage/schema/README.md), with the
+combined regression check at `scripts/check-schema`. The append-only SQLx
+history in `migrations/` records
 the retired `public` schema, its schema-qualified deletion, and reviewed
 in-place schema-migrations for initialized `bigname_phase` databases.
 Deployments do not require the database itself to use C collation, but the
@@ -773,7 +776,7 @@ derived the row, and the route contract in `api-v1-routes.md` says so. The route
 in `apps/api/src/tests/v2_history.rs`.
 The position indexes on these
 tables (`migration_event_associations_position_idx` and the two
-`*_candidate_*_effects_position_idx` in `schema-v2/baseline/05_normalized_events.sql`)
+`*_candidate_*_effects_position_idx` in `crates/storage/schema/baseline/05_normalized_events.sql`)
 exist for `clear_redo_range` and range-scoped selection, both of which resolve
 readability through `chain_lineage`; they are not an alternative to that anchor.
 
@@ -1043,7 +1046,7 @@ emits SQL that clears `search_path` and then creates and fills
 (upstream: .refs/ens_rainbow/src/main.rs:L36 @ ens_rainbow@bc44492)
 (upstream: .refs/ens_rainbow/src/main.rs:L46 @ ens_rainbow@bc44492).
 bigname declares its own `ens_names` inside the phase schema
-(`schema-v2/baseline/07_labels.sql`), and the runner connects with
+(`crates/storage/schema/baseline/07_labels.sql`), and the runner connects with
 `search_path = bigname_phase` and no `public` fallback, so the import reads
 `bigname_phase.ens_names` only. Applying the upstream dump unmodified therefore
 fills a table the importer never reads, and the run reports zero scanned rows

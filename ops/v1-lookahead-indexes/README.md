@@ -93,7 +93,7 @@ under the same settings and put back before the block returns, so the SQLx run
 fails rather than recording success if either name is not an index on
 `bigname_phase.normalized_events`, is not valid and ready, or does not have the
 reviewed definition; recover as described above, then run the schema-migrations
-again. `schema-v2/apply-check.sh` proves each refusal for the script and for
+again. `scripts/check-schema` proves each refusal for the script and for
 the schema-migration, and that the fresh baseline, the schema-migration, and
 the script build the same definitions. Apply that schema-migration through the
 usual SQLx release process when adopting this source revision. The fresh

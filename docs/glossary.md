@@ -2341,7 +2341,7 @@ an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
 currently backs it. Raw labels and their normalization flags are observations,
 not identity; display names are derived when read, following the audit's
-[normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
+[normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
 

@@ -88,7 +88,7 @@ selector restrictions lift when that storage contract exists.
 
 A holistic review of the `v1` API (2026-06-10) confirmed the fragmentation that
 ADR 0003 diagnosed but never resolved: the scope worksheet behind it
-(`docs/internal/api-surface-flattening-scope-decisions.md`) still has an empty
+(`docs/internal/archive/api-surface-flattening-scope-decisions.md`) still has an empty
 "Final Direction" section, and the vocabulary/envelope decisions it deferred were
 never made. Measured against the implementation, the `v1` contract today has:
 
@@ -581,7 +581,7 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
   now uniform instead of route-exceptional.
 
 This answers the open items in
-`docs/internal/api-surface-flattening-scope-decisions.md`: provenance public —
+`docs/internal/archive/api-surface-flattening-scope-decisions.md`: provenance public —
 no, diagnostics-only (Q3); coverage public — simplified on product routes, full
 taxonomy on diagnostics (Q4); one envelope — yes (Q5); record inventory metadata —
 diagnostics-only (Q8); selector-state distinctions — kept, via the unified
@@ -694,7 +694,7 @@ diagnostics execution surfaces; Conformance and Fixtures own capability-mapping
 tests.
 
 1. Accept or revise this ADR; record the outcome as the Final Direction in
-   `docs/internal/api-surface-flattening-scope-decisions.md`.
+   `docs/internal/archive/api-surface-flattening-scope-decisions.md`.
 2. Write the new contract docs from the dictionary and route catalog above —
    maintained as `docs/api-v2.md` / `docs/api-v2-routes.md` during development
    and renamed to the `api-v1` names at the switch; generate the OpenAPI from
@@ -729,7 +729,7 @@ tests.
    `v1`.
 
 Sequencing with the 2026-06 remediation
-(`docs/internal/remediation-2026-06-postmortem.md`, the closed-out record):
+(`docs/internal/archive/remediation-2026-06-postmortem.md`, the closed-out record):
 the remediation completes before `v2` implementation begins (planning decision,
 2026-06-10). Steps 1–2 (docs only) conflict with nothing and may proceed
 during the remediation; step 3 starts after the remediation closes out, so
@@ -804,7 +804,7 @@ auditability. Rejected in favor of confining, not deleting.
   replacement model here, while its implementation slices 3–6 remain valid
   enablers)
 - `docs/adrs/0004-conceptual-deduplication-gate.md`
-- `docs/internal/api-surface-flattening-scope-decisions.md`
+- `docs/internal/archive/api-surface-flattening-scope-decisions.md`
 - `docs/partners/partner-1-indexing-requirements.md`
 - `docs/partners/partner-1-identity-facade-benchmarks.md`
 - `docs/api-v1.md`, `docs/api-v1-routes.md`, `docs/consumer-capabilities.md`

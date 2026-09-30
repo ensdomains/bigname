@@ -21,9 +21,13 @@ outcomes or durable [execution traces](docs/glossary.md).
 - `crates/` — domain types, storage, manifests, schema-v2 adapters, ingest,
   interpret, lookup, and projection behavior
 - `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
-- `migrations/` — Postgres schema
-- `schema-v2/` — the fresh phase-runner schema baseline
-- `docs/` — how it works
+- `crates/storage/schema/` — the fresh database baseline and schema regression fixtures
+- `migrations/` — append-only SQLx history and upgrades for existing databases
+- `scripts/` — development and CI checks, including `scripts/check-schema`
+- `tests/e2e/` — contract-backed scenarios and the retained restore exercise
+- `ops/` — operational SQL and monitoring configuration
+- `docs/` — current contracts and runbooks; historical plans live in
+  [`docs/internal/archive/`](docs/internal/archive/README.md)
 - `site/` — the landing page and API reference, a static site hosted apart
   from the API, with a mainnet/Sepolia network switcher
 

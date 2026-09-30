@@ -47,7 +47,7 @@ Four identity layers, each with its own continuity rules:
 
 ### `logical_name_id`
 
-Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](../simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
+Stable identity for an on-chain name within a namespace, written as `<namespace>:<namehash>` where `namehash` is the lowercase `0x`-prefixed 32-byte node. It survives backing-resource rotation, token regeneration, lapses, re-registrations, and normalizer-version changes. Raw label text and normalization results are attributes, never identity inputs, under the audit's [normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 
 ### `resource_id`
 
@@ -861,7 +861,7 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 ## Normalized event taxonomy
 
 The authority for what may be written is the closed `event_kind` vocabulary in
-`schema-v2/baseline/05_normalized_events.sql`; a value absent from that `CHECK`
+`crates/storage/schema/baseline/05_normalized_events.sql`; a value absent from that `CHECK`
 cannot be stored. The groupings below name the shape of the model, not the
 constraint.
 
@@ -1582,7 +1582,7 @@ separately in `support_status` / `unsupported_reason`.
 Account-level approvals (composed from `project_account_approval`) are the
 exception: they carry no coverage object at all, so they emit neither value
 and a consumer must not probe them for one. That is a deliberate decision recorded
-in [`schema-v2/README.md`](../schema-v2/README.md) § Current projections, not a
+in [`crates/storage/schema/README.md`](../crates/storage/schema/README.md) § Current projections, not a
 gap. Two read paths still report a richer value, and both derive it at read
 time rather than reading it from a projection. The permissions resource-summary
 read derives `authoritative`, `best_effort`, or `not_applicable` from

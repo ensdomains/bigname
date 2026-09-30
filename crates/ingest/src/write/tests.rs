@@ -169,11 +169,13 @@ async fn raw_fact_write_rejects_mixed_case_emitter_addresses() -> Result<()> {
 
 async fn database(name: &str) -> Result<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
-    sqlx::raw_sql(include_str!("../../../../schema-v2/baseline/01_chain.sql"))
-        .execute(database.pool())
-        .await?;
     sqlx::raw_sql(include_str!(
-        "../../../../schema-v2/baseline/02_raw_facts.sql"
+        "../../../storage/schema/baseline/01_chain.sql"
+    ))
+    .execute(database.pool())
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../storage/schema/baseline/02_raw_facts.sql"
     ))
     .execute(database.pool())
     .await?;

@@ -115,11 +115,11 @@ async fn same_block_restore_replays_normalized_emission_order() -> TestResult {
 async fn database() -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new("interpret_restore_order")).await?;
     for statement in [
-        include_str!("../../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+        include_str!("../../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../../storage/schema/baseline/02_raw_facts.sql"),
+        include_str!("../../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
     ] {
         sqlx::raw_sql(statement).execute(database.pool()).await?;
     }

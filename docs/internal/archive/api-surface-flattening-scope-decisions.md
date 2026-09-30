@@ -586,7 +586,7 @@ Notes:
 
 ## Final Direction
 
-Accepted in [ADR 0006](../adrs/0006-api-v2-product-surface.md) as written on
+Accepted in [ADR 0006](../../adrs/0006-api-v2-product-surface.md) as written on
 2026-06-12, after the 2026-06 remediation closed out first per the ADR's
 sequencing.
 
