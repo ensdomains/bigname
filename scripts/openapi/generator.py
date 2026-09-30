@@ -14,6 +14,7 @@ DOCS_BASE = "https://github.com/ensdomains/bigname/blob/main/docs/"
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCALARS = {"string", "integer", "boolean"}
 BOUNDED_INTEGER = r"integer \[(-?(?:0|[1-9][0-9]*)), (-?(?:0|[1-9][0-9]*))\]"
+ARRAY = r"array(?: \[((?:0|[1-9][0-9]*)), ((?:0|[1-9][0-9]*))\])? of (.+)"
 
 
 class Generator:
@@ -60,8 +61,14 @@ class Generator:
             minimum, maximum = map(int, match.groups())
             require(minimum <= maximum, f"integer minimum exceeds maximum: {expr}")
             return {"type": "integer", "minimum": minimum, "maximum": maximum}
-        if expr.startswith("array of "):
-            return {"type": "array", "items": self.type_schema(expr[9:])}
+        match = re.fullmatch(ARRAY, expr)
+        if match:
+            schema = {"type": "array", "items": self.type_schema(match[3])}
+            if match[1] is not None:
+                minimum, maximum = int(match[1]), int(match[2])
+                require(minimum <= maximum, f"array minimum exceeds maximum: {expr}")
+                schema.update(minItems=minimum, maxItems=maximum)
+            return schema
         if expr.startswith("map of string to "):
             return {"type": "object", "additionalProperties": self.type_schema(expr[17:])}
         match = re.fullmatch(rf"(object|enum) ({NAME})", expr)
@@ -174,8 +181,9 @@ class Generator:
             self.headers[name] = {"schema": self.type_schema(row["Type"]), "description": self.prose(row["Description"], True)}
 
     def is_parameter_type(self, expr):
-        if expr.startswith("array of "):
-            expr = expr[9:]
+        match = re.fullmatch(ARRAY, expr)
+        if match:
+            expr = match[3]
         return expr in SCALARS or expr.startswith("enum ") or bool(re.fullmatch(BOUNDED_INTEGER, expr))
 
     def parse_default(self, raw, schema):
@@ -221,7 +229,7 @@ class Generator:
                 self.validate(value, schema, f"default of {name}")
                 schema["default"] = value
             parameter = {"name": name, "in": location, "required": required, "description": note, "schema": schema}
-            if expr.startswith("array of "):
+            if schema.get("type") == "array":
                 parameter.update(style="form" if location == "query" else "simple", explode=False)
             result.append(parameter)
         segments = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", path)
@@ -319,6 +327,10 @@ class Generator:
             if "maximum" in schema:
                 require(value <= schema["maximum"], f"{context}: above maximum {schema['maximum']}")
         if actual == "array":
+            if "minItems" in schema:
+                require(len(value) >= schema["minItems"], f"{context}: below minItems {schema['minItems']}")
+            if "maxItems" in schema:
+                require(len(value) <= schema["maxItems"], f"{context}: above maxItems {schema['maxItems']}")
             for index, item in enumerate(value):
                 self.validate(item, schema["items"], f"{context}[{index}]")
         if actual == "object":

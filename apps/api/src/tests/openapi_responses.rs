@@ -85,6 +85,51 @@ fn openapi_nonempty_fixture_inventory_covers_every_operation() {
 }
 
 #[tokio::test]
+async fn openapi_record_keys_boundaries_match_real_requests() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    for count in [0, 1, 200, 201] {
+        let keys = (0..count)
+            .map(|i| format!("text:key{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/names/alice.eth/records?keys={keys}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        let status = response.status();
+        let body: Value = read_json(response).await?;
+        if count <= 200 {
+            assert_eq!(status, StatusCode::OK, "keys count={count}: {body}");
+            let records = body["data"]["records"].as_object().unwrap();
+            if count == 0 {
+                assert!(
+                    !records.is_empty(),
+                    "blank keys must retain inventory defaults"
+                );
+            } else {
+                assert_eq!(
+                    records.len(),
+                    count,
+                    "the explicit key set must not truncate"
+                );
+            }
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+            assert_eq!(
+                body["error"]["message"],
+                "keys must contain at most 200 record keys"
+            );
+        }
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn openapi_additional_operations_have_nonempty_response_captures() -> Result<()> {
     let mut captured = Vec::new();
     let database = TestDatabase::new_migrated().await?;

@@ -1980,7 +1980,7 @@ types; every enum value is a string.
 type        = "nullable " value-type | value-type
 value-type  = "string" | "integer" | "integer [" bound ", " bound "]"
             | "boolean" | "json"
-            | "array of " type
+            | "array of " type | "array [" size ", " size "] of " type
             | "map of string to " type
             | "object " Name
             | "enum " Name
@@ -1989,6 +1989,7 @@ value-type  = "string" | "integer" | "integer [" bound ", " bound "]"
 alternative = "string" | "integer" | "boolean" | "object " Name
 literal     = "`" wire-text "`"
 bound       = decimal integer, optionally negative, without leading zeros
+size        = nonnegative decimal integer without leading zeros
 ```
 
 An inline enum and a one of consume the rest of the cell, so either may appear
@@ -1997,6 +1998,10 @@ any value type once; `nullable nullable` does not parse. Integer bounds must
 be ordered from minimum to maximum. They constrain defaults and executable
 examples as well as the generated schema. Use them for explicit contract
 limits, rather than inferring limits from a wire field’s implementation type.
+Array size bounds use the same inclusive minimum/maximum ordering and emit
+`minItems`/`maxItems`. A deployment-configurable limit, such as the lookup
+batch limit, stays in the description because the checked artifact must also
+cover deployments configured above or below that default.
 
 | Production | Example | Meaning | Generated schema |
 | --- | --- | --- | --- |
@@ -2007,6 +2012,7 @@ limits, rather than inferring limits from a wire field’s implementation type.
 | boolean | `boolean` | `true` or `false`. | `{"type": "boolean"}` |
 | nullable | `nullable string` | The value may be JSON `null`. This is about the value, not about whether the key is present. | `{"type": ["string", "null"]}`; for an object, enum or one of, `anyOf` of that schema and `{"type": "null"}` |
 | array of | `array of string` | A JSON array whose items all have the inner type. | `{"type": "array", "items": {"type": "string"}}` |
+| bounded array | `array [0, 200] of string` | An array containing zero through 200 items of the inner type. | `{"type": "array", "minItems": 0, "maxItems": 200, "items": {"type": "string"}}` |
 | map of string to | `map of string to object AsOf` | A JSON object used as a dictionary: any key, each value of the inner type. The description says what the keys are. | `{"type": "object", "additionalProperties": {"$ref": "#/components/schemas/AsOf"}}` |
 | object | `object ContractRef` | A named object from Objects. | `{"$ref": "#/components/schemas/ContractRef"}` |
 | named enum | `enum Status` | A named enum from an enum table. | `{"$ref": "#/components/schemas/Status"}` |
@@ -2079,7 +2085,8 @@ with `400 invalid_input`, as [Parameters](#parameters) states.
 | `Default` | The value the server applies when the parameter is omitted, as a backticked literal, or `none`. A default that depends on other input, such as a namespace inferred from the name, is `none`, and the description says how it is chosen. |
 | `Description` | What the parameter does, including values the type does not rule out but the route rejects. |
 
-A query parameter of type `array of X` is one comma-separated value, such as
+A query parameter of type `array of X` or `array [min, max] of X` is one
+comma-separated value, such as
 `include=counts,role_summary`; the generator emits `style: form` and
 `explode: false`. Sending the key twice is not part of the contract. Every
 `{segment}` in the path has one `path` row with the same name, and every

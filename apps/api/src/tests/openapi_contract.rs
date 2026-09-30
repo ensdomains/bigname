@@ -247,6 +247,36 @@ fn openapi_request_page_sizes_enforce_the_documented_inclusive_bounds() {
 }
 
 #[test]
+fn openapi_record_keys_enforce_the_fixed_array_limit() {
+    let parameters = document()["paths"]["/v1/names/{name}/records"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    let keys = parameters.iter().find(|p| p["name"] == "keys").unwrap();
+    assert_eq!(keys["style"], "form");
+    assert_eq!(keys["explode"], false);
+    assert_eq!(keys["required"], false);
+    assert_eq!(keys["schema"]["minItems"], 0);
+    assert_eq!(keys["schema"]["maxItems"], 200);
+    let validator = validator(&keys["schema"]).unwrap();
+    for (count, valid) in [(0, true), (1, true), (200, true), (201, false)] {
+        let values = (0..count)
+            .map(|i| format!("text:key{i}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            validator.is_valid(&json!(values)),
+            valid,
+            "GET /v1/names/{{name}}/records keys count={count}"
+        );
+    }
+    // This limit is deployment-configurable, so its default is not a universal bound.
+    assert!(
+        document()["components"]["schemas"]["LookupRequest"]["properties"]["inputs"]
+            .get("maxItems")
+            .is_none()
+    );
+}
+
+#[test]
 fn openapi_error_responses_constrain_codes_for_the_operation_and_status() {
     for (method, path, status, allowed) in [
         ("post", "/v1/lookup", "400", &["invalid_input"][..]),
