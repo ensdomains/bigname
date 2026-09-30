@@ -207,6 +207,46 @@ fn openapi_lookup_request_closes_both_input_alternatives() {
 }
 
 #[test]
+fn openapi_request_page_sizes_enforce_the_documented_inclusive_bounds() {
+    let mut query_parameters = 0;
+    for (path, methods) in document()["paths"].as_object().unwrap() {
+        for (method, operation) in methods.as_object().unwrap() {
+            for parameter in operation["parameters"].as_array().unwrap() {
+                if parameter["name"] != "page_size" {
+                    continue;
+                }
+                query_parameters += 1;
+                let schema = &parameter["schema"];
+                assert_eq!(schema["minimum"], 1, "{method} {path} page_size");
+                assert_eq!(schema["maximum"], 200, "{method} {path} page_size");
+                assert_eq!(schema["default"], 50, "{method} {path} page_size");
+                let validator = validator(schema).unwrap();
+                for (value, valid) in [(0, false), (1, true), (200, true), (201, false)] {
+                    assert_eq!(
+                        validator.is_valid(&json!(value)),
+                        valid,
+                        "{method} {path} page_size={value}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(query_parameters, 14);
+
+    let schema = &document()["paths"]["/v1/lookup"]["post"]["requestBody"]["content"]["application/json"]
+        ["schema"];
+    let validator = validator(schema).unwrap();
+    for (value, valid) in [(0, false), (1, true), (200, true), (201, false)] {
+        let body = json!({"inputs":[{"address":"0x0000000000000000000000000000000000000abc","relation":"owner","page_size":value}]});
+        assert_eq!(
+            validator.is_valid(&body),
+            valid,
+            "POST /v1/lookup inputs[0].page_size={value}"
+        );
+    }
+}
+
+#[test]
 fn openapi_error_responses_constrain_codes_for_the_operation_and_status() {
     for (method, path, status, allowed) in [
         ("post", "/v1/lookup", "400", &["invalid_input"][..]),

@@ -606,7 +606,7 @@ collection route carry neither header.
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/names -->
 | Status | Body | Code | Headers | When |
@@ -1605,7 +1605,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/names/{name}/subnames -->
 | Status | Body | Code | Headers | When |
@@ -2218,7 +2218,7 @@ the controller a name's `manager` or `role_holder`.
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
 | `include` | query | array of enum `data`, `raw`, `total_count`, `child_registrations` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/names/{name}/history -->
 | Status | Body | Code | Headers | When |
@@ -2506,7 +2506,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/permissions -->
 | Status | Body | Code | Headers | When |
@@ -2860,7 +2860,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/addresses/{address}/names -->
 | Status | Body | Code | Headers | When |
@@ -3499,7 +3499,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
 | `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/addresses/{address}/history -->
 | Status | Body | Code | Headers | When |
@@ -3590,7 +3590,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/search -->
 | Status | Body | Code | Headers | When |
@@ -3703,7 +3703,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
 | `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/events -->
 | Status | Body | Code | Headers | When |
@@ -3860,7 +3860,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 | `If-None-Match` | header | string | no | none | ETag validator from an earlier response, a comma-separated validator list, or *; evaluated only for a cacheable indexed read. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address} -->
@@ -3979,7 +3979,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/roles -->
 | Status | Body | Code | Headers | When |
@@ -4001,7 +4001,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/links -->
 | Status | Body | Code | Headers | When |
@@ -4023,7 +4023,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/aliases -->
 | Status | Body | Code | Headers | When |
@@ -4152,7 +4152,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/registries/{chain_id}/{address} -->
 | Status | Body | Code | Headers | When |
@@ -4256,7 +4256,7 @@ For a registrar lease first identified by a later readable observation, registra
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer | no | `50` | Maximum rows per page: 1 through 200. |
+| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
 <!-- openapi:responses GET /v1/registries/{chain_id}/{address}/labels -->
 | Status | Body | Code | Headers | When |

@@ -110,8 +110,8 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_relation() -> Result<
 async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
-        "ALTER FUNCTION bigname_phase.revalidate_resolution_lookup_state( \
-             text, bigint, text, jsonb, jsonb, uuid, text, text, boolean \
+        "ALTER FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only( \
+             text, bigint, text, jsonb, jsonb, uuid, text, text \
          ) RENAME TO revalidate_resolution_lookup_state_preflight_missing",
     )
     .execute(&database.lookup_pool)
@@ -125,7 +125,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_guard_function() -> R
     assert_eq!(
         format!("{error:#}"),
         "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
-         function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)"
+         function: bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)"
     );
     database.cleanup().await
 }
@@ -160,7 +160,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         .map(|object| format!("{}: {}", object.kind.as_str(), object.identity))
         .collect::<BTreeSet<_>>();
     let expected = BTreeSet::from([
-        "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)",
+        "function: bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
@@ -268,7 +268,7 @@ async fn api_preflight_reports_unreadable_account_approvals() -> Result<()> {
     assert!(!missing.iter().any(|object| object.identity
         == "bigname_phase.resolution_divergences"));
     assert!(missing.iter().any(|object| object.identity
-        == "bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text,boolean)"));
+        == "bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)"));
     sqlx::query(&format!("REVOKE USAGE ON SCHEMA bigname_phase FROM {role}"))
         .execute(&database.lookup_pool).await?;
     let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;

@@ -127,6 +127,33 @@ class GenerationTests(unittest.TestCase):
         doc = Generator(API, ROUTES, "https://docs.example.test/reference/").generate()
         self.assertIn("https://docs.example.test/reference/api-v1.md#objects", doc["components"]["schemas"]["Envelope"]["description"])
 
+    def test_bounded_integers_validate_parameters_and_defaults(self):
+        routes = ROUTES.replace("| integer | no | `100`", "| integer [1, 200] | no | `100`")
+        generator = Generator(API, routes)
+        params = generator.generate()["paths"]["/v1/names/{name}"]["get"]["parameters"]
+        schema = next(p["schema"] for p in params if p["name"] == "page_size")
+        self.assertEqual(schema, {"type": "integer", "minimum": 1, "maximum": 200, "default": 100})
+        for value in (1, 200):
+            generator.validate(value, schema, "page_size")
+            self.generate(routes=routes.replace("`100`", f"`{value}`"))
+        for value in (0, 201):
+            with self.assertRaisesRegex(ContractError, "page_size.*(minimum|maximum)"):
+                generator.validate(value, schema, "page_size")
+            self.reject(routes=routes.replace("`100`", f"`{value}`"), match="default of page_size.*(minimum|maximum)")
+        for expr in ("integer [200, 1]", "integer [1.5, 200]", "integer [01, 200]", "integer [1,]", "string [1, 200]"):
+            self.reject(routes=routes.replace("integer [1, 200]", expr))
+
+    def test_bounded_integer_object_examples_and_nullable_values(self):
+        api = API.replace("| `name` | string", "| `name` | nullable integer [-2, 2]")
+        for value in (None, -2, 2):
+            example = {"name": value, "status": "ok"}
+            doc = self.generate(api=api + "\n```json openapi-example Record\n" + json.dumps(example) + "\n```\n")
+            schema = doc["components"]["schemas"]["Record"]["properties"]["name"]
+            self.assertEqual((schema["type"], schema["minimum"], schema["maximum"]), (["integer", "null"], -2, 2))
+        for value in (-3, 3):
+            example = {"name": value, "status": "ok"}
+            self.reject(api=api + "\n```json openapi-example Record\n" + json.dumps(example) + "\n```\n", match="(minimum|maximum)")
+
     def test_error_responses_restrict_codes_and_keep_the_envelope_closed(self):
         generator = Generator(API, ROUTES)
         responses = generator.generate()["paths"]["/v1/names/{name}"]["get"]["responses"]

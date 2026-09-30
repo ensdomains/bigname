@@ -11,6 +11,55 @@ const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/resolvers/{chain_id}/{address}/roles",
 ];
 
+#[tokio::test]
+async fn openapi_page_size_boundaries_match_real_query_and_lookup_requests() -> Result<()> {
+    let names_database = TestDatabase::new_migrated().await?;
+    seed_v2_names_fixture(&names_database).await?;
+    let lookup_database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&lookup_database, address).await?;
+    for (page_size, status) in [
+        (0, StatusCode::BAD_REQUEST),
+        (1, StatusCode::OK),
+        (200, StatusCode::OK),
+        (201, StatusCode::BAD_REQUEST),
+    ] {
+        let names = v2_names_response(
+            &names_database,
+            &format!(
+                "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&page_size={page_size}"
+            ),
+        )
+        .await?;
+        let lookup = v2_lookup_response_for_database(
+            &lookup_database,
+            "/v1/lookup",
+            json!({"inputs":[{"address":address,"relation":"owner","page_size":page_size}]}),
+        )
+        .await?;
+        for (route, response, page_path) in [
+            ("GET /v1/names", names, "/page/page_size"),
+            ("POST /v1/lookup", lookup, "/data/0/page/page_size"),
+        ] {
+            assert_eq!(response.status(), status, "{route} page_size={page_size}");
+            let body: Value = read_json(response).await?;
+            if status == StatusCode::OK {
+                assert_eq!(body.pointer(page_path), Some(&json!(page_size)), "{route}");
+            } else {
+                assert_eq!(body["error"]["code"], "invalid_input", "{route}");
+                assert!(
+                    body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("page_size")
+                );
+            }
+        }
+    }
+    names_database.cleanup().await?;
+    lookup_database.cleanup().await
+}
+
 #[test]
 fn openapi_nonempty_fixture_inventory_covers_every_operation() {
     let captured = V2_CONFORMANCE_ROUTES
