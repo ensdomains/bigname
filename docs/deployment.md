@@ -1517,3 +1517,21 @@ family run rebuilds the families anyway; the reset adds no second rebuild when
 the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
 redo and Project rebuild discharge this; collection cursors continue as
 described above.
+
+### Resolver set while registering a wrapped name
+
+The build that keeps a registry resolver write that follows `NameWrapped` in a
+wrapped registration transaction on the wrapper resource, instead of moving it
+to the registrar resource the NameWrapper holds
+([projections](projections.md#records-shared-through-resolver-links)), changes
+`crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. An existing deployment finishes the full-history Interpret redo
+and the Project redo it installs before the matching API serves, as for any
+rotation. Only that redo corrects names already registered this way: when the
+Project redo publishes, every wrapped name whose registration transaction set
+a resolver serves that resolver and its records. On Sepolia `taytems.eth`
+(registered at block 4052977) serves resolver
+`0x8fade66b79cc9f707ab26799354482eb93a5b7dd` instead of none; check it, and
+that its records match `source=verified`, before the release is recorded.

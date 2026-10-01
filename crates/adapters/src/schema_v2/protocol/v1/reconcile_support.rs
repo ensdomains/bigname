@@ -256,6 +256,27 @@ fn reconcile_registration(
             .then_some(fields.position?)
         })
         .collect::<BTreeSet<_>>();
+    let wrap_positions = target_candidates
+        .iter()
+        .filter(|index| events.active[**index])
+        .filter(|index| {
+            let event = &output.normalized_events[**index];
+            event.source_family == "ens_v1_wrapper_l1"
+                && event.after_state["source_event"] == "NameWrapped"
+                && event.after_state["authority_kind"] == "wrapper"
+        })
+        .filter_map(|index| events.fields[*index].position)
+        .collect::<BTreeSet<_>>();
+    let setup_positions = pending
+        .iter()
+        .filter(|index| {
+            matches!(
+                events.fields[**index].source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+        })
+        .filter_map(|index| events.fields[*index].position)
+        .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
         // `wrapETH2LD` emits `NameWrapped` before its resolver write; a later controller
@@ -271,6 +292,30 @@ fn reconcile_registration(
             && output.normalized_events[index].after_state["surface_materialization"] == true
             && output.normalized_events[index].after_state["source_event"] == "NameWrapped";
         if preserves_registry_read_pointer {
+            continue;
+        }
+        // `registerAndWrapETH2LD` registers the token to the NameWrapper, which emits
+        // `NameWrapped` and only then sets the registry resolver. A registry write after the wrap,
+        // with no registry ownership setup in between, is already anchored on the wrapper resource
+        // and the registry read resource, as it would be in a later transaction; the registrar
+        // resource the NameWrapper holds stays dormant.
+        // (upstream: .refs/basenames/lib/ens-contracts/contracts/ethregistrar/ETHRegistrarController.sol:L178-L184 @ basenames@1809bbc)
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+        let fields = &events.fields[index];
+        let follows_wrap = fields.family == SourceFamily::Registry
+            && !matches!(
+                fields.source_event,
+                SourceEvent::NewOwner | SourceEvent::Transfer
+            )
+            && fields.position.is_some_and(|position| {
+                let setup = setup_positions.range(..position).next_back();
+                wrap_positions
+                    .range(..position)
+                    .next_back()
+                    .is_some_and(|wrap| setup.is_none_or(|setup| setup < wrap))
+            });
+        if follows_wrap {
             continue;
         }
         if concerns_predecessor_epoch(
