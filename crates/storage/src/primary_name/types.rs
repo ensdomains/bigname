@@ -17,6 +17,11 @@ pub struct PrimaryNameCurrentSnapshot {
     pub row: PrimaryNameCurrentRow,
     pub normalized_claim_name: Option<String>,
     pub claim_name_is_normalized: bool,
+    /// Set when a coin type `60` read serves the `default.reverse` claim although the
+    /// `addr.reverse` node has a nonzero resolver. The projection may not hold that resolver's
+    /// live name (an unadmitted or event-silent resolver), so the served name need not be the
+    /// one the chain answers.
+    pub default_past_resolver: bool,
 }
 
 /// Stable storage representation for projection-owned declared primary-name status.

@@ -3536,7 +3536,11 @@ introduces it rebuilds Project from full history before serving the option; see
   `exact_name_authority_not_verifiable` where it does not. Only an authority
   refusal such as `current_authority_not_projected` makes the name unsupported
   and sends the claim to the first case. None of the
-  three cases dispatches a forward resolver call. A live reverse claim has
+  three cases dispatches a forward resolver call. The projected claim is
+  checked before any provider call, except a `default.reverse` name served
+  past a nonzero `addr.reverse` resolver: the projection may not hold that
+  resolver's name, so the check runs only on the name the live reverse leg
+  returns. A live reverse claim has
   already used its reverse-leg provider calls (two, or three with the
   `default.reverse` read) before the name-level refusal
   is known. A consumer reads `unsupported_reason` to distinguish a projected

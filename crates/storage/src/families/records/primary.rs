@@ -84,9 +84,11 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
         // resolver whose name has any bytes, else the `default.reverse` name. The test is the
         // stored value's length, not its classification: a whitespace name stops the fallback.
         // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
-        let names_addr_reverse = loaded
+        let addr_has_resolver = loaded
             .as_ref()
-            .is_some_and(|(claim, value_empty)| !value_empty && has_resolver(claim));
+            .is_some_and(|(claim, _)| has_resolver(claim));
+        let names_addr_reverse =
+            addr_has_resolver && loaded.as_ref().is_some_and(|(_, value_empty)| !value_empty);
         let mut claim = loaded.map(|(claim, _)| claim);
         if coin_type == "60" && !names_addr_reverse {
             let fallback = load_tuple(
@@ -100,6 +102,7 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
             .await?;
             if let Some((mut fallback, _)) = fallback {
                 fallback.row.coin_type = coin_type.clone();
+                fallback.default_past_resolver = addr_has_resolver;
                 claim = Some(fallback);
             }
         }

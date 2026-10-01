@@ -227,6 +227,7 @@ pub(crate) async fn load_family_reverse_claim_on(
                 claim_provenance: Value::Object(provenance),
             },
             claim_name_is_normalized,
+            default_past_resolver: false,
         },
         node_claim_at_other_resolver,
         claim_value_empty,
