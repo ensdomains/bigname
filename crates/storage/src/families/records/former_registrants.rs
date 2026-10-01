@@ -15,8 +15,8 @@
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
 //!
 //! Rows sort by the served expiry, then namespace, name and namehash; a row without an expiry (an
-//! unregistered ENSv2 name) sorts after every dated row ascending and before them descending,
-//! and an expiry window leaves it out. A page is read in one snapshot.
+//! unregistered ENSv2 name) is the smallest value, before every dated row ascending and after
+//! them descending, and an expiry window leaves it out. A page is read in one snapshot.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -53,9 +53,8 @@ struct Held {
     expiry: Option<UnixSeconds>,
 }
 
-/// The sort key: undated rows after dated ones ascending, then expiry, namespace, name,
-/// namehash.
-// A missing expiry is the smallest value (`None` sorts before `Some`).
+/// The sort key: expiry, then namespace, name, namehash. A missing expiry is the smallest value,
+/// since `None` sorts before `Some`.
 type Key = (Option<UnixSeconds>, String, String, String);
 
 impl Held {
