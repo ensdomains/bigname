@@ -25,6 +25,14 @@ sol! {
 
 /// Both reverse families decode `NameForAddrChanged`; only the `addr.reverse` registrar emits
 /// `ReverseClaimed`.
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L23 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L83 @ ens_v1@91c966f)
+/// The `default.reverse` registrar's setters store the name through the standalone registrar,
+/// which emits `NameForAddrChanged` instead.
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L16-L20 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L26-L57 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L31 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/IStandaloneReverseRegistrar.sol:L10 @ ens_v1@91c966f)
 pub(in crate::schema_v2) fn supports(source_family: &str, signature: &str) -> bool {
     match signature {
         "NameForAddrChanged(address,string)" => true,
