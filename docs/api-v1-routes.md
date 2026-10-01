@@ -4228,7 +4228,10 @@ For a registrar lease first identified by a later readable observation, registra
   `referenced_by` is a nested `{data, page}` collection of every name whose
   current subregistry pointer targets this contract, each `{name,
   display_name, namespace, namehash}`, sorted by display name. It usually
-  holds exactly the served `name`; it is empty when `name` is `null`.
+  holds exactly the served `name`; it is empty when `name` is `null`. With
+  `include=counts`, its `page.total_count` is the exact number of those names
+  at the selected position, counted before the cursor; without it the count
+  is not run and `page.total_count` is `null`.
 - Pagination behavior: standard collection pagination applies to the nested
   `referenced_by.page` object; its cursor binds the chain and registry. The
   top-level response has no `page`. Continuations bind only an explicitly
