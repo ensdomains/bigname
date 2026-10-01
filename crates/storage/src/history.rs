@@ -5,6 +5,9 @@ mod block_window;
 mod child_arm;
 mod child_registrations;
 mod columns;
+mod contract_count;
+#[cfg(test)]
+mod contract_event_count_tests;
 mod decoders;
 mod duplicates;
 mod event_page;
@@ -49,6 +52,7 @@ pub use child_registrations::{
     HistorySubject, NameHistoryPage, NameHistoryRow,
     load_name_history_page_with_child_registrations,
 };
+pub use contract_count::count_contract_events;
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub use options::{

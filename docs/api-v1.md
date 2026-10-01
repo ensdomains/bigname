@@ -972,7 +972,10 @@ Indexed lookup names, record inventories, address-name relations, resolver
 overviews and bound names all use the selected family publication. Composition
 has no historical per-name row to admit below that publication. Current reads
 capture and revalidate its generation; history routes retain their documented
-event windows and audit semantics.
+event windows and audit semantics. One exception: the registry overview's
+`counts.labels` is read after that revalidation from its own snapshot of the
+current publication, so `meta.as_of` does not cover it
+([registry overview](api-v1-routes.md#get-v1registrieschain_idaddress)).
 
 ### Tier 3: Diagnostics
 

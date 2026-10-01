@@ -230,7 +230,7 @@ pub(crate) mod finish_test_hooks {
         Ok((guard, FinishControl { reached, resume }))
     }
 
-    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+    pub(crate) async fn run(pool: &PgPool) -> V2Result<()> {
         let database = current_test_database(pool)
             .await
             .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;

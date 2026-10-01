@@ -25,6 +25,9 @@ mod v1_pre_surface_resolver;
 #[path = "tests/v1_resolver_after_reregistration.rs"]
 mod v1_resolver_after_reregistration;
 
+#[path = "tests/v1_wrapped_registration_resolver.rs"]
+mod v1_wrapped_registration_resolver;
+
 #[path = "tests/wrapper_permissions.rs"]
 mod wrapper_permissions;
 

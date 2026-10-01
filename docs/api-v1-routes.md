@@ -4201,12 +4201,19 @@ For a registrar lease first identified by a later readable observation, registra
   `SourceManifestUpdated` payloads recorded during that admission to establish the
   registry role. The retained declaration identity and address must match; later re-admission neither changes
   an older interval's role nor fills the gap between admissions.
-  `counts.labels` is the exact
-  number of labels the registry currently holds (the rows of the labels route
-  below); for a current selection it is `0` when `name` is `null`. `counts.events` is present only with
-  `include=counts` and counts the product-visible events emitted by the
-  contract — the same rows `GET /v1/events?contract_address=` serves — because
-  it reads every event of the contract rather than a projected total.
+  `counts.labels` is the total of the labels route below for the registry's
+  representative pointing name: the name `name` selects, the earliest name
+  whose current subregistry pointer targets the registry. Labels the registry
+  holds under another name that also points at it are not counted. It is `0`
+  when no name points at the registry. `counts.events` is present only with
+  `include=counts` and counts the product-visible events the contract emitted
+  on this chain up to the selected position, in any namespace. For an ENSv2
+  registry, whose events are all in `ens`, it equals the `total_count` of
+  `GET /v1/events?contract_address=` at the same chain and block: that feed
+  defaults to the `ens` namespace, which is served on one chain. For an address
+  an operator also admits into another namespace on this chain, the overview
+  counts those events too and the default feed does not. The count reads every
+  event of the contract rather than a projected total.
   `counts.roles`, also present with `include=counts`, is the exact number of
   observed nonzero declared role assignments across the registry's root and
   label resources. One account on two resources counts twice; several role bits
@@ -4226,17 +4233,25 @@ For a registrar lease first identified by a later readable observation, registra
   `referenced_by.page` object; its cursor binds the chain and registry. The
   top-level response has no `page`. Continuations bind only an explicitly
   requested `at` position; without one, each page selects the current publication.
-  A publication changed during the request returns `409 stale`; retry with the
-  same cursor. Legacy publication fields are ignored, but an old `at` field must
+  A publication that changes before the route revalidates its block-bounded
+  evidence returns `409 stale`; retry with the same cursor. Legacy publication fields are ignored, but an old `at` field must
   be supplied and match: old cursors cannot distinguish an implicit selection
   from an explicit pin. Dropping or changing it returns `400 invalid_input` once.
 - Snapshot behavior: the route selects the chain's served position like the
   resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
   creation, pointer, and event-count evidence is bounded to that position, so
   an `at` or `finality` selector shows the registry as it stood then.
-  `counts.labels` reads the current child collection and is `null` for a
-  historical selection that differs from the current published position.
-  Current reads revalidate their publication before returning.
+  `counts.labels` is `null` for a historical selection that differs from the
+  current published position. The creation, pointer, reference, role and event
+  evidence is revalidated against the publication before `counts.labels` is
+  read. `counts.labels` is then sampled separately: in its own snapshot of the
+  current publication it finds the registry's representative pointing name
+  there and takes that name's labels-route total, or `0` when no name points at
+  the registry. It is not covered by `meta.as_of`, so it can reflect labels added
+  or removed, a rollback, or a rebuild at a lower block published after the
+  check, and `name`, `parent_registry` and `referenced_by` can describe a
+  different publication from the one `counts.labels` sampled. If that
+  publication is unavailable, the request returns `409 stale`.
 - Status semantics: an unknown registry returns `404 not_found` at every
   selector, because the bounded read proves absence at the selected position.
   Malformed `chain_id` or `address` and an `include` value other than `counts`
