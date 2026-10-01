@@ -295,6 +295,14 @@ Apply them with the phase runner, redo processes and API stopped, with the same
 `lock_timeout`, `statement_timeout` and retry procedure, `--target-version
 20261001110000` and then `20261001110100`. Afterwards, confirm both indexes are
 `indisvalid` and `indisready` and that `pg_get_indexdef` shows those columns.
+The same build narrows the child reads in `crates/storage/src/families`, so it also
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain even though no stored row changes. After the migrations, an existing deployment finishes the
+full-range Interpret redo and then the stamped Project redo it installs before the
+matching API serves, as the [handoff](#phase-runner-configuration) describes; until
+then its snapshot-selected reads answer `409 stale`. When this build ships together with the
+"Resolver set while registering a wrapped name" change, which rotates the hash too,
+that change's single redo pair discharges both rotations.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
