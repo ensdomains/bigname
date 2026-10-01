@@ -1678,7 +1678,18 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f)
   ([registry generation](glossary.md#registry-generation)); a Basenames child
-  and one whose owner is the zero address serve none. An ENSv1 or Basenames
+  and one whose owner is the zero address serve none. Such an ENSv1 child's
+  `ens_v1` object holds only a null `expires_at`, as the registry records no
+  lease, unless a NameWrapper or registrar event named it under a label that
+  fails ENSIP-15 normalization, which those contracts accept
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596-L630 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L865-L876 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191-L193 @ ens_v1@91c966f).
+  bigname keeps such a name out of name reads, so its lease and NameWrapper
+  state are projected without a name row; the child still serves `authority`,
+  but its `ens_v1` object carries no lifecycle fields: no `expires_at` and no
+  wrapper fields. An ENSv1 or Basenames
   registry child with no current name row serves its node's current registry
   owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
@@ -3273,7 +3284,11 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L35 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f)
   ([registry generation](glossary.md#registry-generation));
-  its `ens_v1` object carries only a null `expires_at`, as it holds no lease.
+  its `ens_v1` object carries only a null `expires_at`, as it holds no lease,
+  except for a child a NameWrapper or registrar event named under a label that
+  fails ENSIP-15 normalization: its lease and NameWrapper state are projected
+  without a name row, so, as the subnames route serves it, its `ens_v1` object
+  carries no lifecycle fields, no `expires_at` and no wrapper fields.
   `relation=owner` and `relation=registrant` never list it; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that

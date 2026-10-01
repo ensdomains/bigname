@@ -478,6 +478,138 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
     database.cleanup().await
 }
 
+/// A child NameWrapper wrapped under a label that fails normalization has only a shadow surface
+/// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `name_wrapped`), so no name row
+/// composes and both routes serve it from its registry. Its wrapper state and any lease are
+/// projected without a composed name, so its `ens_v1` object claims no lifecycle: no `expires_at`
+/// and no wrapper fields. A sibling no label-bearing event named keeps `expires_at: null`.
+#[tokio::test]
+async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f1_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Wrapped").await?;
+    let shadowed = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "Wrapped",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(0x7f1_0011),
+    )
+    .await?;
+    let plain = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "plain",
+        RC_OWNER,
+        203,
+        Uuid::from_u128(0x7f1_0012),
+    )
+    .await?;
+    let shadowed_id = format!("ens:{shadowed}");
+    // The shadow surface the wrapper adapter writes for the NameWrapped name in the same block.
+    let labels = ["Wrapped", "alpha", "eth"];
+    sqlx::query(
+        "INSERT INTO bigname_phase.name_surfaces (
+             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state, normalization_errors,
+             deactivation_reason, deactivated_at, chain_id, block_hash, block_number,
+             provenance, canonicality_state)
+         VALUES ($1, 'ens', $2, $3, $4, $5, $6, $7, 'shadow',
+                 '[{\"error\": \"raw label is not byte-identical to its normalized form\"}]',
+                 'normalization_gate', to_timestamp(1700000202), $8, '0xhistory202', 202,
+                 '{}'::jsonb, 'canonical')",
+    )
+    .bind(&shadowed_id)
+    .bind(labels.join("."))
+    .bind(labels.to_vec())
+    .bind(b"\x07Wrapped\x05alpha\x03eth\x00".to_vec())
+    .bind(&shadowed)
+    .bind(
+        labels
+            .iter()
+            .map(|label| child_labelhash(label))
+            .collect::<Vec<_>>(),
+    )
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(FAMILY_CHAIN)
+    .execute(&database.pool)
+    .await?;
+    // The NameWrapper resource the adapter writes beside the shadow surface.
+    let wrapper_resource = Uuid::from_u128(0x7f1_0021);
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: wrapper_resource,
+            token_lineage_id: None,
+            chain_id: FAMILY_CHAIN.to_owned(),
+            block_hash: "0xhistory202".to_owned(),
+            block_number: 202,
+            provenance: json!({"authority_kind": "wrapper"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            family_event(
+                "rc-shadow-alpha-grant",
+                Some(&alpha),
+                Some(alpha_resource),
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                201,
+                0,
+                json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                       "expiry": 1_900_000_000i64}),
+            ),
+            family_event(
+                "rc-shadow-wrapped-fuses",
+                Some(&shadowed_id),
+                Some(wrapper_resource),
+                "PermissionScopeChanged",
+                "ens_v1_wrapper_l1",
+                202,
+                1,
+                json!({"source_event": "NameWrapped", "node": shadowed,
+                       "wrapper_state": "emancipated", "fuses": 65_536,
+                       "expiry": 1_900_000_000i64}),
+            ),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    let rows = rows_of(
+        &read_family_pages(
+            &database,
+            &format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&page_size=10"),
+        )
+        .await?,
+    );
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    for (node, ens_v1) in [(&shadowed, json!({})), (&plain, json!({"expires_at": null}))] {
+        let row = rows
+            .iter()
+            .find(|row| row["namehash"] == json!(node))
+            .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
+        let subname = subnames
+            .iter()
+            .find(|row| row["namehash"] == json!(node))
+            .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
+        for served in [row, subname] {
+            assert_eq!(served["authority"], json!("ens_v1"), "{served:#}");
+            assert_eq!(served["ens_v1"], ens_v1, "{served:#}");
+        }
+    }
+
+    database.cleanup().await
+}
+
 /// A name surface Interpret commits after the publication does not take the child out of the
 /// published read: the child stays a registry-child row until Project publishes the block that
 /// serves the name's ordinary row, which then replaces it.

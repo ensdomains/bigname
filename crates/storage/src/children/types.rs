@@ -19,6 +19,9 @@ pub struct ChildrenCurrentRow {
     /// The `authority` an ENSv1 registry child with no name row serves: the registry
     /// generation that owns its node.
     pub registry_authority: Option<String>,
+    /// The child has only a shadow surface (a label that fails normalization): its lifecycle is
+    /// projected without a composed name.
+    pub shadow_surface: bool,
     pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,

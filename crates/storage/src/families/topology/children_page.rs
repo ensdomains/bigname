@@ -42,6 +42,9 @@ pub struct FamilyChildRow {
     pub registrant: Option<String>,
     /// The `authority` the child serves when it has no name row (`ens_v1` or `ens_v0`).
     pub registry_authority: Option<String>,
+    /// The child's only surface is a shadow one at or below the clock: a label-bearing event
+    /// named it under a label that fails normalization, so no name row composes for it.
+    pub shadow_surface: bool,
 }
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
@@ -308,7 +311,11 @@ pub(super) fn push_children<'a>(
             SELECT selected.parent_logical_name_id, selected.child_logical_name_id,
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
-                   selected.registry_authority, {sort_timestamp} AS sort_timestamp
+                   selected.registry_authority,
+                   COALESCE(child_surface.visibility_state = 'shadow'
+                            AND child_surface.block_number <= clock.block_number, FALSE)
+                       AS shadow_surface,
+                   {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
             JOIN clock ON clock.chain_id = parent.chain_id
@@ -374,6 +381,7 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             owner: row.try_get("owner")?,
             registrant: row.try_get("registrant")?,
             registry_authority: row.try_get("registry_authority")?,
+            shadow_surface: row.try_get("shadow_surface")?,
         },
         row.try_get("sort_timestamp")?,
     )))

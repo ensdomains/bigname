@@ -106,6 +106,7 @@ pub(super) async fn compose_registry_child_rows(
                 "registry_child": true,
                 "served_owner": child.owner,
                 "served_authority": child.authority,
+                "served_shadow_surface": child.shadow_surface,
             })
         }));
     }

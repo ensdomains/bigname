@@ -26,6 +26,8 @@ pub(crate) struct RegistryChildRow {
     pub owner: String,
     pub resource_id: Uuid,
     pub authority: Option<String>,
+    /// The child has only a shadow surface (`FamilyChildRow::shadow_surface`).
+    pub shadow_surface: bool,
 }
 
 /// The children among `candidates` (name ids of `chain_id` with no name surface) that a parent
@@ -70,7 +72,8 @@ pub(crate) async fn load_owned_registry_children(
     builder.push(
         ") SELECT children.child_logical_name_id, children.namespace,
                   children.canonical_display_name, children.namehash, children.owner,
-                  children.registry_authority, state.owner_resource_id
+                  children.registry_authority, children.shadow_surface,
+                  state.owner_resource_id
            FROM children
            JOIN parent ON parent.logical_name_id = children.parent_logical_name_id
            JOIN bigname_phase.project_registry_node_state state
@@ -103,6 +106,7 @@ pub(crate) async fn load_owned_registry_children(
             owner: row.try_get("owner")?,
             resource_id: row.try_get("owner_resource_id")?,
             authority: row.try_get("registry_authority")?,
+            shadow_surface: row.try_get("shadow_surface")?,
         };
         if seen.insert(child.logical_name_id.clone()) {
             children.push(child);

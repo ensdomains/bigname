@@ -33,7 +33,7 @@ pub(crate) fn build_address_name(
     };
     let ens_v1 = match name_row {
         Some(_) => ens_v1_of_row(name_row)?,
-        None => ens_v1_of_registry_child(authority)?,
+        None => ens_v1_of_registry_child(authority, entry.served_shadow_surface)?,
     };
     Ok(AddressName {
         name: entry.normalized_name.clone(),

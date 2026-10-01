@@ -184,6 +184,7 @@ fn row(child: FamilyChildRow) -> ChildrenCurrentRow {
         owner: child.owner,
         registrant: child.registrant,
         registry_authority: child.registry_authority,
+        shadow_surface: child.shadow_surface,
         provenance: json!({}),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

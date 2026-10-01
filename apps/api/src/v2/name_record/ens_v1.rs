@@ -25,7 +25,15 @@ pub(crate) struct EnsV1 {
     /// so the two dates differ even when both are live
     /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741)
     /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L250 @ ens_v2_sepolia_20260916@366de741).
-    pub(crate) expires_at: Option<String>,
+    ///
+    /// The outer `None` omits the field: a registry child named only under a label that fails
+    /// normalization claims no lifecycle ([`ens_v1_of_registry_child`]).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub(crate) expires_at: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,26 +53,58 @@ pub(crate) fn ens_v1(
     let (wrapper_state, wrapper_fuses) =
         wrapper.map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
     Ok(Some(EnsV1 {
-        expires_at: json_timestamp_at_paths(
+        expires_at: Some(json_timestamp_at_paths(
             declared_summary,
             &[&["registration", "ens_v1_expiry"]],
-        ),
+        )),
         wrapper_state,
         wrapper_fuses,
     }))
 }
 
 /// The `ens_v1` object of an ENSv1 registry child with no name row, which serves `authority` from
-/// its registry: only a null expiry. A lease is the BaseRegistrar's `expiries[id]` and token, which
-/// a registry `setSubnodeOwner` child never gets
+/// its registry.
+///
+/// A child no label-bearing event named holds only a null expiry. A lease is the BaseRegistrar's
+/// `expiries[id]` and token, which a registry `setSubnodeOwner` child never gets
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L147 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
-/// Every wrap emits `NameWrapped` with the DNS-encoded name
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f),
-/// from which bigname materializes a name surface, so a wrapped child is never surface-less and
-/// has no wrapper state here.
-pub(crate) fn ens_v1_of_registry_child(authority: Option<Authority>) -> V2Result<Option<EnsV1>> {
-    ens_v1(authority, &Value::Object(serde_json::Map::new()))
+///
+/// A child whose only name surface is a shadow one (`shadow_surface`: the surface bigname records,
+/// but keeps out of name reads, for a name that fails ENSIP-15 normalization) has no name row
+/// either, but it can be wrapped or leased. NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take any label
+/// bytes, `_addLabel` checks only the length, and `_wrap` emits `NameWrapped` with that name
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596-L630 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L865-L876 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f).
+/// For a name that fails normalization the wrapper adapter writes a shadow surface instead of a
+/// name (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs:133 and :258-267), so its wrapper
+/// state, and a `.eth` name's lease, are projected without a composed name. Its object then
+/// omits `expires_at` and the wrapper fields rather than claim it has no lease or wrapper state.
+pub(crate) fn ens_v1_of_registry_child(
+    authority: Option<Authority>,
+    shadow_surface: bool,
+) -> V2Result<Option<EnsV1>> {
+    let ens_v1 = ens_v1(authority, &Value::Object(serde_json::Map::new()))?;
+    Ok(ens_v1.map(|ens_v1| {
+        if shadow_surface {
+            EnsV1 {
+                expires_at: None,
+                ..ens_v1
+            }
+        } else {
+            ens_v1
+        }
+    }))
+}
+
+/// Deserialize a present `expires_at`, null included, as `Some`; an absent one stays `None`.
+fn present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// The `ens_v1` object of a composed name row, for the rows that serve one.

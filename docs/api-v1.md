@@ -2300,7 +2300,7 @@ What only ENSv1 holds about a name while ENSv1 decides it: the BaseRegistrar lea
 <!-- openapi:object EnsV1 -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `expires_at` | nullable string | always | BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead. Below that cap the lease's grace deadline is this value plus 90 days; a capped value does not give the deadline. |
+| `expires_at` | nullable string | when ens_v1_lifecycle | BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead. Below that cap the lease's grace deadline is this value plus 90 days; a capped value does not give the deadline. |
 | `wrapper_state` | enum WrapperState | when wrapper_backed | Current [NameWrapper lifecycle](#naming-dictionary) value. |
 | `wrapper_fuses` | object WrapperFuses | when wrapper_backed | Typed [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word). |
 
@@ -3276,6 +3276,7 @@ Extends Envelope.
 | failure_status | The object status is failed, stale, not_found or mismatch. |
 | registration_held | The record is full and its registration_status is not unregistered. |
 | wrapper_backed | The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together. |
+| ens_v1_lifecycle | The row is not an ENSv1 registry child with no current name row that a NameWrapper or registrar event named only under a label failing ENSIP-15 normalization. Such a child's lease and NameWrapper state are kept without a name row, so its object carries no lifecycle fields: no expires_at and no wrapper fields. |
 | ens_v1_authority | The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records. |
 | migration_proven | The full record selects authority ens_v2 and retains the block time of its latest activated MigrationApplied transition. |
 | name_counts_requested | The request to name detail carries include=counts and the record status is not unsupported. Counts are absent on every unsupported name-level record. |

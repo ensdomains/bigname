@@ -57,6 +57,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.last_recomputed_at,
                 anc.served_owner,
                 anc.served_authority,
+                anc.served_shadow_surface,
                 CASE anc.relation
                     WHEN 'registrant' THEN 0
                     WHEN 'token_holder' THEN 1
@@ -154,7 +155,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 manifest_version,
                 last_recomputed_at,
                 served_owner,
-                served_authority
+                served_authority,
+                served_shadow_surface
             FROM filtered
             ORDER BY
                 address ASC,
@@ -199,7 +201,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.manifest_version,
                 representatives.last_recomputed_at,
                 representatives.served_owner,
-                representatives.served_authority
+                representatives.served_authority,
+                representatives.served_shadow_surface
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address
@@ -229,7 +232,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 manifest_version,
                 last_recomputed_at,
                 served_owner,
-                served_authority
+                served_authority,
+                served_shadow_surface
             FROM filtered
             ORDER BY
                 address ASC,
@@ -275,7 +279,8 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 representatives.manifest_version,
                 representatives.last_recomputed_at,
                 representatives.served_owner,
-                representatives.served_authority
+                representatives.served_authority,
+                representatives.served_shadow_surface
             FROM representatives
             JOIN relation_facets
               ON relation_facets.address = representatives.address

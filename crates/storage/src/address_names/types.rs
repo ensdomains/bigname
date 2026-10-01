@@ -176,9 +176,10 @@ impl AddressNamesCurrentOrder {
 /// An ENSv1 registry child with no name surface (`families::records::registry_children`) has no
 /// surface binding or binding kind; its `canonical_display_name` and `normalized_name` are the
 /// name its parent's subnames route serves, its `resource_id` is the node's registry-only
-/// resource, `served_owner` is its current registry owner and `served_authority` the registry
-/// generation that owns its node. Every other entry has a surface binding and binding kind and
-/// neither.
+/// resource, `served_owner` is its current registry owner, `served_authority` the registry
+/// generation that owns its node and `served_shadow_surface` whether its only surface is a shadow
+/// one. Every other entry has a surface binding and binding kind, no `served_owner` or
+/// `served_authority`, and `served_shadow_surface` false.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressNameCurrentEntry {
     pub address: String,
@@ -200,6 +201,7 @@ pub struct AddressNameCurrentEntry {
     pub last_recomputed_at: OffsetDateTime,
     pub served_owner: Option<String>,
     pub served_authority: Option<String>,
+    pub served_shadow_surface: bool,
 }
 
 impl AddressNameCurrentEntry {

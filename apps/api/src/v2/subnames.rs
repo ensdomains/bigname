@@ -295,7 +295,7 @@ pub(crate) fn build_subname(
     };
     let ens_v1 = match name_row {
         Some(_) => ens_v1_of_row(name_row)?,
-        None => ens_v1_of_registry_child(authority)?,
+        None => ens_v1_of_registry_child(authority, row.shadow_surface)?,
     };
     let (owner, registrant) = if name_row.is_some() {
         (
