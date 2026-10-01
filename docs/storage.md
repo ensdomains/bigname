@@ -246,7 +246,10 @@ Child pages and counts calculate authority-arm agreement once per child across t
 relation. Exact filtered totals still require evaluating every eligible child, even for a small
 `page_size`. Display-name ordering uses label preimages with the documented placeholder
 fallback; keyset pagination bounds the returned rows, while the count and ordering evaluate
-the filtered child relation.
+the filtered child relation. A registry's labels page and count build only the ENSv2
+candidates under a parent whose current subregistry is that registry, and evaluate the
+ENSv1 and Basenames edges only for those children, since another arm can only refuse a child
+that also has an ENSv2 candidate.
 
 Family indexes serve these concrete readers:
 
@@ -269,6 +272,11 @@ Family indexes serve these concrete readers:
   divergence names to affected second-level parents from the normal summary work
   list. It uses the existing active-ledger and surface identity indexes; ordinary
   blocks with neither change do not scan reservation or active-evidence candidates.
+- Child pages and counts check that an ENSv1 or Basenames edge is its child's latest across
+  parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
+  node, and find a registry instance's ENSv2 registrations through
+  `project_child_registration_state_registry_idx`; both primary keys lead with a column
+  those lookups do not bind.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.

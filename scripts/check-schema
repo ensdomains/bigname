@@ -626,6 +626,8 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261001100000_project_child_registration_registry_index.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261001100100_project_child_edge_candidate_child_index.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -745,7 +747,9 @@ for migration_file in \
     "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \
     "$ROOT/migrations/20260930100000_read_only_lookup_guard.sql" \
     "$ROOT/migrations/20260930220000_project_hydration_work.sql" \
-    "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql"
+    "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" \
+    "$ROOT/migrations/20261001100000_project_child_registration_registry_index.sql" \
+    "$ROOT/migrations/20261001100100_project_child_edge_candidate_child_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1079,7 +1083,11 @@ for migration_file in \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260929200000_project_universal_resolver_proxy.sql" \
     "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \
-    "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql"
+    "$ROOT/migrations/20260930210000_exact_expiry_seconds.sql" \
+    "$ROOT/migrations/20261001100000_project_child_registration_registry_index.sql" \
+    "$ROOT/migrations/20261001100000_project_child_registration_registry_index.sql" \
+    "$ROOT/migrations/20261001100100_project_child_edge_candidate_child_index.sql" \
+    "$ROOT/migrations/20261001100100_project_child_edge_candidate_child_index.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

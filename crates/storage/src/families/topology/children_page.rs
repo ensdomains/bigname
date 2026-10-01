@@ -295,7 +295,7 @@ pub(super) fn push_children<'a>(
     filter: &ChildrenCurrentPageFilter<'a>,
     registry: Option<RegistryLabels<'a>>,
 ) {
-    push_selected(builder, parents);
+    push_selected(builder, parents, registry.map(|labels| labels.registry));
     let sort_timestamp = match filter.sort {
         ChildrenCurrentSort::Name => "NULL::NUMERIC",
         ChildrenCurrentSort::ExpiresAt => "summary.expires_at",
@@ -479,3 +479,5 @@ fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
 
 #[cfg(test)]
 mod performance_tests;
+#[cfg(test)]
+mod registry_labels_tests;

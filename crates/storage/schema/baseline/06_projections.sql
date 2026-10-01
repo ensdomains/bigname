@@ -727,6 +727,9 @@ COMMENT ON COLUMN project_child_registration_state.normalized_event_id IS
     'This value names the latest event of the three kinds, or the first reservation when none exists in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_child_registration_state.exists IS
     'This value is true once any reservation, grant or renewal carries this registry.';
+-- The ENSv2 child candidates of one registry instance (topology/children.rs).
+CREATE INDEX IF NOT EXISTS project_child_registration_state_registry_idx
+    ON project_child_registration_state (chain_id, registry_contract_instance_id);
 
 CREATE TABLE IF NOT EXISTS project_wrapper_state (
     chain_id text NOT NULL,
@@ -1826,6 +1829,9 @@ COMMENT ON COLUMN project_child_edge_candidate.labelhash IS
     'This value is the lower-cased labelhash.';
 COMMENT ON COLUMN project_child_edge_candidate.source_family IS
     'This value is the event''s source family.';
+-- A child's edges under every parent, for the latest-edge check (topology/children.rs).
+CREATE INDEX IF NOT EXISTS project_child_edge_candidate_child_idx
+    ON project_child_edge_candidate (chain_id, namespace, child_node);
 
 CREATE TABLE IF NOT EXISTS project_parent_subregistry (
     chain_id text NOT NULL,
