@@ -1590,7 +1590,15 @@ Project redo it installs before the matching API serves, as for any rotation;
 an API upgraded alone refuses the old build's family publication with
 `409 stale`. A cursor issued before the change on one of these sorts still
 decodes and resumes after its saved row, but in the new order, which moved the
-rows without the key to the other end. A cursor saved on a dated row then skips
-those rows, and a cursor saved on a row without the key returns every dated row
-a second time. A client walking one of these sorts across the change restarts
-from the first page.
+rows without the key to the other end of the list:
+
+- Ascending (undated rows were last and are now first): a cursor saved on a
+  dated row skips every undated row, and a cursor saved on an undated row
+  returns every dated row a second time.
+- Descending (undated rows were first and are now last): a cursor saved on an
+  undated row skips every dated row, so rows with a real timestamp are lost,
+  and a cursor saved on a dated row returns the undated rows already seen a
+  second time at the end.
+
+A client walking one of these sorts across the change restarts from the first
+page.
