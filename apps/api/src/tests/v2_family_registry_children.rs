@@ -591,7 +591,8 @@ async fn assert_undated_rows_are_smallest(database: &TestDatabase, base: &str, k
 async fn v2_undated_address_names_sort_as_the_smallest_value_across_pages() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_children_fixture(&database).await?;
-    for key in ["registered_at", "expires_at"] {
+    // A surface-less registry child serves no timestamp, `created_at` included.
+    for key in ["registered_at", "expires_at", "created_at"] {
         let base = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort={key}");
         assert_undated_rows_are_smallest(&database, &base, key).await?;
     }
