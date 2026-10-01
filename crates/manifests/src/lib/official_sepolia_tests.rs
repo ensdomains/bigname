@@ -233,7 +233,10 @@ fn default_reverse_registrars_match_the_pinned_ens_v1_deployments() -> Result<()
             normalize_address(&contract.address),
             normalize_address(artifact["address"].as_str().context("address")?)
         );
-        assert_eq!(contract.start_block, artifact["receipt"]["blockNumber"].as_u64());
+        assert_eq!(
+            contract.start_block,
+            artifact["receipt"]["blockNumber"].as_u64()
+        );
         let event = manifest
             .abi
             .events
