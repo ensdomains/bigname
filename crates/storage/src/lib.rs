@@ -61,9 +61,8 @@ pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
     ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
     ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
-    count_registry_children_current, load_children_current_page,
-    load_children_current_page_filtered, load_children_current_summaries,
-    load_registry_children_current_page,
+    count_registry_labels_current, load_children_current_page, load_children_current_page_filtered,
+    load_children_current_summaries, load_registry_children_current_page,
 };
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
@@ -75,8 +74,8 @@ pub use history::{
     HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
     HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
     HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, load_address_history,
-    load_address_history_for_relations, load_address_history_page,
+    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, count_contract_events,
+    load_address_history, load_address_history_for_relations, load_address_history_page,
     load_address_history_page_for_relations, load_bounded_record_attribution,
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
@@ -158,7 +157,7 @@ pub use record_inventory::{
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
-    RegistryReferencePage, SubregistryPointer, count_contract_events, load_registry_contract,
+    RegistryReferencePage, SubregistryPointer, load_registry_contract,
     load_registry_references_page, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };

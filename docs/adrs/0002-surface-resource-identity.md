@@ -10,7 +10,7 @@ Legacy ENS indexing tends to conflate public name text, node identity, token ide
 - one public surface may rebind across time
 - one resource may appear under multiple public surfaces
 - token identifiers may change while backing authority does not
-- resolver aliasing and wildcard behavior may create observable surfaces without direct registry entries
+- wildcard behavior may create observable surfaces without direct registry entries (when this was written, the 2026-06-29 ENSv2 resolver's aliasing did too; that alias path was later retired and is no longer interpreted, see [upstream](../upstream.md))
 
 ## Decision
 
@@ -67,13 +67,10 @@ Public identity rules:
 - permissions and control are resource-first and keyed by `resource_id`
 - token IDs are never treated as logical identity
 - a time-ranged `SurfaceBinding` joins `logical_name_id` to `resource_id`
-- a canonical ENSv2 registry/root `PreimageObserved`, or a resolver
-  `AliasChanged` preimage observation whose DNS name passes normalization, keeps
+- a canonical ENSv2 registry/root `PreimageObserved` keeps
   its [name surface](../glossary.md#surface-name-surface) known after its active
   binding and resource end; later node-scoped records keep `logical_name_id`
-  but do not inherit the ended `resource_id`, and alias restoration never
-  creates a resource binding; this cross-run rule has one known pre-existing
-  exception described below
+  but do not inherit the ended `resource_id`
 
 ENSv1 authority-anchor rules:
 
@@ -99,7 +96,6 @@ Resource-centric convenience rule:
 - when a resource view needs a single display surface, rank bindings in this order:
   `declared_registry_path`
   `linked_subregistry_path`
-  `resolver_alias_path`
   `observed_wildcard_path`
   `observed_only`
 - ties break by earliest active binding, then lexical `normalized_name`
@@ -109,7 +105,7 @@ Resource-centric convenience rule:
 - address collections return surfaces by default; an ENSv1 registry child with no surface (a standalone registry-owner observation above) is the one row without a surface, listed for its current registry owner on its registry-only resource and named as its parent's child list names it
 - clients may opt into `dedupe_by=resource`, but that is never the default truth model
 - history must support `scope=surface|resource|both`
-- wrapping, migration, token regeneration, and aliasing can be represented without identity distortion
+- wrapping, migration, and token regeneration can be represented without identity distortion (the retired ENSv2 resolver aliasing was represented the same way while it was interpreted)
 
 ## Worked Examples
 
@@ -135,18 +131,10 @@ Resource-centric permissions follow the same lifecycle: while one ENSv1 authorit
 
 Two public surfaces may bind to the same `resource_id`. Permissions and role history stay attached to the resource; surface-specific reads keep their own binding provenance.
 
-A retained canonical registry/root `PreimageObserved`, or a resolver
-`AliasChanged` preimage observation whose DNS name passes normalization,
+A retained canonical registry/root `PreimageObserved`
 rebuilds the known name surface during replay even after registration release
-or expiry closed its binding. Alias evidence never creates or restores a
-resource binding. A later resolver `NameChanged` or `VersionChanged` for that node
-remains attributed to the surface without an active `resource_id`. The
-known exception is when a resolver-emitted resource equals `namehash(N)`:
-named-resource and alias preimages can share one retained [interpreter state
-key](../glossary.md#interpreter-state-key), so resumed interpretation can lose
-the named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). The resolver stores records by node and
+or expiry closed its binding. A later resolver `NameChanged` or `VersionChanged` for that node
+remains attributed to the surface without an active `resource_id`. The resolver stores records by node and
 version. `setName` passes part zero,
 selecting the node-specific, any-part permission resource; the cited
 authorization path reads EnhancedAccessControl role mappings and contains no

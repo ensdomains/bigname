@@ -21,7 +21,7 @@ are:
 - OpenAPI document: `GET` and `HEAD` on `/openapi.json`. The document is
   public and read-only, and the edge adds `Access-Control-Allow-Origin: *` so
   the documentation site can read it from another origin. The API embeds the
-  generated OpenAPI 3.1 document for the 20 product operations, including package
+  generated OpenAPI 3.1 document for the 19 product operations, including package
   version and build SHA. Diagnostics and health remain outside the document.
   Its documentation links use that build's commit when a full Git SHA is
   available; local builds with an unknown or non-commit build label retain

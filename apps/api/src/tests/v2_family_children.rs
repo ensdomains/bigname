@@ -396,7 +396,7 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
             );
             unavailable(
                 "registry label count",
-                bigname_storage::count_registry_children_current(pool, parent, registry)
+                bigname_storage::count_registry_labels_current(pool, FAMILY_CHAIN, registry)
                     .await
                     .map(drop),
             );

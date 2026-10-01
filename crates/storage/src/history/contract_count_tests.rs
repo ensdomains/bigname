@@ -1,4 +1,5 @@
 //! The real page/count builders must use the emitter bound, including with prepared plans.
+use super::super::super::contract_count::contract_count_filter;
 use super::super::super::summary::push_history_count_query;
 use super::*;
 
@@ -62,13 +63,16 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 ("explicit-missing-key", Some("absent"), &["RecordChanged"][..], 0),
                 ("explicit-missing-kind", None, &["RecordVersionChanged"][..], 0),
             ] {
+                // The registry overview's `counts.events` statement, plus the feed's record key.
+                let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
                 let filter = EventHistoryReadFilter {
-                    namespace: Some("ens".into()),
-                    contract_address: Some("0x0000000000000000000000000000000000000076".into()),
-                    event_kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
                     record_key: key.map(str::to_owned),
-                    block_window: Some(window(&[("ethereum-mainnet", None, Some(11200))])),
-                    ..Default::default()
+                    ..contract_count_filter(
+                        "ethereum-mainnet",
+                        "0x0000000000000000000000000000000000000076",
+                        &kinds,
+                        Some(11200),
+                    )
                 };
                 let mut count_query = QueryBuilder::<Postgres>::new("");
                 push_history_count_query(&mut count_query, &filter, true, None);
@@ -104,6 +108,107 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
         }
         Ok(())
     }.await;
+    database.cleanup().await?;
+    result
+}
+
+/// Handoff copies: the counted emitter's 2,000 blocks each hold two copies of one handoff, among
+/// 48,000 other emitters' blocks shaped the same way.
+const HANDOFF_FIXTURE: &str = r#"
+    INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+    SELECT 'ethereum-mainnet', 'block-' || n, n, to_timestamp(n), 'canonical'
+    FROM generate_series(1, 50000) n;
+    INSERT INTO normalized_events
+        (event_identity, namespace, event_kind, source_family, manifest_version,
+         chain_id, block_hash, block_number, transaction_hash, transaction_index,
+         log_index, derivation_kind, canonicality_state, raw_fact_ref, after_state)
+    SELECT 'origin-' || n || ':ResolverChanged:registry-fallback-handoff:resource-' || copy,
+           'ens', 'ResolverChanged', 'ens_v1_registry_l1', 1,
+           'ethereum-mainnet', 'block-' || n, n, 'tx-' || n, 0, copy,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object('kind', 'raw_log', 'emitting_address',
+               CASE WHEN n <= 2000 THEN '0x0000000000000000000000000000000000000076'
+                    ELSE '0x' || lpad(to_hex(n), 40, '0') END),
+           jsonb_build_object('node', 'node-' || n)
+    FROM generate_series(1, 50000) n CROSS JOIN generate_series(1, 2) copy;
+    ANALYZE normalized_events;
+    ANALYZE chain_lineage;
+"#;
+
+/// Every scan of `normalized_events`, subplans included, with its rows visited over all loops and
+/// whether it runs inside a subplan (the handoff representative lookup).
+fn event_scans<'a>(node: &'a Value, in_subplan: bool, output: &mut Vec<(&'a Value, f64, bool)>) {
+    let in_subplan = in_subplan || node["Parent Relationship"] == "SubPlan";
+    if node["Relation Name"] == "normalized_events" {
+        let visited = (node["Actual Rows"].as_f64().unwrap_or(0.0)
+            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
+            * node["Actual Loops"].as_f64().unwrap_or(1.0);
+        output.push((node, visited, in_subplan));
+    }
+    if let Some(children) = node["Plans"].as_array() {
+        for child in children {
+            event_scans(child, in_subplan, output);
+        }
+    }
+}
+
+// The overview's exact count statement on handoff-heavy history: each counted row's
+// representative lookup stays on its own block, under both plan modes.
+#[tokio::test]
+async fn contract_count_handoff_representatives_stay_on_their_block() -> Result<()> {
+    let database = phase_database("history_contract_handoffs", HANDOFF_FIXTURE).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        let kinds: Vec<String> = PRODUCT_KINDS
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect();
+        let filter = contract_count_filter(
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000076",
+            &kinds,
+            Some(50000),
+        );
+        let mut count_query = QueryBuilder::<Postgres>::new("");
+        push_history_count_query(&mut count_query, &filter, true, None);
+        let count: i64 = count_query
+            .build_query_scalar()
+            .fetch_one(&mut *connection)
+            .await?;
+        assert_eq!(count, 2000, "one representative per handoff");
+        for mode in [PlanMode::Unprepared, PlanMode::Generic] {
+            let mut count_query = QueryBuilder::<Postgres>::new("");
+            push_history_count_query(&mut count_query, &filter, true, None);
+            let plan = explain_page(&mut connection, count_query, mode).await?;
+            let mut scans = Vec::new();
+            event_scans(&plan[0]["Plan"], false, &mut scans);
+            // The representative lookup is the subplan scan, run once per counted copy.
+            ensure!(
+                scans.iter().any(|(scan, _, in_subplan)| {
+                    *in_subplan && scan["Actual Loops"].as_f64().unwrap_or(0.0) >= 4000.0
+                }),
+                "{mode:?}: no representative lookup ran: {plan}"
+            );
+            for (scan, _, _) in &scans {
+                ensure!(
+                    scan["Node Type"] != "Seq Scan",
+                    "{mode:?}: sequential event scan: {plan}"
+                );
+            }
+            // 4,000 counted copies plus about two rows per representative lookup.
+            let visited: f64 = scans.iter().map(|(_, visited, _)| visited).sum();
+            ensure!(
+                visited <= 20000.0,
+                "{mode:?}: visited {visited} event rows: {plan}"
+            );
+            eprintln!(
+                "contract handoff count {mode:?}: event_rows_visited={visited}; execution_ms={}",
+                plan[0]["Execution Time"]
+            );
+        }
+        Ok(())
+    }
+    .await;
     database.cleanup().await?;
     result
 }

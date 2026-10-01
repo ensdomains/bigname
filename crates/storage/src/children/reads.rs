@@ -45,14 +45,14 @@ pub async fn load_registry_children_current_page(
     .await
 }
 
-/// Exact count of the declared children of `parent_logical_name_id` whose ENSv2 registration
-/// was emitted by `registry_address`.
-pub async fn count_registry_children_current(
+/// Exact count of the labels `registry_address` holds on `chain_id` at the current family
+/// publication, under the name the registry serves there.
+pub async fn count_registry_labels_current(
     pool: &PgPool,
-    parent_logical_name_id: &str,
+    chain_id: &str,
     registry_address: &str,
 ) -> Result<i64> {
-    super::families::registry_count(pool, parent_logical_name_id, registry_address).await
+    super::families::registry_count_current(pool, chain_id, registry_address).await
 }
 
 pub async fn load_children_current_summaries(

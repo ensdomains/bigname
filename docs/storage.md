@@ -1670,23 +1670,15 @@ It fails the batch, rather than publishing, if interpretation reads a name that
 was not loaded.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
-[name surface](glossary.md#surface-name-surface), or a retained resolver
-`AliasChanged` preimage observation whose DNS name passes normalization,
+[name surface](glossary.md#surface-name-surface)
 permanently establishes that the surface is known in restored protocol state.
-Alias restoration records only the known surface; it never creates or restores
-a resource binding. A registration release or expiry can remove the current
+A registration release or expiry can remove the current
 binding and resource without removing that observation. Normalization-rejected
 name observations are not admitted to this state. Later `RecordChanged` and
 `RecordVersionChanged` resolver events
 therefore retain the logical-name attribution but carry no `resource_id` when
 no current resource exists, identically in a continuous walk and after a cold
-restore, except for the known retained preimage-key collision: when a
-resolver-emitted resource equals `namehash(N)`, named-resource and alias
-preimages can share one retained [interpreter state
-key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
-named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). Project's record inventory attached to a resource
+restore. Project's record inventory attached to a resource
 follows the resource's latest retained linked `ResolverChanged` event whose
 name has a readable canonical surface staged at the target. If a later linked
 event's name lacks such a surface, an earlier linked event with one is the
@@ -1719,7 +1711,7 @@ change invalidates older values without deleting their historical observations.
 The inherited reset increments `recordVersions[node]` and emits `VersionChanged`.
 (upstream: .refs/ens_v1_publicresolver_5141a2a/contracts/resolvers/ResolverBase.sol:L8-L22 @ ens_v1_publicresolver_5141a2a@5141a2a)
 This reuses existing normalized-event and inventory storage; no schema or
-record-ID mapping is added. It does not supply PermissionedResolver aliases,
+record-ID mapping is added. It does not supply PermissionedResolver
 permission resources, or resolver binding enumeration.
 
 A `basenames_base_resolver` event without logical-name

@@ -1,7 +1,4 @@
-//! F10 and F11, aliases and child edges. A name's alias row keeps its latest AliasChanged with
-//! the event's own target and active flag (name_topology.rs, the alias lateral); a resolver's
-//! alias row keeps the latest AliasChanged per resolver and alias identity (resolver
-//! alias_summary.rs). An ENSv1 or Basenames child edge row keeps the latest SubregistryChanged
+//! F11, child edges. An ENSv1 or Basenames child edge row keeps the latest SubregistryChanged
 //! for its parent node, child node and registry, ineligible edges included (children.rs,
 //! `ranked_v1`); an ENSv2 parent keeps its latest SubregistryChanged, clears included
 //! (children.rs, `ranked_v2_subregistries`).
@@ -10,10 +7,8 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    keys,
     reduce::{
-        Context, Preload, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
-        text_or_null,
+        Context, Preload, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
     },
     store::{Row, RowSet},
     tables,
@@ -25,31 +20,6 @@ const V2_REGISTRIES: [&str; 2] = ["ens_v2_root_l1", "ens_v2_registry_l1"];
 
 /// How a table's key is read off an event, `None` when the event does not address it.
 type KeyOf = fn(&Value, &BlockEvent) -> Option<Row>;
-
-/// A payload field as JSON, null when absent.
-fn field(event: &BlockEvent, name: &str) -> Value {
-    event.after.get(name).cloned().unwrap_or(Value::Null)
-}
-
-fn name_alias_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
-    (event.event_kind == "AliasChanged").then_some(())?;
-    Some(key_of(
-        &tables::NAME_ALIAS,
-        [chain.clone(), json!(event.logical_name_id.as_deref()?)],
-    ))
-}
-
-fn resolver_alias_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
-    (event.event_kind == "AliasChanged").then_some(())?;
-    Some(key_of(
-        &tables::RESOLVER_ALIAS,
-        [
-            chain.clone(),
-            json!(keys::alias_resolver(event)?),
-            json!(keys::alias_identity(event)),
-        ],
-    ))
-}
 
 fn edge_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
     let after = &event.after;
@@ -89,14 +59,12 @@ fn subregistry_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
     ))
 }
 
-const KEYED: [(&tables::TableSpec, KeyOf); 4] = [
-    (&tables::NAME_ALIAS, name_alias_key),
-    (&tables::RESOLVER_ALIAS, resolver_alias_key),
+const KEYED: [(&tables::TableSpec, KeyOf); 2] = [
     (&tables::CHILD_EDGE_CANDIDATE, edge_key),
     (&tables::PARENT_SUBREGISTRY, subregistry_key),
 ];
 
-/// The alias, edge and subregistry keys one block's events name.
+/// The edge and subregistry keys one block's events name.
 pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
     for (table, key) in KEYED {
         into.add(table, events.iter().filter_map(|event| key(chain, event)));
@@ -118,50 +86,6 @@ pub(super) async fn apply(
         load_rows(transaction, rows, table, keys).await?;
     }
     for event in events {
-        if let Some(key) = name_alias_key(&chain, event) {
-            let table = &tables::NAME_ALIAS;
-            let mut row = current(rows, table, &key);
-            set(&mut row, "active", active(event));
-            for name in [
-                "alias_state",
-                "to_logical_name_id",
-                "to_name",
-                "to_resource_id",
-                "to_normalized_name",
-                "to_canonical_display_name",
-                "to_namehash",
-            ] {
-                set(&mut row, name, text_or_null(raw_text(&event.after, name)));
-            }
-            set(
-                &mut row,
-                "resolver_address",
-                text_or_null(raw_lower(&event.after, "resolver")),
-            );
-            put(rows, table, row, event)?;
-        }
-        if let Some(key) = resolver_alias_key(&chain, event) {
-            let table = &tables::RESOLVER_ALIAS;
-            let mut row = current(rows, table, &key);
-            set(&mut row, "active", active(event));
-            for name in [
-                "alias_state",
-                "from_dns_encoded_name",
-                "to_dns_encoded_name",
-                "from_name",
-                "to_logical_name_id",
-                "to_name",
-                "to_resource_id",
-            ] {
-                set(&mut row, name, text_or_null(raw_text(&event.after, name)));
-            }
-            set(
-                &mut row,
-                "logical_name_id",
-                text_or_null(event.logical_name_id.clone()),
-            );
-            put(rows, table, row, event)?;
-        }
         if let Some(key) = edge_key(&chain, event) {
             let table = &tables::CHILD_EDGE_CANDIDATE;
             let mut row = current(rows, table, &key);
@@ -195,13 +119,6 @@ pub(super) async fn apply(
         }
     }
     Ok(())
-}
-
-/// The event's active flag, active when it carries none, as both alias readers take it
-/// (`COALESCE((after_state ->> 'active')::boolean, true)`). A text or number is read the way
-/// PostgreSQL reads a boolean; missing or unrecognized values use the active default.
-fn active(event: &BlockEvent) -> Value {
-    Value::Bool(json_boolean(&field(event, "active")).unwrap_or(true))
 }
 
 #[cfg(test)]

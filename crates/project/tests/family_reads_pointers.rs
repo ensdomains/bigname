@@ -1,17 +1,15 @@
 //! Family reader contracts over explicit family rows: resolver classification and manifest
 //! admission bounded by its publication, the link
-//! selection's exact-then-default rule, the alias source's latest-then-reject pointer and the
-//! wildcard source's historical resolver. The batch inventory read over a shared link is
+//! selection's exact-then-default rule and the wildcard source's historical resolver. The batch inventory read over a shared link is
 //! published through the family publisher.
 #[path = "families_support/mod.rs"]
 mod families_support;
 
 use anyhow::{Context, Result};
 use bigname_storage::families::records::{
-    DEFAULT_RECORD_NODE, FamilyAttribution, load_family_alias_source_pointer,
-    load_family_link_selection, load_family_record_inventories_on,
-    load_family_record_inventory_detail, load_family_resolver_classification,
-    load_family_wildcard_source,
+    DEFAULT_RECORD_NODE, FamilyAttribution, load_family_link_selection,
+    load_family_record_inventories_on, load_family_record_inventory_detail,
+    load_family_resolver_classification, load_family_wildcard_source,
 };
 use families_support::{CHAIN, Fixture, hash, uuid};
 use serde_json::{Value, json};
@@ -261,14 +259,13 @@ async fn resource_pointer(
     Ok(())
 }
 
-// The alias source is the latest pointer, then a clear rejected: an empty or zero latest pointer
-// after a non-zero one gives no alias source and never the older resolver. The wildcard source
-// keeps the historical non-zero resolver beside the later clear as its boundary.
+// The wildcard source keeps the historical non-zero resolver beside a later empty or zero clear
+// as its boundary.
 #[tokio::test]
-async fn alias_rejects_a_later_clear_and_wildcard_keeps_the_historical_resolver() -> Result<()> {
+async fn wildcard_keeps_the_historical_resolver_beside_a_later_clear() -> Result<()> {
     let fixture = Fixture::new("family_reads_pointer_views", 8).await?;
     let pool = &fixture.pool;
-    let (empty, zero, live) = (uuid(1), uuid(2), uuid(3));
+    let (empty, zero) = (uuid(1), uuid(2));
     resource_pointer(pool, &empty, ("", 5), (R1, 3)).await?;
     resource_pointer(
         pool,
@@ -277,15 +274,8 @@ async fn alias_rejects_a_later_clear_and_wildcard_keeps_the_historical_resolver(
         (R2, 4),
     )
     .await?;
-    resource_pointer(pool, &live, (R3, 6), (R3, 6)).await?;
     for (resource, historical, clear_block) in [(&empty, R1, 5), (&zero, R2, 7)] {
         let id = resource.parse()?;
-        assert!(
-            load_family_alias_source_pointer(pool, CHAIN, id)
-                .await?
-                .is_none(),
-            "{resource}"
-        );
         let wildcard = load_family_wildcard_source(pool, CHAIN, id)
             .await?
             .context("a wildcard source")?;
@@ -301,10 +291,6 @@ async fn alias_rejects_a_later_clear_and_wildcard_keeps_the_historical_resolver(
             Some(clear_block)
         );
     }
-    let alias = load_family_alias_source_pointer(pool, CHAIN, live.parse()?)
-        .await?
-        .context("a live alias source")?;
-    assert_eq!(alias.resolver_address, R3);
     fixture.cleanup().await
 }
 

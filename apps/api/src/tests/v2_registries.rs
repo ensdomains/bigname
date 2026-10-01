@@ -957,3 +957,394 @@ async fn declared_registry_reads_honor_start_retirement_and_retraction() -> Resu
     );
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_get_registry_event_count_matches_the_events_feed_total() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    // A registrar-surface snapshot replays retained state; the feed does not serve it.
+    let mut snapshot = registry_event(
+        "registry-two-snapshot-expiry",
+        Some(&registry_logical_name_id("two.alpha.eth")),
+        "ExpiryChanged",
+        64,
+        ALPHA_REGISTRY,
+        json!({ "source_event": "ReadableNameObserved", "state_derived": true,
+                "registrar_surface_snapshot": true, "expiry": 1_900_000_000_i64 }),
+    );
+    snapshot.log_index = Some(2);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[snapshot]).await?;
+
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    let feed = registry_payload(
+        &database,
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
+    )
+    .await?;
+    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
+    assert_eq!(
+        overview["data"]["counts"]["events"], feed["page"]["total_count"],
+        "{overview}"
+    );
+    database.cleanup().await
+}
+
+fn spawn_registry_request(
+    database: &TestDatabase,
+    uri: String,
+) -> tokio::task::JoinHandle<Result<Response, std::convert::Infallible>> {
+    let state = database.app_state();
+    tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    })
+}
+
+async fn reach(control: &crate::v2::collection_snapshot::finish_test_hooks::FinishControl) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), control.wait_until_reached())
+        .await
+        .context("registry request never reached the hook")
+}
+
+/// Runs the overview, pausing once its publication check has passed, runs `late` (the change a
+/// publication makes while the labels count is read), and returns the response.
+async fn registry_with_late_change<F, Fut>(
+    database: &TestDatabase,
+    uri: &str,
+    late: F,
+) -> Result<(StatusCode, Value)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    use crate::v2::collection_snapshot::finish_test_hooks;
+    let (_before_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
+    let request = spawn_registry_request(database, uri.to_owned());
+    reach(&before_check).await?;
+    // The publication check consumed the first hook; this one pauses the labels count.
+    let (_after_guard, after_check) = finish_test_hooks::install(&database.pool).await?;
+    before_check.resume().await;
+    reach(&after_check).await?;
+    late().await?;
+    after_check.resume().await;
+    let response = request.await.context("registry request task panicked")??;
+    let status = response.status();
+    Ok((status, read_json(response).await?))
+}
+
+// The block-bounded evidence stays fenced on the publication; the current labels count is read
+// after that check, so a publication during it does not refuse the overview and its new label
+// is counted while the selected evidence and `meta` stay at the checked publication.
+#[tokio::test]
+async fn v2_get_registry_counts_labels_published_after_the_publication_check() -> Result<()> {
+    use crate::v2::collection_snapshot::finish_test_hooks;
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let selected = registry_payload(&database, &uri).await?;
+
+    let (_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
+    let request = spawn_registry_request(&database, uri.clone());
+    reach(&before_check).await?;
+    commit_family_block(&database.pool).await?;
+    before_check.resume().await;
+    let response = request.await.context("registry request task panicked")??;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    seed_unpublished_alpha_label(&database).await?;
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        publish_test_families_on(&pool, REGISTRY_CHAIN_ID, 84).await
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(
+        payload["data"]["counts"],
+        json!({ "labels": 3, "events": 5, "roles": 0 })
+    );
+    assert_eq!(payload["meta"], selected["meta"]);
+    assert_eq!(payload["data"]["name"], selected["data"]["name"]);
+    assert_eq!(payload["data"]["referenced_by"], selected["data"]["referenced_by"]);
+    database.cleanup().await
+}
+
+// A later publication rebinds the alpha registry from alpha.eth to beta.eth, keeping its two
+// labels. The late count follows the name the registry serves at its own snapshot.
+#[tokio::test]
+async fn v2_get_registry_late_labels_count_follows_a_rebind() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let selected = registry_payload(&database, &uri).await?;
+    seed_unpublished_alpha_rebind(&database, true).await?;
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        publish_test_families_on(&pool, REGISTRY_CHAIN_ID, 84).await
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload["data"]["counts"]["labels"], json!(2), "{payload:#}");
+    assert_eq!(payload["meta"], selected["meta"]);
+    assert_eq!(payload["data"]["name"]["name"], json!("alpha.eth"));
+
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z")
+        .await?;
+    let rebound = registry_payload(&database, &uri).await?;
+    assert_eq!(rebound["data"]["name"]["name"], json!("beta.eth"), "{rebound:#}");
+    assert_eq!(rebound["data"]["counts"]["labels"], json!(2), "{rebound:#}");
+    database.cleanup().await
+}
+
+// A rebind that leaves alpha.eth's pointer in place: alpha.eth stays the registry's
+// representative pointing name (the earliest current pointer), so `name` and `counts.labels`
+// both describe alpha.eth, whose labels were released, while `referenced_by` lists both names.
+#[tokio::test]
+async fn v2_get_registry_counts_labels_under_its_representative_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    seed_unpublished_alpha_rebind(&database, false).await?;
+    publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 84).await?;
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z")
+        .await?;
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(overview["data"]["name"]["name"], json!("alpha.eth"), "{overview:#}");
+    let referenced: Vec<&Value> = overview["data"]["referenced_by"]["data"]
+        .as_array()
+        .expect("referenced_by data")
+        .iter()
+        .map(|name| &name["name"])
+        .collect();
+    assert_eq!(referenced, [&json!("alpha.eth"), &json!("beta.eth")]);
+    assert_eq!(overview["data"]["counts"]["labels"], json!(0), "{overview:#}");
+    let labels = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels"),
+    )
+    .await?;
+    assert_eq!(labels["page"]["total_count"], overview["data"]["counts"]["labels"]);
+    database.cleanup().await
+}
+
+// The count has no namespace filter: an event the same address emitted into another namespace
+// on this chain counts, while the bare feed reads only `ens`.
+#[tokio::test]
+async fn v2_get_registry_event_count_includes_every_namespace_the_feed_default_does_not() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let mut other = registry_event(
+        "registry-alpha-other-namespace",
+        None,
+        "ResolverChanged",
+        64,
+        ALPHA_REGISTRY,
+        json!({ "node": "node-other", "resolver": V2_ADDRESS }),
+    );
+    other.namespace = "basenames".to_owned();
+    other.log_index = Some(3);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[other]).await?;
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    let feed = registry_payload(
+        &database,
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
+    )
+    .await?;
+    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
+    assert_eq!(overview["data"]["counts"]["events"], json!(6), "{overview}");
+    database.cleanup().await
+}
+
+// The late count checks its own publication: one that becomes unservable after the overview's
+// check refuses the request rather than counting nothing.
+#[tokio::test]
+async fn v2_get_registry_late_labels_count_refuses_an_unservable_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+            .execute(&pool)
+            .await?;
+        Ok(())
+    })
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    database.cleanup().await
+}
+
+/// At block 84, which no publication covers: the root registry points beta.eth at the alpha
+/// registry, which releases one.alpha.eth and two.alpha.eth and registers one.beta.eth and
+/// two.beta.eth. With `clear_alpha` the root also clears alpha.eth's pointer; without it
+/// alpha.eth keeps pointing at the registry.
+async fn seed_unpublished_alpha_rebind(database: &TestDatabase, clear_alpha: bool) -> Result<()> {
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(REGISTRY_CHAIN_ID, "0xregistry84", None, 84, 1_700_000_084)],
+    )
+    .await?;
+    for (name, base, arm) in [
+        ("beta.eth", 0xB000, "ens_v1"),
+        ("one.beta.eth", 0xB100, "ens_v2"),
+        ("two.beta.eth", 0xB110, "ens_v2"),
+    ] {
+        seed_family_identity_inputs(
+            &database.pool,
+            "ens",
+            name,
+            REGISTRY_CHAIN_ID,
+            84,
+            "0xregistry84",
+            Uuid::from_u128(base),
+            Uuid::from_u128(base + 1),
+            Uuid::from_u128(base + 2),
+            arm,
+        )
+        .await?;
+    }
+    let beta = registry_logical_name_id("beta.eth");
+    let mut beta_grant = family_event(
+        "registry-beta-grant",
+        Some(&beta),
+        Some(Uuid::from_u128(0xB000)),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        84,
+        0,
+        json!({"authority_kind":"registrar", "registrant":V2_ADDRESS, "expiry":1_900_000_000_i64}),
+    );
+    beta_grant.block_hash = Some("0xregistry84".into());
+    let mut events = vec![beta_grant];
+    let mut alpha_cleared = registry_event(
+        "registry-alpha-pointer-cleared",
+        Some(&registry_logical_name_id("alpha.eth")),
+        "SubregistryChanged",
+        84,
+        ROOT_REGISTRY,
+        json!({ "source_event": "SubregistryUpdated",
+                "subregistry": "0x0000000000000000000000000000000000000000" }),
+    );
+    alpha_cleared.log_index = Some(1);
+    let mut beta_pointer = registry_event(
+        "registry-beta-pointer",
+        Some(&beta),
+        "SubregistryChanged",
+        84,
+        ROOT_REGISTRY,
+        json!({ "source_event": "SubregistryUpdated", "subregistry": ALPHA_REGISTRY }),
+    );
+    beta_pointer.log_index = Some(2);
+    if clear_alpha {
+        events.push(alpha_cleared);
+    }
+    events.push(beta_pointer);
+    for (index, (name, resource)) in [("one.alpha.eth", 0xA100), ("two.alpha.eth", 0xA110)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut release = registry_event(
+            &format!("registry-{name}-released"),
+            Some(&registry_logical_name_id(name)),
+            "RegistrationReleased",
+            84,
+            ALPHA_REGISTRY,
+            json!({ "source_event": "ParentUpdated",
+                    "terminal_reason": "registry_name_binding_changed", "status": "released",
+                    "registry_contract_instance_id": Uuid::from_u128(0xA190) }),
+        );
+        release.resource_id = Some(Uuid::from_u128(resource));
+        release.log_index = Some(20 + i64::try_from(index)?);
+        events.push(release);
+    }
+    for (index, (name, resource)) in [("one.beta.eth", 0xB100), ("two.beta.eth", 0xB110)]
+        .into_iter()
+        .enumerate()
+    {
+        let log = 3 + 2 * i64::try_from(index)?;
+        let mut grant = registry_event(
+            &format!("registry-{name}-registered"),
+            Some(&registry_logical_name_id(name)),
+            "RegistrationGranted",
+            84,
+            ALPHA_REGISTRY,
+            json!({ "source_event": "LabelRegistered",
+                    "registry_contract_instance_id": Uuid::from_u128(0xA190),
+                    "status": "registered", "registrant": V2_ADDRESS,
+                    "expiry": 1_900_000_000_i64, "authority_kind": "ens_v2_registry" }),
+        );
+        grant.resource_id = Some(Uuid::from_u128(resource));
+        grant.log_index = Some(log + 1);
+        let mut transfer = grant.clone();
+        transfer.event_identity.push_str("-transfer");
+        transfer.event_kind = "TokenControlTransferred".into();
+        transfer.log_index = Some(log);
+        transfer.after_state = json!({"source_event": "Transfer", "to": V2_ADDRESS});
+        events.extend([grant, transfer]);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok(())
+}
+
+/// `three.alpha.eth`, registered by the alpha registry at block 84, which no publication covers.
+async fn seed_unpublished_alpha_label(database: &TestDatabase) -> Result<()> {
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(REGISTRY_CHAIN_ID, "0xregistry84", None, 84, 1_700_000_084)],
+    )
+    .await?;
+    seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        "three.alpha.eth",
+        REGISTRY_CHAIN_ID,
+        84,
+        "0xregistry84",
+        Uuid::from_u128(0xA130),
+        Uuid::from_u128(0xA131),
+        Uuid::from_u128(0xA132),
+        "ens_v2",
+    )
+    .await?;
+    insert_family_label_preimage(&database.pool, b"three").await?;
+    let three = registry_logical_name_id("three.alpha.eth");
+    let mut grant = registry_event(
+        "registry-three-registered",
+        Some(&three),
+        "RegistrationGranted",
+        84,
+        ALPHA_REGISTRY,
+        json!({ "source_event": "LabelRegistered", "registry_contract_instance_id": Uuid::from_u128(0xA190),
+                "status": "registered", "registrant": V2_ADDRESS, "expiry": 1_900_000_000_i64,
+                "authority_kind": "ens_v2_registry" }),
+    );
+    grant.resource_id = Some(Uuid::from_u128(0xA130));
+    grant.log_index = Some(1);
+    let mut transfer = grant.clone();
+    transfer.event_identity.push_str("-transfer");
+    transfer.event_kind = "TokenControlTransferred".into();
+    transfer.log_index = Some(0);
+    transfer.after_state = json!({"source_event": "Transfer", "to": V2_ADDRESS});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, transfer]).await?;
+    Ok(())
+}

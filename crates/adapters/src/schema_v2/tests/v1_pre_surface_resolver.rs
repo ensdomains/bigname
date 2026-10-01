@@ -432,7 +432,7 @@ fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {
     })
 }
 
-fn compact_prior(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
+pub(super) fn compact_prior(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
     let prior = events.iter().map(prior_event).collect::<Vec<_>>();
     let mut last_index = std::collections::HashMap::new();
     for (index, event) in prior.iter().enumerate() {
@@ -2467,9 +2467,9 @@ mod public_v2_records {
         assert!(interpret_test_batch(batch).is_err());
         // An event outside PublicResolverV2's node set is refused for the public role.
         for (name, fragment, signature) in [(
-            "AliasChanged",
-            "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-            "AliasChanged(bytes,bytes,bytes,bytes)",
+            "NamedResource",
+            "event NamedResource(uint256 indexed resource, bytes name)",
+            "NamedResource(uint256,bytes)",
         )] {
             let shared = manifest_with_events(
                 6191,

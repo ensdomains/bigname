@@ -23,8 +23,8 @@ pub(super) struct RequestSpec {
 // The resolver overview takes no `include`: it serves the mirror declaration and `bound_names`
 // only, and a request that sends `include` is `400 invalid_input`. Its variants are the
 // `bound_names` page sizes: the server default, one row (so a continuation exists to seed) and
-// the documented 200-row maximum. The former sections are the `/aliases`, `/links` and `/roles`
-// collections and `/v1/events?resolver=`, which this workload does not request yet.
+// the documented 200-row maximum. The former sections are the `/links` and `/roles` collections
+// and `/v1/events?resolver=`, which this workload does not request yet.
 const RESOLVER_PAGE_SIZE_VARIANTS: [Option<&str>; 3] = [None, Some("1"), Some("200")];
 
 pub(super) fn request_variants(

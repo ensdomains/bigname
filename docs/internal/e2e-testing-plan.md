@@ -94,7 +94,7 @@ These gaps are not hidden behind a green phase-runner scenario:
 
 - Public route status codes, envelopes, query validation, pagination, and
   lookup/explain output are covered outside this suite by API crate tests.
-- Wildcard, alias, CCIP-read, and Basenames L1 transport execution do not have
+- Wildcard, CCIP-read, and Basenames L1 transport execution do not have
   a deployable pinned end-to-end corpus in this suite.
 - ENSv2 reverse/primary intake, registry TTL changes, root/DNS registrar
   operations, wrapper upgrades, and indexed approval state have no current

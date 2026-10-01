@@ -23,8 +23,6 @@ pub struct ResolutionTopology {
     #[serde(default)]
     pub wildcard: Option<ResolutionWildcard>,
     #[serde(default)]
-    pub alias: Option<ResolutionAlias>,
-    #[serde(default)]
     pub version_boundaries: Option<ResolutionVersionBoundaries>,
     #[serde(default)]
     pub transport: Option<ResolutionTransport>,
@@ -74,14 +72,6 @@ pub struct ResolutionWildcard {
     pub source: Option<ResolutionNameReference>,
     #[serde(default)]
     pub matched_labels: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ResolutionAlias {
-    #[serde(default)]
-    pub final_target: Option<ResolutionNameReference>,
-    #[serde(default)]
-    pub hops: Option<Vec<ResolutionNameReference>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -155,7 +145,6 @@ impl ResolutionRoutePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResolutionRoute {
     Direct,
-    AliasOnly,
     WildcardDerived,
     BasenamesTransportDirect,
 }
@@ -179,7 +168,6 @@ impl ResolutionTopology {
             .ok_or_else(|| {
                 error("projected topology must include resolver_path[0].logical_name_id")
             })?;
-        let alias_present = self.alias_is_present()?;
         let wildcard_source = self.wildcard_source()?;
         let transport_is_null = self.transport_is_null();
 
@@ -198,11 +186,6 @@ impl ResolutionTopology {
                 if resolver_logical_name_id != logical_name_id {
                     return Err(error(
                         "projected Basenames topology must anchor resolver_path[0] to the request name",
-                    ));
-                }
-                if alias_present {
-                    return Err(error(
-                        "projected Basenames topology must keep alias detail empty",
                     ));
                 }
                 if wildcard_source.is_some() {
@@ -225,9 +208,9 @@ impl ResolutionTopology {
                 }
 
                 if let Some(wildcard_source) = wildcard_source {
-                    if alias_present || !self.subregistry_path_is_empty() {
+                    if !self.subregistry_path_is_empty() {
                         return Err(error(
-                            "projected wildcard-derived ENS topology must keep alias detail empty and subregistry_path empty",
+                            "projected wildcard-derived ENS topology must keep subregistry_path empty",
                         ));
                     }
                     if resolver_logical_name_id != wildcard_source {
@@ -243,31 +226,9 @@ impl ResolutionTopology {
                         "projected ENS topology must anchor resolver_path[0] to the request name",
                     ));
                 }
-                if alias_present {
-                    Ok(ResolutionRoute::AliasOnly)
-                } else {
-                    Ok(ResolutionRoute::Direct)
-                }
+                Ok(ResolutionRoute::Direct)
             }
         }
-    }
-
-    fn alias_is_present(&self) -> Result<bool, ResolutionTopologyError> {
-        let alias = self
-            .alias
-            .as_ref()
-            .ok_or_else(|| error("projected topology must include alias"))?;
-        let hops = alias
-            .hops
-            .as_ref()
-            .ok_or_else(|| error("projected topology alias must include hops"))?;
-        let final_target_present = alias.final_target.is_some();
-        if final_target_present == hops.is_empty() {
-            return Err(error(
-                "projected topology alias must set final_target and non-empty hops together",
-            ));
-        }
-        Ok(final_target_present)
     }
 
     fn wildcard_source(&self) -> Result<Option<&str>, ResolutionTopologyError> {

@@ -52,9 +52,8 @@ run without the count assertion:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 ```
 
-The default gate requires the exact library-test summary `95 passed; 0 failed;
-3 ignored; 0 filtered out`. CI shards 1 and 2 each require `32 passed; 0 failed; 1
-ignored; 65 filtered out`, and shard 3 requires `31 passed; 0 failed; 1
+The default gate requires the exact library-test summary `96 passed; 0 failed;
+3 ignored; 0 filtered out`. CI shards 1, 2 and 3 each require `32 passed; 0 failed; 1
 ignored; 66 filtered out`. The gate checks both Cargo's exit status and every
 summary count, so a prematurely successful process or an incorrectly filtered
 suite cannot satisfy CI.

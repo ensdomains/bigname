@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=55
+expected_predecessor_shape_proof_count=56
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -626,6 +626,12 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" baseline-first
+            # The retired resolver alias tables: present in the pre-7c shape, absent from the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261001100000_retire_resolver_alias_families.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261001100000_retire_resolver_alias_families.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261001100000_retire_resolver_alias_families.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261001110000_project_child_registration_registry_index.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261001110100_project_child_edge_candidate_child_index.sql" baseline-first
         done
@@ -748,6 +754,7 @@ for migration_file in \
     "$ROOT/migrations/20260930100000_read_only_lookup_guard.sql" \
     "$ROOT/migrations/20260930220000_project_hydration_work.sql" \
     "$ROOT/migrations/20260930230000_project_redo_execution_extent.sql" \
+    "$ROOT/migrations/20261001100000_retire_resolver_alias_families.sql" \
     "$ROOT/migrations/20261001110000_project_child_registration_registry_index.sql" \
     "$ROOT/migrations/20261001110100_project_child_edge_candidate_child_index.sql"
 do

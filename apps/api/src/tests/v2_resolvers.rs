@@ -64,7 +64,7 @@ fn v2_bound_names_cursor_rejects_wrong_chain_resolver_sort_or_snapshot() {
 fn v2_resolver_overview_serves_no_counts_or_sections() {
     // The stored summaries still carry every section and count; the overview serves none.
     let overview = crate::v2::build_resolver_overview(
-        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS),
+        resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS),
         1,
         empty_bound_names(),
     );
@@ -1129,10 +1129,6 @@ fn unsupported_resolver_current_row(chain_id: &str, resolver_address: &str) -> R
     let mut row = resolver_current_row(chain_id, resolver_address);
     row.declared_summary = json!({
         "bindings": {
-            "status": "unsupported",
-            "unsupported_reason": "resolver_family_pending",
-        },
-        "aliases": {
             "status": "unsupported",
             "unsupported_reason": "resolver_family_pending",
         },

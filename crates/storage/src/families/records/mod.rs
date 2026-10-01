@@ -50,8 +50,8 @@ pub use inventory::{
     load_family_record_inventory_for_snapshot, load_family_supported_record_inventory_for_snapshot,
 };
 pub use links::{
-    DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
-    load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
+    DEFAULT_RECORD_NODE, FamilyLink, FamilyWildcardSource, LinkSelection,
+    load_family_link_selection, load_family_wildcard_source,
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
 pub use primary::{load_family_primary_name_snapshot, load_family_primary_name_snapshots};

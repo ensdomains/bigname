@@ -301,8 +301,8 @@ chain even though no stored row changes. After the migrations, an existing deplo
 full-range Interpret redo and then the stamped Project redo it installs before the
 matching API serves, as the [handoff](#phase-runner-configuration) describes; until
 then its snapshot-selected reads answer `409 stale`. When this build ships together with the
-"Resolver set while registering a wrapped name" change, which rotates the hash too,
-that change's single redo pair discharges both rotations.
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+change, which rotates the hash too, that change's single redo pair discharges both rotations.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -994,8 +994,6 @@ GRANT SELECT ON TABLE
     bigname_phase.project_grant,
     bigname_phase.project_resource_admin_aggregate,
     bigname_phase.project_account_approval,
-    bigname_phase.project_name_alias,
-    bigname_phase.project_resolver_alias,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
     bigname_phase.project_reverse_tuple,
@@ -1537,3 +1535,58 @@ family run rebuilds the families anyway; the reset adds no second rebuild when
 the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
 redo and Project rebuild discharge this; collection cursors continue as
 described above.
+
+### Resolver set while registering a wrapped name
+
+The build that keeps a registry resolver write that follows `NameWrapped` in a
+wrapped registration transaction on the wrapper resource, instead of moving it
+to the registrar resource the NameWrapper holds
+([projections](projections.md#records-shared-through-resolver-links)), changes
+`crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. An existing deployment finishes the full-history Interpret redo
+and the Project redo it installs before the matching API serves, as for any
+rotation. Only that redo corrects names already registered this way: when the
+Project redo publishes, a wrapped name whose registration transaction set a
+resolver serves its latest resolver state rather than none, including any later
+change or clear. Before the release is recorded, confirm that both redos
+adopted the new hash, then compare Sepolia `taytems.eth` (registered at block
+4052977) with `source=verified` at the same published block: the resolver and
+the record values must agree.
+
+### Retired resolver alias path
+
+The build that stops interpreting the 2026-06-29 ENSv2 resolver `AliasChanged`
+event ([upstream](upstream.md)) removes it from the ENSv2 resolver adapter and
+the Project topology family, so it changes `crates/adapters/src` and hashed
+Project and storage sources and rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs `20261001100000_retire_resolver_alias_families.sql`, which drops
+`project_name_alias` and `project_resolver_alias`. No admitted manifest declares
+`AliasChanged`, so both are expected to be empty, but a database whose families
+were built from retained June-generation events can hold rows; the
+schema-migration refuses to drop a table that still has rows, so census any
+such rows and decide whether to retire them before retrying. It needs no
+manifest change and no historical ingest fetch.
+
+This is a coordinated release with the old API and phase-runner supervisor
+stopped, not a rolling migration: the old Project and API still read and write
+both tables, and the old API preflight requires them. Follow the
+[planned migration procedure](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary),
+steps 4 to 8: apply the schema-migration, then run the new build's
+full-history Interpret redo and the matching full-history Project redo on every
+configured chain whose hash rotates, then check that each chain's family
+publication carries the new hash and that `/v1/status` reports ready before
+serving. When it ships with the
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+release, that release's single Interpret redo and Project redo discharge this
+rotation too. An API upgraded alone refuses the old build's family publication
+with `409 stale`. After the drop, rolling back only the binary fails, because
+the old API preflight requires both tables: roll the schema back together with
+it, or run forward.
+
+No served value changes except the removed fields: the resolver overview no
+longer reports an `aliases` section, `/aliases` answers like any unknown route,
+lookup topology has no `alias` field, and the `set_alias` and
+`admin_set_alias` powers are no longer reported.

@@ -3,14 +3,11 @@
 //! - `load_family_link_selection`: the latest link per (resolver, node); the link at the name's
 //!   own node wins unless it is absent or a clear (record id `0`); then the link at the empty-name
 //!   node, the resolver's default record, serves, unless it is a clear too.
-//! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
-//!   or empty, never an older pointer.
 //! - `load_family_wildcard_source`: the latest non-zero pointer, with the latest pointer or
 //!   version event as its boundary.
 use anyhow::Result;
 use bigname_storage::families::topology::{
-    LinkSelection, load_family_alias_source_pointer, load_family_link_selection,
-    load_family_wildcard_source,
+    LinkSelection, load_family_link_selection, load_family_wildcard_source,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
@@ -197,34 +194,6 @@ async fn pointer(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-// The alias read takes the current pointer before rejecting a clear, so no older pointer is
-// exposed. This fixture covers null and zero; empty-address rejection remains implemented, and
-// the empty current pointer is exercised by crates/project/tests/family_reads_pointers.rs.
-#[tokio::test]
-async fn alias_pointer_rejects_null_and_zero() -> Result<()> {
-    with_database("family_alias_pointer", |pool| async move {
-        let cases = [
-            (Uuid::from_u128(1), Some(RESOLVER), Some(RESOLVER)),
-            (Uuid::from_u128(2), None, None),
-            (Uuid::from_u128(3), Some(ZERO), None),
-        ];
-        for (resource, current, _) in cases {
-            pointer(&pool, resource, current, Some(Some(OLDER))).await?;
-        }
-        for (resource, _, expected) in cases {
-            let read = load_family_alias_source_pointer(&pool, CHAIN, resource).await?;
-            assert_eq!(
-                read.as_ref()
-                    .map(|pointer| pointer.resolver_address.as_str()),
-                expected,
-                "{resource}"
-            );
-        }
-        Ok(())
-    })
-    .await
 }
 
 // The wildcard read keeps the latest non-zero pointer through a later zero clear, with the clear

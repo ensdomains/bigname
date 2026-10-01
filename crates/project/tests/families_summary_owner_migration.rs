@@ -78,7 +78,10 @@ fn reset_tables() -> Vec<String> {
 fn the_reset_literal_names_every_family_table() {
     assert_eq!(
         reset_literal(),
-        reset_tables().into_iter().collect::<BTreeSet<_>>()
+        reset_tables()
+            .into_iter()
+            .chain(support::RETIRED_FAMILY_TABLES.map(str::to_owned))
+            .collect::<BTreeSet<_>>()
     );
 }
 

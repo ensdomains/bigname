@@ -47,13 +47,16 @@ fn with(mut base: Value, fields: Value) -> Row {
     row(base)
 }
 
-fn alias(number: i64, log: i64, active: bool) -> Row {
+fn pointer(number: i64, log: i64, resolver: &str) -> Row {
     with(
         position(number, log),
-        json!({"logical_name_id": "ens:alias.eth", "active": active,
-               "to_logical_name_id": if active { json!("ens:target.eth") } else { Value::Null }}),
+        json!({"namespace": "ens", "node": "0xn0", "resolver_address": resolver,
+               "source_family": "ens_v1_registry_l1"}),
     )
 }
+
+const RESOLVER: &str = "0x00000000000000000000000000000000000000r1";
+const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
 fn link(number: i64, log: i64, node: &str, record_id: &str) -> Row {
     with(
@@ -163,8 +166,8 @@ fn key(table: &'static TableSpec, row: &Row) -> Row {
 #[tokio::test]
 async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte() -> Result<()> {
     let (database, pool) = database().await?;
-    let (name_alias, resolver_link, parent) = (
-        &tables::NAME_ALIAS,
+    let (registry_pointer, resolver_link, parent) = (
+        &tables::REGISTRY_POINTER,
         &tables::RESOLVER_LINK,
         &tables::PARENT_SUBREGISTRY,
     );
@@ -174,9 +177,9 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
         None,
         vec![
             (
-                name_alias,
-                key(name_alias, &alias(10, 1, true)),
-                Some(alias(10, 1, true)),
+                registry_pointer,
+                key(registry_pointer, &pointer(10, 1, RESOLVER)),
+                Some(pointer(10, 1, RESOLVER)),
             ),
             (
                 resolver_link,
@@ -194,7 +197,7 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     let before = snapshot(&pool).await?;
     let sequence = marker::read(&pool, CHAIN).await?.sequence;
 
-    // Block 11 clears the alias and the first link, creates a second link and deletes the
+    // Block 11 clears the pointer and the first link, creates a second link and deletes the
     // parent's subregistry row.
     publish(
         &pool,
@@ -202,9 +205,9 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
         Some(&at(10)),
         vec![
             (
-                name_alias,
-                key(name_alias, &alias(11, 1, false)),
-                Some(alias(11, 1, false)),
+                registry_pointer,
+                key(registry_pointer, &pointer(11, 1, ZERO)),
+                Some(pointer(11, 1, ZERO)),
             ),
             (
                 resolver_link,
