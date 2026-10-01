@@ -182,7 +182,12 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                         WHEN node_state.owner_getter_reason = 'graveyard' THEN NULL
                         ELSE lower(COALESCE(node_state.owner_getter, node_state.registry_owner,
                                             node_state.owner))
-                   END AS served_owner
+                   END AS served_owner,
+                   -- The node's registry generation (`registry::registry_generation`): only the
+                   -- 2017 registry has recorded an owner for it.
+                   COALESCE(node_state.has_old_record
+                            AND node_state.first_current_record_block IS NULL, FALSE)
+                       AS old_registry_only
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_child_edge_candidate edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
@@ -208,7 +213,14 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                    CASE WHEN edge.source_family = 'basenames_base_registry' THEN 'basenames'
                         ELSE 'ens_v1' END AS authority_arm,
                    edge.block_number, edge.transaction_index, edge.log_index, edge.event_identity,
-                   NULL::text AS registry_address
+                   NULL::text AS registry_address,
+                   -- The `authority` a child with no name row serves: the registry generation
+                   -- that owns its node, none for Basenames or a child the registry reads as
+                   -- ownerless.
+                   CASE WHEN edge.source_family = 'basenames_base_registry'
+                             OR COALESCE(edge.served_owner, '') IN ('', {ZERO_ADDRESS}) THEN NULL
+                        WHEN edge.old_registry_only THEN 'ens_v0'
+                        ELSE 'ens_v1' END AS registry_authority
             FROM v1_edges edge
             JOIN parent ON parent.logical_name_id = edge.edge_parent_logical_name_id
             JOIN clock ON clock.chain_id = parent.chain_id
@@ -238,7 +250,8 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                    GREATEST(registration.block_number, subregistry.block_number),
                    registration.transaction_index, registration.log_index,
                    registration.event_identity,
-                   lower(registration_event.raw_fact_ref ->> 'emitting_address')
+                   lower(registration_event.raw_fact_ref ->> 'emitting_address'),
+                   NULL::text
             FROM parent JOIN clock ON clock.chain_id = parent.chain_id
             JOIN bigname_phase.project_parent_subregistry subregistry
               ON subregistry.chain_id = parent.chain_id

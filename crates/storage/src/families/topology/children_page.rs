@@ -40,6 +40,8 @@ pub struct FamilyChildRow {
     pub labelhash: Option<String>,
     pub owner: Option<String>,
     pub registrant: Option<String>,
+    /// The `authority` the child serves when it has no name row (`ens_v1` or `ens_v0`).
+    pub registry_authority: Option<String>,
 }
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
@@ -306,7 +308,7 @@ pub(super) fn push_children<'a>(
             SELECT selected.parent_logical_name_id, selected.child_logical_name_id,
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
-                   {sort_timestamp} AS sort_timestamp
+                   selected.registry_authority, {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
             JOIN clock ON clock.chain_id = parent.chain_id
@@ -371,6 +373,7 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             labelhash: row.try_get("labelhash")?,
             owner: row.try_get("owner")?,
             registrant: row.try_get("registrant")?,
+            registry_authority: row.try_get("registry_authority")?,
         },
         row.try_get("sort_timestamp")?,
     )))

@@ -17,9 +17,9 @@ use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_filter::NameMatch;
 use super::support::normalize_inferred_route_name;
 use super::{
-    AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
-    RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode, encode,
-    load_subregistry_refs, name_record::name_registration_fields,
+    AddressNamesSort, Authority, CursorPayload, Envelope, Page, QueryParamAllowlist,
+    RegistrationStatus, RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode,
+    encode, load_subregistry_refs, name_record::name_registration_fields,
     validate_latest_collection_selectors,
 };
 
@@ -86,6 +86,8 @@ pub(crate) struct Subname {
     pub(crate) expires_at_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<Authority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,6 +317,14 @@ pub(crate) fn build_subname(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
+        // A child with no name row serves the authority of the registry that owns its node.
+        authority: match name_row {
+            Some(name) => Authority::from_provenance(&name.provenance),
+            None => row
+                .registry_authority
+                .as_deref()
+                .and_then(Authority::from_wire),
+        },
         subregistry: None,
         subname_count: include_counts.then(|| {
             summary

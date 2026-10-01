@@ -183,6 +183,7 @@ fn row(child: FamilyChildRow) -> ChildrenCurrentRow {
         labelhash: child.labelhash,
         owner: child.owner,
         registrant: child.registrant,
+        registry_authority: child.registry_authority,
         provenance: json!({}),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

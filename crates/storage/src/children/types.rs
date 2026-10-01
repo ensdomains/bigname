@@ -16,6 +16,9 @@ pub struct ChildrenCurrentRow {
     pub labelhash: Option<String>,
     pub owner: Option<String>,
     pub registrant: Option<String>,
+    /// The `authority` an ENSv1 registry child with no name row serves: the registry
+    /// generation that owns its node.
+    pub registry_authority: Option<String>,
     pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,

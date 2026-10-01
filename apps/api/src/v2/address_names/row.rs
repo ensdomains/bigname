@@ -20,7 +20,8 @@ pub(crate) fn build_address_name(
 
     // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
     // route serves for it (`subnames::build_subname` with no name row), its registry owner and
-    // the registration fields of no name row, on its registry-only resource.
+    // the registration fields of no name row, on its registry-only resource, with the authority of
+    // the registry that owns its node.
     AddressName {
         name: entry.normalized_name.clone(),
         display_name: entry.canonical_display_name.clone(),
@@ -35,7 +36,13 @@ pub(crate) fn build_address_name(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
-        authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
+        authority: match name_row {
+            Some(row) => Authority::from_provenance(&row.provenance),
+            None => entry
+                .served_authority
+                .as_deref()
+                .and_then(Authority::from_wire),
+        },
         migrated_at,
         relations: entry
             .relations

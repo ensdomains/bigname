@@ -105,6 +105,7 @@ pub(super) async fn compose_registry_child_rows(
                 "last_recomputed_at": last_recomputed_at,
                 "registry_child": true,
                 "served_owner": child.owner,
+                "served_authority": child.authority,
             })
         }));
     }

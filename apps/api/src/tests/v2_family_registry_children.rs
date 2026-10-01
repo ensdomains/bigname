@@ -15,6 +15,20 @@ async fn insert_registry_child(
     block: i64,
     resource: Uuid,
 ) -> Result<String> {
+    insert_registry_child_from(database, parent, label, owner, block, resource, "registry").await
+}
+
+/// [`insert_registry_child`] from the registry `emitter_role` names: `registry`, the current
+/// ENSv1 registry, or `registry_old`, the 2017 registry.
+async fn insert_registry_child_from(
+    database: &TestDatabase,
+    parent: &str,
+    label: &str,
+    owner: &str,
+    block: i64,
+    resource: Uuid,
+    emitter_role: &str,
+) -> Result<String> {
     upsert_test_resources(
         &database.pool,
         &[Resource {
@@ -52,7 +66,7 @@ async fn insert_registry_child(
             0,
             json!({"source_event": "NewOwner", "node": node, "child_node": child,
                    "labelhash": labelhash, "owner": owner, "owner_getter": owner,
-                   "emitter_role": "registry"}),
+                   "emitter_role": emitter_role}),
         )],
     )
     .await?;
@@ -230,7 +244,13 @@ async fn v2_registry_children_are_listed_for_their_registry_owner() -> Result<()
             .unwrap_or_else(|| panic!("{name} is a subname: {subnames:#?}"));
         assert_eq!(row["name"], json!(name), "{row:#}");
         assert_eq!(row["display_name"], json!(name), "{row:#}");
-        for field in ["name", "display_name", "owner", "registration_status"] {
+        for field in [
+            "name",
+            "display_name",
+            "owner",
+            "registration_status",
+            "authority",
+        ] {
             assert_eq!(
                 row[field], subname[field],
                 "{field}: {row:#} vs {subname:#}"
@@ -244,12 +264,13 @@ async fn v2_registry_children_are_listed_for_their_registry_owner() -> Result<()
         );
         assert_eq!(row["relations"], json!(["manager"]), "{row:#}");
         assert_eq!(row["is_primary"], json!(false), "{row:#}");
+        assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
+        assert_eq!(row["authority"], json!("ens_v1"), "{row:#}");
         for absent in [
             "registrant",
             "registered_at",
             "created_at",
             "expires_at",
-            "authority",
             "migrated_at",
         ] {
             assert!(row.get(absent).is_none(), "{absent}: {row:#}");
@@ -320,12 +341,19 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
         "sort=name&order=desc",
         "include=counts",
         "include=role_summary",
+        "authority=ens_v1",
+        "authority=ens_v0,ens_v1",
     ] {
         let rows = read(query.to_owned()).await?;
         assert!(listed(&rows, "known.alpha.eth"), "{query}: {rows:#?}");
         assert!(listed(&rows, &unknown_name), "{query}: {rows:#?}");
     }
-    for query in ["relation=owner", "authority=ens_v1", "is_migrated=true"] {
+    for query in [
+        "relation=owner",
+        "authority=ens_v0",
+        "authority=ens_v2",
+        "is_migrated=true",
+    ] {
         let rows = read(query.to_owned()).await?;
         assert!(!listed(&rows, "known.alpha.eth"), "{query}: {rows:#?}");
         assert!(!listed(&rows, &unknown_name), "{query}: {rows:#?}");
@@ -345,6 +373,104 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
     // `q` matches the served text.
     let rows = read("q=kno".to_owned()).await?;
     assert_eq!(names_of(&rows), ["known.alpha.eth"], "{rows:#?}");
+
+    database.cleanup().await
+}
+
+/// A registry child with no surface carries the authority of the registry that owns its node:
+/// `ens_v1` for one the current ENSv1 registry recorded, `ens_v0` for one only the 2017 registry
+/// did (docs/glossary.md#registry-generation). Address names and subnames serve the same value,
+/// and the address-names `authority` filter matches it.
+#[tokio::test]
+async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7a1_0000, "ens_v1").await?;
+    let current = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "current",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(0x7e1_0001),
+    )
+    .await?;
+    let old = insert_registry_child_from(
+        &database,
+        "alpha.eth",
+        "old",
+        RC_OWNER,
+        203,
+        Uuid::from_u128(0x7e1_0002),
+        "registry_old",
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[family_event(
+            "rc-authority-alpha-grant",
+            Some(&alpha),
+            Some(alpha_resource),
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            201,
+            0,
+            json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                   "expiry": 1_900_000_000i64}),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    let read = |query: &str| {
+        let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&page_size=10{query}");
+        let database = &database;
+        async move { anyhow::Ok(rows_of(&read_family_pages(database, &uri).await?)) }
+    };
+    let rows = read("").await?;
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    for (node, authority) in [(&current, "ens_v1"), (&old, "ens_v0")] {
+        let row = rows
+            .iter()
+            .find(|row| row["namehash"] == json!(node))
+            .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
+        assert_eq!(row["authority"], json!(authority), "{row:#}");
+        assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
+        assert_eq!(row["relations"], json!(["manager"]), "{row:#}");
+        let subname = subnames
+            .iter()
+            .find(|row| row["namehash"] == json!(node))
+            .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
+        assert_eq!(subname["authority"], row["authority"], "{subname:#}");
+    }
+    let alpha_row = rows
+        .iter()
+        .find(|row| row["name"] == json!("alpha.eth"))
+        .expect("alpha.eth is listed");
+    assert_eq!(alpha_row["authority"], json!("ens_v1"), "{alpha_row:#}");
+
+    let nodes = |rows: &[Value]| {
+        let mut nodes: Vec<String> = rows
+            .iter()
+            .filter(|row| row["name"] != json!("alpha.eth"))
+            .map(|row| row["namehash"].as_str().expect("namehash").to_owned())
+            .collect();
+        nodes.sort();
+        nodes
+    };
+    let mut both = vec![current.clone(), old.clone()];
+    both.sort();
+    for (query, expected) in [
+        ("&authority=ens_v1", vec![current.clone()]),
+        ("&authority=ens_v0", vec![old.clone()]),
+        ("&authority=ens_v0,ens_v1", both),
+        ("&authority=ens_v2", Vec::new()),
+    ] {
+        let filtered = read(query).await?;
+        assert_eq!(nodes(&filtered), expected, "{query}: {filtered:#?}");
+    }
 
     database.cleanup().await
 }
