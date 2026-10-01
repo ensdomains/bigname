@@ -209,3 +209,41 @@ fn official_sepolia_keeps_canonical_v1_dependencies_and_both_execution_arms() ->
     assert!(!workspace().join("manifests/sepolia-hackathon").exists());
     Ok(())
 }
+
+#[test]
+fn default_reverse_registrars_match_the_pinned_ens_v1_deployments() -> Result<()> {
+    for profile in ["mainnet", "sepolia"] {
+        let repository = load_repository(workspace().join("manifests").join(profile))?;
+        let manifest = &repository
+            .manifests()
+            .iter()
+            .find(|loaded| loaded.manifest.source_family == "ens_v1_reverse_l1")
+            .context("reverse family")?
+            .manifest;
+        let path = workspace().join(format!(
+            ".refs/ens_v1/deployments/{profile}/DefaultReverseRegistrar.json"
+        ));
+        let artifact: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let contract = manifest
+            .contracts
+            .iter()
+            .find(|contract| contract.role == "default_reverse_registrar")
+            .context("default reverse registrar")?;
+        assert_eq!(
+            normalize_address(&contract.address),
+            normalize_address(artifact["address"].as_str().context("address")?)
+        );
+        assert_eq!(
+            contract.start_block,
+            artifact["receipt"]["blockNumber"].as_u64()
+        );
+        let event = manifest
+            .abi
+            .events
+            .iter()
+            .find(|event| event.name == "NameForAddrChanged")
+            .context("NameForAddrChanged")?;
+        assert_eq!(event.emitter_roles, ["default_reverse_registrar"]);
+    }
+    Ok(())
+}

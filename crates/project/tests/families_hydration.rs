@@ -536,3 +536,77 @@ async fn another_chains_shared_tuple_write_and_undo_update_mainnet_work() -> Res
     );
     fixture.cleanup().await
 }
+
+// A hydrated name is tested by its byte length for the `default.reverse` fallback, as upstream
+// tests the resolver's return: whitespace stops it, an empty answer falls back.
+// (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
+#[tokio::test]
+async fn hydrated_whitespace_stops_the_default_reverse_fallback() -> Result<()> {
+    let fixture = Fixture::new("family_reverse_hydration_default", 3).await?;
+    fixture.lineage(CHAIN, 3).await?;
+    let rpc = rpc::Rpc::new().await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    seed(&fixture, 1, 1).await?;
+    let default_node = {
+        let labels = [
+            format!("{:040x}", 1),
+            "default".to_owned(),
+            "reverse".to_owned(),
+        ];
+        let hash = labels
+            .iter()
+            .rev()
+            .fold(alloy_primitives::B256::ZERO, |parent, label| {
+                let label = alloy_primitives::keccak256(label.as_bytes());
+                alloy_primitives::keccak256([parent.as_slice(), label.as_slice()].concat())
+            });
+        format!("{hash:#x}")
+    };
+    let source = json!({"address": ADDRESS, "namespace": "ens", "coin_type": "2147483648",
+                        "reverse_node": default_node});
+    for (identity, log, kind, after) in [
+        (
+            "default:1:0",
+            10,
+            "ReverseChanged",
+            json!({"source_event": "NameForAddrChanged",
+            "address": ADDRESS, "coin_type": "2147483648", "namespace": "ens",
+            "reverse_node": default_node}),
+        ),
+        (
+            "default:1:1",
+            11,
+            "RecordChanged",
+            json!({"source_event": "NameForAddrChanged",
+            "address": ADDRESS, "node": default_node, "record_key": "name",
+            "record_family": "name", "raw_name": "evers.eth", "primary_claim_source": source}),
+        ),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 1, log, kind, "ens_v1_reverse_l1")
+                    .on(CHAIN)
+                    .after(after),
+            )
+            .await?;
+    }
+    rpc.answer(1, Some(" "));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let hydrated: Option<String> = sqlx::query_scalar(
+        "SELECT hydrated_name FROM project_reverse_tuple WHERE address = $1 AND coin_type = '60'",
+    )
+    .bind(ADDRESS)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(hydrated.as_deref(), Some(" "));
+    let served = claim(&fixture).await?;
+    assert_eq!(served.row.claim_status.as_str(), "not_found");
+    assert_eq!(served.row.claim_provenance["reverse_node"], node(1));
+
+    rpc.answer(2, Some(""));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    let served = claim(&fixture).await?;
+    assert_eq!(served.row.raw_claim_name.as_deref(), Some("evers.eth"));
+    assert_eq!(served.row.claim_provenance["reverse_node"], default_node);
+    fixture.cleanup().await
+}

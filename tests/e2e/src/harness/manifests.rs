@@ -416,3 +416,74 @@ fn patch_targets(doc: &mut Value, local_targets: &HashMap<&str, (Address, u64)>)
 fn placeholder_address(label: &str) -> Address {
     Address::from_slice(&keccak256(format!("bigname-e2e-placeholder:{label}"))[12..])
 }
+
+/// The shipped Mainnet `ens_v1_reverse_l1` manifest retargeted at a local Sepolia deployment:
+/// each contract role is bound to the deployment that plays it, from block zero, and an
+/// unrecognised role fails rather than inheriting another contract's address. The
+/// `default.reverse` registrar keeps its own address, so its `NameForAddrChanged` logs and the
+/// verified `nameForAddr` call reach the right contract.
+pub fn local_sepolia_reverse_manifest(
+    repo: &Path,
+    reverse_registrar: Address,
+    default_reverse_registrar: Address,
+) -> Result<Value> {
+    let mut reverse: Value = std::fs::read_to_string(
+        repo.join("manifests/mainnet/ethereum/ens/ens_v1_reverse_l1/v1.toml"),
+    )?
+    .parse()?;
+    reverse["chain"] = Value::String("ethereum-sepolia".into());
+    for contract in reverse["contracts"]
+        .as_array_mut()
+        .context("reverse contracts")?
+    {
+        let address = match contract["role"].as_str() {
+            Some("reverse_registrar") => reverse_registrar,
+            Some("default_reverse_registrar") => default_reverse_registrar,
+            role => anyhow::bail!("unhandled reverse contract role {role:?}"),
+        };
+        contract["address"] = Value::String(format!("{address:#x}"));
+        contract["start_block"] = Value::Integer(0);
+    }
+    Ok(reverse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_sepolia_reverse_manifest_binds_each_registrar_to_its_own_deployment() -> Result<()> {
+        let reverse_registrar = Address::repeat_byte(0x11);
+        let default_reverse_registrar = Address::repeat_byte(0x22);
+        let manifest = local_sepolia_reverse_manifest(
+            &crate::harness::repo_root(),
+            reverse_registrar,
+            default_reverse_registrar,
+        )?;
+        let contracts = manifest["contracts"].as_array().context("contracts")?;
+        let bound = |role: &str| {
+            contracts
+                .iter()
+                .find(|contract| contract["role"].as_str() == Some(role))
+                .and_then(|contract| contract["address"].as_str())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            bound("reverse_registrar"),
+            Some(format!("{reverse_registrar:#x}"))
+        );
+        assert_eq!(
+            bound("default_reverse_registrar"),
+            Some(format!("{default_reverse_registrar:#x}"))
+        );
+        // Every declared event names roles the manifest binds.
+        for event in manifest["abi"]["events"].as_array().context("events")? {
+            for role in event["emitter_roles"].as_array().context("emitter roles")? {
+                let role = role.as_str().context("role")?;
+                assert!(bound(role).is_some(), "event role {role} is not bound");
+            }
+        }
+        assert_eq!(manifest["chain"].as_str(), Some("ethereum-sepolia"));
+        Ok(())
+    }
+}

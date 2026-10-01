@@ -1,6 +1,6 @@
 # Interpreter fixtures
 
-`raw-events.json` contains 20 bounded raw-log cases. Each case runs in a new
+`raw-events.json` contains 21 bounded raw-log cases. Each case runs in a new
 migrated database so its block, transaction, and log positions remain
 unchanged. `expected-outputs.json` records every
 [normalized event](../../../../../docs/glossary.md) and every row in the

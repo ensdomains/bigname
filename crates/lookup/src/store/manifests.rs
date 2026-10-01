@@ -32,6 +32,20 @@ pub(super) async fn load_entrypoint(
     transaction: &mut Transaction<'_, Postgres>,
     query: EntrypointQuery<'_>,
 ) -> Result<ManifestEntry> {
+    let (source_family, role) = (query.source_family, query.role);
+    load_optional_entrypoint(transaction, query)
+        .await?
+        .ok_or_else(|| {
+            LookupError::unsupported(format!(
+                "no declared {source_family}/{role} lookup entrypoint is available"
+            ))
+        })
+}
+
+pub(super) async fn load_optional_entrypoint(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: EntrypointQuery<'_>,
+) -> Result<Option<ManifestEntry>> {
     sqlx::query_as::<_, ManifestEntry>(
         r#"
         WITH authoritative_manifest AS (
@@ -93,11 +107,5 @@ pub(super) async fn load_entrypoint(
     .bind(query.require_resolution_capability)
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(database("load lookup entrypoint manifest"))?
-    .ok_or_else(|| {
-        LookupError::unsupported(format!(
-            "no declared {}/{} lookup entrypoint is available",
-            query.source_family, query.role
-        ))
-    })
+    .map_err(database("load lookup entrypoint manifest"))
 }

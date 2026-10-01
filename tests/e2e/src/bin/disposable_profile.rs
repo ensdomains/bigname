@@ -144,19 +144,15 @@ fn complete_disposable_profile(
 
     let reverse_dir = ens.join("ens_v1_reverse_l1");
     std::fs::create_dir_all(&reverse_dir)?;
-    let mut reverse: T = std::fs::read_to_string(
-        repo.join("manifests/mainnet/ethereum/ens/ens_v1_reverse_l1/v1.toml"),
-    )?
-    .parse()?;
-    reverse["chain"] = T::String("ethereum-sepolia".into());
-    for contract in reverse["contracts"]
-        .as_array_mut()
-        .context("reverse contracts")?
-    {
-        contract["address"] = T::String(address("ReverseRegistrar")?);
-        contract["start_block"] = T::Integer(0);
-    }
-    // DefaultReverseRegistrar has a different ABI and is not aliased to ReverseClaimed.
+    // The ens_v1 deploy stack deploys DefaultReverseRegistrar as a dependency of the
+    // ETHRegistrarController this profile already binds, so both registrars are present.
+    // (upstream: .refs/ens_v1/deploy/reverseregistrar/01_deploy_default_reverse_registrar.ts:L7-L10 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deploy/ethregistrar/04_deploy_eth_registrar_controller.ts:L129-L135 @ ens_v1@91c966f)
+    let reverse = manifests::local_sepolia_reverse_manifest(
+        repo,
+        address("ReverseRegistrar")?.parse()?,
+        address("DefaultReverseRegistrar")?.parse()?,
+    )?;
     std::fs::write(reverse_dir.join("v1.toml"), toml::to_string(&reverse)?)?;
 
     for entry in std::fs::read_dir(ens.join("ens_v2_resolver_l1"))? {

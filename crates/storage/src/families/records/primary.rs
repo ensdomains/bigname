@@ -9,6 +9,9 @@
 //! current claim and its attempt block remains canonical. Replay can preserve hydration
 //! columns while changing a pointer, so attempt lineage alone does not establish that match.
 //!
+//! A coin type 60 read whose `addr.reverse` claim has no nonzero resolver or no name serves the
+//! namespace's `default.reverse` claim (coin type 2147483648) when that tuple exists.
+//!
 //! The public tuple has no chain; the stored family tuple has one. A namespace's tuples live on one
 //! chain, which the read takes from the family rows.
 use std::collections::BTreeMap;
@@ -17,13 +20,17 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
 
-use super::reverse::load_family_reverse_claim_on;
+use super::reverse::{load_family_reverse_claim_on, node_resolver};
 use crate::{
     PrimaryNameClaimStatus, PrimaryNameCurrentSnapshot,
     families::name::{FamilyPublication, servable_publication},
 };
 
 const HYDRATION: &str = "canonical_head_multicall_hydration";
+/// ENSIP-19 `default.reverse` coin type.
+/// (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
+const DEFAULT_COIN_TYPE: &str = "2147483648";
+const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 /// `load_primary_name_current_snapshot` over the families.
 pub async fn load_family_primary_name_snapshot(
@@ -64,43 +71,137 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
     let address = address.to_ascii_lowercase();
     let mut publications: BTreeMap<String, FamilyPublication> = BTreeMap::new();
     for (namespace, coin_type) in keys {
-        let chains: Vec<String> = sqlx::query_scalar(
-            "/* storage:families.records.primary_tuple_chains */
-             SELECT chain_id FROM bigname_phase.project_reverse_tuple
-             WHERE address = $1 AND namespace = $2 AND coin_type = $3
-               AND reverse_position IS NOT NULL
-               AND ($4::text[] IS NULL OR chain_id = ANY($4))
-             ORDER BY chain_id",
+        let loaded = load_tuple(
+            conn,
+            &mut publications,
+            &address,
+            namespace,
+            coin_type,
+            selected_chains,
         )
-        .bind(&address)
-        .bind(namespace)
-        .bind(coin_type)
-        .bind(selected_chains)
-        .fetch_all(&mut *conn)
-        .await
-        .context("failed to find the chain of a reverse tuple")?;
-        let Some(chain_id) = chains.first() else {
-            // The caller's namespace publication fence covers an absent tuple. Requiring
-            // unrelated chains here would reject a healthy, explicitly scoped request.
-            continue;
-        };
-        if !publications.contains_key(chain_id) {
-            let publication = servable_publication(&mut *conn, chain_id).await?;
-            publications.insert(chain_id.clone(), publication);
+        .await?;
+        // ENS's ETH reverse resolver: the `addr.reverse` name when the reverse node has a nonzero
+        // resolver whose name has any bytes, else the `default.reverse` name. The test is the
+        // stored value's length, not its classification: a whitespace name stops the fallback.
+        // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
+        let addr_tuple = loaded.is_some();
+        let addr_has_resolver = loaded
+            .as_ref()
+            .is_some_and(|(claim, _)| has_resolver(claim));
+        let names_addr_reverse =
+            addr_has_resolver && loaded.as_ref().is_some_and(|(_, value_empty)| !value_empty);
+        let mut claim = loaded.map(|(claim, _)| claim);
+        if coin_type == "60" && !names_addr_reverse {
+            let fallback = load_tuple(
+                conn,
+                &mut publications,
+                &address,
+                namespace,
+                DEFAULT_COIN_TYPE,
+                selected_chains,
+            )
+            .await?;
+            if let Some((mut fallback, _)) = fallback {
+                fallback.row.coin_type = coin_type.clone();
+                // Without a projected tuple (a node claimed through a registrar no manifest
+                // admits), the registry projection still holds the node's resolver.
+                fallback.default_past_resolver = if addr_tuple {
+                    addr_has_resolver
+                } else {
+                    addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
+                };
+                claim = Some(fallback);
+            }
         }
-        let publication = &publications[chain_id];
-        let Some(claim) =
-            load_family_reverse_claim_on(&mut *conn, chain_id, &address, namespace, coin_type)
-                .await?
-        else {
-            continue;
-        };
-        let mut claim = claim.snapshot;
-        stamp(&mut claim, publication);
-        hydrate(&mut *conn, chain_id, &mut claim).await?;
-        out.insert((namespace.clone(), coin_type.clone()), claim);
+        if let Some(claim) = claim {
+            out.insert((namespace.clone(), coin_type.clone()), claim);
+        }
     }
     Ok(out)
+}
+
+/// The claim of one stored tuple, stamped and hydrated, and whether its stored or hydrated name
+/// value is empty; `None` when the tuple is absent.
+async fn load_tuple(
+    conn: &mut PgConnection,
+    publications: &mut BTreeMap<String, FamilyPublication>,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+    selected_chains: Option<&[String]>,
+) -> Result<Option<(PrimaryNameCurrentSnapshot, bool)>> {
+    let chains: Vec<String> = sqlx::query_scalar(
+        "/* storage:families.records.primary_tuple_chains */
+         SELECT chain_id FROM bigname_phase.project_reverse_tuple
+         WHERE address = $1 AND namespace = $2 AND coin_type = $3
+           AND reverse_position IS NOT NULL
+           AND ($4::text[] IS NULL OR chain_id = ANY($4))
+         ORDER BY chain_id",
+    )
+    .bind(address)
+    .bind(namespace)
+    .bind(coin_type)
+    .bind(selected_chains)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to find the chain of a reverse tuple")?;
+    let Some(chain_id) = chains.first() else {
+        // The caller's namespace publication fence covers an absent tuple. Requiring
+        // unrelated chains here would reject a healthy, explicitly scoped request.
+        return Ok(None);
+    };
+    if !publications.contains_key(chain_id) {
+        let publication = servable_publication(&mut *conn, chain_id).await?;
+        publications.insert(chain_id.clone(), publication);
+    }
+    let Some(claim) =
+        load_family_reverse_claim_on(&mut *conn, chain_id, address, namespace, coin_type).await?
+    else {
+        return Ok(None);
+    };
+    let mut value_empty = claim.claim_value_empty;
+    let mut claim = claim.snapshot;
+    stamp(&mut claim, &publications[chain_id]);
+    if let Some(hydrated_empty) = hydrate(&mut *conn, chain_id, &mut claim).await? {
+        value_empty = hydrated_empty;
+    }
+    Ok(Some((claim, value_empty)))
+}
+
+/// Whether the projected registry or resource pointer of `<address>.addr.reverse`, on the chain of
+/// `claim`, names a nonzero resolver.
+async fn addr_reverse_has_resolver(
+    conn: &mut PgConnection,
+    claim: &PrimaryNameCurrentSnapshot,
+    address: &str,
+    namespace: &str,
+) -> Result<bool> {
+    let Some(chain_id) = claim
+        .row
+        .claim_provenance
+        .get("chain_id")
+        .and_then(Value::as_str)
+    else {
+        return Ok(false);
+    };
+    let label = address.strip_prefix("0x").unwrap_or(address);
+    let node = format!(
+        "{:#x}",
+        crate::ens_namehash_label_bytes(&[label.as_bytes(), b"addr", b"reverse"])
+    );
+    Ok(node_resolver(conn, chain_id, namespace, &node)
+        .await?
+        .is_some_and(|resolver| !resolver.is_empty() && resolver != ZERO_ADDRESS))
+}
+
+/// Whether the claim's reverse node has a nonzero resolver.
+fn has_resolver(claim: &PrimaryNameCurrentSnapshot) -> bool {
+    claim
+        .row
+        .claim_provenance
+        .get("resolver_address")
+        .and_then(Value::as_str)
+        .is_some_and(|resolver| !resolver.is_empty() && resolver != ZERO_ADDRESS)
 }
 
 /// The publication target the served claim provenance carries (and its read filter checks).
@@ -114,12 +215,13 @@ fn stamp(claim: &mut PrimaryNameCurrentSnapshot, publication: &FamilyPublication
     }
 }
 
-/// Overlay the tuple's hydrated name when its attempt block is on canonical lineage.
+/// Overlay the tuple's hydrated name when its attempt block is on canonical lineage. Returns
+/// whether the hydrated name is empty when an overlay applies.
 async fn hydrate(
     conn: &mut PgConnection,
     chain_id: &str,
     claim: &mut PrimaryNameCurrentSnapshot,
-) -> Result<()> {
+) -> Result<Option<bool>> {
     let row = sqlx::query(
         "/* storage:families.records.primary_hydration */
          SELECT tuple.hydrated_name, tuple.attempt_block, tuple.attempt_hash, tuple.baseline
@@ -159,9 +261,10 @@ async fn hydrate(
     .await
     .context("failed to load the reverse tuple hydration")?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(None);
     };
     let name: String = row.try_get("hydrated_name")?;
+    let name_empty = name.is_empty();
     let block: i64 = row.try_get("attempt_block")?;
     let hash: String = row.try_get("attempt_hash")?;
     let prepared_baseline: Value = row.try_get("baseline")?;
@@ -202,5 +305,5 @@ async fn hydrate(
             }),
         );
     }
-    Ok(())
+    Ok(Some(name_empty))
 }

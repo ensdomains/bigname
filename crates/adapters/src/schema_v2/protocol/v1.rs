@@ -84,6 +84,17 @@ fn is_registry_ownership_event(name: &str) -> bool {
     matches!(name, "NewOwner" | "Transfer")
 }
 
+pub(super) fn reverse_abi(source_family: &str, signature: &str) -> bool {
+    reverse::supports(source_family, signature)
+}
+
+pub(super) fn validate_reverse_roles(
+    source: &crate::schema_v2::manifest::ManifestSource,
+    event: &crate::schema_v2::manifest::ManifestEvent,
+) -> anyhow::Result<()> {
+    reverse::validate_roles(source, event)
+}
+
 pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
