@@ -379,8 +379,13 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
 
 /// A registry child with no surface carries the authority of the registry that owns its node:
 /// `ens_v1` for one the current ENSv1 registry recorded, `ens_v0` for one only the 2017 registry
-/// did (docs/glossary.md#registry-generation). Address names and subnames serve the same value,
-/// and the address-names `authority` filter matches it.
+/// did (docs/glossary.md#registry-generation): the current registry answers `owner(node)` and
+/// `resolver(node)` from the 2017 registry while its own `recordExists(node)`, a nonzero stored
+/// owner, is false
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L35 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f).
+/// Address names and subnames serve the same value, and the address-names `authority` filter
+/// matches it.
 #[tokio::test]
 async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

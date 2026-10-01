@@ -251,7 +251,11 @@ pub(super) fn push_selected<'a>(
                                             node_state.owner))
                    END AS served_owner,
                    -- The node's registry generation (`registry::registry_generation`): only the
-                   -- 2017 registry has recorded an owner for it.
+                   -- 2017 registry has recorded an owner for it. The current registry answers
+                   -- owner(node) and resolver(node) from the 2017 registry while its own
+                   -- recordExists(node), a nonzero stored owner, is false
+                   -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L35 @ ens_v1@91c966f)
+                   -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f).
                    COALESCE(node_state.has_old_record
                             AND node_state.first_current_record_block IS NULL, FALSE)
                        AS old_registry_only
