@@ -484,6 +484,7 @@ include!("tests/v2_list_cursor.rs");
 include!("tests/v2_collection_cursor_completion.rs");
 include!("tests/v2_family_children.rs");
 include!("tests/v2_family_registry_children.rs");
+include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_family_name_publication_changes.rs");
 include!("tests/v2_family_name_recompute.rs");
 include!("tests/v2_family_resolver_history.rs");

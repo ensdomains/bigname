@@ -706,7 +706,7 @@ collection route carry neither header.
 <!-- openapi:parameters GET /v1/names/{name} -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
@@ -1051,7 +1051,7 @@ its value map:
 <!-- openapi:parameters GET /v1/names/{name}/records -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
@@ -1586,7 +1586,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 <!-- openapi:parameters GET /v1/names/{name}/subnames -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
@@ -1670,14 +1670,19 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   encoded by PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f`
   as a backslash and three octal digits, a backslash doubled, and every other
   byte verbatim. The rule runs over the whole string, so a non-ASCII parent
-  portion is octal-escaped along with the label. Neither form is reserved syntax
-  — a label really spelled `[<64 hex digits>].<parent>`, or really spelled like
-  escape output such as `\377bad`, produces the same string — so distinguish
-  rows by `namehash` and `labelhash` rather than by parsing the served text.
+  portion is octal-escaped along with the label. The placeholder label
+  `[<64 hex digits>]` is reserved syntax. bigname's normalizer rejects `[` and
+  `]` ([name inputs](api-v1.md#name-inputs)), so a real label spelled that way is
+  itself served as the placeholder of its own
+  labelhash and never as its text. Clients can therefore recognize the
+  placeholder from the served text. The escape form is not reserved: a label
+  really spelled like escape output, such as `\377bad`, produces the same
+  string. `namehash` and `labelhash` remain the stable identifiers of a row.
   Both forms come from ENSv1 and Basenames registry edges; an ENSv2 child
-  bigname cannot name is absent from the page instead. Neither form is
-  addressable, and neither may be fed
-  back into a name-shaped route. Resolver records are not included here;
+  bigname cannot name is absent from the page instead. The placeholder label
+  is a [name input](api-v1.md#name-inputs) for its node. That node has no name
+  row while it has no name surface, so name routes answer it `404 not_found`.
+  The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
   `include=counts` adds `subname_count`, the row's direct subname count.
@@ -2196,7 +2201,7 @@ the controller a name's `manager` or `role_holder`.
 <!-- openapi:parameters GET /v1/names/{name}/history -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
@@ -2659,7 +2664,8 @@ introduces it rebuilds Project from full history before serving the option; see
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, normalized `name` when supplied, and an explicitly requested public
+  `address`, the node a `name` names when supplied (so equivalent
+  [name inputs](api-v1.md#name-inputs) share a cursor), and an explicitly requested public
   `registration_id`. It also binds the namespace when explicit or implied by a
   name (and namespace absence for an address-only request, matching its
   all-namespace result set), `include=lineage`, the fixed sort and the last
@@ -3677,7 +3683,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
 | `namespace` | query | string | no | none | Inferred from name when supplied; defaults to ens only when neither name nor resolver is supplied. A bare resolver selector spans namespaces. |
-| `name` | query | string | no | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | query | string | no | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `address` | query | string | no | none | EVM address in hexadecimal form. |
 | `resolver` | query | string | no | none | Resolver selector in numeric-chain-id:hex-address form; matches emitted events and current/previous resolver-pointer changes. |
 | `contract_address` | query | string | no | none | Case-insensitive emitting contract address; combines with resolver and other filters. |
@@ -4544,7 +4550,8 @@ so there is no persisted artifact to explain. See
 - Request parameters: query `namespace`, `name`, `address`,
   `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
-  rejected by the shared latest-state collection rule. When `name` is present
+  rejected by the shared latest-state collection rule. `name` is a
+  [name input](api-v1.md#name-inputs). When `name` is present
   and `namespace` is omitted, namespace is inferred from the name; `namespace`
   defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of raw normalized-event rows in

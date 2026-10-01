@@ -393,8 +393,9 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
 <p>Name routes infer the namespace from the name and echo it in the response. Pass <code>namespace</code> to override the inference. Address routes default to <code>ens</code>. A namespace the deployment does not serve answers 404. <a href="#namespace">namespaces(2)</a> reports what each namespace supports.</p>` },
     { h: 'Names', id: 'names', html: `<ul>
 <li>Names are ENSIP-15 normalized before lookup. A path name that cannot be normalized answers 400. A name in a lookup batch that cannot be normalized reports <code>invalid_name</code> in its own row.</li>
+<li>A label written as <code>[</code>, 64 lowercase hex digits, <code>]</code> is a labelhash. It addresses that node: the response serves the node's name, with the real label when bigname knows it. A node with no name row answers 404, including a registry child that is listed on its parent's subnames page but has no name surface. A bracketed <code>eth</code> or <code>base</code> label is read as that label when inferring the namespace.</li>
 <li>Responses carry <code>name</code> in normalized form and <code>display_name</code> for display.</li>
-<li>Only <a href="#subnames">names-subnames(2)</a> emits strings that are not names, for children whose label is unknown. Identify rows by <code>namehash</code> and <code>labelhash</code> rather than by parsing text.</li>
+<li>Only <a href="#subnames">names-subnames(2)</a> emits strings that are not names, for children whose label is unknown. The bracketed labelhash form is reserved and can be recognized from the text. <code>namehash</code> and <code>labelhash</code> remain the stable identifiers.</li>
 </ul>` },
     { h: 'Addresses, chains, and coin types', id: 'addresses', html: `<ul>
 <li>Addresses are EVM hex addresses. A malformed address answers 400.</li>
@@ -471,7 +472,7 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
 </script>
 <script>
 const P = {
-  name: { name: 'name', in: 'path', required: true, desc: 'The name, ENSIP-15 normalized before lookup. The namespace is inferred from it.' },
+  name: { name: 'name', in: 'path', required: true, desc: 'The name, ENSIP-15 normalized before lookup. A label may be its bracketed labelhash, <code>[&lt;64 lowercase hex digits&gt;]</code>. The namespace is inferred from it.' },
   address: { name: 'address', in: 'path', required: true, desc: 'An EVM hex address.' },
   namespace: { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], desc: 'Overrides the inferred namespace. The response echoes whichever was used.' },
   namespaceEns: { name: 'namespace', in: 'query', type: 'enum', values: ['ens', 'basenames'], default: 'ens', desc: 'A namespace this deployment does not serve answers 404.' },
@@ -674,7 +675,7 @@ const ROUTES = [
   },
   outcomes: [['200', 'The children, or an empty page.'], ['400 invalid_input', 'The name is invalid, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The parent is unknown.']],
   notes: [
-    { h: 'Children whose label is unknown', html: `<p>When the label is unknown or cannot be normalized, <code>name</code> and <code>display_name</code> take the form <code>[&lt;labelhash without 0x&gt;].&lt;parent&gt;</code>. When the stored label is invalid UTF-8 or contains NUL, the whole name is given in PostgreSQL <code>escape</code> encoding. Neither form is reserved, so identify rows by <code>namehash</code> and <code>labelhash</code> and do not feed these strings into name routes. This applies to ENSv1 and Basenames only; an unnamed ENSv2 child is omitted.</p>` },
+    { h: 'Children whose label is unknown', html: `<p>When the label is unknown or cannot be normalized, <code>name</code> and <code>display_name</code> take the form <code>[&lt;labelhash without 0x&gt;].&lt;parent&gt;</code>. When the stored label is invalid UTF-8 or contains NUL, the whole name is given in PostgreSQL <code>escape</code> encoding. The bracketed form is reserved: a real label spelled that way fails normalization and is itself shown as its own labelhash. Name routes accept it, but such a child has no name row, so they answer 404. The escape form is not reserved and is never accepted as a name. <code>namehash</code> and <code>labelhash</code> remain the stable identifiers. This applies to ENSv1 and Basenames only; an unnamed ENSv2 child is omitted.</p>` },
     { h: 'Children after a migration', html: `<p>A child appears once, under its own selected authority. A released ENSv2 child is served as released under ENSv2 and is not listed on either arm; an ENSv1 relation is listed only when the child's own authority selects ENSv1 and that relation is still reachable; only a child with no selected authority at all whose ENSv1 and ENSv2 relations disagree is omitted. After a parent has migrated from ENSv1 to ENSv2, its ENSv1 children remain only along the <code>locked_wrapped</code> and <code>locked_child</code> paths, and only while they are migratable: no entry history in the migration registry, <code>PARENT_CANNOT_CONTROL</code> set, <code>IS_DOT_ETH</code> clear, and a non-zero ENSv1 owner.</p>` },
   ],
   related: ['name', 'history'],

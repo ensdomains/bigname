@@ -108,8 +108,7 @@ pub(crate) async fn get_subnames(
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let include_counts = subnames_include_counts(&params.include)?;
 
-    let logical_name_id =
-        bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    let logical_name_id = normalized.logical_name_id(&namespace);
     let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         params.cursor.as_deref(),

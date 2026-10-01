@@ -454,7 +454,7 @@ pub(crate) async fn load_name_current_for_selected_snapshot(
     name: &str,
     selected_snapshot: &SelectedSnapshot,
 ) -> ApiResult<NameCurrentRow> {
-    let logical_name_id = bigname_storage::logical_name_id_for_name(namespace, name);
+    let logical_name_id = super::route_logical_name_id(namespace, name);
     match load_name_current_for_snapshot(pool, &logical_name_id, &selected_snapshot.chain_positions)
         .await
         .map_err(snapshot_selection_api_error)?

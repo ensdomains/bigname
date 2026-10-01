@@ -1135,7 +1135,7 @@
             "name": "name",
             "in": "query",
             "required": false,
-            "description": "ENS name; name-shaped paths normalize it before reading.",
+            "description": "ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
             "schema": {
               "type": "string"
             }
@@ -1826,7 +1826,7 @@
             "name": "name",
             "in": "path",
             "required": true,
-            "description": "ENS name; name-shaped paths normalize it before reading.",
+            "description": "ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
             "schema": {
               "type": "string"
             }
@@ -2174,7 +2174,7 @@
             "name": "name",
             "in": "path",
             "required": true,
-            "description": "ENS name; name-shaped paths normalize it before reading.",
+            "description": "ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
             "schema": {
               "type": "string"
             }
@@ -2541,7 +2541,7 @@
             "name": "name",
             "in": "path",
             "required": true,
-            "description": "ENS name; name-shaped paths normalize it before reading.",
+            "description": "ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
             "schema": {
               "type": "string"
             }
@@ -2910,7 +2910,7 @@
             "name": "name",
             "in": "path",
             "required": true,
-            "description": "ENS name; name-shaped paths normalize it before reading.",
+            "description": "ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md).",
             "schema": {
               "type": "string"
             }

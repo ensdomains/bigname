@@ -1798,11 +1798,15 @@ PostgreSQL `escape` encoding of the whole stored child name — the parent porti
 included, since the encoding runs over the whole byte string. A
 normalization-failing label takes the placeholder rather than the escape form:
 its decoded text is a valid string but not a name for the proven node, and
-escaping it would serve the same misleading text. Neither is
-reserved syntax — a label really spelled that way produces the same string — so
-a caller distinguishing rows should use `namehash` and `labelhash`, not the
-served text. A non-name form is not addressable and may not be fed back into a
-name-shaped route.
+escaping it would serve the same misleading text. The placeholder label is
+reserved syntax: bigname's normalizer rejects `[` and `]`
+([name inputs](api-v1.md#name-inputs)), so a real label spelled that way
+is itself served as its own labelhash's placeholder, and a caller can recognize
+the placeholder from the text. The escape form is not reserved, since a label
+really spelled like escape output produces the same string. `namehash` and
+`labelhash` stay the stable identifiers. The placeholder is accepted as a
+[name input](api-v1.md#name-inputs) for its node, which serves no name row while
+it has no name surface; the escape form is not.
 
 ## Normalized event
 
