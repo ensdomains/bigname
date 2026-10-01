@@ -90,7 +90,8 @@ where
         Err(error) => return primary_call_error(error, None, request.position),
     };
     // ENS's ETH reverse resolver reads `default.reverse` when the reverse node has no resolver or
-    // its name is empty; a failed name call ends the lookup instead.
+    // its name has no bytes; a failed name call, out of gas included, ends the lookup instead.
+    // A whitespace name takes the addr.reverse branch and normalizes to not_found.
     // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
     let (resolver_address, raw_name) =
         match (addr_reverse, request.default_reverse_registrar_address) {
@@ -364,7 +365,15 @@ async fn reverse_name(
     block_selector: &Value,
 ) -> PrimaryCallResult<Option<String>> {
     let call = resolver_name_call(node);
-    let bytes = eth_call(rpc, resolver_address, call.calldata_hex(), block_selector).await?;
+    let gas = reverse_name_gas(call.calldata());
+    let bytes = eth_call_with_gas(
+        rpc,
+        resolver_address,
+        call.calldata_hex(),
+        Some(gas),
+        block_selector,
+    )
+    .await?;
     decode_resolver_name(&bytes)
         .map_err(|_| PrimaryCallError::InBand("resolver_return_data_malformed"))
 }
@@ -384,20 +393,45 @@ async fn default_reverse_name(
         .map_err(|_| PrimaryCallError::InBand("resolver_return_data_malformed"))
 }
 
+/// Gas for the reverse resolver's `name(node)` call. ENS's ETH reverse resolver gives that call a
+/// 100,000 gas stipend and treats a failed call, out of gas included, as an empty answer that ends
+/// the lookup without reading `default.reverse`.
+/// (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
+/// An `eth_call` frame receives its gas limit minus the intrinsic transaction cost: 21,000 base plus
+/// 16 gas per nonzero and 4 gas per zero calldata byte. Adding that cost to the stipend gives the
+/// resolver exactly 100,000 gas.
+fn reverse_name_gas(calldata: &[u8]) -> u64 {
+    const NAME_CALL_STIPEND: u64 = 100_000;
+    const TRANSACTION_BASE_GAS: u64 = 21_000;
+    let calldata_gas: u64 = calldata
+        .iter()
+        .map(|byte| if *byte == 0 { 4 } else { 16 })
+        .sum();
+    NAME_CALL_STIPEND + TRANSACTION_BASE_GAS + calldata_gas
+}
+
 async fn eth_call(
     rpc: &JsonRpcHttpClient,
     to: &str,
     calldata: String,
     block_selector: &Value,
 ) -> PrimaryCallResult<Vec<u8>> {
+    eth_call_with_gas(rpc, to, calldata, None, block_selector).await
+}
+
+async fn eth_call_with_gas(
+    rpc: &JsonRpcHttpClient,
+    to: &str,
+    calldata: String,
+    gas: Option<u64>,
+    block_selector: &Value,
+) -> PrimaryCallResult<Vec<u8>> {
+    let mut call = json!({ "to": to, "data": calldata });
+    if let Some(gas) = gas {
+        call["gas"] = Value::String(format!("{gas:#x}"));
+    }
     let response = match rpc
-        .call(
-            "eth_call",
-            vec![
-                json!({ "to": to, "data": calldata }),
-                block_selector.clone(),
-            ],
-        )
+        .call("eth_call", vec![call, block_selector.clone()])
         .await
     {
         Ok(response) => response,

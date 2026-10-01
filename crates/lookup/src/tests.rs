@@ -3302,6 +3302,76 @@ async fn primary_name_falls_back_to_the_default_reverse_registrar() -> AnyResult
 }
 
 #[tokio::test]
+async fn primary_name_stops_at_a_failed_or_whitespace_reverse_name() -> AnyResult<()> {
+    const DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let resolver_word = hex_string(&Address::from_str(reverse_resolver)?.abi_encode());
+    // A resolver that burns its 100,000 gas stipend before returning "" fails the bounded call;
+    // a provider reports that as an execution error.
+    let out_of_gas = RpcResponse::Error {
+        code: -32000,
+        message: "out of gas".to_owned(),
+        data: Value::Null,
+    };
+    let whitespace = RpcResponse::Result(Value::String(hex_string(&" ".abi_encode())));
+    for (name_response, expected) in [
+        (out_of_gas, EnsPrimaryNameStatus::ExecutionFailed),
+        (whitespace, EnsPrimaryNameStatus::NotFound),
+    ] {
+        let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+            RpcResponse::Result(Value::String(resolver_word.clone())),
+            name_response,
+        ])
+        .await?;
+        let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+        seed_manifest(
+            fixture.pool(),
+            ENS_NAMESPACE,
+            "ens_v1_registry_l1",
+            "registry",
+            ENS_REGISTRY,
+            "00000000-0000-0000-0000-000000000104",
+        )
+        .await?;
+        seed_manifest(
+            fixture.pool(),
+            ENS_NAMESPACE,
+            "ens_v1_reverse_l1",
+            "default_reverse_registrar",
+            DEFAULT_REVERSE_REGISTRAR,
+            "00000000-0000-0000-0000-000000000105",
+        )
+        .await?;
+        let result = lookup_engine(fixture.pool(), &rpc_url)?
+            .lookup_ens_primary_name(ETHEREUM, target)
+            .await?;
+        fixture.cleanup().await?;
+        let requests = join_rpc(rpc_handle).await?;
+
+        assert_eq!(result.status, expected);
+        assert_eq!(result.name, None);
+        assert_eq!(
+            requests.len(),
+            2,
+            "no default.reverse call after the resolver answers"
+        );
+        let name_call = &requests[1]["params"][0];
+        assert_eq!(name_call["to"], reverse_resolver);
+        // name(bytes32) calldata is 36 nonzero bytes for this node: 100,000 stipend + 21,000
+        // base + 36 * 16 calldata gas = 121,576.
+        assert_eq!(
+            name_call["data"],
+            "0x691f3431658ecd2fe8aadf31c3ee6126e11967ff852cfd7592ef26c28e0b65c30e4e8628"
+        );
+        assert_eq!(name_call["gas"], "0x1dae8");
+        assert_eq!(requests[0]["params"][0].get("gas"), None);
+        assert_hash_pinned(&requests, ETHEREUM_HASH);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResult<()> {
     let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
     let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
