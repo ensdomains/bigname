@@ -186,11 +186,14 @@ impl RolloutStatus {
     }
 }
 
+/// A capability flag is either supported or not; `parse_authored_manifest` rejects an authored
+/// `shadow`. Stored manifest payloads written before `shadow` was removed still carry it, and
+/// those flags were flipped to `supported`, so it decodes as `Supported`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilitySupportStatus {
     Unsupported,
-    Shadow,
+    #[serde(alias = "shadow")]
     Supported,
 }
 
@@ -198,10 +201,18 @@ impl CapabilitySupportStatus {
     pub const fn as_db_value(self) -> &'static str {
         match self {
             Self::Unsupported => "unsupported",
-            Self::Shadow => "shadow",
             Self::Supported => "supported",
         }
     }
+}
+
+/// Optional marker on an ABI entry. Unlike capability flags, ABI entries keep `shadow`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbiEntryStatus {
+    Unsupported,
+    Shadow,
+    Supported,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -247,7 +258,7 @@ pub struct ManifestAbiEvent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_events: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<CapabilitySupportStatus>,
+    pub status: Option<AbiEntryStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -259,7 +270,7 @@ pub struct ManifestAbiCall {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<CapabilitySupportStatus>,
+    pub status: Option<AbiEntryStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -368,6 +379,28 @@ impl From<RawSourceManifest> for SourceManifest {
             universal_resolver_implementations: value.universal_resolver_implementations,
         }
     }
+}
+
+/// Parses one authored manifest file, rejecting a `shadow` capability flag by name.
+pub(crate) fn parse_authored_manifest(raw_manifest: &str) -> Result<SourceManifest> {
+    let table = toml::from_str::<toml::Table>(raw_manifest)?;
+    if let Some(flags) = table
+        .get("capability_flags")
+        .and_then(toml::Value::as_table)
+    {
+        for (name, flag) in flags {
+            let status = flag
+                .as_str()
+                .or_else(|| flag.get("status").and_then(toml::Value::as_str));
+            if status == Some("shadow") {
+                anyhow::bail!(
+                    "capability flag `{name}` has status `shadow`; a capability flag is \
+                     `unsupported` or `supported`"
+                );
+            }
+        }
+    }
+    Ok(toml::from_str::<RawSourceManifest>(raw_manifest)?.into())
 }
 
 fn deserialize_optional_start_block<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>

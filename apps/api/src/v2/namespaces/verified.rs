@@ -36,10 +36,10 @@ impl VerifiedCapability {
 
 /// `verified_records` and `verified_primary_name`, decided per declared network from what the
 /// lookup engine will actually execute: the route table's entrypoint for the namespace and
-/// chain, a manifest declaring that entrypoint with a usable `verified_resolution` flag (shadow
-/// manifests count where the route admits them, as ENS does), and a configured provider for the
-/// execution chain. Per-name support classes still apply on the routes themselves; this is
-/// deployment-level support.
+/// chain, a manifest declaring that entrypoint with a supported `verified_resolution` flag
+/// (manifests with `rollout_status = shadow` count where the route admits them, as ENS does),
+/// and a configured provider for the execution chain. Per-name support classes still apply on
+/// the routes themselves; this is deployment-level support.
 pub(super) fn verified_capabilities(
     namespace: &str,
     manifests: &[ActiveManifestVersion],
@@ -148,11 +148,7 @@ fn verified_chain_capability(
             && manifest
                 .capability_flags
                 .get(VERIFIED_RESOLUTION_FLAG)
-                .is_some_and(|flag| {
-                    flag.status == CapabilitySupportStatus::Supported
-                        || (entrypoint.allow_shadow
-                            && flag.status == CapabilitySupportStatus::Shadow)
-                })
+                .is_some_and(|flag| flag.status == CapabilitySupportStatus::Supported)
     });
     if !execution_declared {
         return NamespaceChainCapability::unsupported(EXECUTION_ENTRYPOINT_NOT_DECLARED);
@@ -238,7 +234,7 @@ mod tests {
             "ethereum-sepolia",
             1,
             "shadow",
-            CapabilitySupportStatus::Shadow,
+            CapabilitySupportStatus::Supported,
         )];
 
         let configured = verified_capabilities(

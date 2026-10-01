@@ -269,7 +269,7 @@ and `orphaned` (on a losing branch; kept for audit, excluded from reads).
 ## Capability promotion ("graduation")
 
 the deliberate, doc-first act of
-moving a capability from `shadow`/`unsupported` to publicly `supported`.
+moving a capability from `unsupported` to publicly `supported`.
 Nothing else promotes a capability: backfill completion, conformance passes,
 and manifest presence are necessary evidence, never the promotion itself.
 Serving an individual exact name is not a capability promotion: a name whose

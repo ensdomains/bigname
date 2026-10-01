@@ -219,14 +219,37 @@ For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_f
 
 ### `capability_flags`
 
-Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.
+Each flag carries a name, a status (`unsupported` | `supported`), and optional
+notes, written either as `name = "supported"` or as
+`name = { status = "supported", notes = "..." }`. The loader rejects any other
+status, including `shadow`, which is not a capability state; `shadow` remains a
+`rollout_status` value and an [ABI entry](#abi) marker. Manifest payloads
+stored before `shadow` was removed, including those in manifest-update
+history, still decode: the decoder reads a stored `shadow` flag as `supported`,
+and manifest synchronization rewrites the active payloads from the checked-in
+files.
 
 Capability flags are product-facing declarations. A source family that owns
 intake or diagnostic history without owning a public consumer capability uses
 an empty `[capability_flags]` table. Internal pipeline labels must not be added
 as capability keys: the product namespace route intentionally maps a closed
-set of declared capability names, while the diagnostics manifest route exposes
-the complete source-family metadata.
+set of declared capability names (`declared_children`, `exact_name_profile`,
+`name_history`, `verified_resolution`) and fails on any other key, while the
+diagnostics manifest route exposes the complete source-family metadata. The
+loader itself does not check flag names.
+
+Two of those flags drive output:
+
+- `declared_children` is aggregated into the namespace summary's `subnames`.
+- `verified_resolution` decides whether a manifest can serve as a verified
+  execution entrypoint, for the lookup engine and for the namespace summary's
+  per-chain `verified_records` and `verified_primary_name`.
+
+`exact_name_profile` and `name_history` are no longer read: the namespace
+summary reports `name_profile` and `name_history` as `full` whenever the
+namespace has an active manifest. The existing declarations stay so the
+manifests keep their recorded intent and the namespace route keeps mapping the
+keys.
 
 ### `verified_authority_arms`
 
@@ -400,9 +423,9 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by widening this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "supported"` and `rollout_status = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. Public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
 
-The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in the family reverse claims (`bigname_phase.project_reverse_tuple` and `project_reverse_node_claim`); provider lookup responses are not persisted as execution outcomes or traces.
+The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in the family reverse claims (`bigname_phase.project_reverse_tuple` and `project_reverse_node_claim`); provider lookup responses are not persisted as execution outcomes or traces.
 
 `ens_v1_reverse_l1` owns declared reverse-claim intake at the Mainnet `addr.reverse` Reverse Registrar `0xa58E81fe9b61B5c3fE2AFD33CF304c454AbFc7Cb`.[^v1-revreg-deploy][^v1-revreg-l15][^v1-revreg-l19] No dedicated `claimed_primary_name` flag is needed for that indexed claim-state contract. The current Sepolia profile declares its canonical ReverseRegistrar at `0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6` (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L2 @ ens_v1@91c966f).
 
@@ -456,7 +479,7 @@ The previous June and hackathon manifests are removed.
 ### ENS execution (`sepolia` deployment profile)
 
 `ens_execution` declares the canonical Universal Resolver proxy
-`0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with shadow verified-resolution
+`0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with supported verified-resolution
 ownership and explicit `verified_authority_arms = ["ens_v1", "ens_v2"]`.
 The [deployment inventory](sepolia-deployment.md#resolver-and-discovery-coverage)
 requires rollout verification of the proxy route to the selected root.
@@ -1822,7 +1845,7 @@ the hash of the setter argument, with no namehash component.
 
 ## Capability policy
 
-Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. The `exact_name_profile` and `name_history` flags are exceptions: they are namespace-level declarations that no served output reads (`/v1/namespaces` reports `name_profile` and `name_history` from whether the namespace has an active manifest), and they do not gate whether an individual name is served (see [architecture](architecture.md#ensv1ensv2-current-authority)). Adding a new capability is additive only when it does not change prior semantics.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. The `exact_name_profile` and `name_history` flags are exceptions: they are namespace-level declarations that no served output reads (`/v1/namespaces` reports `name_profile` and `name_history` from whether the namespace has an active manifest), and they do not gate whether an individual name is served (see [architecture](architecture.md#ensv1ensv2-current-authority)). Adding a new capability is additive only when it does not change prior semantics.
 
 ## Ownership
 

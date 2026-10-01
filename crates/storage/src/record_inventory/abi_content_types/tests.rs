@@ -349,8 +349,7 @@ fn observation_paths_agree_with_the_checked_in_manifests() {
             let admits = role.as_deref() != Some(bigname_manifests::ENSV1_MIRROR_RESOLVER_ROLE)
                 && events.iter().any(|event| {
                     matches!(event.name.as_str(), "ABIChanged" | "ABIUpdated")
-                        && event.status
-                            != Some(bigname_manifests::CapabilitySupportStatus::Unsupported)
+                        && event.status != Some(bigname_manifests::AbiEntryStatus::Unsupported)
                         && admitted_for(event)
                         && (role_record_keys.is_empty()
                             || first_input(event)

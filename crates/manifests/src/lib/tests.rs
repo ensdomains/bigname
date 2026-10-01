@@ -868,7 +868,7 @@ roots = []
 discovery_rules = []
 {arms}
 [capability_flags]
-verified_resolution = "shadow"
+verified_resolution = "supported"
 
 [[contracts]]
 role = "universal_resolver"
@@ -951,6 +951,47 @@ fn repository_loader_validates_verified_authority_arms() -> Result<()> {
     assert!(
         format!("{error:#}").contains("only source family ens_execution may declare"),
         "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_loader_rejects_a_shadow_capability_flag() -> Result<()> {
+    for (case, flag) in [
+        ("short form", "declared_children = \"shadow\""),
+        (
+            "detailed form",
+            "declared_children = { status = \"shadow\", notes = \"indexed first\" }",
+        ),
+    ] {
+        let contents = manifest_contents().replacen("declared_children = \"supported\"", flag, 1);
+        let error = load_one(&contents).expect_err(case);
+        assert!(
+            format!("{error:#}").contains(
+                "capability flag `declared_children` has status `shadow`; a capability flag is \
+                 `unsupported` or `supported`"
+            ),
+            "{case}: {error:#}"
+        );
+    }
+
+    let shadow_abi_entry = manifest_contents().replacen(
+        "normalized_events = [\"SubregistryChanged\"]\nstatus = \"supported\"",
+        "normalized_events = [\"SubregistryChanged\"]\nstatus = \"shadow\"",
+        1,
+    );
+    let repository = load_one(&shadow_abi_entry)?;
+    assert_eq!(
+        repository.manifests()[0].manifest.abi.events[0].status,
+        Some(AbiEntryStatus::Shadow),
+        "ABI entries keep shadow"
+    );
+
+    let stored: CapabilityFlag = serde_json::from_value(json!({ "status": "shadow" }))?;
+    assert_eq!(
+        stored.status,
+        CapabilitySupportStatus::Supported,
+        "manifest history stored before shadow was removed still decodes"
     );
     Ok(())
 }
@@ -1817,7 +1858,7 @@ fn sepolia_ens_v1_families_pin_their_declared_surface() -> Result<()> {
     );
     assert_eq!(
         ["exact_name_profile", "name_history"].map(|flag| registrar.capability_flags[flag].status),
-        [CapabilitySupportStatus::Shadow; 2]
+        [CapabilitySupportStatus::Supported; 2]
     );
     let registrar_surface = event_surface(registrar)
         .into_iter()

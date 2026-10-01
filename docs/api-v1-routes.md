@@ -4358,10 +4358,10 @@ For a registrar lease first identified by a later readable observation, registra
   the numeric chain id (`"1"`, `"11155111"`, `"8453"`). A chain entry is
   `{completeness: full}` when the lookup route table has an execution
   entrypoint for the namespace on that chain (ENS: Ethereum Mainnet or Sepolia;
-  Basenames: Base, executing through the Mainnet L1 Resolver), an active or,
-  where the route admits it, shadow manifest declares that entrypoint with a
-  `verified_resolution` flag the route accepts (ENS accepts `shadow`; Basenames
-  requires `supported` on manifest version 2), for `verified_primary_name` the
+  Basenames: Base, executing through the Mainnet L1 Resolver), a manifest
+  whose `rollout_status` is `active` or, where the route admits it (ENS),
+  `shadow` declares that entrypoint with a `supported` `verified_resolution`
+  flag (Basenames also requires manifest version 2), for `verified_primary_name` the
   same chain also has an active `ens_v1_registry_l1` manifest, and
   `BIGNAME_API_CHAIN_RPC_URLS` names a provider for the execution chain.
   Otherwise the entry is `unsupported` with one of
