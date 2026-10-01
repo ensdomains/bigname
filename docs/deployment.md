@@ -1543,12 +1543,30 @@ the Project topology family, so it changes `crates/adapters/src` and hashed
 Project and storage sources and rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
 chain. It needs `20261001100000_retire_resolver_alias_families.sql`, which drops
-`project_name_alias` and `project_resolver_alias`; both are empty, because no
-admitted manifest declares `AliasChanged`. It needs no manifest change and no
-historical ingest fetch. It ships in the same full-history Interpret redo and
-families rebuild as TYR-116, which discharge this rotation; an API upgraded
-alone refuses the old build's family publication with `409 stale`. Apply the
-schema-migration with the new build, not before it: the old Project and API
-still read and write both tables. No served value changes except the removed fields: the
-resolver overview no longer reports an `aliases` section, `/aliases` answers
-like any unknown route, and lookup topology has no `alias` field.
+`project_name_alias` and `project_resolver_alias`. No admitted manifest declares
+`AliasChanged`, so both are expected to be empty, but a database whose families
+were built from retained June-generation events can hold rows; the
+schema-migration refuses to drop a table that still has rows, so census any
+such rows and decide whether to retire them before retrying. It needs no
+manifest change and no historical ingest fetch.
+
+This is a coordinated release with the old API and phase-runner supervisor
+stopped, not a rolling migration: the old Project and API still read and write
+both tables, and the old API preflight requires them. Follow the
+[planned migration procedure](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary),
+steps 4 to 8: apply the schema-migration, then run the new build's
+full-history Interpret redo and the matching full-history Project redo on every
+configured chain whose hash rotates, then check that each chain's family
+publication carries the new hash and that `/v1/status` reports ready before
+serving. When it ships with the
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+release, that release's single Interpret redo and Project redo discharge this
+rotation too. An API upgraded alone refuses the old build's family publication
+with `409 stale`. After the drop, rolling back only the binary fails, because
+the old API preflight requires both tables: roll the schema back together with
+it, or run forward.
+
+No served value changes except the removed fields: the resolver overview no
+longer reports an `aliases` section, `/aliases` answers like any unknown route,
+lookup topology has no `alias` field, and the `set_alias` and
+`admin_set_alias` powers are no longer reported.
