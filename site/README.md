@@ -94,7 +94,7 @@ part of TYR-56, not from this repository. After the site checks pass, CI
 uploads `site/` as an artifact.
 
 The API serves its generated OpenAPI 3.1 document at `/openapi.json`, with
-package version and build SHA. It describes the 20 product operations; the
+package version and build SHA. It describes the 19 product operations; the
 handwritten guide also covers diagnostics and health.
 The public edge admits that exact path for GET and HEAD.
 `scripts/tests/openapi-edge-smoke` runs the committed Caddyfile in front of a

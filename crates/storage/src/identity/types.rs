@@ -59,7 +59,6 @@ pub struct NameSurface {
 pub enum SurfaceBindingKind {
     DeclaredRegistryPath,
     LinkedSubregistryPath,
-    ResolverAliasPath,
     ObservedWildcardPath,
     ObservedOnly,
 }
@@ -69,7 +68,6 @@ impl SurfaceBindingKind {
         match self {
             Self::DeclaredRegistryPath => "declared_registry_path",
             Self::LinkedSubregistryPath => "linked_subregistry_path",
-            Self::ResolverAliasPath => "resolver_alias_path",
             Self::ObservedWildcardPath => "observed_wildcard_path",
             Self::ObservedOnly => "observed_only",
         }
@@ -79,7 +77,6 @@ impl SurfaceBindingKind {
         match value {
             "declared_registry_path" => Ok(Self::DeclaredRegistryPath),
             "linked_subregistry_path" => Ok(Self::LinkedSubregistryPath),
-            "resolver_alias_path" => Ok(Self::ResolverAliasPath),
             "observed_wildcard_path" => Ok(Self::ObservedWildcardPath),
             "observed_only" => Ok(Self::ObservedOnly),
             _ => bail!("unknown surface binding kind {value}"),

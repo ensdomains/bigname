@@ -63,7 +63,7 @@ fn openapi_operations_equal_the_product_router_in_both_directions() {
     assert_eq!(registered, documented, "explicit product method/path pairs");
     assert_eq!(
         documented.len(),
-        20,
+        19,
         "update the selected-surface coverage deliberately"
     );
     assert!(
@@ -116,10 +116,6 @@ fn openapi_query_names_equal_every_route_specific_extractor() {
         (
             "/v1/resolvers/{chain_id}/{address}",
             list!("../v2/resolvers.rs"),
-        ),
-        (
-            "/v1/resolvers/{chain_id}/{address}/aliases",
-            list!("../v2/resolvers/collections.rs"),
         ),
         (
             "/v1/resolvers/{chain_id}/{address}/links",

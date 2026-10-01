@@ -1,24 +1,17 @@
-//! The alias and wildcard arms of a name's `declared_summary.topology`, read from the aliases
-//! (`project_name_alias`) and the resource resolver pointers (`project_resource_pointer`). The
-//! direct, ownerless and Basenames transport arms are not read here.
+//! The wildcard arm of a name's `declared_summary.topology`, read from the resource resolver
+//! pointers (`project_resource_pointer`). The direct, ownerless and Basenames transport arms are
+//! not read here.
 //!
 //! The name's selected binding, and each wildcard ancestor's, is the one the composed name reader
-//! selects (`families::name`).
-//!
-//! The alias arm joins the name's current pointer (latest, then reject zero), never the
-//! historical non-zero pointer, so a pointer clear with no alias event leaves no alias topology
-//! and exposes no older pointer. The wildcard arm takes the longest ancestor by suffix with a
+//! selects (`families::name`). The wildcard arm takes the longest ancestor by suffix with a
 //! binding, its historical non-zero pointer and its independent version boundary.
 use anyhow::{Context, Result};
 use bigname_domain::resolution_topology::ResolutionTopology;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::pointers::{
-    load_family_alias_source_pointer_on as load_family_alias_source_pointer,
-    load_family_wildcard_source_on as load_family_wildcard_source,
-};
+use super::pointers::load_family_wildcard_source_on as load_family_wildcard_source;
 
 /// A name's selected binding: its `project_binding_candidate` row.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,7 +58,6 @@ async fn selected_binding(
     ))
 }
 
-const ALIAS_PATH: &str = "resolver_alias_path";
 const WILDCARD_PATH: &str = "observed_wildcard_path";
 
 struct Surface {
@@ -75,8 +67,8 @@ struct Surface {
     namehash: String,
 }
 
-/// The name's alias or wildcard topology as the serializer stores it, `None` when the name's
-/// selected binding is neither arm or the arm has no source.
+/// The name's wildcard topology as the serializer stores it, `None` when the name's selected
+/// binding is not a wildcard binding or the arm has no source.
 pub async fn load_name_topology_shadow(
     pool: &PgPool,
     logical_name_id: &str,
@@ -98,7 +90,6 @@ pub(crate) async fn load_name_topology_on(
         return Ok(None);
     };
     let topology = match binding.binding_kind.as_str() {
-        ALIAS_PATH => alias_topology(conn, &surface, &binding).await?,
         WILDCARD_PATH => wildcard_topology(conn, &surface, &binding).await?,
         _ => None,
     };
@@ -157,19 +148,12 @@ fn resolver_hop(surface: &Surface, resource_id: Uuid, chain_id: &str, address: V
     })
 }
 
-fn topology(
-    registry: Value,
-    resolver: Value,
-    wildcard: Value,
-    alias: Value,
-    boundary: Value,
-) -> Value {
+fn topology(registry: Value, resolver: Value, wildcard: Value, boundary: Value) -> Value {
     json!({
         "registry_path": [registry],
         "subregistry_path": [],
         "resolver_path": [resolver],
         "wildcard": wildcard,
-        "alias": alias,
         "version_boundaries": {
             "topology_version_boundary": boundary,
             "record_version_boundary": boundary,
@@ -181,104 +165,6 @@ fn topology(
             "latest_event_kind": null,
         },
     })
-}
-
-/// The block's hash and timestamp on the readable lineage.
-async fn block(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    number: i64,
-) -> Result<Option<(String, Value)>> {
-    sqlx::query_as(
-        "SELECT block_hash, to_jsonb(block_timestamp) FROM bigname_phase.chain_lineage
-         WHERE chain_id = $1 AND block_number = $2
-           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(chain_id)
-    .bind(number)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("failed to load a lineage block")
-}
-
-async fn alias_topology(
-    conn: &mut PgConnection,
-    surface: &Surface,
-    binding: &SelectedBinding,
-) -> Result<Option<Value>> {
-    let Some(pointer) =
-        load_family_alias_source_pointer(conn, &binding.chain_id, binding.resource_id).await?
-    else {
-        return Ok(None);
-    };
-    type AliasRow = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let alias: Option<AliasRow> = sqlx::query_as(
-        "SELECT to_logical_name_id, to_normalized_name, to_name, to_canonical_display_name,
-                to_namehash, to_resource_id
-         FROM bigname_phase.project_name_alias
-         WHERE chain_id = $1 AND logical_name_id = $2
-           AND active AND to_logical_name_id IS NOT NULL",
-    )
-    .bind(&binding.chain_id)
-    .bind(&surface.logical_name_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("failed to load the name alias")?;
-    let Some((to_id, to_normalized, to_name, to_display, to_namehash, to_resource)) = alias else {
-        return Ok(None);
-    };
-    let Some((block_hash, timestamp)) =
-        block(conn, &binding.chain_id, binding.block_number).await?
-    else {
-        return Ok(None);
-    };
-    // The alias event's namespace is the source name's: the event names that name.
-    let mut target = Map::new();
-    for (key, value) in [
-        ("logical_name_id", to_id),
-        ("namespace", Some(surface.namespace.clone())),
-        ("normalized_name", to_normalized.or_else(|| to_name.clone())),
-        ("canonical_display_name", to_display.or(to_name)),
-        ("namehash", to_namehash),
-        ("resource_id", to_resource),
-        ("binding_kind", Some(ALIAS_PATH.to_owned())),
-    ] {
-        if let Some(value) = value {
-            target.insert(key.to_owned(), Value::String(value));
-        }
-    }
-    let target = Value::Object(target);
-    let boundary = json!({
-        "logical_name_id": surface.logical_name_id,
-        "resource_id": binding.resource_id,
-        "normalized_event_id": null,
-        "event_kind": null,
-        "chain_position": {
-            "chain_id": binding.chain_id,
-            "block_number": binding.block_number,
-            "block_hash": block_hash,
-            "timestamp": timestamp,
-        },
-    });
-    Ok(Some(topology(
-        name_ref(surface, binding.resource_id, &binding.binding_kind),
-        resolver_hop(
-            surface,
-            binding.resource_id,
-            &pointer.chain_id,
-            json!(pointer.resolver_address),
-        ),
-        json!({"source": null, "matched_labels": []}),
-        json!({"final_target": target, "hops": [target]}),
-        boundary,
-    )))
 }
 
 async fn wildcard_topology(
@@ -360,7 +246,6 @@ async fn wildcard_topology(
                 "source": name_ref(&ancestor, ancestor_binding.resource_id, WILDCARD_PATH),
                 "matched_labels": matched,
             }),
-            json!({"final_target": null, "hops": []}),
             boundary,
         )));
     }

@@ -327,40 +327,6 @@ pub async fn load_registry_references_page(
     Ok(RegistryReferencePage { rows, next_cursor })
 }
 
-/// Counts readable events of the given kinds emitted by one contract.
-pub async fn count_contract_events(
-    pool: &PgPool,
-    chain_id: &str,
-    address: &str,
-    event_kinds: &[String],
-    as_of_block: Option<i64>,
-) -> Result<i64> {
-    let address = address.to_ascii_lowercase();
-    sqlx::query_scalar::<_, i64>(&format!(
-        r#"
-        SELECT count(*)::bigint
-        FROM bigname_phase.normalized_events ne
-        LEFT JOIN bigname_phase.chain_lineage rb
-          ON rb.chain_id = ne.chain_id AND rb.block_hash = ne.block_hash
-        WHERE ne.chain_id = $1
-          AND lower(ne.raw_fact_ref ->> 'emitting_address') = $2
-          AND ne.event_kind = ANY($3::text[])
-          AND ne.consumer_visibility = 'activated'
-          AND ne.canonicality_state IN {READABLE_STATES}
-          {lineage_readable}
-          AND ($4::bigint IS NULL OR ne.block_number <= $4)
-        "#,
-        lineage_readable = lineage_readable("ne"),
-    ))
-    .bind(chain_id)
-    .bind(&address)
-    .bind(event_kinds)
-    .bind(as_of_block)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to count events emitted by {chain_id}:{address}"))
-}
-
 /// Current pointers (latest per name) whose target is `address`, joined to the active name
 /// surface. Callers append ordering and paging.
 fn current_pointers_to_registry<'a>(

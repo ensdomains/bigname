@@ -336,7 +336,7 @@ $ curl -s -X POST '__API__/v1/lookup' -H 'content-type: application/json' \\
     { h: 'Which routes accept what', id: 'which', html: `<dl class="fields prose">
 <dt><a href="#name">names(2)</a>, <a href="#records">names-records(2)</a>, <a href="#resolver">resolvers(2)</a>, <a href="#registry">registries(2)</a>, and the exact-name diagnostics</dt><dd><code>at</code> yes. <code>finality</code> latest, safe, or finalized. The answer carries <code>as_of</code> and a token.</dd>
 <dt><a href="#lookup">lookup(2)</a> and <a href="#primary-name">addresses-primary(2)</a></dt><dd>Neither. The answer carries the current positions, with a token when one is available.</dd>
-<dt><a href="#resolver-aliases">Resolver aliases</a> and <a href="#resolver-roles">resolver roles</a></dt><dd><code>at</code> and all three finality values are accepted, subject to current projection availability. Cursors retain their sort position and pin a selected block only when <code>at</code> is explicit; publication changes between pages do not invalidate them. These collections do not reconstruct historical binding or permission tables.</dd>
+<dt><a href="#resolver-links">Resolver links</a> and <a href="#resolver-roles">resolver roles</a></dt><dd><code>at</code> and all three finality values are accepted, subject to current projection availability. Cursors retain their sort position and pin a selected block only when <code>at</code> is explicit; publication changes between pages do not invalidate them. These collections do not reconstruct historical binding or permission tables.</dd>
 <dt>Latest-state product collections: names, subnames, address names, permissions, search, registry labels</dt><dd><code>at</code> is rejected with 400. <code>finality</code> latest only. Each page reports <code>as_of</code>. Continuations read current data after their saved position. A change during one request returns <code>409 stale</code>; retry with the same cursor.</dd>
 <dt>History collections: name history, address history, events</dt><dd><code>at</code> is rejected with 400. <code>finality</code> latest only. Each page reports in <code>as_of</code> the publication captured when it was admitted. A continuation reads whatever is published when it runs; see <a href="#pagination">paging(7)</a>.</dd>
 <dt><a href="#status">status(2)</a>, <a href="#namespace">namespaces(2)</a>, <a href="#diag-manifests">diag-manifests(2)</a></dt><dd>Neither, and no snapshot fields.</dd>
@@ -811,8 +811,8 @@ const ROUTES = [
 },
 {
   id: 'resolver', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}', title: 'Resolver overview',
-  summary: 'Describes a resolver contract and pages the names currently bound to it. Its aliases, record links, and roles are separate paged collections.',
-  keywords: ['bound_names', 'mirror', 'aliases', 'links', 'roles'],
+  summary: 'Describes a resolver contract and pages the names currently bound to it. Its record links and roles are separate paged collections.',
+  keywords: ['bound_names', 'mirror', 'links', 'roles'],
   sample: SAMPLE.resolver,
   params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The chain the resolver is deployed on.' }, { name: 'address', in: 'path', required: true, desc: 'The resolver contract address.' }, P.at, P.finality, { ...P.cursor, desc: 'Pages the nested <code>bound_names</code> list.' }, { ...P.pageSize, desc: 'Sizes the nested <code>bound_names</code> list.' }],
   response: {
@@ -821,9 +821,9 @@ const ROUTES = [
   },
   outcomes: [['200', 'The overview, possibly with an empty nested list.'], ['400 invalid_input', 'The chain ID or address is malformed, or a parameter is unknown.'], ['404 not_found', 'There is no overview for this resolver at latest.'], ['409 stale', 'The generation or publication changed during the read, rows are ahead of the selected position, or a historical selector was given with no current projection; retry with the same cursor. An explicit <code>at</code> still requires that selected position to be readable.']],
   notes: [
-    { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. The <a href="#resolver-aliases">aliases</a>, <a href="#resolver-links">links</a> and <a href="#resolver-roles">roles</a> collections page the supported indexed tables; the overview carries no counts or samples of them. They do not reconstruct historical bindings or permissions. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
+    { h: 'Reading at an older position', html: `<p><code>bound_names</code> always reads the current projections, even with <code>at</code>, so a name that was bound at that time but has since been unbound is absent. The <a href="#resolver-links">links</a> and <a href="#resolver-roles">roles</a> collections page the supported indexed tables; the overview carries no counts or samples of them. They do not reconstruct historical bindings or permissions. A read at latest also checks for an Interpret redo; a historical read keeps only the generation check.</p>` },
   ],
-  related: ['resolver-aliases', 'resolver-links', 'resolver-roles', 'records', 'name', 'permissions'],
+  related: ['resolver-links', 'resolver-roles', 'records', 'name', 'permissions'],
 },
 {
   id: 'resolver-links', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/links', title: 'Resolver record links',
@@ -837,21 +837,7 @@ const ROUTES = [
   },
   outcomes: [['200', 'The page, including an explicitly unsupported empty page on a node-keyed resolver.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or the publication changed during the read; retry with the same cursor. An explicit <code>at</code> still requires that selected position to be readable.']],
   notes: [{ h: 'What a link is', html: '<p>A record-ID resolver stores values per numeric record and binds names to records with <code>Linked(recordId, node, name)</code>. The latest link per node is current; record ID <code>0</code> unlinks the node; a record linked at the empty-name node is the default, answering every node without a link of its own. Rows come from activated canonical link events at the selected block. Cursors bind the chain, resolver, collection and last sort position. An explicit <code>at</code> must be repeated; otherwise each page selects the current publication. Completed rebuilds do not invalidate the position.</p><p class="cite">(upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)</p>' }, { h: 'Choosing an address to try', html: '<p>The path address must be a record-ID resolver bigname has observed on that chain; an address it has never seen answers <code>404 not_found</code>, and the zero address is never a resolver row. Take one from the <code>resolver</code> field of <a href="#name">name detail</a> for an ENSv2 name, or from a <code>resolver</code> event on <a href="#events">the events feed</a>.</p>' }],
-  related: ['resolver', 'resolver-aliases', 'resolver-roles', 'records'],
-},
-{
-  id: 'resolver-aliases', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/aliases', title: 'Resolver aliases',
-  summary: 'Pages the supported indexed alias mappings for a resolver, including current binding aliases and active alias-event mappings.',
-  keywords: ['aliases', 'bindings', 'from_name', 'to_name', 'total_count'],
-  sample: SAMPLE.resolver,
-  params: [{ name: 'chain_id', in: 'path', type: 'integer', required: true, desc: 'The numeric EVM chain ID.' }, P.address, P.at, P.finality, P.cursor, P.pageSize],
-  response: {
-    fields: [['data', 'Binding aliases are <code>{namespace, name, display_name, namehash}</code>. Active alias-event mappings are <code>{namespace, from_name, to_name, state, resolver, to_registration_id?}</code>.'], ['page.total_count', 'The exact number of supported mappings across both groups, including zero. Unsupported enumeration instead returns an empty page with a null total and explicit <code>meta.completeness</code> and <code>meta.unsupported_reason</code>.']],
-    sample: { data: [{ namespace: 'ens', name: 'alias.eth', display_name: 'alias.eth', namehash: '0x…' }], page: { cursor: null, next_cursor: null, page_size: 50, total_count: 1, has_more: false }, meta: AS_OF },
-  },
-  outcomes: [['200', 'The page, including an explicitly unsupported empty page when enumeration is unsupported.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or the publication changed during the read; retry with the same cursor. An explicit <code>at</code> still requires that selected position to be readable.']],
-  notes: [{ h: 'Ordering and snapshots', html: '<p>Current binding aliases sort first by stable name identity, then active alias-event mappings by stable alias identity. Cursors bind the chain, resolver, collection and last sort position. An explicit <code>at</code> must be repeated; otherwise each page selects the current publication. Completed rebuilds do not invalidate the position. Alias events are bounded to the selected block, while bindings use current projections; this does not reconstruct historical tables or discover arbitrary custom resolver behavior.</p>' }],
-  related: ['resolver', 'resolver-roles'],
+  related: ['resolver', 'resolver-roles', 'records'],
 },
 {
   id: 'resolver-roles', method: 'GET', path: '/v1/resolvers/{chain_id}/{address}/roles', title: 'Resolver roles',
@@ -865,7 +851,7 @@ const ROUTES = [
   },
   outcomes: [['200', 'The page, including an explicitly unsupported empty page when enumeration is unsupported.'], ['400 invalid_input', 'The chain, address, parameter, or cursor is invalid, or a cursor belongs to another route or snapshot.'], ['404 not_found', 'The resolver is unknown.'], ['409 stale', 'The selected projection is unavailable or the publication changed during the read; retry with the same cursor. An explicit <code>at</code> still requires that selected position to be readable.']],
   notes: [{ h: 'Ordering and snapshots', html: '<p>Rows sort by address and registration ID. Cursors bind the chain, resolver, collection and last sort position. An explicit <code>at</code> must be repeated; otherwise each page selects the current publication. A completed rebuild, including at the same block, does not invalidate the position. These reads use current permissions and do not reconstruct historical permission tables.</p>' }],
-  related: ['resolver', 'resolver-aliases', 'permissions'],
+  related: ['resolver', 'resolver-links', 'permissions'],
 },
 {
   id: 'registry', method: 'GET', path: '/v1/registries/{chain_id}/{address}', title: 'Registry overview',
@@ -1049,7 +1035,7 @@ const ROUTES = [
     ['names', ['names', 'name', 'records', 'subnames', 'history', 'permissions']],
     ['addresses', ['address-names', 'primary-name', 'address-history']],
     ['index', ['lookup', 'search', 'events', 'namespace']],
-    ['resolvers', ['resolver', 'resolver-aliases', 'resolver-links', 'resolver-roles']],
+    ['resolvers', ['resolver', 'resolver-links', 'resolver-roles']],
     ['registries', ['registry', 'registry-labels']],
     ['health', ['status', 'healthz', 'diag-coverage', 'diag-binding', 'diag-authority', 'diag-records', 'diag-manifests', 'diag-events']],
   ];

@@ -23,7 +23,6 @@ fn direct_topology() -> Value {
             "address": "0x0000000000000000000000000000000000000001"
         }],
         "wildcard": { "source": null, "matched_labels": [] },
-        "alias": { "final_target": null, "hops": [] },
         "version_boundaries": {
             "topology_version_boundary": null,
             "record_version_boundary": null
@@ -60,16 +59,6 @@ fn classifies_every_admitted_route() {
         Ok(ResolutionRoute::Direct)
     );
 
-    let mut alias = direct_topology();
-    alias["alias"] = json!({
-        "final_target": { "logical_name_id": "ens:0xtarget" },
-        "hops": [{ "logical_name_id": "ens:0xtarget" }]
-    });
-    assert_eq!(
-        parse(alias).classify(NAME_ID, ResolutionRoutePolicy::Ens),
-        Ok(ResolutionRoute::AliasOnly)
-    );
-
     let mut wildcard = direct_topology();
     wildcard["resolver_path"][0]["logical_name_id"] = json!(WILDCARD_ID);
     wildcard["wildcard"] = json!({
@@ -97,26 +86,7 @@ fn classifies_every_admitted_route() {
 }
 
 #[test]
-fn rejects_the_invalid_alias_and_wildcard_states_both_old_classifiers_rejected() {
-    let mut missing_alias_hops = direct_topology();
-    missing_alias_hops["alias"] = json!({ "final_target": null });
-    assert!(
-        parse(missing_alias_hops)
-            .classify(NAME_ID, ResolutionRoutePolicy::Ens)
-            .is_err()
-    );
-
-    let mut disagreeing_alias = direct_topology();
-    disagreeing_alias["alias"] = json!({
-        "final_target": { "logical_name_id": "ens:0xtarget" },
-        "hops": []
-    });
-    assert!(
-        parse(disagreeing_alias)
-            .classify(NAME_ID, ResolutionRoutePolicy::Ens)
-            .is_err()
-    );
-
+fn rejects_the_invalid_wildcard_states_both_old_classifiers_rejected() {
     let mut source_without_labels = direct_topology();
     source_without_labels["wildcard"]["source"] = json!({
         "logical_name_id": WILDCARD_ID
@@ -135,18 +105,15 @@ fn rejects_the_invalid_alias_and_wildcard_states_both_old_classifiers_rejected()
             .is_err()
     );
 
-    let mut wildcard_with_alias = direct_topology();
-    wildcard_with_alias["resolver_path"][0]["logical_name_id"] = json!(WILDCARD_ID);
-    wildcard_with_alias["wildcard"] = json!({
+    let mut wildcard_with_subregistry = direct_topology();
+    wildcard_with_subregistry["resolver_path"][0]["logical_name_id"] = json!(WILDCARD_ID);
+    wildcard_with_subregistry["wildcard"] = json!({
         "source": { "logical_name_id": WILDCARD_ID },
         "matched_labels": ["alice"]
     });
-    wildcard_with_alias["alias"] = json!({
-        "final_target": { "logical_name_id": "ens:0xtarget" },
-        "hops": [{ "logical_name_id": "ens:0xtarget" }]
-    });
+    wildcard_with_subregistry["subregistry_path"] = json!([{ "logical_name_id": WILDCARD_ID }]);
     assert!(
-        parse(wildcard_with_alias)
+        parse(wildcard_with_subregistry)
             .classify(NAME_ID, ResolutionRoutePolicy::Ens)
             .is_err()
     );
@@ -223,6 +190,6 @@ fn serializer_canonicalizes_typed_addresses_without_reshaping_the_object() {
         serialized["transport"]["contract_address"],
         "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31"
     );
-    assert!(serialized["alias"]["final_target"].is_null());
+    assert!(serialized.get("alias").is_none());
     assert_eq!(serialized["wildcard"]["matched_labels"], json!([]));
 }

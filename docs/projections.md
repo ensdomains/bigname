@@ -144,7 +144,7 @@ Project's families and publication marker; the normal rebuild repopulates them b
 | Address-to-records | Node/record-ID inverse indexes and current inventory | Admit `resolves_to` through the same indexed-record evaluator |
 | Children and labels | Child-edge candidates, parent subregistries and name summary | Filter current reachability, authority, expiry and readable display |
 | Permissions | Grants, resource admin aggregates and account approvals | Compose masked powers, operators, restrictions and coverage |
-| Resolvers | Classification, pointers, aliases, links and grants | Classify the resolver and page current collections |
+| Resolvers | Classification, pointers, links and grants | Classify the resolver and page current collections |
 | Record inventory | Current pointer, classification, partitions, values and links | Compose selectors, values, boundary and provenance |
 | Primary claims | Reverse tuples, node claims and normalization | Compose declared claim and any valid hydration overlay |
 | Child registration history | `child_registration_events` | Retain direct-child registration membership by parent and event identity |
@@ -237,13 +237,13 @@ it.
 `declared_summary.topology` is the lookup engine's routing input
 (`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
 lookup). The snapshot reader composes it in a fixed order, selecting the first
-applicable shape: alias paths, observed wildcard paths, ownerless
+applicable shape: observed wildcard paths, ownerless
 ENS registry pointers, then exact-surface direct ENS names, then Basenames
 transport. The direct shape covers an ENS name bound through its selected
 `declared_registry_path` binding on either [authority arm](glossary.md#authority-epoch):
 one `registry_path` hop for the binding, one `resolver_path` hop for the
 projected exact resolver (a declared ENSv1 mirror resolver stays the mirror
-address), empty `subregistry_path`, null wildcard, alias, and transport detail,
+address), empty `subregistry_path`, null wildcard and transport detail,
 and `version_boundaries` copied from the binding resource's
 composed inventory
 `record_version_boundary`. A bound name whose exact
@@ -1090,7 +1090,7 @@ redo restores their before-images and replays replacement input. Historical
 attribution reads retained normalized pointer and link intervals, so a retired
 current link does not erase the name's earlier history.
 
-Resolver overview reads `project_resolver_classification`. Bound names, aliases,
+Resolver overview reads `project_resolver_classification`. Bound names,
 links and permissions are separate collections composed from current families;
 there are no stored sampled section summaries, digests or summary-version
 carry-forward rows. Record links apply only to the admitted record-ID resolver
@@ -1521,10 +1521,10 @@ Project keeps per-key current state for the facts readers compose, grouped by
 owned family: name identity and binding candidates,
 registration and lease state, wrapper state, registry ownership, resolver
 classification, the registry-node and resource resolver pointers, node and
-record-id records with resolver links, grants and account approvals, aliases,
+record-id records with resolver links, grants and account approvals,
 child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
-included: a zero pointer, record id `0`, a revoked grant or an inactive alias
+included: a zero pointer, record id `0` or a revoked grant
 stays a row. A row goes only when nothing remains for its key. Each grant also
 carries `registration_position`, the the position of the resource's latest `RegistrationGranted` or
 `RegistrationReserved` before the grant, earlier events of the grant's own block
@@ -1556,7 +1556,7 @@ it is interpretation input and rotates the interpreter content hash
 ([deployment](deployment.md#ensv1-lease-date-on-name-rows)).
 
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
-one resource's latest pointer, including unnamed changes, for root, alias and
+one resource's latest pointer, including unnamed changes, for root and
 wildcard composition. `project_named_resource_pointer` keeps the latest named
 `ResolverChanged` per `(chain_id, resource_id, logical_name_id)`, clears included.
 Only events carrying both keys write it; unnamed changes and changes naming
