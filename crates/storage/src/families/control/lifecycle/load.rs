@@ -53,9 +53,9 @@ pub(crate) const KEY_STATES_SQL: &str =
      WHERE state.chain_id = $1
        AND (state.logical_name_id = ANY($2) OR state.resource_id = ANY($3::uuid[]))";
 
-/// The authority epoch starts and latest migration position on chain `$1` of the names `$2`, by
-/// `project_name_state_name_idx` (the primary key leads with the namespace, which the names do
-/// not bind).
+/// The authority epoch starts and latest ENSv1→ENSv2 migration position on chain `$1` of the
+/// names `$2`, by `project_name_state_name_idx` (the primary key leads with the namespace, which
+/// the names do not bind).
 pub(crate) const AUTHORITY_STARTS_SQL: &str =
     "/* storage:families.control.lifecycle.authority_starts */
      SELECT state.logical_name_id, state.authority_start_positions, state.migration_position

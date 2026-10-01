@@ -45,10 +45,10 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
         .unwrap_or(Value::Null)
 }
 
-/// The ENSv1 grant an ENSv2 grant continues: for the grant the name's latest migration wrote in
-/// its own transaction, the name's latest registrar grant before the migration. A migration moves
-/// a live lease, so its ENSv2 registration keeps that lease's registration time; a name with no
-/// registrar grant (a subname) has none to keep.
+/// The ENSv1 grant an ENSv2 grant continues: for the grant the name's latest ENSv1→ENSv2
+/// migration wrote in its own transaction, the name's latest registrar grant before that
+/// migration. The ENSv1→ENSv2 migration moves a live lease, so its ENSv2 registration keeps that
+/// lease's registration time; a name with no registrar grant (a subname) has none to keep.
 pub(super) fn migrated_lease<'a>(
     facts: &NameFacts,
     tagged: &[Tagged<'a>],
