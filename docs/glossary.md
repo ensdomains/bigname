@@ -811,6 +811,14 @@ separate predecessor rule under
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L815-L835 @ ens_v1@91c966f)
 
+The boundary moves authority, not the registration. The ENSv2 registration
+written in the boundary's transaction continues the ENSv1 lease it replaces, so
+the served `registered_at` stays that lease's registration time through the
+boundary, as it does through renewals and the
+[premigration reservation](#premigration-reservation); `migrated_at` records the
+boundary itself. Only a release followed by a new registration starts a new
+registration time (see [`registered_at`](api-v1.md#naming-dictionary)).
+
 ## Migration expiry jump
 
 the change in current `expires_at` at an activated

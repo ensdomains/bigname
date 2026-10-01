@@ -6568,7 +6568,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -6972,7 +6972,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7268,7 +7268,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7345,7 +7345,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7425,7 +7425,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -8431,7 +8431,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
