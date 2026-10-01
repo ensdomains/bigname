@@ -1517,3 +1517,21 @@ family run rebuilds the families anyway; the reset adds no second rebuild when
 the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
 redo and Project rebuild discharge this; collection cursors continue as
 described above.
+
+### Registration time kept through the ENSv1→ENSv2 migration
+
+The build that keeps a migrated name's `registered_at` at its ENSv1 lease's
+registration time instead of the migration's block time
+([naming dictionary](api-v1.md#naming-dictionary)) reads the stored migration
+position the name state already holds. It adds no schema-migration, manifest
+change or historical ingest fetch, but the code lives in hashed storage sources
+(`crates/storage/src/families/control/lifecycle`), so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. An existing deployment finishes the full-history Interpret redo and the
+Project redo it installs before the matching API serves, as for any rotation;
+until then the fenced name routes answer `409 stale`. It ships batched with the
+TYR-116 release (the wrapped-registration resolver fix), whose single Interpret
+redo and Project rebuild discharge it. Once the redo publishes, check on Sepolia
+that `GET /v1/names/cosmic-heron.eth` serves `registered_at` `"1779115572"`,
+its May 2026 ENSv1 registration, equal to its `created_at`, while `migrated_at`
+stays `"1790687028"`.

@@ -5,7 +5,9 @@
 //! reservation's expiry and the 28-day ENSv2 grace while it does. After the cutover a `.eth`
 //! name that ENSv1 decides without a live ENSv2 entry, and every name below it, serve no
 //! resolver. A block that changes a proxy recomposes the summaries of the reserved names, and
-//! undo and rebuild restore them.
+//! undo and rebuild restore them. The registration time of such a name is its ENSv1
+//! registration's through renewals, the reservation, the cutover and the ENSv1→ENSv2 migration;
+//! only a new registration after a release starts a new one (TYR-131).
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -473,5 +475,229 @@ async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publicati
     ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
     fixture.assert_undo_restores(9).await?;
     fixture.assert_rebuild_equal(9).await?;
+    fixture.cleanup().await
+}
+
+/// The block time `Fixture::lineage` gives `block`, in Unix seconds.
+fn block_time(block: i64) -> i64 {
+    1_800_000_000 + block * 12
+}
+
+/// A composed name's registration time and migration time, in Unix seconds, as the name summary
+/// and the name state hold them.
+async fn times(fixture: &Fixture, logical_name_id: &str) -> Result<(Option<i64>, Option<i64>)> {
+    let registered: Option<i64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM registered_at)::bigint FROM project_name_summary
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let migrated: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM migrated_at)::bigint FROM project_name_state
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?;
+    Ok((registered, migrated.flatten()))
+}
+
+/// A registrar event of `name`'s lease `n` at `block`.
+async fn lease_event(
+    fixture: &Fixture,
+    name: &str,
+    n: u32,
+    block: i64,
+    kind: &str,
+    expiry: u64,
+) -> Result<()> {
+    fixture
+        .write(
+            block,
+            1,
+            kind,
+            "ens_v1_registrar_l1",
+            Some(name),
+            Some(&uuid(0x1000 + n)),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                   "expiry": expiry}),
+            REGISTRAR,
+        )
+        .await?;
+    Ok(())
+}
+
+/// An ENSv2 `eth` registry entry `entry` with token `token`, registered to `OWNER` at `block`
+/// and bound under ens_v2 there.
+async fn v2_registered(
+    fixture: &Fixture,
+    name: &str,
+    binding: &str,
+    entry: &str,
+    token: &str,
+    block: i64,
+) -> Result<()> {
+    fixture
+        .binding(binding, name, entry, "ens_v2", block, 1, None)
+        .await?;
+    fixture
+        .write(
+            block,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(name),
+            Some(entry),
+            json!({"registry_contract_instance_id": "eth", "token_id": token,
+                   "status": "registered", "registrant": OWNER, "owner": OWNER,
+                   "expiry": RESERVED_EXPIRY}),
+            V2_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+/// `name`'s lease `n` migrates at `block`: its ENSv1 binding closes, and in one transaction the
+/// reserved ENSv2 entry is registered and bound and the MigrationApplied follows.
+async fn migrated(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + $2 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(100 + n))
+    .bind(block)
+    .execute(&fixture.pool)
+    .await?;
+    let entry = uuid(0x2000 + n);
+    v2_registered(
+        fixture,
+        name,
+        &uuid(200 + n),
+        &entry,
+        &format!("{n}"),
+        block,
+    )
+    .await?;
+    fixture
+        .write(
+            block,
+            2,
+            "MigrationApplied",
+            "ens_v2_migration_l1",
+            Some(name),
+            Some(&entry),
+            json!({"migration_path": "unwrapped"}),
+            V2_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn renewals_the_reservation_the_cutover_and_the_migration_keep_the_registration_time()
+-> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_registered_at", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    let granted = Some(block_time(2));
+    lease_event(
+        &fixture,
+        &alice,
+        1,
+        3,
+        "RegistrationRenewed",
+        LEASE_EXPIRY + 365 * DAY,
+    )
+    .await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    ensure!(times(&fixture, &alice).await? == (granted, None));
+
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let reserved_after_cutover = served(&fixture, &alice).await?;
+    ensure!(
+        reserved_after_cutover["expiry"] == json!(RESERVED_EXPIRY.to_string()),
+        "{reserved_after_cutover}"
+    );
+    ensure!(times(&fixture, &alice).await? == (granted, None));
+
+    migrated(&fixture, &alice, 1, 7).await?;
+    fixture.apply(7, FamilyMode::Normal).await?;
+    ensure!(served(&fixture, &alice).await?["arm"] == json!("ens_v2"));
+    let migrated_times = times(&fixture, &alice).await?;
+    ensure!(
+        migrated_times == (granted, Some(block_time(7))),
+        "{migrated_times:?}"
+    );
+
+    fixture.assert_undo_restores(7).await?;
+    fixture.assert_rebuild_equal(7).await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn only_a_registration_after_a_release_starts_a_new_registration_time() -> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_registered_again", 14).await?;
+    let dave = leased(&fixture, "dave.eth", 2, 1).await?;
+    // The lease ran out and the label was registered again: the registrar emits a new grant.
+    lease_event(&fixture, &dave, 2, 4, "RegistrationGranted", LEASE_EXPIRY).await?;
+    reserved(&fixture, &dave, 2, 5).await?;
+    migrated(&fixture, &dave, 2, 6).await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let migrated_times = times(&fixture, &dave).await?;
+    ensure!(
+        migrated_times == (Some(block_time(4)), Some(block_time(6))),
+        "{migrated_times:?}"
+    );
+
+    // The migrated registration is unregistered, and the label is registered again in ENSv2.
+    fixture
+        .event(
+            Event::new(
+                "dave-unregistered",
+                8,
+                1,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .name(&dave)
+            .resource(&uuid(0x2002))
+            .before(json!({"registrant": OWNER}))
+            .after(
+                json!({"registry_contract_instance_id": "eth", "token_id": "2",
+                              "released_at": block_time(8)}),
+            )
+            .raw(json!({"emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 8 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(202))
+    .execute(&fixture.pool)
+    .await?;
+    v2_registered(&fixture, &dave, &uuid(212), &uuid(0x2102), "3", 10).await?;
+    fixture.apply(10, FamilyMode::Normal).await?;
+    let again = times(&fixture, &dave).await?;
+    ensure!(
+        again == (Some(block_time(10)), Some(block_time(6))),
+        "{again:?}"
+    );
+
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }

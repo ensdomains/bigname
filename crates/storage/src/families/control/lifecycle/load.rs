@@ -53,11 +53,12 @@ pub(crate) const KEY_STATES_SQL: &str =
      WHERE state.chain_id = $1
        AND (state.logical_name_id = ANY($2) OR state.resource_id = ANY($3::uuid[]))";
 
-/// The authority epoch starts on chain `$1` of the names `$2`, by `project_name_state_name_idx`
-/// (the primary key leads with the namespace, which the names do not bind).
+/// The authority epoch starts and latest migration position on chain `$1` of the names `$2`, by
+/// `project_name_state_name_idx` (the primary key leads with the namespace, which the names do
+/// not bind).
 pub(crate) const AUTHORITY_STARTS_SQL: &str =
     "/* storage:families.control.lifecycle.authority_starts */
-     SELECT state.logical_name_id, state.authority_start_positions
+     SELECT state.logical_name_id, state.authority_start_positions, state.migration_position
      FROM bigname_phase.project_name_state state
      WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2)";
 
@@ -290,14 +291,15 @@ pub async fn load_name_facts_on(
         .into_iter()
         .collect(),
     );
-    let starts: BTreeMap<String, Value> =
-        sqlx::query_as::<_, (String, Value)>(AUTHORITY_STARTS_SQL)
+    let states: BTreeMap<String, (Value, Option<Value>)> =
+        sqlx::query_as::<_, (String, Value, Option<Value>)>(AUTHORITY_STARTS_SQL)
             .bind(chain_id)
             .bind(&ids)
             .fetch_all(&mut *conn)
             .await
             .context("failed to load name states")?
             .into_iter()
+            .map(|(name, starts, migration)| (name, (starts, migration)))
             .collect();
     let node_keys: Vec<(String, String)> = names
         .iter()
@@ -452,7 +454,13 @@ pub async fn load_name_facts_on(
             block_timestamps: Arc::clone(&block_timestamps),
             block_seconds: Arc::clone(&block_seconds),
             snapshot_timestamps: Arc::clone(&snapshot_timestamps),
-            authority_starts: starts.get(name).cloned().unwrap_or(Value::Null),
+            authority_starts: states
+                .get(name)
+                .map_or(Value::Null, |(starts, _)| starts.clone()),
+            migration: states
+                .get(name)
+                .and_then(|(_, migration)| migration.as_ref())
+                .and_then(Position::from_json),
             registry_node: nodes
                 .get(&(
                     namespace_of(name).to_owned(),
