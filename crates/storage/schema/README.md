@@ -118,7 +118,7 @@ the undo journal (`project_family_undo`) and the repair record
 (`project_repair_record`). Each family keeps per-key current state: name identity
 and binding candidates, registration and lease state, wrapper state, registry
 ownership, resolver classification and pointers, records, grants and account
-approvals, aliases, child edges, reverse claims, address indexes, name history
+approvals, child edges, reverse claims, address indexes, name history
 and the name summary. `child_registration_events` keeps historical child
 membership. The API reads these tables through storage's family readers
 (`crates/storage/src/families`), which compose names, records, permissions,

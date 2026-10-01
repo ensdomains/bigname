@@ -449,7 +449,8 @@ them.
   bit by bit; each name is the pinned upstream `ROLE_<NAME>` constant in
   lower snake case, and `admin_<name>` is `ROLE_<NAME>_ADMIN`, the same bit
   shifted by 128. Unknown bits are omitted rather than surfaced under invented
-  names.
+  names, and so are bits 28 and 156 of the 2026-06-29 resolver generation,
+  whose role is no longer interpreted ([upstream](upstream.md)).
   (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L7-L63 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7-L64 @ ens_v2_sepolia_20260629@ccaeb58)
   (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L10 @ ens_v2_sepolia_20260903@5da83f6a)
@@ -501,7 +502,6 @@ them.
 | `set_abi` | ENSv2 resolvers | `ROLE_SET_ABI` (bit 16; bit 12 on the record resolver). |
 | `set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE` (bit 20; bit 16 on the record resolver). |
 | `set_name` | ENSv2 resolvers | `ROLE_SET_NAME` (bit 24; bit 20 on the record resolver). |
-| `set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS` (bit 28). |
 | `clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR` (bit 32): may clear a name's records. |
 | `set_data` | ENSv2 resolvers | `ROLE_SET_DATA` (bit 36; bit 24 on the record resolver). |
 | `link` | ENSv2 record resolver | `ROLE_LINK` (bit 28). |
@@ -512,7 +512,6 @@ them.
 | `admin_set_abi` | ENSv2 resolvers | `ROLE_SET_ABI_ADMIN` (bit 144; bit 140 on the record resolver). |
 | `admin_set_interface` | ENSv2 resolvers | `ROLE_SET_INTERFACE_ADMIN` (bit 148; bit 144 on the record resolver). |
 | `admin_set_name` | ENSv2 resolvers | `ROLE_SET_NAME_ADMIN` (bit 152; bit 148 on the record resolver). |
-| `admin_set_alias` | ENSv2 resolver (20260629) | `ROLE_SET_ALIAS_ADMIN` (bit 156). |
 | `admin_clear_records` | ENSv2 resolver (20260629) | `ROLE_CLEAR_ADMIN` (bit 160). |
 | `admin_set_data` | ENSv2 resolvers | `ROLE_SET_DATA_ADMIN` (bit 164; bit 152 on the record resolver). |
 | `admin_link` | ENSv2 record resolver | `ROLE_LINK_ADMIN` (bit 156). |
@@ -931,7 +930,7 @@ batches after the cursor, applying namespace membership before checking those
 resources' publications. Address `include=role_summary` uses the same bounded reader
 with its existing 1000-row inline-expansion limit. The resolver overview (`GET
 /v1/resolvers/{chain_id}/{address}`, including whether it lists bound names)
-and whether its `/aliases`, `/links` and `/roles` collections are supported come
+and whether its `/links` and `/roles` collections are supported come
 from the families' resolver classification, and those collections list the
 families' rows, with the names each row joins read from composed rows. History
 attribution through a resolver's classification reads the same classification.
@@ -952,7 +951,7 @@ the zero address leaves a name's registry node ownerless
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f),
 the composed name becomes unregistered but remains projected and can be listed
 by `GET /v1/search`. Composed rows carry the complete declared resolution topology
-(`declared_summary.topology`): aliases, wildcard sources, direct and ownerless
+(`declared_summary.topology`): wildcard sources, direct and ownerless
 ENS, and admitted Basenames cross-chain transport. Basenames retains its
 execution-manifest admission and the Ethereum position selected at the Base
 publication's timestamp.
@@ -1426,8 +1425,7 @@ the retained canonical [name surface](glossary.md#surface-name-surface), keeps
 `raw_fact_ref.interpreter_state_key`. Its `before_state` may also become the
 preceding `after_state` from the logical-name/resource-null state stream that
 the event now joins. Issue #348 retains the surface from registry/root
-evidence; issue #529 retains a surface observed only by resolver
-`AliasChanged` before a batch boundary. The event may therefore newly enter name-filtered
+evidence. The event may therefore newly enter name-filtered
 diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
@@ -1469,13 +1467,7 @@ change has no continuation guarantee and may be rejected. Consumers must
 discard pre-#613 cursors and restart from the first page; fresh post-publication
 cursors continue normally.
 
-These boundaries do not claim fresh/resumed parity for the
-known pre-existing exception: when a resolver-emitted resource equals
-`namehash(N)`, named-resource and alias preimages can share one retained
-[interpreter state key](glossary.md#interpreter-state-key), so resumed
-interpretation can lose the named-resource resolver hint and diverge from a
-fresh walk ([#560](https://github.com/ensdomains/bigname/issues/560); evidence
-is checked in as an ignored collision probe). If an ended resource still
+If an ended resource still
 retains a resolver pointer to the emitter, its rebuildable record-inventory
 projection may change too. The
 resource-less late event does not restore the composed name's `resource_id`, so name
@@ -1501,11 +1493,11 @@ readable surface answers `404 not_found`.
 
 A [current-state list cursor](glossary.md#current-state-list-cursor), the
 cursor of every current-state product collection (search, names, subnames,
-address names, permissions, registry labels, resolver aliases/links/roles,
+address names, permissions, registry labels, resolver links/roles,
 and nested resolver `bound_names` and registry `referenced_by`), holds the list's
 sort and filters, the sort position of the last row it returned, and, when the
 request pinned `at`, that `at` token. Only resolver and registry overviews and
-resolver aliases/links/roles accept `at`. It holds no publication,
+resolver links/roles accept `at`. It holds no publication,
 generation, or evaluation time. A continuation reads whatever is published when
 it runs and returns the rows that sort after that position:
 
@@ -1527,7 +1519,7 @@ it runs and returns the rows that sort after that position:
   resolver generation that `GET /v1/names` and `bound_names` cursors carried
   before this contract, and the snapshot field of `GET /v1/search` cursors
   issued before July 2026, so such a cursor is refused once. Resolver
-  aliases/links/roles likewise reject their old publication/generation layout.
+  links/roles likewise reject their old publication/generation layout.
   Subnames, address names, permissions, registry labels and `referenced_by`
   accept their previous position layout after validating sort, filters and
   anchors, ignoring only the old publication/evaluation fields. Address names
@@ -2947,25 +2939,6 @@ Closed history payload fields. The event type and retained evidence determine wh
 | `removed_powers` | array of enum PermissionPower | optional | Powers removed, when the log supplies the old set. |
 | `migration_path` | enum `unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, `emancipated_child` | optional | Migration path retained by the event. |
 
-### ResolverAlias
-
-A supported resolver binding or alias-event item; the route defines the two forms.
-
-<!-- openapi:object ResolverAlias -->
-| Field | Type | Presence | Description |
-| --- | --- | --- | --- |
-| `namespace` | string | optional | Resolved public namespace slug. |
-| `name` | string | optional | Normalized name; the subnames and registry-label routes also permit the documented non-name forms. |
-| `display_name` | string | optional | Display form of the name. |
-| `namehash` | string | optional | Hexadecimal ENS namehash. |
-| `resolver` | object ContractRef | optional | Resolver contract for this answer. |
-| `state` | enum `active`, `removed`, `unknown` | optional | Latest alias state on an alias-event row. |
-| `from_name` | nullable string | optional | Alias source name; always present on alias-event rows. |
-| `to_name` | nullable string | optional | Alias target name; null for a removed or unknown target. |
-| `from_display_name` | string | optional | Display form of the alias source when retained. |
-| `to_display_name` | string | optional | Display form of the alias target when retained. |
-| `to_registration_id` | string | optional | Target registration handle when retained. |
-
 ### LinkEvent
 
 <!-- openapi:object LinkEvent -->
@@ -3177,18 +3150,6 @@ Extends Envelope.
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `data` | object ResolverOverview | always | Requested result data. |
-
-### ResolverAliasesResponse
-
-Success envelope for the corresponding product operation.
-
-Extends Envelope.
-
-<!-- openapi:object ResolverAliasesResponse -->
-| Field | Type | Presence | Description |
-| --- | --- | --- | --- |
-| `data` | array of object ResolverAlias | always | Requested result data. |
-| `page` | object Page | always | Standard collection pagination metadata. |
 
 ### ResolverLinksResponse
 

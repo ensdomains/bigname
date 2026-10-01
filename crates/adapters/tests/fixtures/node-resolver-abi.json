@@ -35,14 +35,6 @@
     ]
   },
   {
-    "name": "AliasChanged",
-    "fragment": "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-    "normalized_events": [
-      "AliasChanged",
-      "PreimageObserved"
-    ]
-  },
-  {
     "name": "NamedResource",
     "fragment": "event NamedResource(uint256 indexed resource, bytes name)",
     "normalized_events": [

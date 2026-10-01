@@ -214,7 +214,7 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
 
         if wires.public_resolver.is_some() {
             // The record-ID deployment links both names to one record, then writes through that
-            // ID. It has no AliasChanged event.
+            // ID.
             // (upstream: .refs/ens_v2_sepolia_20260903/contracts/src/resolver/PermissionedResolver.sol:L352-L366 @ ens_v2_sepolia_20260903@5da83f6a)
             let record_id = U256::from(seat + 1);
             actions.push(action(
@@ -291,37 +291,6 @@ pub fn build(wiring: &Wiring, dimensions: &Dimensions, settle_timestamp: i64) ->
                         .encode_log_data(),
                     ),
                 ],
-            ));
-        } else {
-            actions.push(action(
-                format!("{label}:alias"),
-                stage::WRITE,
-                vec![emission(
-                    wires.resolver,
-                    V2Resolver::AliasChanged {
-                        indexedFromName: alloy_primitives::keccak256(dns_encode(&[label, "eth"])),
-                        indexedToName: alloy_primitives::keccak256(dns_encode(&[
-                            alias_label.as_str(),
-                            "eth",
-                        ])),
-                        fromName: dns_encode(&[label, "eth"]).into(),
-                        toName: dns_encode(&[alias_label.as_str(), "eth"]).into(),
-                    }
-                    .encode_log_data(),
-                )],
-            ));
-            actions.push(action(
-                format!("{label}:alias-record"),
-                stage::LATE,
-                vec![emission(
-                    wires.resolver,
-                    V2Resolver::AddressChanged {
-                        node: alias_node,
-                        coinType: U256::from(60_u64),
-                        newAddress: owner.to_vec().into(),
-                    }
-                    .encode_log_data(),
-                )],
             ));
         }
 

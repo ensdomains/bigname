@@ -16,7 +16,6 @@ fn topology() -> Value {
             "address": "0x0000000000000000000000000000000000000001"
         }],
         "wildcard": { "source": null, "matched_labels": [] },
-        "alias": { "final_target": null, "hops": [] },
         "version_boundaries": {
             "topology_version_boundary": null,
             "record_version_boundary": null
@@ -46,13 +45,6 @@ fn assert_classification(namespace: &str, topology: &Value, expected: VerifiedRe
 fn storage_adapter_preserves_the_domain_route_matrix() {
     let direct = topology();
     assert_classification("ens", &direct, VerifiedResolutionPathClass::Direct);
-
-    let mut alias = topology();
-    alias["alias"] = json!({
-        "final_target": { "logical_name_id": "ens:0xtarget" },
-        "hops": [{ "logical_name_id": "ens:0xtarget" }]
-    });
-    assert_classification("ens", &alias, VerifiedResolutionPathClass::AliasOnly);
 
     let mut wildcard = topology();
     wildcard["resolver_path"][0]["logical_name_id"] = json!("ens:0xancestor");

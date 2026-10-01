@@ -60,9 +60,7 @@ async fn enrich(
     inventories: &BTreeMap<(String, Uuid), FamilyRecordInventory>,
 ) -> Result<()> {
     let mut topology = match row.binding_kind.map(|kind| kind.as_str()) {
-        Some("resolver_alias_path" | "observed_wildcard_path") => {
-            load_name_topology_on(conn, &row.logical_name_id).await?
-        }
+        Some("observed_wildcard_path") => load_name_topology_on(conn, &row.logical_name_id).await?,
         _ => None,
     };
     let chain_id = chain_of(row)?;
@@ -154,7 +152,7 @@ fn shape(
         json!([])
     };
     json!({"registry_path":registry, "subregistry_path":[], "resolver_path":[resolver],
-        "wildcard":{"source":null,"matched_labels":[]}, "alias":{"final_target":null,"hops":[]},
+        "wildcard":{"source":null,"matched_labels":[]},
         "version_boundaries":{"topology_version_boundary":boundary,"record_version_boundary":boundary},
         "transport":{"source_chain_id":null,"target_chain_id":null,"contract_address":null,"latest_event_kind":null}})
 }

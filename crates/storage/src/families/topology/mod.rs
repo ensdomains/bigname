@@ -1,4 +1,4 @@
-//! Production readers for child pages/counts, aliases, wildcard topology and resolver
+//! Production readers for child pages/counts, wildcard topology and resolver
 //! overview/collections. They use the owned family tables plus retained identity, lineage and
 //! normalized events, composing attached names in the same publication snapshot.
 //!
@@ -23,8 +23,7 @@ pub(crate) use children_page::{
     page as children_page_on, require_publication,
 };
 pub use collections::{
-    FamilyCollectionPage, load_resolver_aliases_shadow, load_resolver_links_shadow,
-    load_resolver_roles_shadow,
+    FamilyCollectionPage, load_resolver_links_shadow, load_resolver_roles_shadow,
 };
 pub(crate) use name_topology::load_name_topology_on;
 pub use name_topology::load_name_topology_shadow;
@@ -34,8 +33,8 @@ pub(crate) use overview::{
 };
 pub(crate) use pointers::load_family_wildcard_source_on;
 pub use pointers::{
-    FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
-    load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
+    FamilyLink, FamilyWildcardSource, LinkSelection, load_family_link_selection,
+    load_family_wildcard_source,
 };
 pub(crate) use registry_children::{
     RegistryChildRow, load_owned_registry_children, published_surface_exists,

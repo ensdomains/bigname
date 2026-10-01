@@ -37,7 +37,6 @@ sol! {
     event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress);
     event ContenthashChanged(bytes32 indexed node, bytes hash);
     event VersionChanged(bytes32 indexed node, uint64 newVersion);
-    event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
     event NamedResource(uint256 indexed resource, bytes name);
     event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
     event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
@@ -243,7 +242,6 @@ pub(super) fn interpret(
                 }),
             ))
         }
-        "AliasChanged" => alias(selected, raw, state),
         "NamedResource" => named_resource(selected, raw, state, NamedKind::Whole),
         "NamedTextResource" => named_resource(selected, raw, state, NamedKind::Text),
         "NamedAddrResource" => named_resource(selected, raw, state, NamedKind::Address),
@@ -272,74 +270,6 @@ fn record(
         resource_id,
         after,
     ))
-}
-
-fn alias(selected: &Selected, raw: &RawLogInput, state: &mut State) -> anyhow::Result<Interpreted> {
-    let event =
-        decode_event_log::<AliasChanged>(&raw.topics, &raw.data, "AliasChanged log is malformed")?;
-    ensure_declared(selected, &["AliasChanged", "PreimageObserved"])?;
-    let Ok(from_raw_labels) = decode_dns_labels(&event.fromName) else {
-        return Ok(Interpreted::new());
-    };
-    let to_raw_labels = if event.toName.is_empty() {
-        None
-    } else {
-        decode_dns_labels(&event.toName).ok()
-    };
-    let from_labels = surface_labels(&from_raw_labels);
-    let to_labels = to_raw_labels
-        .as_ref()
-        .and_then(|labels| surface_labels(labels));
-    let from_namehash = namehash_raw(from_raw_labels.iter().map(Vec::as_slice));
-    let from_logical_name_id = format!("{}:{from_namehash}", selected.source.namespace);
-    let to_namehash = to_raw_labels
-        .as_ref()
-        .map(|labels| namehash_raw(labels.iter().map(Vec::as_slice)));
-    let same_endpoint = to_namehash.as_ref() == Some(&from_namehash);
-    let to_logical_name_id = to_namehash
-        .as_ref()
-        .map(|namehash| format!("{}:{namehash}", selected.source.namespace));
-    let to_resource_id = to_namehash
-        .as_deref()
-        .filter(|_| to_labels.is_some())
-        .and_then(|namehash| state.name_link_by_namehash(&selected.source.namespace, namehash))
-        .and_then(|(_, resource_id)| resource_id);
-    let alias_removed = event.toName.is_empty();
-    let alias_unknown = !alias_removed && to_raw_labels.is_none();
-    let mut output = single_event(
-        "AliasChanged",
-        Some(from_logical_name_id.clone()),
-        to_resource_id,
-        json!({
-            "source_event": "AliasChanged",
-            "resolver": raw.emitting_address,
-            "resolver_contract_instance_id": selected.contract_instance_id.to_string(),
-            "from_dns_encoded_name": hex_string(&event.fromName),
-            "to_dns_encoded_name": hex_string(&event.toName),
-            "alias_state": if alias_removed { "removed" } else if alias_unknown { "unknown" } else { "active" },
-            "active": !alias_removed && !alias_unknown,
-            "from_name": from_labels.as_ref().map(|labels| labels.join(".")),
-            "to_name": to_labels.as_ref().map(|labels| labels.join(".")),
-            "to_logical_name_id": to_logical_name_id,
-            "to_resource_id": to_resource_id.map(|value| value.to_string()),
-            "from_namehash": from_namehash,
-            "to_namehash": to_namehash,
-        }),
-    );
-    observe_resolver_name(
-        selected,
-        state,
-        &mut output,
-        from_raw_labels,
-        from_labels,
-        None,
-    );
-    if let Some(to_raw_labels) = to_raw_labels
-        && !same_endpoint
-    {
-        observe_resolver_name(selected, state, &mut output, to_raw_labels, to_labels, None);
-    }
-    Ok(output)
 }
 
 enum NamedKind {
@@ -532,7 +462,7 @@ fn name_draft(
         token_lineage_id: None,
         surface_binding_id: None,
         bind,
-        binding_kind: "resolver_alias_path".to_owned(),
+        binding_kind: "observed_only".to_owned(),
         authority_arm: "ens_v2".to_owned(),
         source_kind: "resolver_dns_name".to_owned(),
         preimage_metadata,

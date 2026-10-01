@@ -18,7 +18,7 @@ prefix in #315, and the public edge serves it.
 versioned product routes. The landing page and the API reference are a
 separate static site ([`site/`](../site/README.md)) outside the API binary;
 both describe this contract and neither is part of it. The API answers `GET /`
-and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 20
+and `GET /docs` like any unknown route. `GET /openapi.json` serves the generated OpenAPI 3.1 reference for the 19
 product operations below. It is a static contract artifact, outside the product envelope, and excludes
 the six diagnostic operations.
 
@@ -173,8 +173,7 @@ ENSv2 resolver `RecordChanged` or `RecordVersionChanged` keeps its
 the corresponding `raw_fact_ref.interpreter_state_key` attribution field. Its
 `before_state` may also become the preceding `after_state` from the
 logical-name/resource-null state stream that the event now joins. Issue #348
-retains the surface from registry/root evidence; issue #529 retains a surface
-observed only by resolver `AliasChanged` before a batch boundary. Those events
+retains the surface from registry/root evidence. Those events
 may consequently enter name-filtered diagnostics and product history. An
 outstanding cursor has no continuation guarantee across this behavior-changing
 boundary and may be rejected. Consumers must discard pre-#348/#529 cursors and
@@ -190,13 +189,6 @@ change has no continuation guarantee and may be rejected. Consumers must
 discard pre-#613 cursors and restart from the first page; fresh post-publication
 cursors continue normally.
 
-These boundaries do not claim fresh/resumed parity for the known pre-existing
-exception: when a resolver-emitted resource equals `namehash(N)`,
-named-resource and alias preimages can share one retained [interpreter state
-key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
-named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe).
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
 does not restore the name's serving `resource_id`, so the released or expired name's
@@ -1269,7 +1261,7 @@ its value map:
   discovery](glossary.md#universal-resolver-ancestor-discovery) applies when a
   readable ENS name on the deployment profile's Ethereum L1 (Mainnet under
   `manifests/mainnet`, Sepolia under `manifests/sepolia`) has a null projected
-  exact resolver, a projected name identity and DNS wire name, no alias,
+  exact resolver, a projected name identity and DNS wire name, no
   linked-subregistry, projected wildcard, or cross-chain transport path, and an
   admitted Universal Resolver manifest entrypoint on that chain
   (`ens_execution`, checked in for both profiles; see the
@@ -3925,15 +3917,18 @@ For a registrar lease first identified by a later readable observation, registra
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
   The overview carries no section counts and no sampled sections. A
-  resolver's alias mappings, record links, and resolver-scoped permission rows
-  are the paginated `/aliases`, `/links`, and `/roles` collections below, each
+  resolver's record links and resolver-scoped permission rows
+  are the paginated `/links` and `/roles` collections below, each
   with an exact `page.total_count`; its events are `GET /v1/events` with the
   `resolver` filter. This is a consumer-visible shape change: the overview
   formerly served `counts` (`nodes`, `aliases`, `links`, `linked_records`,
   `role_holders`) and, through the `include` parameter, bounded samples
   `nodes`, `aliases`, `links`, and `roles` and an `events` count object; those
   fields and the parameter are removed, and a request that still sends
-  `include` is rejected rather than served without the sections.
+  `include` is rejected rather than served without the sections. The former
+  `/aliases` collection is removed too and answers like any unknown route: it
+  paged mappings that only the retired 2026-06-29 resolver generation could
+  emit ([upstream](upstream.md)).
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
 - Snapshot behavior: the resolver overview and bound names read
@@ -3969,7 +3964,7 @@ For a registrar lease first identified by a later readable observation, registra
 - Replaces (v1): `GET /v1/resolvers/{chain_id}/{resolver_address}/overview`
   and the `GET /v1/names?resolver=...` filter.
 
-### `GET /v1/resolvers/{chain_id}/{address}/aliases`, `/links`, and `/roles`
+### `GET /v1/resolvers/{chain_id}/{address}/links` and `/roles`
 
 <!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/roles -->
 | Parameter | In | Type | Required | Default | Description |
@@ -4015,42 +4010,10 @@ For a registrar lease first identified by a later readable observation, registra
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
-<!-- openapi:parameters GET /v1/resolvers/{chain_id}/{address}/aliases -->
-| Parameter | In | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- | --- |
-| `chain_id` | path | integer | yes | none | Supported numeric EVM chain ID. |
-| `address` | path | string | yes | none | EVM address in hexadecimal form. |
-| `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
-| `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
-| `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
-| `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
-
-<!-- openapi:responses GET /v1/resolvers/{chain_id}/{address}/aliases -->
-| Status | Body | Code | Headers | When |
-| --- | --- | --- | --- | --- |
-| 200 | object ResolverAliasesResponse | none | none | The requested answer, including the empty or in-band outcomes documented below. |
-| 400 | object ErrorEnvelope | `invalid_input` | none | Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules. |
-| 404 | object ErrorEnvelope | `not_found` | none | The selected resource or namespace does not exist. |
-| 408 | object ErrorEnvelope | `request_timeout` | none | The configured whole-request deadline expired. |
-| 409 | object ErrorEnvelope | `conflict` | none | The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined. |
-| 409 | object ErrorEnvelope | `stale` | none | The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry. |
-| 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
-| 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
-
-- Tier: product read. These collections page a resolver's alias mappings,
-  record links, and resolver-scoped permission rows.
+- Tier: product read. These collections page a resolver's record links and
+  resolver-scoped permission rows.
 - Parameters: numeric `chain_id`, resolver `address`; `at`, `finality`, `cursor`,
   `page_size` (default 50, maximum 200). Other query parameters are rejected.
-- `/aliases` returns current alias bindings followed by current active
-  alias-event mappings. A binding row is `{namespace, name, display_name,
-  namehash}`; an alias-event row is `{namespace, from_name, to_name,
-  from_display_name?, to_display_name?, state, resolver: {chain_id, address},
-  to_registration_id?}`, and its `to_name` is `null` when the latest alias
-  state is `removed` or `unknown`. The binding
-  group sorts by stable name identity; the event group sorts by stable alias
-  identity, so equal display names cannot skip or duplicate entries. Counts
-  cover both groups. This is a complete enumeration of the supported indexed
-  mappings, not a claim to discover arbitrary custom resolver behavior.
 - `/links` serves the record links of a resolver of the ENSv2 record-ID
   generation (a proxy whose admitted implementation's manifest declares
   `Linked`; see [manifests](manifests.md#record-id-resolver-generation)).
@@ -4135,8 +4098,8 @@ For a registrar lease first identified by a later readable observation, registra
   each request; a change returns `409 stale` asking to retry with the same cursor.
   Legacy cursors carrying generation/publication fields return `400 invalid_input`
   once. See [current-state list cursors](api-v1.md#current-state-list-cursors).
-- Alias and link events come from activated canonical normalized events
-  bounded to the selected height; bindings and permissions come from current
+- Link events come from activated canonical normalized events
+  bounded to the selected height; permissions come from current
   projections using their existing canonical-lineage predicates. Resolver classification
   and enumeration support remain the authority for whether either collection
   can make an indexed completeness claim. No manifest coverage is widened.
