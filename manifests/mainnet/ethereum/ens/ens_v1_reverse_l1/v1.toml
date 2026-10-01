@@ -1,4 +1,4 @@
-# Bootstrap seed for the canonical ENS reverse registrar on Ethereum mainnet.
+# Bootstrap seed for the canonical ENS reverse registrars on Ethereum mainnet.
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v1_reverse_l1"
@@ -19,6 +19,17 @@ proxy_kind = "none"
 # (upstream: .refs/ens_v1/deployments/mainnet/ReverseRegistrar.json:L379 @ ens_v1@91c966f).
 start_block = 16925606
 
+# The ENSIP-19 default.reverse registrar (coin type 2147483648).
+# (upstream: .refs/ens_v1/deployments/mainnet/DefaultReverseRegistrar.json:L2 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
+[[contracts]]
+role = "default_reverse_registrar"
+address = "0x283F227c4Bd38ecE252C4Ae7ECE650B0e913f1f9"
+proxy_kind = "none"
+# Start block follows the Mainnet deployment receipt.
+# (upstream: .refs/ens_v1/deployments/mainnet/DefaultReverseRegistrar.json:L270 @ ens_v1@91c966f).
+start_block = 22764819
+
 # The reverse registrar emits the claimed address and reverse node together:
 # (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L23 @ ens_v1@91c966f).
 [[abi.events]]
@@ -26,3 +37,13 @@ name = "ReverseClaimed"
 fragment = "event ReverseClaimed(address indexed addr, bytes32 indexed node)"
 emitter_roles = ["reverse_registrar"]
 normalized_events = ["ReverseChanged"]
+
+# Every setter of the default registrar stores the address's name and emits it:
+# (upstream: .refs/ens_v1/contracts/reverseRegistrar/IStandaloneReverseRegistrar.sol:L10 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L31 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L26-L57 @ ens_v1@91c966f).
+[[abi.events]]
+name = "NameForAddrChanged"
+fragment = "event NameForAddrChanged(address indexed addr, string name)"
+emitter_roles = ["default_reverse_registrar"]
+normalized_events = ["ReverseChanged", "RecordChanged"]
