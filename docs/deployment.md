@@ -1530,8 +1530,9 @@ chain. It needs no schema-migration, no manifest change and no historical
 ingest fetch. An existing deployment finishes the full-history Interpret redo
 and the Project redo it installs before the matching API serves, as for any
 rotation. Only that redo corrects names already registered this way: when the
-Project redo publishes, every wrapped name whose registration transaction set
-a resolver serves that resolver and its records. On Sepolia `taytems.eth`
-(registered at block 4052977) serves resolver
-`0x8fade66b79cc9f707ab26799354482eb93a5b7dd` instead of none; check it, and
-that its records match `source=verified`, before the release is recorded.
+Project redo publishes, a wrapped name whose registration transaction set a
+resolver serves its latest resolver state rather than none, including any later
+change or clear. Before the release is recorded, confirm that both redos
+adopted the new hash, then compare Sepolia `taytems.eth` (registered at block
+4052977) with `source=verified` at the same published block: the resolver and
+the record values must agree.

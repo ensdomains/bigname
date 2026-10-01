@@ -256,26 +256,16 @@ fn reconcile_registration(
             .then_some(fields.position?)
         })
         .collect::<BTreeSet<_>>();
-    let wrap_positions = target_candidates
+    let wrapped_resources = target_candidates
         .iter()
         .filter(|index| events.active[**index])
-        .filter(|index| {
-            let event = &output.normalized_events[**index];
-            event.source_family == "ens_v1_wrapper_l1"
+        .filter_map(|index| {
+            let event = &output.normalized_events[*index];
+            (event.source_family == "ens_v1_wrapper_l1"
                 && event.after_state["source_event"] == "NameWrapped"
-                && event.after_state["authority_kind"] == "wrapper"
+                && event.after_state["authority_kind"] == "wrapper")
+                .then_some((event.resource_id?, events.fields[*index].position?))
         })
-        .filter_map(|index| events.fields[*index].position)
-        .collect::<BTreeSet<_>>();
-    let setup_positions = pending
-        .iter()
-        .filter(|index| {
-            matches!(
-                events.fields[**index].source_event,
-                SourceEvent::NewOwner | SourceEvent::Transfer
-            )
-        })
-        .filter_map(|index| events.fields[*index].position)
         .collect::<BTreeSet<_>>();
     let retarget_candidates = retarget_candidates(events, &target_candidates, &pending_positions);
     for index in retarget_candidates {
@@ -295,27 +285,28 @@ fn reconcile_registration(
             continue;
         }
         // `registerAndWrapETH2LD` registers the token to the NameWrapper, which emits
-        // `NameWrapped` and only then sets the registry resolver. A registry write after the wrap,
-        // with no registry ownership setup in between, is already anchored on the wrapper resource
-        // and the registry read resource, as it would be in a later transaction; the registrar
-        // resource the NameWrapper holds stays dormant.
+        // `NameWrapped` and only then sets the registry resolver. The registry row anchored on
+        // the wrapper resource that `NameWrapped` bound stays there: the name is served from it.
+        // The registry-read copy still moves with the registration, so restored resolver
+        // selection is unchanged.
         // (upstream: .refs/basenames/lib/ens-contracts/contracts/ethregistrar/ETHRegistrarController.sol:L178-L184 @ basenames@1809bbc)
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
         let fields = &events.fields[index];
-        let follows_wrap = fields.family == SourceFamily::Registry
+        let on_wrapped_resource = fields.family == SourceFamily::Registry
             && !matches!(
                 fields.source_event,
                 SourceEvent::NewOwner | SourceEvent::Transfer
             )
-            && fields.position.is_some_and(|position| {
-                let setup = setup_positions.range(..position).next_back();
-                wrap_positions
-                    .range(..position)
-                    .next_back()
-                    .is_some_and(|wrap| setup.is_none_or(|setup| setup < wrap))
-            });
-        if follows_wrap {
+            && fields
+                .resource_id
+                .zip(fields.position)
+                .is_some_and(|(resource, position)| {
+                    wrapped_resources
+                        .iter()
+                        .any(|(wrapped, wrapped_at)| *wrapped == resource && *wrapped_at < position)
+                });
+        if on_wrapped_resource {
             continue;
         }
         if concerns_predecessor_epoch(
