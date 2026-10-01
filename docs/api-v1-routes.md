@@ -3348,24 +3348,38 @@ introduces it rebuilds Project from full history before serving the option; see
   the indexed answer. Basenames verified primary-name lookup is unsupported;
   indexed Basenames responses remain Base-scoped.
 - ENSIP-19 default name: for ENS `coin_type=60`, both sources follow the read
-  order of ENS's ETH reverse resolver. The `addr.reverse` name wins when the
-  reverse node `<address>.addr.reverse` has a nonzero registry resolver and that
-  resolver's `name` is non-empty; otherwise the answer is the name the
-  `default.reverse` registrar stores for the address (coin type `2147483648`).
+  order of ENS's ETH reverse resolver for the sources the Mainnet and Sepolia
+  profiles declare. The `addr.reverse` name wins when the reverse node
+  `<address>.addr.reverse` has a nonzero registry resolver and that resolver's
+  `name` returns at least one byte. The answer is the name the
+  `default.reverse` registrar stores for the address (coin type `2147483648`)
+  only when that resolver is zero or its `name` call succeeds with an empty
+  string. Emptiness is byte length, not normalization: a whitespace-only name
+  stops the fallback and then answers `not_found`, and any other nonempty name
+  that does not normalize stops it with `invalid_name`.
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
+  Upstream's first source, a standalone `addr.reverse` registrar, has no
+  declared deployment in either profile and is not read.
   The indexed source applies this to the projected claims
-  ([projections](projections.md#primary-names)): an `addr.reverse` claim that
-  is `not_found` or whose reverse node has no nonzero resolver gives way to the
-  projected `default.reverse` claim when one exists, which keeps its own status.
-  A reverse node whose resolver is not admitted has no projected name and falls
-  back too, while the chain answers that resolver's name
+  ([projections](projections.md#primary-names)): an `addr.reverse` claim whose
+  projected or hydrated name has no bytes, or whose reverse node has no nonzero
+  resolver, gives way to the projected `default.reverse` claim when one exists,
+  which keeps its own status. A reverse node whose resolver is not admitted, or
+  is event-silent with no hydrated name, has no projected name and falls back
+  too, while the chain answers that resolver's name
   ([divergence](upstream.md#known-divergences)). The verified source's reverse
-  leg calls the registry's `resolver` and that resolver's `name`, and when the
-  resolver is zero or the name is empty calls `nameForAddr(address)` on the
-  `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares; the
-  forward check is unchanged. `coin_type=2147483648` reads the
+  leg calls the registry's `resolver`, then that resolver's `name` with the call
+  gas set so the resolver gets the 100,000 gas ENS's reverse resolver allows it
+  ([execution](execution.md)), and when the resolver is zero or `name`
+  succeeds with an empty string calls `nameForAddr(address)` on the
+  `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
+  `name` call that reverts, runs out of gas, or returns malformed data ends the
+  lookup with `execution_failed` and no default read; upstream returns an empty
+  name there, so the status differs while neither falls back.
+  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
+  The forward check is unchanged. `coin_type=2147483648` reads the
   `default.reverse` claim itself on the indexed source.
   Sepolia check after the release's redo:
   `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` answers `evers.eth` and

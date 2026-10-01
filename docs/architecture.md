@@ -1410,7 +1410,7 @@ For ENS, declared claim precedence is reverse-only through
 `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
 The family has two sources: the `addr.reverse` claim and the `default.reverse`
 name (coin type `2147483648`). For coin type `60` the `addr.reverse` name wins
-when the reverse node has a nonzero resolver and that name is non-empty;
+when the reverse node has a nonzero resolver and that name has at least one byte;
 otherwise the `default.reverse` name applies, the ENSIP-19 order of ENS's ETH
 reverse resolver
 (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).

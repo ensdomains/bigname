@@ -256,21 +256,26 @@ to the applicable entries below.
 
 > **Indexed `default.reverse` fallback reads projected names only**: for an ENS
 > `coin_type=60` primary name, the indexed answer serves the address's
-> `default.reverse` name whenever the projected `addr.reverse` claim is
-> `not_found` or its reverse node has no nonzero resolver. A reverse node that
-> points at a resolver bigname does not admit has no projected name, so the
-> indexed answer falls back to `default.reverse` there too.
-> **Upstream**: ENS's ETH reverse resolver calls `name()` on any nonzero
-> registry resolver of the reverse node and falls back to the `default.reverse`
-> registrar only when that call returns an empty name; a revert or undecodable
-> result ends the lookup with no name
+> `default.reverse` name whenever the projected `addr.reverse` name has no
+> bytes or its reverse node has no nonzero resolver. A reverse node that points
+> at a resolver bigname does not admit, or at an event-silent resolver with no
+> hydrated name, has no projected name, so the indexed answer falls back to
+> `default.reverse` there too.
+> **Upstream**: ENS's ETH reverse resolver first reads a standalone
+> `addr.reverse` registrar, then calls `name()` with a 100,000 gas stipend on
+> any nonzero registry resolver of the reverse node, and falls back to the
+> `default.reverse` registrar only when that call returns an empty name; a
+> revert, out-of-gas, or undecodable result ends the lookup with an empty name
 > `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`.
 > **Our rule**: `docs/projections.md` § Primary names and `docs/api-v1-routes.md`
 > § `GET /v1/addresses/{address}/primary-name`. The verified source follows the
-> upstream order with live calls.
+> upstream order with live calls and gives `name()` the same gas. It skips the
+> standalone registrar, which the Mainnet and Sepolia profiles do not declare,
+> and a failed `name()` call ends it with `execution_failed` instead of an
+> empty name; neither reads the default.
 > **Why**: the projection holds names only from admitted resolver events and
-> hydration, and unlisted emitters are unsupported; the verified source carries
-> the exact answer.
+> hydration, and unlisted emitters are unsupported; the verified source reads
+> the resolver itself.
 > **Since**: `2026-10-01`
 
 <a id="ensv1-authority-without-an-ensv2-entry"></a>
