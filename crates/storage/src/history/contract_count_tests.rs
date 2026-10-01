@@ -68,7 +68,6 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 let filter = EventHistoryReadFilter {
                     record_key: key.map(str::to_owned),
                     ..contract_count_filter(
-                        "ens",
                         "ethereum-mainnet",
                         "0x0000000000000000000000000000000000000076",
                         &kinds,

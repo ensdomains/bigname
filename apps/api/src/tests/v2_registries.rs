@@ -968,9 +968,10 @@ async fn reach(control: &crate::v2::collection_snapshot::finish_test_hooks::Fini
 }
 
 // The block-bounded evidence stays fenced on the publication; the current labels count is read
-// after that check, so a publication during it does not refuse the overview.
+// after that check, so a publication during it does not refuse the overview and its new label
+// is counted while `meta.as_of` stays at the checked publication.
 #[tokio::test]
-async fn v2_get_registry_counts_labels_after_the_publication_check() -> Result<()> {
+async fn v2_get_registry_counts_labels_published_after_the_publication_check() -> Result<()> {
     use crate::v2::collection_snapshot::finish_test_hooks;
     let database = TestDatabase::new_migrated().await?;
     seed_registry_fixture(&database).await?;
@@ -987,6 +988,7 @@ async fn v2_get_registry_counts_labels_after_the_publication_check() -> Result<(
     assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
     assert_eq!(payload["error"]["code"], json!("stale"));
 
+    seed_unpublished_alpha_label(&database).await?;
     let (_before_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
     let request = spawn_registry_request(&database, uri);
     reach(&before_check).await?;
@@ -994,7 +996,7 @@ async fn v2_get_registry_counts_labels_after_the_publication_check() -> Result<(
     let (_after_guard, after_check) = finish_test_hooks::install(&database.pool).await?;
     before_check.resume().await;
     reach(&after_check).await?;
-    commit_family_block(&database.pool).await?;
+    publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 84).await?;
     after_check.resume().await;
     let response = request.await.context("registry request task panicked")??;
     let status = response.status();
@@ -1002,8 +1004,51 @@ async fn v2_get_registry_counts_labels_after_the_publication_check() -> Result<(
     assert_eq!(status, StatusCode::OK, "{payload:#}");
     assert_eq!(
         payload["data"]["counts"],
-        json!({ "labels": 2, "events": 5, "roles": 0 })
+        json!({ "labels": 3, "events": 5, "roles": 0 })
     );
     assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(83));
     database.cleanup().await
+}
+
+/// `three.alpha.eth`, registered by the alpha registry at block 84, which no publication covers.
+async fn seed_unpublished_alpha_label(database: &TestDatabase) -> Result<()> {
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(REGISTRY_CHAIN_ID, "0xregistry84", None, 84, 1_700_000_084)],
+    )
+    .await?;
+    seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        "three.alpha.eth",
+        REGISTRY_CHAIN_ID,
+        84,
+        "0xregistry84",
+        Uuid::from_u128(0xA130),
+        Uuid::from_u128(0xA131),
+        Uuid::from_u128(0xA132),
+        "ens_v2",
+    )
+    .await?;
+    insert_family_label_preimage(&database.pool, b"three").await?;
+    let three = registry_logical_name_id("three.alpha.eth");
+    let mut grant = registry_event(
+        "registry-three-registered",
+        Some(&three),
+        "RegistrationGranted",
+        84,
+        ALPHA_REGISTRY,
+        json!({ "source_event": "LabelRegistered", "registry_contract_instance_id": Uuid::from_u128(0xA190),
+                "status": "registered", "registrant": V2_ADDRESS, "expiry": 1_900_000_000_i64,
+                "authority_kind": "ens_v2_registry" }),
+    );
+    grant.resource_id = Some(Uuid::from_u128(0xA130));
+    grant.log_index = Some(1);
+    let mut transfer = grant.clone();
+    transfer.event_identity.push_str("-transfer");
+    transfer.event_kind = "TokenControlTransferred".into();
+    transfer.log_index = Some(0);
+    transfer.after_state = json!({"source_event": "Transfer", "to": V2_ADDRESS});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, transfer]).await?;
+    Ok(())
 }

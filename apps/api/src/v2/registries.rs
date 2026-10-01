@@ -180,7 +180,6 @@ pub(crate) async fn get_registry(
         Some(
             bigname_storage::count_contract_events(
                 &state.pool,
-                "ens",
                 chain_id_slug,
                 &normalized_address,
                 &product_history_event_kinds(),

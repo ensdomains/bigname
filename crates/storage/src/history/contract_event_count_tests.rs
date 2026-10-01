@@ -12,6 +12,8 @@ use super::{
 const CHAIN: &str = "ethereum-sepolia";
 const EMITTER: &str = "0x00000000000000000000000000000000000000aa";
 const AS_OF: i64 = 8;
+const BASE: &str = "base-mainnet";
+const BASENAMES: &str = "0x00000000000000000000000000000000000000cc";
 
 #[tokio::test]
 async fn contract_event_count_matches_feed_total_count() -> Result<()> {
@@ -37,7 +39,7 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
         sqlx::raw_sql(
             "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
              SELECT chain, chain || '-block-' || n, n, to_timestamp(n), 'canonical'
-             FROM unnest(ARRAY['ethereum-sepolia', 'ethereum-mainnet']) chain, generate_series(1, 9) n",
+             FROM unnest(ARRAY['ethereum-sepolia', 'ethereum-mainnet', 'base-mainnet']) chain, generate_series(1, 9) n",
         )
         .execute(&mut *connection)
         .await?;
@@ -58,14 +60,18 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
             ("label-9", "RegistrationGranted", CHAIN, EMITTER, 9, json!({})),
             ("other-emitter-1", "RegistrationGranted", CHAIN, "0x00000000000000000000000000000000000000bb", 1, json!({})),
             ("other-chain-1", "RegistrationGranted", "ethereum-mainnet", EMITTER, 1, json!({})),
+            // A registry outside the ens namespace.
+            ("basenames-1", "SubregistryChanged", BASE, BASENAMES, 1, json!({})),
+            ("basenames-2", "ResolverChanged", BASE, BASENAMES, 2, json!({"node": "node-b2"})),
         ];
         for (identity, kind, chain, emitter, block, after_state) in rows {
+            let namespace = if chain == BASE { "basenames" } else { "ens" };
             sqlx::query(
                 "INSERT INTO normalized_events
                     (event_identity, namespace, event_kind, source_family, manifest_version,
                      chain_id, block_hash, block_number, transaction_hash, transaction_index,
                      log_index, derivation_kind, canonicality_state, raw_fact_ref, after_state)
-                 VALUES ($1, 'ens', $2, 'ens_v2_registry_l1', 1, $3, $3 || '-block-' || $5, $5,
+                 VALUES ($1, $7, $2, 'ens_v2_registry_l1', 1, $3, $3 || '-block-' || $5, $5,
                          'tx-' || $1, 0, 0, 'ens_v2_registry_resource_surface', 'canonical',
                          jsonb_build_object('kind', 'raw_log', 'emitting_address', $4::text), $6)",
             )
@@ -75,6 +81,7 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
             .bind(emitter)
             .bind(block)
             .bind(after_state)
+            .bind(namespace)
             .execute(&mut *connection)
             .await?;
         }
@@ -115,8 +122,38 @@ async fn contract_event_count_matches_feed_total_count() -> Result<()> {
         .expect("count summary")
         .total_count;
         assert_eq!(feed, 3);
-        let overview = super::count_contract_events(pool, "ens", CHAIN, EMITTER, &kinds, Some(AS_OF)).await?;
+        let overview = super::count_contract_events(pool, CHAIN, EMITTER, &kinds, Some(AS_OF)).await?;
         assert_eq!(overview, feed, "overview counts.events differs from the feed total_count");
+
+        let basenames_feed = load_event_history_page(
+            pool,
+            EventHistoryFilter {
+                namespace: Some("basenames".to_owned()),
+                contract_address: Some(BASENAMES.to_owned()),
+                event_kinds: kinds.clone(),
+                block_window: Some(HistoryBlockWindow {
+                    ranges: vec![ChainBlockRange {
+                        chain_id: BASE.to_owned(),
+                        from_block: None,
+                        to_block: Some(AS_OF),
+                    }],
+                }),
+                ..EventHistoryFilter::default()
+            },
+            true,
+            None,
+            1,
+            HistorySummaryMode::Count,
+            false,
+        )
+        .await?
+        .summary
+        .expect("count summary")
+        .total_count;
+        assert_eq!(basenames_feed, 2);
+        let basenames =
+            super::count_contract_events(pool, BASE, BASENAMES, &kinds, Some(AS_OF)).await?;
+        assert_eq!(basenames, basenames_feed, "a registry outside the ens namespace counted 0");
         Ok(())
     }
     .await;

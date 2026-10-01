@@ -4204,9 +4204,12 @@ For a registrar lease first identified by a later readable observation, registra
   `counts.labels` is the exact
   number of labels the registry currently holds (the rows of the labels route
   below); for a current selection it is `0` when `name` is `null`. `counts.events` is present only with
-  `include=counts` and counts the product-visible events emitted by the
-  contract — the same rows `GET /v1/events?contract_address=` serves — because
-  it reads every event of the contract rather than a projected total.
+  `include=counts` and counts the product-visible events the contract emitted
+  on this chain up to the selected position, without a namespace filter: the
+  rows `GET /v1/events?contract_address=` serves for this chain, since an ENSv2
+  registry's events are all in the feed's default `ens` namespace. The feed
+  itself spans every published chain. The count reads every event of the
+  contract rather than a projected total.
   `counts.roles`, also present with `include=counts`, is the exact number of
   observed nonzero declared role assignments across the registry's root and
   label resources. One account on two resources counts twice; several role bits
