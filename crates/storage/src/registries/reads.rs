@@ -269,8 +269,8 @@ pub async fn load_registry_serving_pointer(
     let address = address.to_ascii_lowercase();
     let mut builder = current_pointers_to_registry(chain_id, &address, as_of_block);
     builder.push(
-        " ORDER BY pointer.block_number NULLS LAST, pointer.transaction_index NULLS LAST, \
-         pointer.log_index NULLS LAST, pointer.event_identity LIMIT 1",
+        " SELECT * FROM matched ORDER BY block_number NULLS LAST, \
+         transaction_index NULLS LAST, log_index NULLS LAST, event_identity LIMIT 1",
     );
     let row = builder
         .build()
@@ -304,27 +304,47 @@ pub async fn load_registry_references_page(
         "registry references page_size does not fit in usize",
     )?;
     let mut builder = current_pointers_to_registry(chain_id, &address, as_of_block);
+    builder.push(", page AS (SELECT * FROM matched WHERE TRUE");
     if let Some(cursor) = cursor {
-        builder.push(" AND (surface.raw_name, pointer.logical_name_id) > (");
+        builder.push(" AND (display_name, logical_name_id) > (");
         builder.push_bind(cursor.display_name.clone());
         builder.push(", ");
         builder.push_bind(cursor.logical_name_id.clone());
         builder.push(")");
     }
-    builder.push(" ORDER BY surface.raw_name, pointer.logical_name_id LIMIT ");
+    builder.push(" ORDER BY display_name, logical_name_id LIMIT ");
     builder.push_bind(limit);
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load names referencing registry {chain_id}:{address}"))?
+    builder.push(
+        ") SELECT total.total_count, page.*
+         FROM (SELECT count(*) AS total_count FROM matched) total LEFT JOIN page ON TRUE
+         ORDER BY page.display_name, page.logical_name_id",
+    );
+    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+        format!("failed to load names referencing registry {chain_id}:{address}")
+    })?;
+    let total_count = match rows.first() {
+        Some(row) => u64::try_from(row.try_get::<i64, _>("total_count")?)
+            .context("negative registry reference count")?,
+        None => 0,
+    };
+    let rows = rows
         .into_iter()
+        .filter(|row| {
+            matches!(
+                row.try_get::<Option<String>, _>("logical_name_id"),
+                Ok(Some(_))
+            )
+        })
         .map(decode_subregistry_pointer)
         .collect::<Result<Vec<_>>>()?;
     let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
         RegistryReferenceKeysetCursor::from(row)
     });
-    Ok(RegistryReferencePage { rows, next_cursor })
+    Ok(RegistryReferencePage {
+        rows,
+        next_cursor,
+        total_count,
+    })
 }
 
 /// Counts readable events of the given kinds emitted by one contract.
@@ -362,7 +382,7 @@ pub async fn count_contract_events(
 }
 
 /// Current pointers (latest per name) whose target is `address`, joined to the active name
-/// surface. Callers append ordering and paging.
+/// surface, as the CTE `matched` (left open: callers append the statement that reads it).
 fn current_pointers_to_registry<'a>(
     chain_id: &'a str,
     address: &'a str,
@@ -413,9 +433,10 @@ fn current_pointers_to_registry<'a>(
         )
         "#,
     );
+    builder.push(", matched AS (");
     builder.push(POINTER_SELECT);
     builder.push(
-        r#"
+        r#", pointer.transaction_index, pointer.log_index, pointer.event_identity
         FROM pointer
         JOIN bigname_phase.name_surfaces surface
           ON surface.logical_name_id = pointer.logical_name_id
@@ -423,6 +444,7 @@ fn current_pointers_to_registry<'a>(
         WHERE pointer.subregistry = "#,
     );
     builder.push_bind(address);
+    builder.push(")");
     builder
 }
 

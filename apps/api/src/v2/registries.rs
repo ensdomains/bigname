@@ -220,7 +220,7 @@ pub(crate) async fn get_registry(
             cursor: params.cursor.clone(),
             next_cursor: next_cursor.clone(),
             page_size: params.page_size,
-            total_count: None,
+            total_count: Some(references.total_count),
             has_more: next_cursor.is_some(),
         },
         data: references.rows.iter().map(registry_name).collect(),

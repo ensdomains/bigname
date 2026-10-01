@@ -79,4 +79,6 @@ impl From<&SubregistryPointer> for RegistryReferenceKeysetCursor {
 pub struct RegistryReferencePage {
     pub rows: Vec<SubregistryPointer>,
     pub next_cursor: Option<RegistryReferenceKeysetCursor>,
+    /// Exact number of names whose pointer targets the registry, before the cursor.
+    pub total_count: u64,
 }

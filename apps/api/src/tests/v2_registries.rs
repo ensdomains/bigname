@@ -307,6 +307,7 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
         }])
     );
     assert_eq!(data["referenced_by"]["page"]["has_more"], json!(false));
+    assert_eq!(data["referenced_by"]["page"]["total_count"], json!(1));
     assert!(payload["meta"]["as_of"].is_object(), "{payload}");
     assert!(payload["meta"]["as_of_token"].is_string(), "{payload}");
     assert!(payload.get("page").is_none_or(Value::is_null));
@@ -354,6 +355,10 @@ async fn v2_get_registry_root_has_no_name_or_parent_and_declared_registries_reso
         root["data"]["referenced_by"]["page"]["has_more"],
         json!(false)
     );
+    assert_eq!(
+        root["data"]["referenced_by"]["page"]["total_count"],
+        json!(0)
+    );
 
     let declared =
         registry_payload(&database, &format!("/v1/registries/1/{DECLARED_REGISTRY}")).await?;
@@ -361,6 +366,50 @@ async fn v2_get_registry_root_has_no_name_or_parent_and_declared_registries_reso
     assert_eq!(declared["data"]["created_block_number"], json!(55));
     assert_eq!(declared["data"]["created_transaction_hash"], Value::Null);
     assert_eq!(declared["data"]["name"], Value::Null);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_registry_counts_every_name_referencing_it_on_each_page() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let two = registry_logical_name_id("two.alpha.eth");
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[registry_event(
+            "registry-two-pointer",
+            Some(&two),
+            "SubregistryChanged",
+            66,
+            ALPHA_REGISTRY,
+            json!({ "source_event": "SubregistryUpdated", "subregistry": ONE_REGISTRY }),
+        )],
+    )
+    .await?;
+    publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 83).await?;
+
+    let first = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ONE_REGISTRY}?page_size=1"),
+    )
+    .await?;
+    let references = &first["data"]["referenced_by"];
+    assert_eq!(references["data"][0]["name"], json!("one.alpha.eth"));
+    assert_eq!(references["page"]["total_count"], json!(2));
+    assert_eq!(references["page"]["has_more"], json!(true));
+    let next_cursor = references["page"]["next_cursor"]
+        .as_str()
+        .expect("referenced_by next cursor");
+    let second = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ONE_REGISTRY}?page_size=1&cursor={next_cursor}"),
+    )
+    .await?;
+    let references = &second["data"]["referenced_by"];
+    assert_eq!(references["data"][0]["name"], json!("two.alpha.eth"));
+    assert_eq!(references["page"]["total_count"], json!(2));
+    assert_eq!(references["page"]["has_more"], json!(false));
 
     database.cleanup().await
 }
