@@ -3,16 +3,16 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=99
-expected_runnable=96
+expected_total=100
+expected_runnable=97
 expected_ignored=3
 expected_shard_1_runnable=32
 expected_shard_1_ignored=1
-expected_shard_1_filtered=66
+expected_shard_1_filtered=67
 expected_shard_2_runnable=32
 expected_shard_2_ignored=1
-expected_shard_2_filtered=66
-expected_shard_3_runnable=32
+expected_shard_2_filtered=67
+expected_shard_3_runnable=33
 expected_shard_3_ignored=1
 expected_shard_3_filtered=66
 
@@ -95,6 +95,7 @@ shard_2_tests=(
 )
 
 shard_3_tests=(
+    "harness::manifests::tests::local_sepolia_reverse_manifest_binds_each_registrar_to_its_own_deployment"
     "harness::pipeline::tests::supervised_readiness_timeout_stops_and_reaps_child"
     "harness::pipeline::tests::timeout_configuration_requires_positive_integer_seconds"
     "harness::responses::tests::pointer_preserves_explicit_null"

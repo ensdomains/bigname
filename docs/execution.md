@@ -205,9 +205,25 @@ upstream ships an operator script for exactly that
 through the live revert. Egress policy for this path should pin the host the
 contract currently returns, not assume it is immutable.
 
-For the ENS primary-name path the reverse leg is two plain `eth_call`s —
-registry `resolver(node)`, then `name(node)` on the reverse resolver — that never
-follow CCIP-Read, so the reverse resolver itself cannot supply URLs. The forward
+For the ENS primary-name path the reverse leg is plain `eth_call`s — registry
+`resolver(node)`, then `name(node)` on the reverse resolver, and, when that
+resolver is zero or the name is empty, `nameForAddr(address)` on the
+manifest-declared `default.reverse` registrar — that never follow CCIP-Read, so
+neither the reverse resolver nor the registrar can supply URLs
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).
+ENS's reverse resolver gives the `name(node)` call a 100,000 gas stipend and
+treats its failure, out of gas included, as an empty answer that skips
+`default.reverse`
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f).
+bigname's `name(node)` call reproduces only that gas bound: it sets its gas to
+100,000 plus the transaction's intrinsic cost, 21,000 base plus 16 gas per
+nonzero and 4 per zero calldata byte, so the resolver frame receives 100,000
+when the provider's gas cap admits that limit (121,576 when all 36 bytes of the
+`name(node)` calldata are nonzero). It is a plain top-level `eth_call` from the
+zero address, not a static call from ETHReverseResolver
+([divergence](upstream.md#verified-reverse-name-call-context)). A call that runs out of
+gas or reverts ends the lookup as `execution_failed` without the default read;
+the other reverse-leg calls carry no gas field. The forward
 `addr:60` leg is different: it calls the Universal Resolver's `resolve(name,
 data)` with CCIP-Read following enabled, and the Universal Resolver forwards the
 target resolver's `OffchainLookup.urls` unchanged — directly when the resolver

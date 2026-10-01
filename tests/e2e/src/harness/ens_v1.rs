@@ -259,6 +259,18 @@ mod reverse_calls {
     }
 }
 
+mod default_reverse_calls {
+    use alloy_sol_types::sol;
+
+    // DefaultReverseRegistrar.setName stores msg.sender's `default.reverse` name and emits
+    // NameForAddrChanged.
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L26-L28 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f)
+    sol! {
+        function setName(string name) external;
+    }
+}
+
 pub fn labelhash(label: &str) -> B256 {
     keccak256(label.as_bytes())
 }
@@ -313,6 +325,7 @@ pub struct EnsV1Deployment {
     pub controller: Deployed,
     pub public_resolver: Deployed,
     pub reverse_registrar: Deployed,
+    pub default_reverse_registrar: Deployed,
     pub name_wrapper: Deployed,
     pub wrapped_controller: Deployed,
 }
@@ -478,6 +491,7 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         controller,
         public_resolver,
         reverse_registrar,
+        default_reverse_registrar,
         name_wrapper,
         wrapped_controller,
     };
@@ -1556,6 +1570,25 @@ pub async fn set_reverse_name(
     .await
 }
 
+/// Store `from`'s `default.reverse` name (coin type 2147483648).
+pub async fn set_default_reverse_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.default_reverse_registrar.address,
+        &default_reverse_calls::setNameCall {
+            name: name.to_string(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
 pub async fn set_reverse_default_resolver(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
@@ -1682,6 +1715,13 @@ impl EnsV1Deployment {
                 (
                     self.reverse_registrar.address,
                     self.reverse_registrar.block_number,
+                ),
+            ),
+            (
+                "default_reverse_registrar",
+                (
+                    self.default_reverse_registrar.address,
+                    self.default_reverse_registrar.block_number,
                 ),
             ),
             (

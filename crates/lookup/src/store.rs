@@ -71,6 +71,8 @@ pub(super) struct IndexedComparison {
 pub(crate) struct EnsPrimaryNameAuthority {
     pub registry_address: String,
     pub universal_resolver_address: String,
+    /// The `default.reverse` registrar the ENS reverse manifest declares, when it declares one.
+    pub default_reverse_registrar_address: Option<String>,
     pub position: LookupPosition,
     pub execution_authority: Value,
 }
@@ -461,26 +463,40 @@ pub(crate) async fn load_ens_primary_name_authority(
         },
     )
     .await?;
+    let default_reverse_manifest = manifests::load_optional_entrypoint(
+        &mut transaction,
+        manifests::EntrypointQuery {
+            namespace: ENS_NAMESPACE,
+            source_family: crate::ENS_V1_REVERSE_SOURCE_FAMILY,
+            chain_id,
+            role: crate::ENS_DEFAULT_REVERSE_REGISTRAR_ROLE,
+            allow_shadow: false,
+            execution_block_number: head.block_number,
+            required_manifest_version: None,
+            require_resolution_capability: false,
+        },
+    )
+    .await?;
     transaction
         .commit()
         .await
         .map_err(database("commit primary-name authority read"))?;
+    let default_reverse_registrar_address = default_reverse_manifest
+        .as_ref()
+        .map(|manifest| manifest.declared_address.to_ascii_lowercase());
+    let mut authority_manifests = vec![registry_manifest, universal_resolver_manifest];
+    authority_manifests.extend(default_reverse_manifest);
     Ok(EnsPrimaryNameAuthority {
-        registry_address: registry_manifest.declared_address.to_ascii_lowercase(),
-        universal_resolver_address: universal_resolver_manifest
-            .declared_address
-            .to_ascii_lowercase(),
+        registry_address: authority_manifests[0].declared_address.to_ascii_lowercase(),
+        universal_resolver_address: authority_manifests[1].declared_address.to_ascii_lowercase(),
+        default_reverse_registrar_address,
         position: LookupPosition {
             chain_id: head.chain_id,
             block_number: head.block_number,
             block_hash: head.block_hash,
             timestamp: head.timestamp,
         },
-        execution_authority: execution_authority(
-            &project_publication,
-            None,
-            &[registry_manifest, universal_resolver_manifest],
-        )?,
+        execution_authority: execution_authority(&project_publication, None, &authority_manifests)?,
     })
 }
 

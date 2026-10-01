@@ -113,6 +113,9 @@ impl LookupEngine {
                 normalized_address,
                 registry_address: &authority.registry_address,
                 universal_resolver_address: &authority.universal_resolver_address,
+                default_reverse_registrar_address: authority
+                    .default_reverse_registrar_address
+                    .as_deref(),
                 position: &authority.position,
                 chain_rpc_urls: &self.rpc_urls,
             },

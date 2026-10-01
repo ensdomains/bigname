@@ -19,6 +19,9 @@ pub struct FamilyReverseClaim {
     /// row exists for the same namespace, reverse node and chain at another resolver. A
     /// diagnostic only: it does not establish that a claim is missing from the family.
     pub node_claim_at_other_resolver: bool,
+    /// The selected claim stores no name bytes: no claim, a version reset, or an empty string.
+    /// Unlike `claim_status`, whitespace or undecodable bytes are not empty.
+    pub claim_value_empty: bool,
 }
 
 /// The reverse claim of the tuple, `None` when the tuple has no `ReverseChanged`, read in one
@@ -156,6 +159,15 @@ pub(crate) async fn load_family_reverse_claim_on(
         .and_then(|claim| claim.after_state.get("raw_name"))
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let claim_value_empty = claim.is_none_or(|claim| {
+        let state = &claim.after_state;
+        state.get("raw_name_bytes").is_none()
+            && match state.get("raw_name") {
+                Some(Value::String(name)) => name.is_empty(),
+                Some(Value::Object(_)) => false,
+                _ => true,
+            }
+    });
     let raw_claim_name = match status.as_str() {
         "success" | "invalid_name" => raw_name.clone(),
         _ => None,
@@ -215,8 +227,10 @@ pub(crate) async fn load_family_reverse_claim_on(
                 claim_provenance: Value::Object(provenance),
             },
             claim_name_is_normalized,
+            default_past_resolver: false,
         },
         node_claim_at_other_resolver,
+        claim_value_empty,
     }))
 }
 
@@ -227,6 +241,18 @@ pub(crate) async fn load_family_reverse_claim_on(
 /// select: a state-derived ENSv1 `ResolverChanged` with the parent in `node` and the reverse
 /// node in `child_node` is keyed here and would be skipped there. Returns its event id and
 /// resolver.
+/// The current resolver the registry-node or resource pointer of `node` names, if any.
+pub(super) async fn node_resolver(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    namespace: &str,
+    node: &str,
+) -> Result<Option<String>> {
+    Ok(node_pointer(conn, chain_id, namespace, node)
+        .await?
+        .and_then(|(_, resolver)| resolver))
+}
+
 async fn node_pointer(
     conn: &mut PgConnection,
     chain_id: &str,

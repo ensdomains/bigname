@@ -521,6 +521,42 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
     database.cleanup().await
 }
 
+// TYR-120. Each write to the ENS `default.reverse` registrar is its own primary-name row at coin
+// type 2147483648, with the name its `NameForAddrChanged` carried. Compatibility coverage: the
+// history reader already handled same-log `NameForAddrChanged` rows for any coin type, so this
+// does not exercise raw-event admission or the current-state fallback.
+#[tokio::test]
+async fn default_reverse_rows_return_the_recorded_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, V2_ADDRESS, b"evers.eth").await?;
+    publish_primary_claim(&database.pool, ENS_DEFAULT_REVERSE, V2_ADDRESS, b"").await?;
+    let rows = event_data_rows(
+        &event_data_payload_in(
+            &database,
+            &["ens", "basenames"],
+            &format!(
+                "/v1/events?namespace=ens&type=primary_name&include=data&order=asc&contract_address={ENS_DEFAULT_REVERSE_REGISTRAR}"
+            ),
+        )
+        .await?,
+    )
+    .into_iter()
+    .map(|row| row["data"].clone())
+    .collect::<Vec<_>>();
+    let address = V2_ADDRESS.to_ascii_lowercase();
+    assert_eq!(
+        rows,
+        [
+            json!({"address": address, "coin_type": 2_147_483_648_u64, "name": "evers.eth",
+                   "name_status": "set"}),
+            json!({"address": address, "coin_type": 2_147_483_648_u64, "name_status": "cleared"}),
+        ],
+    );
+
+    database.cleanup().await
+}
+
 // A record write the adapter did not link to a name carries no name on the events feed: a
 // resolver write is keyed by node or record ID, and no name is derived for it at read time. Under
 // `include=data` each carries its resolver and node or record ID, and name history is where a

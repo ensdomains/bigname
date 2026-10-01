@@ -62,6 +62,11 @@ pub(super) async fn unverifiable_claim_authority(
     let Some(claim_name) = snapshot.normalized_claim_name.as_deref() else {
         return Ok(ForwardGateDecision::Admit);
     };
+    // A `default.reverse` name served past a nonzero `addr.reverse` resolver need not be what the
+    // live reverse leg returns, so the live gate decides on the name the chain answers instead.
+    if snapshot.default_past_resolver {
+        return Ok(ForwardGateDecision::Admit);
+    }
     unverifiable_name_authority(pool, namespace, claim_name).await
 }
 

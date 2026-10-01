@@ -27,6 +27,7 @@ mod contracts {
         function contenthash(bytes32 node) external view returns (bytes);
         function resolver(bytes32 node) external view returns (address);
         function name(bytes32 node) external view returns (string);
+        function nameForAddr(address addr) external view returns (string);
     }
 }
 
@@ -132,6 +133,18 @@ pub(crate) fn resolver_name_call(node: [u8; 32]) -> EncodedCall {
     encoded_call(contracts::nameCall {
         node: B256::from(node),
     })
+}
+
+/// `nameForAddr(addr)` on an ENSIP-19 standalone reverse registrar.
+/// (upstream: .refs/ens_v1/contracts/reverseRegistrar/IStandaloneReverseRegistrar.sol:L12-L16 @ ens_v1@91c966f)
+pub(crate) fn reverse_registrar_name_call(address: Address) -> EncodedCall {
+    encoded_call(contracts::nameForAddrCall { addr: address })
+}
+
+pub(crate) fn decode_reverse_registrar_name(return_data: &[u8]) -> Result<Option<String>> {
+    let name = contracts::nameForAddrCall::abi_decode_returns_validate(return_data)
+        .context("reverse registrar name return data is malformed")?;
+    Ok((!name.is_empty()).then_some(name))
 }
 
 pub(crate) fn decode_registry_resolver(return_data: &[u8]) -> Result<Option<String>> {

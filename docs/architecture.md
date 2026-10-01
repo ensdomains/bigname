@@ -560,7 +560,7 @@ Family ownership is fixed:
 - `ens_v1_wrapper_l1` owns NameWrapper authority, holder facts, direct fuse/expiry observations, wrapper-revealed names, and wrapper-originated resolver/TTL changes on both the Mainnet and Sepolia deployment profiles.[^v1-namewrapper-deploy][^v1-iname-l27][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l240][^v1-nw-l377][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676]
 - `ens_v1_resolver_l1` owns the declared PublicResolver address lists in the Mainnet and Sepolia deployment profiles. The schema-v2 project phase classifies an emitter as supported only when its exact address is in the active manifest; that classification permits projection of retained canonical normalized observations but does not prove complete history, authorization semantics, or event-to-call parity. Unlisted emitters are unsupported.[^v1-publicresolver-deploy][^v1-pres-l5][^v1-pres-l13][^v1-pres-l20][^v1-pres-l66][^v1-pres-l114]
 - ENS verified resolution belongs to `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`,[^ens-docs-univ] not to `ens_v1_registry_l1`. The pinned implementation artifact is recorded under `.refs/`.[^v1-ur-deploy][^v1-ursol-l8] (See [`upstream.md`](upstream.md) for the proxy-vs-implementation divergence.)
-- ENS reverse-claim intake belongs to `ens_v1_reverse_l1`: Mainnet retains its declared ReverseRegistrar; the official Sepolia profile declares canonical `0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6`. (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L2 @ ens_v1@91c966f)
+- ENS reverse-claim intake belongs to `ens_v1_reverse_l1`: Mainnet retains its declared ReverseRegistrar; the official Sepolia profile declares canonical `0xA0a1AbcDAe1a2a4A2EF8e9113Ff0e02DD81DC0C6`. (upstream: .refs/ens_v1/deployments/sepolia/ReverseRegistrar.json:L2 @ ens_v1@91c966f) The same family declares each profile's ENSIP-19 `default.reverse` registrar as `default_reverse_registrar` ([manifests](manifests.md#ens-mainnet)). (upstream: .refs/ens_v1/deployments/sepolia/DefaultReverseRegistrar.json:L2 @ ens_v1@91c966f)
 - The `ens_v2_migration_l1` family owns fixed ENSv1→ENSv2 migration-controller, Graveyard,
   `ETHRenewerV1`, `VerifiableFactory`, `BatchRegistrar`, and helper admission.
   It also owns launch-bounded correlation of Sepolia BaseRegistrar Graveyard
@@ -1409,6 +1409,12 @@ and support at the family publication. It does not store verified output.
 
 For ENS, declared claim precedence is reverse-only through
 `ens_v1_reverse_l1`.[^v1-revreg-deploy][^v1-revreg-l74][^v1-revreg-l83][^v1-revreg-l84]
+The family has two sources: the `addr.reverse` claim and the `default.reverse`
+name (coin type `2147483648`). For coin type `60` the `addr.reverse` name wins
+when the reverse node has a nonzero resolver and that name has at least one byte;
+otherwise the `default.reverse` name applies, the ENSIP-19 order of ENS's ETH
+reverse resolver
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).
 Project may refresh an existing ENS/60 tuple through the configured
 [event-silent](glossary.md) reverse resolver at the exact published head. It
 retains the raw spelling and whether that spelling byte-equals its ENSIP-15

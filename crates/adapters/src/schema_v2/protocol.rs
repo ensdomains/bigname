@@ -401,6 +401,7 @@ pub(super) fn validate_manifest(
                 source.manifest_id
             );
         }
+        v1::validate_reverse_roles(source, event)?;
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
                 "source family {} has no typed schema-v2 adapter for {}",
@@ -529,8 +530,7 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "TransferBatch(address,address,address,uint256[],uint256[])"
                 | "TransferSingle(address,address,address,uint256,uint256)"
         ),
-        "ens_v1_reverse_l1" => signature == "ReverseClaimed(address,bytes32)",
-        "basenames_base_primary" => signature == "NameForAddrChanged(address,string)",
+        "ens_v1_reverse_l1" | "basenames_base_primary" => v1::reverse_abi(source_family, signature),
         "ens_v2_registrar_l1" => matches!(
             signature,
             "NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)"

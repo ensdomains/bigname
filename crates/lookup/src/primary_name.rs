@@ -7,8 +7,9 @@ use bigname_domain::normalization::normalize_name;
 use crate::{
     ChainRpcUrls, LookupError, LookupPosition, LookupRecordStatus, RecordSelector, Result,
     abi::{
-        ResolutionResultAbi, decode_registry_resolver, decode_resolver_name, dns_encode_name,
-        hex_to_bytes, namehash, registry_resolver_call, resolver_name_call,
+        ResolutionResultAbi, decode_registry_resolver, decode_resolver_name,
+        decode_reverse_registrar_name, dns_encode_name, hex_to_bytes, namehash,
+        registry_resolver_call, resolver_name_call, reverse_registrar_name_call,
     },
     call::{
         ExecutionBlock, RecordCallContext, execute_record_call,
@@ -33,9 +34,11 @@ pub enum EnsPrimaryNameStatus {
 pub struct EnsPrimaryNameLookup {
     pub position: LookupPosition,
     pub status: EnsPrimaryNameStatus,
-    /// Verbatim value returned by the reverse resolver.
+    /// Verbatim value returned by the reverse resolver or the `default.reverse` registrar.
     pub name: Option<String>,
     pub normalized_name: Option<String>,
+    /// The contract that returned `name`: the reverse node's resolver, or the `default.reverse`
+    /// registrar when the fallback answered.
     pub reverse_resolver_address: Option<String>,
     pub forward_address: Option<String>,
     pub ccip_read: bool,
@@ -48,6 +51,7 @@ pub(crate) struct EnsPrimaryNameRequest<'a> {
     pub normalized_address: &'a str,
     pub registry_address: &'a str,
     pub universal_resolver_address: &'a str,
+    pub default_reverse_registrar_address: Option<&'a str>,
     pub position: &'a LookupPosition,
     pub chain_rpc_urls: &'a ChainRpcUrls,
 }
@@ -68,7 +72,7 @@ where
     let reverse_node = reverse_node(request.normalized_address)?;
     let rpc = primary_name_rpc(request.chain_rpc_urls, &request.position.chain_id)?;
     let block_selector = hash_pinned_block_selector(&request.position.block_hash);
-    let resolver_address = match registry_resolver(
+    let addr_reverse = match registry_resolver(
         &rpc,
         request.registry_address,
         reverse_node,
@@ -76,16 +80,40 @@ where
     )
     .await
     {
-        Ok(Some(address)) => address,
-        Ok(None) => return Ok(not_found(request.position)),
+        Ok(Some(resolver)) => {
+            match reverse_name(&rpc, &resolver, reverse_node, &block_selector).await {
+                Ok(name) => name.map(|name| (resolver, name)),
+                Err(error) => return primary_call_error(error, Some(&resolver), request.position),
+            }
+        }
+        Ok(None) => None,
         Err(error) => return primary_call_error(error, None, request.position),
     };
-    let raw_name = match reverse_name(&rpc, &resolver_address, reverse_node, &block_selector).await
-    {
-        Ok(Some(name)) => name,
-        Ok(None) => return Ok(not_found(request.position)),
-        Err(error) => return primary_call_error(error, Some(&resolver_address), request.position),
-    };
+    // ENS's ETH reverse resolver reads `default.reverse` when the reverse node has no resolver or
+    // its name has no bytes; a failed name call, out of gas included, ends the lookup instead.
+    // A whitespace name takes the addr.reverse branch and normalizes to not_found.
+    // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
+    let (resolver_address, raw_name) =
+        match (addr_reverse, request.default_reverse_registrar_address) {
+            (Some(claim), _) => claim,
+            (None, None) => return Ok(not_found(request.position)),
+            (None, Some(registrar)) => {
+                match default_reverse_name(
+                    &rpc,
+                    registrar,
+                    request.normalized_address,
+                    &block_selector,
+                )
+                .await
+                {
+                    Ok(Some(name)) => (registrar.to_owned(), name),
+                    Ok(None) => return Ok(not_found(request.position)),
+                    Err(error) => {
+                        return primary_call_error(error, Some(registrar), request.position);
+                    }
+                }
+            }
+        };
     let normalized_name = match normalized_reverse_claim(&raw_name) {
         ReverseClaimNormalization::Ready(name) => name,
         ReverseClaimNormalization::NotFound => return Ok(not_found(request.position)),
@@ -337,9 +365,49 @@ async fn reverse_name(
     block_selector: &Value,
 ) -> PrimaryCallResult<Option<String>> {
     let call = resolver_name_call(node);
-    let bytes = eth_call(rpc, resolver_address, call.calldata_hex(), block_selector).await?;
+    let gas = reverse_name_gas(call.calldata());
+    let bytes = eth_call_with_gas(
+        rpc,
+        resolver_address,
+        call.calldata_hex(),
+        Some(gas),
+        block_selector,
+    )
+    .await?;
     decode_resolver_name(&bytes)
         .map_err(|_| PrimaryCallError::InBand("resolver_return_data_malformed"))
+}
+
+async fn default_reverse_name(
+    rpc: &JsonRpcHttpClient,
+    registrar_address: &str,
+    normalized_address: &str,
+    block_selector: &Value,
+) -> PrimaryCallResult<Option<String>> {
+    let address = normalized_address
+        .parse()
+        .map_err(|_| PrimaryCallError::InBand("reverse_address_malformed"))?;
+    let call = reverse_registrar_name_call(address);
+    let bytes = eth_call(rpc, registrar_address, call.calldata_hex(), block_selector).await?;
+    decode_reverse_registrar_name(&bytes)
+        .map_err(|_| PrimaryCallError::InBand("resolver_return_data_malformed"))
+}
+
+/// Gas for the reverse resolver's `name(node)` call. ENS's ETH reverse resolver gives that call a
+/// 100,000 gas stipend and treats a failed call, out of gas included, as an empty answer that ends
+/// the lookup without reading `default.reverse`.
+/// (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
+/// An `eth_call` frame receives its gas limit minus the intrinsic transaction cost: 21,000 base plus
+/// 16 gas per nonzero and 4 gas per zero calldata byte. Adding that cost to the stipend gives the
+/// resolver exactly 100,000 gas.
+fn reverse_name_gas(calldata: &[u8]) -> u64 {
+    const NAME_CALL_STIPEND: u64 = 100_000;
+    const TRANSACTION_BASE_GAS: u64 = 21_000;
+    let calldata_gas: u64 = calldata
+        .iter()
+        .map(|byte| if *byte == 0 { 4 } else { 16 })
+        .sum();
+    NAME_CALL_STIPEND + TRANSACTION_BASE_GAS + calldata_gas
 }
 
 async fn eth_call(
@@ -348,14 +416,22 @@ async fn eth_call(
     calldata: String,
     block_selector: &Value,
 ) -> PrimaryCallResult<Vec<u8>> {
+    eth_call_with_gas(rpc, to, calldata, None, block_selector).await
+}
+
+async fn eth_call_with_gas(
+    rpc: &JsonRpcHttpClient,
+    to: &str,
+    calldata: String,
+    gas: Option<u64>,
+    block_selector: &Value,
+) -> PrimaryCallResult<Vec<u8>> {
+    let mut call = json!({ "to": to, "data": calldata });
+    if let Some(gas) = gas {
+        call["gas"] = Value::String(format!("{gas:#x}"));
+    }
     let response = match rpc
-        .call(
-            "eth_call",
-            vec![
-                json!({ "to": to, "data": calldata }),
-                block_selector.clone(),
-            ],
-        )
+        .call("eth_call", vec![call, block_selector.clone()])
         .await
     {
         Ok(response) => response,

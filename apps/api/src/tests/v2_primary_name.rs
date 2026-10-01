@@ -319,6 +319,66 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
     database.cleanup().await
 }
 
+// TYR-120. With an empty `addr.reverse` name, coin type 60 serves the `default.reverse` name, as
+// ENS's ETH reverse resolver does; coin type 2147483648 reads the default name itself.
+#[tokio::test]
+async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-default-reverse",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    let indexed = |coin_type: &str| {
+        format!(
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?coin_type={coin_type}&source=indexed"
+        )
+    };
+    publish_primary_claim(
+        &database.lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
+    publish_primary_claim(
+        &database.lookup_pool,
+        ENS_DEFAULT_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"evers.eth",
+    )
+    .await?;
+    for coin_type in ["60", "2147483648"] {
+        let payload = v2_primary_name_payload_for_database(&database, &indexed(coin_type)).await?;
+        assert_eq!(
+            payload["data"]["answers"],
+            json!([{"source": "indexed", "status": "ok", "name": "evers.eth"}]),
+            "coin type {coin_type}"
+        );
+    }
+
+    // A non-empty addr.reverse name on the reverse node's resolver wins.
+    publish_primary_claim(
+        &database.lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
+    )
+    .await?;
+    let payload = v2_primary_name_payload_for_database(&database, &indexed("60")).await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "indexed", "status": "ok", "name": "taytems.eth"}])
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -950,6 +1010,150 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
         "{payload}"
     );
     assert!(payload["data"].get("verification").is_none(), "{payload}");
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+// TYR-120 review. The projected `addr.reverse` name is empty but the reverse node keeps a nonzero
+// resolver, so the indexed snapshot serves the `default.reverse` name. The chain may still answer a
+// name from that resolver (an unadmitted or event-silent one), so the refused authority of the
+// substituted default name must not decide the verified answer: the live name, on an admitted
+// arm, is verified.
+#[tokio::test]
+async fn v2_get_primary_name_gates_the_live_name_when_the_default_was_substituted() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    publish_primary_claim(&database.pool, "ens", V2_ON_DEMAND_PRIMARY_NAME_ADDRESS, b"").await?;
+    publish_primary_claim(
+        &database.pool,
+        ENS_DEFAULT_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"evers.eth",
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "evers.eth", None, "ens_v2").await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v1").await?;
+
+    // Reverse leg answered by the resolver itself, then the forward call for the live name.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 substituted-default primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "verified", "status": "ok", "name": "taytems.eth"}]),
+        "{payload}"
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+// TYR-120 review. The reverse node was claimed through a registrar no manifest admits, so no
+// coin type 60 tuple exists, but the registry projection holds its nonzero resolver. The served
+// `default.reverse` name must not decide the verified answer either.
+#[tokio::test]
+async fn v2_get_primary_name_gates_the_live_name_without_a_projected_reverse_tuple() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_003,
+        "0xbinding",
+        "2026-04-17T00:00:03Z",
+    )
+    .await?;
+    publish_primary_claim(
+        &database.pool,
+        ENS_UNADMITTED_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
+    publish_primary_claim(
+        &database.pool,
+        ENS_DEFAULT_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"evers.eth",
+    )
+    .await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "evers.eth", None, "ens_v2").await?;
+    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v1").await?;
+
+    // Reverse leg answered by the resolver itself, then the forward call for the live name.
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 tuple-less substituted-default primary-name request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "verified", "status": "ok", "name": "taytems.eth"}]),
+        "{payload}"
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
 
     lookup_pool.close().await;
     database.cleanup().await?;

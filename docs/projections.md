@@ -1474,6 +1474,29 @@ selects their current state. Explicit `NameForAddrChanged` tuple claims retain
 their existing event path. These are declared claims; forward verification
 remains request-scoped.
 
+The ENSIP-19 `default.reverse` registrar's `NameForAddrChanged` keys its own
+tuple at coin type `2147483648`, with `<address>.default.reverse` as its
+reverse name; the tuple's claim is the latest such write. The reader applies
+ENS's ETH reverse resolver order to a coin type `60` read: the `addr.reverse`
+claim, after any hydration overlay, wins when the reverse node's current
+resolver is nonzero and the claim's source name has at least one byte. The
+test is the retained or hydrated value, not the claim status: a whitespace-only
+name is `not_found` yet still wins, as a nonempty text name that does not
+normalize wins with its `invalid_name` status and a nonempty name retained only
+as bytes wins with its `unsupported` status. Otherwise the reader
+serves the same namespace's `default.reverse` claim, under the requested coin
+type, when that tuple exists, and the `addr.reverse` claim (or no tuple)
+when it does not. A served `default.reverse` claim keeps its own status, so an
+empty default name is `not_found`
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f).
+The projection knows a resolver's name only from that resolver's admitted
+events or hydration, so a reverse node pointing at an unadmitted resolver
+falls back here while the chain would return that resolver's name; see
+[upstream divergences](upstream.md#known-divergences). The first source in the
+upstream order, a standalone `addr.reverse` registrar, has no admitted
+deployment and is not read.
+
 Configured mainnet follow blocks prepare reverse hydration
 before opening the publication transaction. A short preparation transaction uses
 the normal pointer and reverse reducers to include the new block's candidates,
