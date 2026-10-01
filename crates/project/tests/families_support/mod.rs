@@ -32,6 +32,10 @@ pub fn uuid(n: u32) -> String {
     format!("00000000-0000-0000-0000-{n:012x}")
 }
 
+/// The retired F10 alias tables. Historical reset migrations still name them in their literal
+/// lists; 20261001100000_retire_resolver_alias_families.sql drops them.
+pub const RETIRED_FAMILY_TABLES: [&str; 2] = ["project_name_alias", "project_resolver_alias"];
+
 /// Journalled family tables, compared by the undo and rebuild tests.
 pub const FAMILY_TABLES: &[&str] = &[
     "child_registration_events",
@@ -58,8 +62,6 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_grant",
     "project_resource_admin_aggregate",
     "project_account_approval",
-    "project_name_alias",
-    "project_resolver_alias",
     "project_child_edge_candidate",
     "project_parent_subregistry",
     "project_reverse_tuple",

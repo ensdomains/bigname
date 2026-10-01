@@ -37,16 +37,15 @@ async fn family_page(
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {
     use bigname_storage::families::topology::{
-        load_resolver_aliases_shadow, load_resolver_links_shadow, load_resolver_roles_shadow,
+        load_resolver_links_shadow, load_resolver_roles_shadow,
     };
     let limit = page_size.saturating_add(1) as i64;
     let loaded = match section {
-        "links" => {
+        "roles" => load_resolver_roles_shadow(pool, chain, address, key, limit).await,
+        _ => {
             let namespace = super::super::resolver_namespace(chain)?;
             load_resolver_links_shadow(pool, chain, address, namespace, key, limit).await
         }
-        "roles" => load_resolver_roles_shadow(pool, chain, address, key, limit).await,
-        _ => load_resolver_aliases_shadow(pool, chain, address, key, limit).await,
     }
     .map_err(crate::v2::name_rows_error(
         crate::v2::SnapshotReadResource::Resolver,

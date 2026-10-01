@@ -40,7 +40,7 @@ revision, bindings, inventory boundary and real manifest provenance. A live
 publication may trail the stored execution head by one block, matching
 `PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`. Provider calls remain pinned to the
 captured execution head; the indexed comparison retains its own published
-position. The snapshot contains the full declared topology, including aliases,
+position. The snapshot contains the full declared topology, including
 wildcards and any admitted cross-chain transport context.
 
 API revalidation begins a fresh `REPEATABLE READ, READ ONLY` transaction after
@@ -95,13 +95,12 @@ arm-scoped. The supported topology classes are:
   A declared ENSv1 mirror resolver stays the exact resolver in the topology:
   that is the address the Universal Resolver reports and the divergence
   comparison is keyed on;
-- exact-surface alias resolution with a declared non-empty alias path; and
 - exact-surface wildcard-derived resolution with a declared wildcard source
   and matched labels; and
 - [Universal Resolver ancestor
   discovery](glossary.md#universal-resolver-ancestor-discovery): exact-surface
   resolution on the profile's Ethereum L1 (Mainnet or Sepolia) with a null
-  exact resolver and no alias, linked-subregistry, projected wildcard, or
+  exact resolver and no linked-subregistry, projected wildcard, or
   transport path, executed through that chain's manifest-admitted Universal
   Resolver at its readable head. This last route has no indexed comparison and retains the exact resolver
   as null in the API response. The entrypoint walks to the nearest nonzero
@@ -109,7 +108,7 @@ arm-scoped. The supported topology classes are:
   `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)`
   `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f)`.
 
-Ancestor-selected non-alias paths, linked-subregistry ancestor selection,
+Ancestor-selected paths, linked-subregistry ancestor selection,
 transport-assisted ENS paths, and CCIP-participating ENS paths remain explicit
 `unsupported` unless a retained route contract says otherwise.
 

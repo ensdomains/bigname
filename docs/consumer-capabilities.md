@@ -42,7 +42,7 @@ to the routes and selectors documented in [`api-v1-routes.md`](api-v1-routes.md)
 | Permission holders | `GET /v1/permissions` | Known current direct permission rows plus effective ENSv1 and Basenames registry operators that apply to each resource. Registry `ApprovalForAll` is served for `address`, `name`, and `registration_id` filters and role-summary expansion. ENSv1 NameWrapper holders, operators, and per-token delegates are direct rows. Surfaces not yet listed are named in `meta.unlisted_permission_surfaces` (`ens_v2_registry_operators`, `registrar_approvals`, `resolver_approvals`, `wrapper_parent_control`) beside `unsupported_reason=permissions_partially_listed`, so coverage stays request-relative partial even for zero rows; the list shrinks as later parts of issue #605 add these surfaces. ENSv2 registry operators also remain unsupported, and an ENSv2 registration reports that gap as `ens_v2_registry_operators` instead of `registrar_approvals`. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) An empty name-filter result reports `permission_support_unknown` when the name is missing or unrecognized, its current name is marked unsupported, or its current name is not bound to a registration resource. A wrapped `.eth` name's `registration_id` is its BaseRegistrar lease, and a permissions read by that `registration_id` returns the rows of the NameWrapper resource that currently controls the name. The NameWrapper resource of a wrapped `.eth` name is not a registration, so a read by it returns an empty page without completeness metadata; a wrapped subname has no lease and is still read by its NameWrapper resource. See [registration identity of wrapped names](api-v1.md#registration-identity-of-wrapped-names). (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L155-L158 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f) Returned current wrapper registrations still carry [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) lifecycle and fuse data when backed. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L414 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f) |
 | Search | `GET /v1/search` | Name search only; no registration, pricing, or availability workflow. |
 | Events | `GET /v1/events` | Product event collection with included/excluded types, raw product kinds, and one exact record key (including applicable reset rows), all applied before paging. These filters also work on name and address history. Contract-address queries can request an exact filtered row count with `include=total_count`; the default remains null. |
-| Resolver overview | `GET /v1/resolvers/{chain_id}/{address}` | Resolver metadata and mirror declaration, and separately paginated complete alias, record-link (ENSv2 record-ID resolvers: which nodes share which record, the default record included (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)), per-registration role, and record-shaped bound-name collections, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
+| Resolver overview | `GET /v1/resolvers/{chain_id}/{address}` | Resolver metadata and mirror declaration, and separately paginated complete record-link (ENSv2 record-ID resolvers: which nodes share which record, the default record included (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)), per-registration role, and record-shaped bound-name collections, including [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper metadata when backed. |
 | Namespace metadata | `GET /v1/namespaces/{namespace}` | Product-facing namespace and capability metadata. |
 | Registry overview and labels | `GET /v1/registries/{chain_id}/{address}` and `/labels` | Current labels and exact declared registry assignment/per-label distinct holder counts with `include=counts`. Historical overview label totals are null; declared assignment counts do not imply complete effective-permission coverage. |
 | Pipeline diagnostics | `/v1/diagnostics/*` | Explicit diagnostic tier, separate from product reads. |
@@ -67,7 +67,7 @@ exact resolver emitter. Separately, a reverse claim uses the declared resolver's
 resolver: the claim is matched by namespace, chain, reverse node, and that exact
 resolver, and does not depend on the record-inventory classification.
 A supported record classification does not prove exhaustive selector history,
-resolver binding enumeration, aliases, or permission-holder enumeration;
+resolver binding enumeration or permission-holder enumeration;
 coverage remains limited to the retained observations and admitted capabilities.
 No new REST route, schema, or record-ID interpretation is implied.
 
@@ -365,16 +365,8 @@ stays fixed, `logical_name_id` becomes non-null, `resource_id` stays null,
 `raw_fact_ref.interpreter_state_key`
 changes with the attribution, and `before_state` may rethread onto the
 logical-name/resource-null state stream. Issue #348 retains the surface from
-registry/root evidence; issue #529 retains a surface observed only by resolver
-`AliasChanged` before a batch boundary. Those rows may newly enter
-name-filtered diagnostics and product history. This boundary does not claim
-fresh/resumed parity for the known pre-existing exception: when a
-resolver-emitted resource equals `namehash(N)`, named-resource and alias
-preimages can share one retained [interpreter state
-key](glossary.md#interpreter-state-key), so resumed interpretation can lose the
-named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). An ended resource whose latest
+registry/root evidence. Those rows may newly enter
+name-filtered diagnostics and product history. An ended resource whose latest
 retained `ResolverChanged` pointer names the emitting resolver may also receive
 a different rebuildable record inventory; the released or
 expired name must still have no current binding or resource, and its name and

@@ -164,14 +164,7 @@ ENSv2 resolver attribution classes
 [#529](https://github.com/ensdomains/bigname/issues/529) catalogued. ENSv1
 lifecycle state advances through each block's reconciled normalized events,
 and ENSv2 restore rebuilds lasting canonical [name surface](#surface-name-surface)
-observations from retained registry/root events and resolver `AliasChanged`
-preimage observations whose DNS names pass normalization. One known
-pre-existing exception remains: when a resolver-emitted resource equals
-`namehash(N)`, named-resource and alias preimages can share one retained
-[interpreter state key](#interpreter-state-key), so resumed interpretation can
-lose the named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). See [interpretation
+observations from retained registry/root events. See [interpretation
 replay](storage.md#interpretation-replay).
 
 Issue #411 enforces the role-dependent contract below; five-field descriptors remain compatible and default to `both`.
@@ -1848,7 +1841,7 @@ watch range.
 ## Path class / support class
 
 the classification of a resolution's shape
-that decides which verified answers are publicly supported. Direct, alias-only,
+that decides which verified answers are publicly supported. Direct,
 wildcard-derived, and transport-assisted are the classes most relevant to
 refusal semantics, not a closed list: the docs also classify shapes such as
 ancestor-selected, linked-subregistry, CCIP-participating, transport-free, and
@@ -2257,15 +2250,8 @@ resolver attribution classes
 [#529](https://github.com/ensdomains/bigname/issues/529). ENSv1 time-derived
 lifecycle observations use reconciled state from the preceding block, and
 ENSv2 restore rebuilds lasting canonical [name surface](#surface-name-surface)
-observations from retained registry/root events and resolver `AliasChanged`
-preimage observations whose DNS names pass normalization in every run shape,
-except when a resolver-emitted resource equals `namehash(N)`: named-resource
-and alias preimages can share one retained [interpreter state
-key](#interpreter-state-key), so resumed interpretation can lose the
-named-resource resolver hint and diverge from a fresh walk
-([#560](https://github.com/ensdomains/bigname/issues/560); evidence is checked
-in as an ignored collision probe). See [interpretation
-replay](storage.md#interpretation-replay).
+observations from retained registry/root events in every run shape. See
+[interpretation replay](storage.md#interpretation-replay).
 
 <a id="served-head"></a>
 ## Served head
@@ -2382,7 +2368,7 @@ execution node.
 
 the request-scoped ENS records path, on the deployment profile's Ethereum L1
 (Mainnet or Sepolia), for a projected name whose exact registry resolver is null. When
-the name has no projected alias, linked-subregistry, wildcard, or cross-chain
+the name has no projected linked-subregistry, wildcard, or cross-chain
 transport path, bigname calls the manifest-admitted Universal Resolver at the
 selected block and lets that contract find the nearest ENSIP-10 ancestor
 resolver
@@ -2485,7 +2471,8 @@ changed keys, undo journal and marker together. Rebuilds can group older work
 blocks into bounded ranges; reads remain unavailable until the marker is live.
 
 The families carry labels F1 to F15, used in the difference lists, the table
-comments and the reducers' module headers. Each label names these tables and
+comments and the reducers' module headers; F10, the retired resolver alias
+tables, is unused. Each label names these tables and
 the reducer under `crates/project/src/families/` that writes them:
 
 | Label | Tables | Reducer |
@@ -2501,7 +2488,6 @@ the reducer under `crates/project/src/families/` that writes them:
 | F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
 | F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
 | F9, account approvals | `project_account_approval` | `permissions.rs` |
-| F10, aliases | `project_name_alias`, `project_resolver_alias` | `topology.rs` |
 | F11, child edges | `project_child_edge_candidate`, `project_parent_subregistry` | `topology.rs` |
 | F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
 | F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |

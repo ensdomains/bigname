@@ -245,7 +245,7 @@ record inventory, subname counts, permission lineage, address-name role
 summaries, all three address-name sort fields, both sort orders, and both
 deduplication modes. The resolver overview takes no expansions; it runs at the
 default `bound_names` page, at one row and at the 200-row maximum. Its former
-sections, the `/aliases`, `/links` and `/roles` collections and resolver
+sections, the `/links` and `/roles` collections and resolver
 events, are not in the timed workload yet.
 Cursor seeding uses those same default and parameterized requests, so a
 continuation retains its expansion parameters or default scope. Production

@@ -1,136 +1,4 @@
 #[tokio::test]
-async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_permissioned_collection_inputs(&database).await?;
-    let alpha_resource = Uuid::from_u128(0x5a100);
-    let alpha = seed_family_identity_inputs(
-        &database.pool,
-        "ens",
-        "alpha.eth",
-        "ethereum-mainnet",
-        140,
-        "0xcollection140",
-        alpha_resource,
-        Uuid::from_u128(0x5a101),
-        Uuid::from_u128(0x5a102),
-        "ens_v1",
-    )
-    .await?;
-    let mut inputs = Vec::new();
-    for (kind, family, after) in [
-        (
-            "RegistrationGranted",
-            "ens_v1_registrar_l1",
-            json!({"authority_kind":"registrar",
-            "registrant":V2_ADDRESS,"expiry":1_900_000_000_i64}),
-        ),
-        (
-            "ResolverChanged",
-            "ens_v2_registry_l1",
-            json!({"resolver":V2_RESOLVER_ADDRESS}),
-        ),
-    ] {
-        let mut event = history_event(
-            &format!("alias-alpha-{kind}"),
-            Some(&alpha),
-            Some(alpha_resource),
-            Some("ethereum-mainnet"),
-            Some(150),
-            Some("0xcollection150"),
-            Some("0xalias-alpha"),
-            Some(0),
-            CanonicalityState::Canonical,
-        );
-        event.event_kind = kind.into();
-        event.source_family = family.into();
-        event.before_state = json!({});
-        event.after_state = after;
-        inputs.push(event);
-    }
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &inputs).await?;
-    // Alias bindings are retained identity inputs, selected again by the real family rebuild.
-    sqlx::query("UPDATE surface_bindings SET binding_kind = 'resolver_alias_path' WHERE logical_name_id = $1")
-        .bind(bigname_storage::logical_name_id_for_name("ens", "alpha.eth"))
-        .execute(&database.pool).await?;
-    upsert_phase_raw_blocks(
-        &database.pool,
-        &[raw_block(
-            "ethereum-mainnet",
-            "0xcollection150",
-            None,
-            150,
-            1_700_000_150,
-        )],
-    )
-    .await?;
-    let alias = |index: usize, identity: &str, active: bool, resolver: &str| {
-        let mut event = history_event(
-            identity,
-            None,
-            None,
-            Some("ethereum-mainnet"),
-            Some(150),
-            Some("0xcollection150"),
-            Some("0xaliastx"),
-            Some(index as i64),
-            CanonicalityState::Canonical,
-        );
-        event.event_kind = "AliasChanged".to_owned();
-        event.source_family = "ens_v2_resolver_l1".into();
-        event.after_state = json!({"resolver":resolver, "from_namehash":format!("key-{index:04}"),
-            "from_name":"same.eth", "to_name":format!("target-{index:04}.eth"),
-            "alias_state":"active", "active":active});
-        event
-    };
-    let mut events = (0..105)
-        .map(|index| alias(index, &format!("alias-{index}"), true, V2_RESOLVER_ADDRESS))
-        .collect::<Vec<_>>();
-    let mut removed = alias(0, "alias-removed", false, V2_RESOLVER_ADDRESS);
-    removed.log_index = Some(200);
-    events.push(removed);
-    events.push(alias(
-        500,
-        "alias-other",
-        true,
-        "0x0000000000000000000000000000000000000bbb",
-    ));
-    let mut orphan = alias(501, "alias-orphan", true, V2_RESOLVER_ADDRESS);
-    orphan.canonicality_state = CanonicalityState::Orphaned;
-    events.push(orphan);
-    events.push(alias(502, "alias-candidate", true, V2_RESOLVER_ADDRESS));
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['alias-candidate-correlation'] WHERE event_identity = 'alias-candidate'")
-        .execute(&database.pool).await?;
-    publish_resolver_collection_inputs(&database).await?;
-    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/aliases?page_size=37");
-    let first = v2_resolver_payload_for_database(&database, &base).await?;
-    assert_eq!(first["page"]["total_count"], 105);
-    assert_eq!(first["data"][0]["name"], "alpha.eth");
-    let token = first["meta"]["as_of_token"].clone();
-    let mut all = first["data"].as_array().unwrap().clone();
-    let mut page = first;
-    while let Some(cursor) = page["page"]["next_cursor"].as_str() {
-        publish_resolver_collection_inputs(&database).await?;
-        page =
-            v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
-        assert_eq!(page["meta"]["as_of_token"], token);
-        assert_eq!(page["page"]["total_count"], 105);
-        all.extend(page["data"].as_array().unwrap().clone());
-    }
-    assert_eq!(all.len(), 105);
-    let targets = all
-        .iter()
-        .filter_map(|row| row["to_name"].as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(targets.len(), 104);
-    assert!(!targets.contains("target-0000.eth"));
-    assert!(!targets.contains("target-0500.eth"));
-    assert!(!targets.contains("target-0501.eth"));
-    assert!(!targets.contains("target-0502.eth"));
-    database.cleanup().await
-}
-
-#[tokio::test]
 async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let manifest = seed_permissioned_collection_inputs(&database).await?;
@@ -177,7 +45,7 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
     }
     assert_eq!(ids.len(), 205);
     for uri in [
-        format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/aliases?cursor={first_cursor}"),
+        format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/links?cursor={first_cursor}"),
         format!(
             "/v1/resolvers/1/0x0000000000000000000000000000000000000bbb/roles?cursor={first_cursor}"
         ),
@@ -384,7 +252,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
 async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_overview(&database, false).await?;
-    for section in ["aliases", "links", "roles"] {
+    for section in ["links", "roles"] {
         let payload = v2_resolver_payload_for_database(
             &database,
             &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),

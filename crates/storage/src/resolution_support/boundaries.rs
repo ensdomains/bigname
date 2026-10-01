@@ -47,14 +47,7 @@ pub fn resolution_record_inventory_lookup_key_any_chain(
 ) -> Option<(Uuid, Value)> {
     let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
-            ENS_NAMESPACE => matches!(
-                row.binding_kind,
-                Some(
-                    SurfaceBindingKind::DeclaredRegistryPath
-                        | SurfaceBindingKind::ResolverAliasPath
-                )
-            ),
-            BASENAMES_NAMESPACE => {
+            ENS_NAMESPACE | BASENAMES_NAMESPACE => {
                 row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
             }
             _ => false,
@@ -159,13 +152,8 @@ pub fn resolution_verified_support_boundary(
     };
     let record_version_boundary = resolution_record_version_boundary(row, record_inventory_row)
         .or_else(|| Some(topology_version_boundary.clone()))?;
-    let path_class = match row.binding_kind {
-        Some(SurfaceBindingKind::ResolverAliasPath) => VerifiedResolutionPathClass::AliasOnly,
-        _ => VerifiedResolutionPathClass::Direct,
-    };
-
     Some(VerifiedResolutionSupportBoundary {
-        path_class,
+        path_class: VerifiedResolutionPathClass::Direct,
         topology_version_boundary,
         record_version_boundary,
     })
@@ -234,10 +222,8 @@ fn row_has_basenames_execution_v2_manifest(row: &NameCurrentRow) -> bool {
 
 fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<Value> {
     if row.namespace != ENS_NAMESPACE
-        || !(matches!(
-            row.binding_kind,
-            Some(SurfaceBindingKind::DeclaredRegistryPath | SurfaceBindingKind::ResolverAliasPath)
-        ) || name_current_has_event_linked_registry_serving(row))
+        || !(row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
+            || name_current_has_event_linked_registry_serving(row))
         || row.record_serving_resource_id().is_none()
     {
         return None;
@@ -254,14 +240,7 @@ fn build_supported_resolution_verified_boundary(row: &NameCurrentRow) -> Option<
 fn build_supported_resolution_declared_boundary(row: &NameCurrentRow) -> Option<Value> {
     let binding_supported = name_current_has_event_linked_registry_serving(row)
         || match row.namespace.as_str() {
-            ENS_NAMESPACE => matches!(
-                row.binding_kind,
-                Some(
-                    SurfaceBindingKind::DeclaredRegistryPath
-                        | SurfaceBindingKind::ResolverAliasPath
-                )
-            ),
-            BASENAMES_NAMESPACE => {
+            ENS_NAMESPACE | BASENAMES_NAMESPACE => {
                 row.binding_kind == Some(SurfaceBindingKind::DeclaredRegistryPath)
             }
             _ => false,

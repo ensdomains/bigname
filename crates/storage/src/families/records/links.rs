@@ -1,12 +1,12 @@
-//! Readers the edge and topology step shares: the resolver link selection over F7, and the alias
-//! and wildcard views of the F5 resource pointer.
+//! Readers the edge and topology step shares: the resolver link selection over F7, and the
+//! wildcard view of the F5 resource pointer.
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use super::{FamilyPosition, is_cleared, load_family_resource_pointer};
+use super::{FamilyPosition, load_family_resource_pointer};
 
 /// The empty-name node, `namehash("")`: a record linked there is the resolver's default record,
 /// answering any node with no link of its own.
@@ -196,52 +196,11 @@ fn select(exact: Option<FamilyLink>, default: Option<FamilyLink>) -> Option<Link
     })
 }
 
-/// The pointer the alias topology join reads: the resource's current pointer, and nothing when
-/// that pointer is a clear. An older non-zero pointer is never exposed. F5 keeps one pointer per
-/// resource, so a later unnamed pointer, or one attributed to another name, answers here even
-/// though it is not attributed to the surface being read.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FamilyAliasSourcePointer {
-    pub resource_id: Uuid,
-    pub resolver_address: String,
-    pub pointer_position: FamilyPosition,
-    pub namespace: Option<String>,
-    pub source_family: Option<String>,
-    pub namehash: Option<String>,
-}
-
-/// The current pointer of `resource_id` after the zero rejection.
-pub async fn load_family_alias_source_pointer(
-    pool: &PgPool,
-    chain_id: &str,
-    resource_id: Uuid,
-) -> Result<Option<FamilyAliasSourcePointer>> {
-    let Some(pointer) = load_family_resource_pointer(pool, chain_id, resource_id).await? else {
-        return Ok(None);
-    };
-    let (Some(resolver_address), Some(pointer_position)) =
-        (pointer.resolver_address, pointer.pointer_position)
-    else {
-        return Ok(None);
-    };
-    if is_cleared(Some(&resolver_address)) {
-        return Ok(None);
-    }
-    Ok(Some(FamilyAliasSourcePointer {
-        resource_id,
-        resolver_address,
-        pointer_position,
-        namespace: pointer.namespace,
-        source_family: pointer.source_family,
-        namehash: pointer.namehash,
-    }))
-}
-
 /// What the wildcard read takes from a resource on its longest ancestor (name_topology.rs, the
 /// wildcard lateral): the latest non-zero pointer, zero filtered before the latest is taken, and
 /// the latest `RecordVersionChanged` or `ResolverChanged` with clears included as its boundary.
 /// A non-zero pointer followed by a clear keeps the non-zero resolver with the clear as boundary.
-/// As with [`FamilyAliasSourcePointer`], F5 keeps one row per resource, so the pointer and
+/// F5 keeps one row per resource, so the pointer and
 /// boundary are the resource's latest whether or not they are attributed to the ancestor
 /// surface.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -974,8 +974,6 @@ GRANT SELECT ON TABLE
     bigname_phase.project_grant,
     bigname_phase.project_resource_admin_aggregate,
     bigname_phase.project_account_approval,
-    bigname_phase.project_name_alias,
-    bigname_phase.project_resolver_alias,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
     bigname_phase.project_reverse_tuple,
@@ -1517,3 +1515,21 @@ family run rebuilds the families anyway; the reset adds no second rebuild when
 the schema-migration is applied first. It ships inside the TYR-61 batch, whose single Interpret
 redo and Project rebuild discharge this; collection cursors continue as
 described above.
+
+### Retired resolver alias path
+
+The build that stops interpreting the 2026-06-29 ENSv2 resolver `AliasChanged`
+event ([upstream](upstream.md)) removes it from the ENSv2 resolver adapter and
+the Project topology family, so it changes `crates/adapters/src` and hashed
+Project and storage sources and rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs `20261001100000_retire_resolver_alias_families.sql`, which drops
+`project_name_alias` and `project_resolver_alias`; both are empty, because no
+admitted manifest declares `AliasChanged`. It needs no manifest change and no
+historical ingest fetch. It ships in the same full-history Interpret redo and
+families rebuild as TYR-116, which discharge this rotation; an API upgraded
+alone refuses the old build's family publication with `409 stale`. Apply the
+schema-migration with the new build, not before it: the old Project and API
+still read and write both tables. No served value changes except the removed fields: the
+resolver overview no longer reports an `aliases` section, `/aliases` answers
+like any unknown route, and lookup topology has no `alias` field.

@@ -167,12 +167,6 @@ sol! {
     }
 
     interface V2Resolver {
-        event AliasChanged(
-            bytes indexed indexedFromName,
-            bytes indexed indexedToName,
-            bytes fromName,
-            bytes toName
-        );
         event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType);
         event EACRolesChanged(
             uint256 indexed resource,
@@ -266,7 +260,6 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
             V2Registry::Upgraded,
             V2Registrar::NameRegistered,
             V2Registrar::NameRenewed,
-            V2Resolver::AliasChanged,
             V2Resolver::AddressChanged,
             V2Resolver::TextChanged,
             V2Resolver::NameChanged,
@@ -299,10 +292,7 @@ pub fn declared_events() -> Vec<DeclaredEvent> {
         .collect::<Vec<_>>();
     let v2 = v2
         .into_iter()
-        .filter(|event| {
-            event.signature != V2Resolver::AliasChanged::SIGNATURE
-                && event.signature != V2Resolver::NameChanged::SIGNATURE
-        })
+        .filter(|event| event.signature != V2Resolver::NameChanged::SIGNATURE)
         .chain(declared!(
             "ens_v2_sepolia",
             [

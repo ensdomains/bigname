@@ -16,8 +16,8 @@
 //! - `declared_summary.history`, the name's latest events, read by key from `normalized_events`
 //!   (`heads.rs`), which the binding diagnostics route serves;
 //! - the coverage and support columns;
-//! - the whole declared resolution topology, composed on the same database snapshot: aliases,
-//!   wildcard sources, direct and ownerless ENS, and admitted Basenames L1 transport.
+//! - the whole declared resolution topology, composed on the same database snapshot: wildcard
+//!   sources, direct and ownerless ENS, and admitted Basenames L1 transport.
 //!
 //! The listings over composed rows are `list.rs` (search, expiring) and `bound.rs` (the names
 //! bound to a resolver).

@@ -231,7 +231,7 @@ fn openapi_request_page_sizes_enforce_the_documented_inclusive_bounds() {
             }
         }
     }
-    assert_eq!(query_parameters, 14);
+    assert_eq!(query_parameters, 13);
 
     let schema = &document()["paths"]["/v1/lookup"]["post"]["requestBody"]["content"]["application/json"]
         ["schema"];

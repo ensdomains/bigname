@@ -791,6 +791,7 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
             "project_family_undo",
             "project_repair_record",
         ])
+        .chain(support::RETIRED_FAMILY_TABLES)
         .collect();
     assert_eq!(
         reset_tables, expected,
