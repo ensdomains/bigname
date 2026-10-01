@@ -784,6 +784,9 @@ collection route carry neither header.
   `expires_at` is the BaseRegistrar lease's own expiry, `null` without a
   lease, which after the Universal Resolver cutover can differ from the
   top-level ENSv2 `expires_at` (see [Expiry and grace](api-v1.md#expiry-and-grace)).
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L326-L329 @ ens_v2_sepolia_20260916@366de741)
   An ENSv1 wrapper-backed name's `ens_v1` also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
