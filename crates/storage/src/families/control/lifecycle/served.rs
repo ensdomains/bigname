@@ -287,7 +287,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let expiry_seconds = expiry_event.and_then(|event| event.expiry_seconds);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     // The BaseRegistrar lease's own expiry, which `choose` below may replace with a live ENSv2
-    // entry's; null without a lease, as for a subname.
+    // entry's after the Universal Resolver cutover; null without a lease, as for a subname.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L326-L329 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L487 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20260916@366de741)
     let ens_v1_expiry = expiry_event
         .filter(|event| event.source_family == REGISTRAR)
         .and_then(|event| event.expiry_seconds)

@@ -31,7 +31,13 @@ async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> R
         json!({"source_event":"NameWrapped", "authority_kind":"wrapper", "owner":holder})).await?;
     append_alice_name_input(database, "TokenControlTransferred", "ens_v1_wrapper_l1",
         json!({"source_event":"NameWrapped", "owner":holder})).await?;
-    // PARENT_CANNOT_CONTROL | IS_DOT_ETH, as every wrapped `.eth` second-level name has.
+    // PARENT_CANNOT_CONTROL | IS_DOT_ETH, as every wrapped `.eth` second-level name has: each
+    // wrap path goes through `_wrapETH2LD`, which ORs both fuses in
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L272 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L298 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L808 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L996-L1015 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18-L19 @ ens_v1@91c966f).
     append_alice_name_input(database, "PermissionScopeChanged", "ens_v1_wrapper_l1",
         json!({"source_event":"NameWrapped", "wrapper_state":"emancipated", "fuses":196_608})).await?;
     append_alice_name_input(database, "ExpiryChanged", "ens_v1_wrapper_l1",

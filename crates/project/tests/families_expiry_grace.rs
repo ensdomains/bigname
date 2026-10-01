@@ -660,7 +660,14 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
     );
 
     // ETHRenewerV1 after the cutover: the ENSv2 entry's expiry moves, then the BaseRegistrar
-    // renews the lease and the NameWrapper expiry follows it.
+    // renews the lease and the NameWrapper expiry follows it
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/AbstractETHRegistrar.sol:L132-L133 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L153-L155 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L119-L124 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L140-L146 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L318 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f).
     const RESERVED_AGAIN: u64 = RENEWED_AGAIN + 62 * DAY;
     fixture
         .write(
