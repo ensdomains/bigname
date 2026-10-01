@@ -1462,8 +1462,9 @@ ENS's ETH reverse resolver order to a coin type `60` read: the `addr.reverse`
 claim, after any hydration overlay, wins when the reverse node's current
 resolver is nonzero and the claim's source name has at least one byte. The
 test is the retained or hydrated value, not the claim status: a whitespace-only
-name is `not_found` yet still wins, as a nonempty name that does not normalize
-wins with its `invalid_name` status. Otherwise the reader
+name is `not_found` yet still wins, as a nonempty text name that does not
+normalize wins with its `invalid_name` status and a nonempty name retained only
+as bytes wins with its `unsupported` status. Otherwise the reader
 serves the same namespace's `default.reverse` claim, under the requested coin
 type, when that tuple exists, and the `addr.reverse` claim (or no tuple)
 when it does not. A served `default.reverse` claim keeps its own status, so an

@@ -3355,8 +3355,11 @@ introduces it rebuilds Project from full history before serving the option; see
   `default.reverse` registrar stores for the address (coin type `2147483648`)
   only when that resolver is zero or its `name` call succeeds with an empty
   string. Emptiness is byte length, not normalization: a whitespace-only name
-  stops the fallback and then answers `not_found`, and any other nonempty name
-  that does not normalize stops it with `invalid_name`.
+  stops the fallback and then answers `not_found`, and a nonempty text name
+  that does not normalize stops it with `invalid_name`. On the indexed source a
+  nonempty name whose bytes are not text (not valid UTF-8, or containing a NUL
+  byte) is retained as bytes and stops the fallback with `unsupported`; the
+  verified source's handling of a non-UTF-8 return is described below.
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
@@ -3375,10 +3378,17 @@ introduces it rebuilds Project from full history before serving the option; see
   ([execution](execution.md)), and when the resolver is zero or `name`
   succeeds with an empty string calls `nameForAddr(address)` on the
   `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
-  `name` call that reverts, runs out of gas, or returns malformed data ends the
-  lookup with `execution_failed` and no default read; upstream returns an empty
-  name there, so the status differs while neither falls back.
+  `name` call that reverts or runs out of gas ends the lookup with
+  `execution_failed` and no default read; upstream returns an empty name there,
+  so the status differs while neither falls back. Upstream decodes the return
+  by checking only that the encoded byte array fits inside the return data. A
+  return that fails that check is an empty name upstream and `execution_failed`
+  (`resolver_return_data_malformed`) here. A nonempty byte string that is not
+  valid UTF-8 passes upstream's check and is returned as the name, while the
+  verified source's string decoder rejects it as `execution_failed`
+  (`resolver_return_data_malformed`). Neither case falls back to the default.
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/utils/LibABI.sol:L8-L27 @ ens_v1@91c966f)
   The forward check is unchanged. `coin_type=2147483648` reads the
   `default.reverse` claim itself on the indexed source.
   Sepolia check after the release's redo:
