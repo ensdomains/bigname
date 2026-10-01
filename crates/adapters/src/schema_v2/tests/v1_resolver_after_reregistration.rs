@@ -476,12 +476,14 @@ const FIRST_UNWRAPPED: i64 = REGISTERED + 20;
 
 /// `registerAndWrapETH2LD` in transaction `transaction` of `block`, for a name whose previous
 /// registration was unwrapped: the BaseRegistrar burns the expired token from its registrant,
-/// mints to the NameWrapper, names it the registry owner and emits `NameRegistered`; `_mint`
-/// finds no old ERC-1155 token, mints the new one, emits `NameWrapped`, then sets the resolver.
+/// mints to the NameWrapper, names it the registry owner and emits `NameRegistered`. Then
+/// `_mint` finds no old ERC-1155 token and mints the new one, `_wrap` emits `NameWrapped`, and
+/// `_wrapETH2LD` calls `ens.setResolver` because its resolver argument is nonzero.
 /// Log indexes run on from `first_log`, as they do across one block.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L143-L150 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L143-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L892 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
 #[allow(clippy::too_many_arguments)]
 fn register_and_wrap_after_unwrap(
