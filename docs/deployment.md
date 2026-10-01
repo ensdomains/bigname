@@ -1573,8 +1573,9 @@ lookup topology has no `alias` field, and the `set_alias` and
 
 ### Resolver set when a wrapped name is registered again
 
-The build that lets a registry resolver write from a later block replace a
-resolver pointer that an earlier write left on the registry read resource
+The build that lets a later registry resolver write, by block, transaction and
+log position, replace a resolver pointer that an earlier write left on the
+registry read resource
 ([projections](projections.md#records-shared-through-resolver-links)) changes
 `crates/adapters/src`, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
@@ -1586,5 +1587,7 @@ that redo corrects names already affected: when the Project redo publishes, a
 wrapped `.eth` name whose earlier registration set its resolver through
 `NameWrapper.setResolver`, and which was registered again with a resolver after
 expiry and grace, serves the resolver from the new registration rather than the
-earlier one, including any later change or clear. Before the release is
-recorded, confirm that both redos adopted the new hash.
+earlier one, including any later change or clear. The same holds when the
+registry owner left by an earlier unwrap set a resolver earlier in the block of
+the new registration. Before the release is recorded, confirm that both redos
+adopted the new hash.

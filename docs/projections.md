@@ -1209,16 +1209,25 @@ the same node in the registration transaction, such as the resolver write
 `registerAndWrapETH2LD` makes after wrapping, stays on that wrapper resource,
 the one the name is served from. Its registry-read copy follows the ordinary
 registration reconciliation rules, and a registry write that comes after a
-later ownership write in the same transaction is reconciled as before. When one
-registry resolver write produces both that registry-read pointer and a row on a
-registrar or wrapper resource, replay keeps the registry-read pointer whichever
-of the two rows it restores first, because stored rows from one block come back
-in no fixed order. A registry resolver write in a later block always replaces
-the pointer, wherever its rows were reconciled: a wrapped `.eth` name registered
-again after expiry and grace with a resolver selects that resolver rather than
-one set through `NameWrapper.setResolver` during the earlier registration.
+later ownership write in the same transaction is reconciled as before. Replay
+orders registry resolver writes by their raw position, block then transaction
+then log, because stored rows from one block come back in no fixed order. A
+later raw write always replaces the pointer, wherever its rows were reconciled,
+and an earlier write restored after it never does. Only among the rows of one
+raw write, when that write produces both a registry-read pointer and a row on a
+registrar or wrapper resource, does replay keep the registry-read pointer
+whichever row it restores first. So a wrapped `.eth` name registered again after
+expiry and grace with a resolver selects that resolver rather than one set
+through `NameWrapper.setResolver` during the earlier registration, or one its
+still-recorded registry owner set through `ENSRegistry.setResolver` earlier in
+the same block, since registry authorisation checks only the recorded owner.
+Explicit clears keep their position too. A restored row without a full raw
+position falls back to block time, where a registry-read pointer from the same
+block keeps out rows on other resources.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666-L671 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1016-L1018 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
 Record
 attribution remains node-keyed and provider-free. If a registrar registration
 makes the registrar resource current before the retained registry-only
