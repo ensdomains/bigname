@@ -522,6 +522,7 @@ fn prior_event(
         emitting_address: None,
         state_scope,
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
+        write_position: None,
         after_state,
     }
 }

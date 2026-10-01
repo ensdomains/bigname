@@ -114,6 +114,8 @@ CROSS JOIN LATERAL (
         'emitting_address', event.raw_fact_ref ->> 'emitting_address',
         '{state_key}', event.raw_fact_ref ->> '{state_key}',
         'event_identity', event.event_identity, '{state_scope}', event.raw_fact_ref ->> '{state_scope}',
+        'block_number', event.block_number, '{transaction_index}', event.transaction_index,
+        '{log_index}', event.log_index,
         'after_state', event.after_state
     ) AS body
 ) value

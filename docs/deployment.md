@@ -284,6 +284,26 @@ window as the two above, with the phase runner, redo processes and API stopped. 
 `indisready` in `pg_index` and that `pg_get_indexdef` shows `(chain_id, logical_name_id)`,
 with `WHERE (logical_name_id IS NOT NULL)` on the key state index only.
 
+`20261001110000_project_child_registration_registry_index.sql` adds
+`project_child_registration_state_registry_idx` on `(chain_id,
+registry_contract_instance_id)`, and
+`20261001110100_project_child_edge_candidate_child_index.sql` adds
+`project_child_edge_candidate_child_idx` on `(chain_id, namespace, child_node)`; the child
+pages and counts, the registry labels read among them, probe both. Each is a plain
+`CREATE INDEX` with the same SHARE lock on its table until the schema-migration commits.
+Apply them with the phase runner, redo processes and API stopped, with the same
+`lock_timeout`, `statement_timeout` and retry procedure, `--target-version
+20261001110000` and then `20261001110100`. Afterwards, confirm both indexes are
+`indisvalid` and `indisready` and that `pg_get_indexdef` shows those columns.
+The same build narrows the child reads in `crates/storage/src/families`, so it also
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain even though no stored row changes. After the migrations, an existing deployment finishes the
+full-range Interpret redo and then the stamped Project redo it installs before the
+matching API serves, as the [handoff](#phase-runner-configuration) describes; until
+then its snapshot-selected reads answer `409 stale`. When this build ships together with the
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+change, which rotates the hash too, that change's single redo pair discharges both rotations.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -1618,6 +1638,35 @@ is the `RegistrationGranted` row emitted by the ENSv1 BaseRegistrar
 `MigrationApplied` row (`type=migration`), which shares its block, transaction
 and log with the ENSv2 `RegistrationGranted` it accompanies. Each row carries
 its `block_number`, `transaction_hash` and block `timestamp`.
+
+### Resolver set when a wrapped name is registered again
+
+The build that lets a later registry resolver write, by block, transaction and
+log position, replace a resolver pointer that an earlier write left on the
+registry read resource
+([projections](projections.md#records-shared-through-resolver-links)) changes
+`crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. It ships in the same full-history Interpret redo and Project redo
+as [Resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name),
+and an existing deployment finishes both redos before the matching API serves, as for any rotation. Only
+that redo corrects names already affected: when the Project redo publishes, a
+wrapped `.eth` name whose earlier registration set its resolver through
+`NameWrapper.setResolver`, and which was registered again with a resolver after
+expiry and grace, serves the resolver from the new registration rather than the
+earlier one, including any later change or clear. The same holds when the
+registry owner left by an earlier unwrap set a resolver earlier in the block of
+the new registration.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666-L671 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+Before the release is recorded, confirm that both redos adopted the new hash.
 
 ### Capability flags without shadow
 

@@ -204,6 +204,7 @@ mod tests {
                 token_id.unwrap_or("-")
             )),
             block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + Duration::SECOND),
+            write_position: None,
             after_state,
         }
     }

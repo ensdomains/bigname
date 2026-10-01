@@ -248,9 +248,16 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             "resource:registry-only:{}:{namehash}",
             event.chain_id
         ));
-        let already_registry_linked = state
-            .v1_resolver_link(&event.namespace, namehash)
-            .is_some_and(|link| link.resource_id == Some(registry_resource_id));
+        let registry_read = event.resource_id == Some(registry_resource_id);
+        let written_at = event.block_timestamp.map(time::OffsetDateTime::unix_timestamp);
+        let replaces = state.restored_v1_resolver_write_replaces(
+            &event.namespace,
+            namehash,
+            event.write_position,
+            registry_read,
+            written_at,
+            registry_resource_id,
+        );
         let resolver = event
             .after_state
             .get("resolver")
@@ -259,7 +266,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                 !resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
             })
             .map(str::to_owned);
-        if !(already_registry_linked && event.resource_id != Some(registry_resource_id)) {
+        if replaces {
             state.set_v1_resolver_link(
                 &event.namespace,
                 namehash,
@@ -271,6 +278,13 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .get("emitter_role")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+            );
+            state.record_restored_v1_resolver_write(
+                &event.namespace,
+                namehash,
+                event.write_position,
+                registry_read,
+                written_at,
             );
         }
     }

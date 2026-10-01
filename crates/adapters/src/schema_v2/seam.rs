@@ -268,6 +268,11 @@ pub fn fold_prior_events(
                 .map(str::to_owned),
             state_scope: Some(state_scope),
             block_timestamp,
+            write_position: super::PriorWritePosition::from_parts(
+                event.block_number,
+                event.transaction_index,
+                event.log_index,
+            ),
             after_state: event.after_state.clone(),
         };
         sequence = sequence.saturating_add(1);
@@ -318,6 +323,7 @@ mod tests {
                 emitting_address: None,
                 state_scope: None,
                 block_timestamp: None,
+                write_position: None,
                 after_state: json!({"value": value}),
             })
             .collect::<Vec<_>>();

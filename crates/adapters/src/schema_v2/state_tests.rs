@@ -61,6 +61,7 @@ fn restore_keys_authority_derived_resolver_links_by_child() {
         emitting_address: None,
         state_scope: None,
         block_timestamp: None,
+        write_position: None,
         after_state: json!({
             "source_event": "AuthorityEpochChanged",
             "node": "parent",
@@ -148,6 +149,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
         emitting_address: None,
         state_scope: None,
         block_timestamp: None,
+        write_position: None,
         after_state: json!({
             "namehash": NODE,
             "raw_name": "pointer.eth",
@@ -660,6 +662,7 @@ fn wrapper_renewal_restore_preserves_unsigned_expiry_and_later_fuse_state() {
             emitting_address: None,
             state_scope: None,
             block_timestamp: None,
+            write_position: None,
             after_state: serde_json::from_slice(&serialized).unwrap(),
         };
         assert_eq!(event.after_state["expiry"].as_u64(), Some(expiry));
