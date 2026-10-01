@@ -55,7 +55,14 @@ pub(crate) fn ens_v1(
 }
 
 /// The `ens_v1` object of an ENSv1 registry child with no name row, which serves `authority` from
-/// its registry: it holds no lease and a wrapped name always has a surface, so only a null expiry.
+/// its registry: only a null expiry. A lease is the BaseRegistrar's `expiries[id]` and token, which
+/// a registry `setSubnodeOwner` child never gets
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L147 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+/// Every wrap emits `NameWrapped` with the DNS-encoded name
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f),
+/// from which bigname materializes a name surface, so a wrapped child is never surface-less and
+/// has no wrapper state here.
 pub(crate) fn ens_v1_of_registry_child(authority: Option<Authority>) -> V2Result<Option<EnsV1>> {
     ens_v1(authority, &Value::Object(serde_json::Map::new()))
 }
