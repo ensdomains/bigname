@@ -1,14 +1,12 @@
-# Copy into ensdomains/bigname/.github/workflows/. Publishing a GitHub pre-release (tag v0.1.0-rc.1,
-# "Set as a pre-release") deploys that commit to staging through Komodo; a full release runs the same
-# staging deploy and then stops at the production gate, which is still a person following
-# docs/runbooks/deploy-indexer.md in bigname-internal.
+# Publishing a GitHub pre-release (tag v0.1.0-rc.1, "Set as a pre-release") deploys that commit to
+# staging through the ops Komodo instance; a full release runs the same staging deploy and then stops
+# at the production gate, which is still done by the ops team by hand.
 #
 # Needs a repository environment `staging` holding
 #   secrets  KOMODO_CF_ACCESS_CLIENT_ID, KOMODO_CF_ACCESS_CLIENT_SECRET   (Cloudflare Access service token)
 #            KOMODO_API_KEY, KOMODO_API_SECRET                           (Komodo service user, Execute on one Action)
-#   vars     KOMODO_URL = https://komodo.ops.bigname.sh
-#            KOMODO_ACTION = deploy-release (staging)
-# How the Action and the key are made: bigname-internal docs/04-deploy.md ("Releases to staging").
+#   vars     KOMODO_URL, KOMODO_ACTION
+# The ops side (the Action, the key, what the deploy does and refuses) is documented with the infrastructure.
 name: Release
 on:
   release:
@@ -99,6 +97,6 @@ jobs:
     steps:
       - name: not automated yet
         run: |
-          echo "Production releases are still done by a person: bigname-internal docs/runbooks/deploy-indexer.md, then deploy-api." | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Production releases are still done by the ops team by hand (runner first, then API)." | tee -a "$GITHUB_STEP_SUMMARY"
           echo "- image: ${{ needs.resolve.outputs.image }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- commit: ${{ needs.resolve.outputs.commit }}" >> "$GITHUB_STEP_SUMMARY"
