@@ -54,6 +54,8 @@ async fn assert_generic_name_record(run: &support::PipelineRun, raw_name: &str) 
 
 /// Project follows the current reverse-node resolver across name set, change,
 /// and clear operations, without rewriting node records into tuple-keyed events.
+/// A `default.reverse` name written first stays behind a nonempty `addr.reverse`
+/// name, answers coin type 60 once that name is cleared, and clears in turn.
 #[tokio::test]
 async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -63,6 +65,7 @@ async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> 
     let alice = rpc.accounts().await?[1];
     let alice_path = format!("{alice:#x}");
 
+    ens_v1::set_default_reverse_name(&rpc, &deployment, alice, "carol.eth").await?;
     ens_v1::set_reverse_name(&rpc, &deployment, alice, "alice.eth").await?;
     let first = support::ingest_and_serve(
         &anvil,
@@ -120,9 +123,29 @@ async fn reverse_node_name_set_changed_then_cleared_updates_declared_claim() -> 
     .await?;
     assert_generic_name_record(&cleared, "").await?;
     let cleared_body = primary_name(&cleared.api, "ens", 60, &alice_path, "declared").await?;
-    assert_declared_not_found(&cleared_body);
-
+    assert_declared_name(&cleared_body, "carol.eth");
     cleared.db.cleanup().await?;
+
+    ens_v1::set_default_reverse_name(&rpc, &deployment, alice, "").await?;
+    let default_cleared = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT EXISTS (
+                 SELECT 1 FROM normalized_events
+                 WHERE event_kind = 'RecordChanged'
+                   AND canonicality_state = 'canonical'
+                   AND after_state->>'raw_name' = ''
+                   AND after_state ? 'primary_claim_source'
+             )",
+        ),
+    )
+    .await?;
+    let default_cleared_body =
+        primary_name(&default_cleared.api, "ens", 60, &alice_path, "declared").await?;
+    assert_declared_not_found(&default_cleared_body);
+
+    default_cleared.db.cleanup().await?;
     Ok(())
 }
 
