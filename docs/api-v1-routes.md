@@ -1580,7 +1580,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | ABI records | Content types served outside the grammar | No record key and no value. The records route with `include=inventory` lists the content types of the name's selected ABI writes as `abi_content_types` (see the records route above), and name detail and lookup list them as `records.seen_abis`; the ABI bytes are never served, and `keys=abi:<content_type>` is rejected. ENS defines ABI records by node and accepted content-type mask, and each write names one single-bit content type. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L16-L26 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
-| Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged`, it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
+| Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged` (from the Basenames L2 reverse registrar, or from the ENS `default.reverse` registrar at coin type `2147483648`), it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
 | General resolver name records | Served outside the grammar | No public key. Every resolver-family `NameChanged` is retained as an unattributed normalized `RecordChanged` in the `name` family, regardless of resolver or node type; a write for an `<addr>.addr.reverse` node therefore remains unattributed. The current value written on a name's own node is served as the forward `records.name` singleton on name detail and lookup `profile=detail` ([grouped records](#grouped-name-profile-records)), with the reset and clear rules of every indexed record. When the row is associated with a materialized name, `GET /v1/names/{name}/history` exposes the change as `type=record` without its stored name value. The record routes reject the `name` family. The primary-name projection reads these rows only through the reverse-node join in the row above: a `NameChanged` for a node that no retained `ReverseClaimed` tuple names, or on a resolver that is not that node's current registry resolver, contributes nothing. ENSv1 defines `NameChanged` generically by node and name. (upstream: .refs/ens_v1/contracts/resolvers/profiles/INameResolver.sol:L4-L11 @ ens_v1@91c966f) |
 | Resolver record versions | Outside the grammar | No public key. ENS keeps a per-node record version on the resolver and bumps it on `clearRecords`, emitting `VersionChanged`; the indexed record inventory retains that event as the boundary that invalidates older record values, but the version number itself is not served. (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L8 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20-L22 @ ens_v1@91c966f) |
 | DNS record sets | Outside the grammar | No public key. ENS defines DNS record-set update/delete events and a wire-format getter. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IDNSRecordResolver.sol:L4-L24 @ ens_v1@91c966f) |
@@ -2006,7 +2006,7 @@ Per friendly `type`, `data` may contain:
 | `transfer` | `from`, `to`, `fuses` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
 | `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
-| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a Basenames `NameForAddrChanged` stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
+| `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a `NameForAddrChanged` (Basenames, or the ENS `default.reverse` registrar) stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
 | `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes); see [permission change values](#permission-change-values) |
 | `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
@@ -2123,6 +2123,10 @@ A `primary_name` row's `data` returns the name its event recorded:
 - `name_status=set` with `name`: the name as the reverse record stored it,
   unnormalized. A `NameForAddrChanged` carries the name in its own log.
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L31 @ ens_v1@91c966f)
+  On ENS it comes from the `default.reverse` registrar, so each default-name
+  write is its own row with `coin_type` `2147483648`.
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/DefaultReverseRegistrar.sol:L26-L57 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
   A `ReverseClaimed` carries none. The reverse registrar's `setNameForAddr`
   emits `ReverseClaimed`, has the registry write the reverse node's owner and
   resolver (`NewOwner`, and `NewResolver` and `NewTTL` only when they change),
@@ -2148,7 +2152,9 @@ A `primary_name` row's `data` returns the name its event recorded:
 - `name_status=unknown`: the event's transaction retains no name write the
   evidence above ties to the claim: a `claim` that only took ownership of the
   reverse node, a first name write on another resolver or outside the claim's
-  span, or a resolver the index retains no selection for.
+  span, or a resolver the index retains no selection for. A claim that sets the
+  reverse node's resolver to zero so that the address's `default.reverse` name
+  applies is such a claim; that name is the separate `default.reverse` row.
 
 No name value is taken from outside the event's transaction: a later name
 write or the address's current primary name never stands in for a historical
@@ -3323,6 +3329,31 @@ introduces it rebuilds Project from full history before serving the option; see
   read; otherwise the request returns `409 stale`. Live results never change
   the indexed answer. Basenames verified primary-name lookup is unsupported;
   indexed Basenames responses remain Base-scoped.
+- ENSIP-19 default name: for ENS `coin_type=60`, both sources follow the read
+  order of ENS's ETH reverse resolver. The `addr.reverse` name wins when the
+  reverse node `<address>.addr.reverse` has a nonzero registry resolver and that
+  resolver's `name` is non-empty; otherwise the answer is the name the
+  `default.reverse` registrar stores for the address (coin type `2147483648`).
+  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L15-L19 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
+  The indexed source applies this to the projected claims
+  ([projections](projections.md#primary-names)): an `addr.reverse` claim that
+  is `not_found` or whose reverse node has no nonzero resolver gives way to the
+  projected `default.reverse` claim when one exists, which keeps its own status.
+  A reverse node whose resolver is not admitted has no projected name and falls
+  back too, while the chain answers that resolver's name
+  ([divergence](upstream.md#known-divergences)). The verified source's reverse
+  leg calls the registry's `resolver` and that resolver's `name`, and when the
+  resolver is zero or the name is empty calls `nameForAddr(address)` on the
+  `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares; the
+  forward check is unchanged. `coin_type=2147483648` reads the
+  `default.reverse` claim itself on the indexed source.
+  Sepolia check after the release's redo:
+  `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` answers `evers.eth` and
+  `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth`, on
+  both sources. On 2026-10-01 both reverse nodes had a zero registry resolver
+  and those names stored on `default.reverse`.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
@@ -3474,7 +3505,8 @@ introduces it rebuilds Project from full history before serving the option; see
   refusal such as `current_authority_not_projected` makes the name unsupported
   and sends the claim to the first case. None of the
   three cases dispatches a forward resolver call. A live reverse claim has
-  already used its two reverse-leg provider calls before the name-level refusal
+  already used its reverse-leg provider calls (two, or three with the
+  `default.reverse` read) before the name-level refusal
   is known. A consumer reads `unsupported_reason` to distinguish a projected
   coverage refusal from the shared authority-not-verifiable refusal.
 - Replaces (v1): `GET /v1/primary-names/{address}`.

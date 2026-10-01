@@ -1536,3 +1536,31 @@ change or clear. Before the release is recorded, confirm that both redos
 adopted the new hash, then compare Sepolia `taytems.eth` (registered at block
 4052977) with `source=verified` at the same published block: the resolver and
 the record values must agree.
+
+### Default reverse names
+
+The build that admits the ENSIP-19 `default.reverse` registrar and serves its
+name as the coin type `60` fallback
+([primary-name route](api-v1-routes.md#get-v1addressesaddressprimary-name))
+adds a `default_reverse_registrar` contract and its `NameForAddrChanged` event
+to the `ens_v1_reverse_l1` manifests: Sepolia
+`0x4F382928805ba0e23B30cFB75fC9E848e82DFD47` from block `8579966` and Mainnet
+`0x283F227c4Bd38ecE252C4Ae7ECE650B0e913f1f9` from block `22764819`
+([manifests](manifests.md#ens-mainnet)). It also changes
+`crates/adapters/src` and the family readers under
+`crates/storage/src/families`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration. The new address widens the watch plan:
+manifest synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) and stamps a
+required Ingest redo from the declared start block through the published head.
+Complete that Ingest redo, then the full-history Interpret redo with
+`--attest-watch-set-coverage`, then the Project redo it installs, before the
+matching API serves. It may ship with the "Resolver set while registering a
+wrapped name" release, whose Interpret and Project redos then run once for
+both. Before the release is recorded, run the Sepolia check in the route
+contract: `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` must answer
+`evers.eth` and `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` must answer
+`artitest.eth` on both sources, and
+`GET /v1/events?contract_address=0x4F382928805ba0e23B30cFB75fC9E848e82DFD47`
+must list `primary_name` rows with `coin_type` `2147483648`.

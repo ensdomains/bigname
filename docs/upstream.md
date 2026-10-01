@@ -248,6 +248,25 @@ to the applicable entries below.
 > answers aligned without changing retained normalized bytes.
 > **Since**: `2026-09-05`
 
+> **Indexed `default.reverse` fallback reads projected names only**: for an ENS
+> `coin_type=60` primary name, the indexed answer serves the address's
+> `default.reverse` name whenever the projected `addr.reverse` claim is
+> `not_found` or its reverse node has no nonzero resolver. A reverse node that
+> points at a resolver bigname does not admit has no projected name, so the
+> indexed answer falls back to `default.reverse` there too.
+> **Upstream**: ENS's ETH reverse resolver calls `name()` on any nonzero
+> registry resolver of the reverse node and falls back to the `default.reverse`
+> registrar only when that call returns an empty name; a revert or undecodable
+> result ends the lookup with no name
+> `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/projections.md` § Primary names and `docs/api-v1-routes.md`
+> § `GET /v1/addresses/{address}/primary-name`. The verified source follows the
+> upstream order with live calls.
+> **Why**: the projection holds names only from admitted resolver events and
+> hydration, and unlisted emitters are unsupported; the verified source carries
+> the exact answer.
+> **Since**: `2026-10-01`
+
 <a id="ensv1-authority-without-an-ensv2-entry"></a>
 > **ENSv1 authority for a `.eth` name without an ENSv2 entry** — bigname follows the chain for ENSv1 and ENSv2 name authority: a current ENSv2 registration decides, a premigration reservation defers to ENSv1, a released or expired ENSv2 registration stays with ENSv2 as released, and a name that never had an ENSv2 registration is decided by a live ENSv1 registration, or by its history when neither arm holds it. For a name ENSv1 decides without a live ENSv2 entry the ENSv2 Universal Resolver answers nothing: it reads only ENSv2 registries, keeps the nearest ancestor's resolver when a label has no live entry, and the deployment registers `eth` without a resolver, so the lookup fails with `ResolverNotFound`. bigname still serves the name's ownership and registration from its live ENSv1 registration, or as the released ENSv1 registration when that has ended. What it resolves to depends on the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): before it, clients resolve through ENSv1 and bigname serves the ENSv1 resolver and records; from it, bigname follows the Universal Resolver and serves no resolver or records for the name or any name below it, with `unresolvable_reason: "no_live_ens_v2_entry"` (`docs/api-v1.md` § Expiry and grace). On Sepolia at block `11807425` that covered 172 `.eth` second-level names held on ENSv1 (13 never reserved, 159 whose reservation passed its expiry unclaimed) and 149 live names below them.
 > **Upstream**: the Universal Resolver walks only the ENSv2 root registry and its subregistries, taking an entry's resolver only when it is nonzero `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L56-L63 @ ens_v2_sepolia_20260916@366de741)` `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)`; the registry returns no resolver for an expired entry `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L283-L286 @ ens_v2_sepolia_20260916@366de741)`; the deployment registers `eth` with a zero resolver `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)`; a missing resolver fails the lookup `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L406-L408 @ ens_v2_sepolia_20260916@366de741)`. Premigration normally reserves every live ENSv1 `.eth` name with `ENSV1Resolver` as its resolver, which closes this gap for those names `(upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L3-L8 @ ens_v2_sepolia_20260916@366de741)`.

@@ -206,9 +206,12 @@ upstream ships an operator script for exactly that
 through the live revert. Egress policy for this path should pin the host the
 contract currently returns, not assume it is immutable.
 
-For the ENS primary-name path the reverse leg is two plain `eth_call`s —
-registry `resolver(node)`, then `name(node)` on the reverse resolver — that never
-follow CCIP-Read, so the reverse resolver itself cannot supply URLs. The forward
+For the ENS primary-name path the reverse leg is plain `eth_call`s — registry
+`resolver(node)`, then `name(node)` on the reverse resolver, and, when that
+resolver is zero or the name is empty, `nameForAddr(address)` on the
+manifest-declared `default.reverse` registrar — that never follow CCIP-Read, so
+neither the reverse resolver nor the registrar can supply URLs
+(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f). The forward
 `addr:60` leg is different: it calls the Universal Resolver's `resolve(name,
 data)` with CCIP-Read following enabled, and the Universal Resolver forwards the
 target resolver's `OffchainLookup.urls` unchanged — directly when the resolver
