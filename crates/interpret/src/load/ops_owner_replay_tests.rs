@@ -365,7 +365,7 @@ async fn full_restore(
          event.event_kind, event.source_family, event.manifest_version, event.source_manifest_id,
          event.raw_fact_ref ->> 'emitting_address', event.raw_fact_ref ->> '{INTERPRETER_STATE_KEY}',
          event.event_identity, event.raw_fact_ref ->> '{STATE_SCOPE_KEY}', event.block_number,
-         event.block_hash, lineage.block_timestamp, event.after_state
+         ARRAY[event.transaction_index, event.log_index], lineage.block_timestamp, event.after_state
          FROM normalized_events event JOIN chain_lineage lineage
          ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash AND lineage.block_number = event.block_number
          WHERE event.chain_id = $1 AND event.block_number < $2

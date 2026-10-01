@@ -832,6 +832,7 @@ fn resolver_changed_node_precedence_matches_restore() -> anyhow::Result<()> {
         emitting_address: None,
         state_scope: None,
         block_timestamp: None,
+        write_position: None,
         after_state,
     };
     for (after_state, filed_under) in [
