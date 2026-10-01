@@ -68,7 +68,7 @@ async fn registry_owned_subname_permission_handle_is_followable_from_real_new_ow
             namespace: "ens".into(), logical_name_id: Some(format!("ens:{:#x}", namehash(NAME))),
             resource_id: None, event_kind: "PreimageObserved".into(), source_family: "ens_v1_registry_l1".into(),
             manifest_version: 3, source_manifest_id: Some(911), emitting_address: None, state_scope: None,
-            block_timestamp: Some(timestamp - time::Duration::seconds(1)),
+            block_timestamp: Some(timestamp - time::Duration::seconds(1)), write_position: None,
             after_state: json!({"namehash": format!("{:#x}", namehash(NAME)),
                 "raw_labels": ["child", "parent", "eth"], "visibility_state": "active", "surface_known": true}),
         }], blocks: vec![RawBlockInput {

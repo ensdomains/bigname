@@ -1,5 +1,6 @@
 use bigname_adapters::schema_v2::{
     AdapterSessionRestore, InterpreterStateRequest, InterpreterStateValue, PriorEventInput,
+    PriorWritePosition,
 };
 use futures_util::TryStreamExt;
 use sqlx::{PgConnection, PgPool, types::Uuid};
@@ -24,7 +25,7 @@ type Row = (
     String,
     Option<String>,
     i64,
-    String,
+    Vec<Option<i64>>,
     Option<time::OffsetDateTime>,
     serde_json::Value,
 );
@@ -146,7 +147,7 @@ fn restore_statement() -> String {
                payload.event_identity,
                payload.raw_fact_ref ->> '{STATE_SCOPE_KEY}',
                payload.block_number,
-               payload.block_hash,
+               ARRAY[payload.transaction_index, payload.log_index],
                payload.retained_block_timestamp,
                payload.after_state
         FROM (
@@ -185,8 +186,8 @@ fn row_to_event(
         interpreter_state_key,
         event_identity,
         state_scope,
-        _block_number,
-        _block_hash,
+        block_number,
+        transaction_and_log,
         block_timestamp,
         after_state,
     ): Row,
@@ -207,6 +208,13 @@ fn row_to_event(
         emitting_address,
         state_scope,
         block_timestamp,
+        // A row without a transaction and log position restores by block time alone.
+        write_position: match transaction_and_log[..] {
+            [transaction_index, log_index] => {
+                PriorWritePosition::from_parts(Some(block_number), transaction_index, log_index)
+            }
+            _ => None,
+        },
         after_state,
     }
 }

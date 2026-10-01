@@ -3966,6 +3966,7 @@ fn incremental_v2_delta_refreshes_only_the_affected_topology_component() {
             emitting_address: None,
             state_scope: Some(format!("{registry}:-:{token_id}:-:LabelRegistered")),
             block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(timestamp)),
+            write_position: None,
             after_state: json!({
                 "source_event":"LabelRegistered",
                 "token_id":token_id,
@@ -4498,6 +4499,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         emitting_address: None,
         state_scope: Some(format!("registry:{namehash}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1)),
+        write_position: None,
         after_state: json!({
             "source_event":"NewOwner",
             "child_node":namehash,
@@ -4581,6 +4583,7 @@ fn assert_registration_grant_restore_matches_live(registration: bool) -> anyhow:
         emitting_address: None,
         state_scope: Some(grant.state_scope),
         block_timestamp: Some(raw.block_timestamp),
+        write_position: None,
         after_state: grant.after_state,
     };
     let restored_state = super::state::State::new(vec![registry_prior, restored_grant], Vec::new());
@@ -9869,6 +9872,7 @@ fn surface_before_first_owner_links_a_later_ownerless_resolver() -> anyhow::Resu
         emitting_address: None,
         state_scope: Some(format!("surface:{node:#x}")),
         block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
+        write_position: None,
         after_state: json!({"source_event":"NameRegistered", "namehash":format!("{node:#x}")}),
     };
     let mut registry = admission(95, "registry");
@@ -11201,6 +11205,11 @@ fn ens_v2_resource_and_lineage_survive_prior_state_and_token_regeneration() -> a
             block_timestamp: event
                 .block_number
                 .map(|number| OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number)),
+            write_position: PriorWritePosition::from_parts(
+                event.block_number,
+                event.transaction_index,
+                event.log_index,
+            ),
             after_state: event.after_state.clone(),
         })
         .collect();
@@ -20852,6 +20861,11 @@ fn prior_event(event: &NormalizedEvent) -> PriorEventInput {
         block_timestamp: event
             .block_number
             .map(|number| OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(number)),
+        write_position: PriorWritePosition::from_parts(
+            event.block_number,
+            event.transaction_index,
+            event.log_index,
+        ),
         after_state: event.after_state.clone(),
     }
 }

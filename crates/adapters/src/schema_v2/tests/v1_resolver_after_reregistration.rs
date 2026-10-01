@@ -471,3 +471,273 @@ fn reregistered_resolver_replaces_a_prior_lifetime_registry_read_link() -> anyho
     assert_eq!(identities(&one_shot.normalized_events), identities(&events));
     Ok(())
 }
+
+const FIRST_UNWRAPPED: i64 = REGISTERED + 20;
+
+/// `registerAndWrapETH2LD` in transaction `transaction` of `block`, for a name whose previous
+/// registration was unwrapped: the BaseRegistrar burns the expired token from its registrant,
+/// mints to the NameWrapper, names it the registry owner and emits `NameRegistered`; `_mint`
+/// finds no old ERC-1155 token, mints the new one, emits `NameWrapped`, then sets the resolver.
+/// Log indexes run on from `first_log`, as they do across one block.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L143-L150 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L892 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+#[allow(clippy::too_many_arguments)]
+fn register_and_wrap_after_unwrap(
+    contracts: &Contracts,
+    block: i64,
+    transaction: i64,
+    first_log: i64,
+    previous_registrant: &str,
+    owner: &str,
+    expiry: i64,
+    resolver: &str,
+) -> Vec<RawLogInput> {
+    let (labelhash, token, node) = label();
+    let wrapper = address(&contracts.wrapper);
+    let at = |encoded, offset: i64, emitter: &str| {
+        raw_at_transaction(encoded, block, transaction, first_log + offset, emitter)
+    };
+    vec![
+        at(
+            events::Transfer {
+                from: address(previous_registrant),
+                to: Address::ZERO,
+                tokenId: token,
+            }
+            .encode_log_data(),
+            0,
+            &contracts.registrar,
+        ),
+        at(
+            events::Transfer {
+                from: Address::ZERO,
+                to: wrapper,
+                tokenId: token,
+            }
+            .encode_log_data(),
+            1,
+            &contracts.registrar,
+        ),
+        at(
+            events::NewOwner {
+                node: super::common::namehash(&["eth".to_owned()])
+                    .parse()
+                    .expect("eth node"),
+                label: labelhash,
+                owner: wrapper,
+            }
+            .encode_log_data(),
+            2,
+            &contracts.registry,
+        ),
+        at(
+            events::NameRegistered {
+                id: token,
+                owner: wrapper,
+                expires: U256::from(expiry),
+            }
+            .encode_log_data(),
+            3,
+            &contracts.registrar,
+        ),
+        at(
+            events::TransferSingle {
+                operator: address(CONTROLLER),
+                from: Address::ZERO,
+                to: address(owner),
+                id: U256::from_be_bytes(node.0),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            4,
+            &contracts.wrapper,
+        ),
+        at(
+            events::NameWrapped {
+                node,
+                name: b"\x08relinked\x03eth\0".to_vec().into(),
+                owner: address(owner),
+                fuses: DOT_ETH_FUSES,
+                expiry: u64::try_from(expiry + GRACE_PERIOD).expect("expiry"),
+            }
+            .encode_log_data(),
+            5,
+            &contracts.wrapper,
+        ),
+        at(
+            events::NewResolver {
+                node,
+                resolver: address(resolver),
+            }
+            .encode_log_data(),
+            6,
+            &contracts.registry,
+        ),
+    ]
+}
+
+/// The compacted rows, as `compact_prior` keeps them, with the rows of each block restored in
+/// reverse: a block's stored rows come back in no fixed order.
+fn compact_prior_reversed_within_blocks(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
+    let prior = events
+        .iter()
+        .map(|event| (event.block_number, prior_event(event)))
+        .collect::<Vec<_>>();
+    let mut last_index = std::collections::HashMap::new();
+    for (index, (_, event)) in prior.iter().enumerate() {
+        last_index.insert(event.retained_state_key.clone(), index);
+    }
+    let mut kept = prior
+        .into_iter()
+        .enumerate()
+        .filter(|(index, (_, event))| last_index[&event.retained_state_key] == *index)
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+    kept.reverse();
+    kept.sort_by_key(|(block, _)| *block);
+    kept.into_iter().map(|(_, event)| event).collect()
+}
+
+/// A `.eth` name unwrapped during its first registration keeps an ordinary registry owner, who
+/// may still call `ENSRegistry.setResolver` after expiry, since registry authorisation checks
+/// only the recorded owner. In one block, that owner sets resolver A in transaction 0 and a
+/// controller registers the name again, wrapped, with resolver B in transaction 1. A's row stays
+/// on the registry-read resource while B's land on the new wrapper and registrar resources, all
+/// with the block's timestamp. B is the later write, so it is selected live and after restoring
+/// all rows, compacted rows, and compacted rows in reverse within each block; a later unwrap
+/// and zero-resolver rewrap leave B, since the registry still holds it.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+#[test]
+fn same_block_wrapped_reregistration_replaces_an_earlier_registry_write() -> anyhow::Result<()> {
+    let (chain, manifests, admissions) = profile(
+        "sepolia",
+        &[
+            "ens_v1_registry_l1",
+            "ens_v1_registrar_l1",
+            "ens_v1_wrapper_l1",
+        ],
+    )?;
+    let contracts = Contracts::new(&admissions);
+    let node = super::common::namehash(&["relinked".to_owned(), "eth".to_owned()]);
+    let mut reregistration = vec![raw_at_transaction(
+        events::NewResolver {
+            node: label().2,
+            resolver: address(RESOLVER_A),
+        }
+        .encode_log_data(),
+        REREGISTERED,
+        0,
+        0,
+        &contracts.registry,
+    )];
+    reregistration.extend(register_and_wrap_after_unwrap(
+        &contracts,
+        REREGISTERED,
+        1,
+        1,
+        FIRST_OWNER,
+        SECOND_OWNER,
+        SECOND_EXPIRY,
+        RESOLVER_B,
+    ));
+    let steps: Vec<(Vec<RawLogInput>, Option<&str>)> = vec![
+        (
+            register_and_wrap(
+                &contracts,
+                REGISTERED,
+                FIRST_OWNER,
+                FIRST_EXPIRY,
+                None,
+                None,
+            ),
+            None,
+        ),
+        (unwrap(&contracts, FIRST_UNWRAPPED, FIRST_OWNER), None),
+        (reregistration, Some(RESOLVER_B)),
+        (
+            unwrap(&contracts, UNWRAPPED, SECOND_OWNER),
+            Some(RESOLVER_B),
+        ),
+        (
+            rewrap(&contracts, REWRAPPED, SECOND_OWNER, SECOND_EXPIRY),
+            Some(RESOLVER_B),
+        ),
+    ];
+    let link = |session: &AdapterSession| {
+        session
+            .v1_resolver_link("ens", &node)
+            .map(|link| link.resolver_address.to_ascii_lowercase())
+    };
+    let mut session = None;
+    let mut events = Vec::new();
+    for (index, (logs, expected)) in steps.into_iter().enumerate() {
+        let (output, live) = interpret_test_batch_incremental(
+            batch(&chain, &manifests, &admissions, Vec::new(), logs),
+            session,
+        )?;
+        events.extend(output.normalized_events);
+        assert_eq!(
+            link(&live).as_deref(),
+            expected,
+            "live link after step {index}"
+        );
+        for (form, prior) in [
+            (
+                "all rows",
+                events.iter().map(prior_event).collect::<Vec<_>>(),
+            ),
+            ("compacted rows", compact_prior(&events)),
+            (
+                "compacted rows reversed within blocks",
+                compact_prior_reversed_within_blocks(&events),
+            ),
+        ] {
+            let (_, restored) = interpret_test_batch_incremental(
+                batch(&chain, &manifests, &admissions, prior, Vec::new()),
+                None,
+            )?;
+            assert_eq!(
+                link(&restored).as_deref(),
+                expected,
+                "restored from {form} after step {index}"
+            );
+            // Other retained state follows production row order within a block, so the reversed
+            // form checks only the resolver link.
+            if !form.contains("reversed") {
+                assert_eq!(
+                    restored, live,
+                    "restored session from {form} after step {index}"
+                );
+            }
+        }
+        session = Some(live);
+    }
+
+    let stale = events
+        .iter()
+        .filter(|event| event.block_number.is_some_and(|block| block > REREGISTERED))
+        .filter(|event| {
+            event.after_state["resolver"]
+                .as_str()
+                .or_else(|| event.after_state["scope"]["resolver_address"].as_str())
+                .is_some_and(|resolver| resolver.eq_ignore_ascii_case(RESOLVER_A))
+        })
+        .map(|event| {
+            (
+                event.block_number,
+                event.event_kind.clone(),
+                event.resource_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stale,
+        Vec::new(),
+        "resolver A reappears after resolver B replaced it"
+    );
+    Ok(())
+}

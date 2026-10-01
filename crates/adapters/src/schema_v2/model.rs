@@ -73,7 +73,33 @@ pub struct PriorEventInput {
     pub emitting_address: Option<String>,
     pub state_scope: Option<String>,
     pub block_timestamp: Option<OffsetDateTime>,
+    /// Where the raw log this row came from sits in the chain; `None` for a row without a full
+    /// block, transaction and log position.
+    pub write_position: Option<PriorWritePosition>,
     pub after_state: Value,
+}
+
+/// A raw log's chain position. Copies of one raw write share it; a later write orders after.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PriorWritePosition {
+    pub block_number: i64,
+    pub transaction_index: i64,
+    pub log_index: i64,
+}
+
+impl PriorWritePosition {
+    /// The full position, or `None` when any part is missing.
+    pub fn from_parts(
+        block_number: Option<i64>,
+        transaction_index: Option<i64>,
+        log_index: Option<i64>,
+    ) -> Option<Self> {
+        Some(Self {
+            block_number: block_number?,
+            transaction_index: transaction_index?,
+            log_index: log_index?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]

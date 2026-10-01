@@ -496,7 +496,9 @@ async fn lookahead_sql_uses_baseline_indexes() -> Result {
     let events_sql = super::EVENTS
         .replace("{state_key}", INTERPRETER_STATE_KEY)
         .replace("{state_scope}", super::STATE_SCOPE_KEY)
-        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY);
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
+        .replace("{transaction_index}", super::TRANSACTION_INDEX_KEY)
+        .replace("{log_index}", super::LOG_INDEX_KEY);
     for (statement, signature, arguments, index) in [
         (
             events_sql.as_str(),

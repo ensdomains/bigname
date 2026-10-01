@@ -123,6 +123,7 @@ pub(super) struct State {
     v1_resolvers: OrdMap<String, String>,
     v1_resolver_links: OrdMap<String, V1ResolverLink>,
     v1_resolver_linked_resources: OrdMap<String, OrdMap<Uuid, V1ResolverLink>>,
+    v1_resolver_write_marks: OrdMap<String, resolver_links::V1ResolverWriteMark>,
     known_source_manifest_ids: Option<OrdSet<i64>>,
     restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
