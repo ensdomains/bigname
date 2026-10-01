@@ -19,7 +19,8 @@ use super::support::normalize_inferred_route_name;
 use super::{
     AddressNamesSort, CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
     RegistryRef, SortOrder, StrictQueryParams, V2Error, V2Result, decode, encode,
-    load_subregistry_refs, name_record::name_registration_fields,
+    load_subregistry_refs,
+    name_record::{ens_v1_of_row, name_registration_fields},
     validate_latest_collection_selectors,
 };
 
@@ -86,6 +87,9 @@ pub(crate) struct Subname {
     pub(crate) expires_at_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
+    /// Present while the name's authority is `ens_v1` or `ens_v0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ens_v1: Option<crate::v2::name_record::EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subregistry: Option<RegistryRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,11 +258,11 @@ pub(crate) async fn get_subnames(
                 child_name_rows.get(&row.child_logical_name_id),
                 child_summaries.get(&row.child_logical_name_id),
                 include_counts,
-            );
+            )?;
             subname.subregistry = subregistries.remove(&row.child_logical_name_id);
-            subname
+            Ok(subname)
         })
-        .collect();
+        .collect::<V2Result<_>>()?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -277,8 +281,9 @@ pub(crate) fn build_subname(
     name_row: Option<&NameCurrentRow>,
     summary: Option<&ChildrenCurrentSummary>,
     include_counts: bool,
-) -> Subname {
+) -> V2Result<Subname> {
     let registration = name_registration_fields(name_row, &row.namespace);
+    let ens_v1 = ens_v1_of_row(name_row)?;
     let (owner, registrant) = if name_row.is_some() {
         (
             registration.owner.or_else(|| {
@@ -300,7 +305,7 @@ pub(crate) fn build_subname(
         (row.owner.clone(), row.registrant.clone())
     };
 
-    Subname {
+    Ok(Subname {
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
@@ -314,13 +319,14 @@ pub(crate) fn build_subname(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
+        ens_v1,
         subregistry: None,
         subname_count: include_counts.then(|| {
             summary
                 .and_then(|summary| u64::try_from(summary.child_count).ok())
                 .unwrap_or_default()
         }),
-    }
+    })
 }
 
 /// Everything a subnames cursor binds besides its keyset position.

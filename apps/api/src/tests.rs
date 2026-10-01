@@ -471,6 +471,7 @@ include!("tests/v2_family_records.rs");
 include!("tests/v2_family_reverse_page.rs");
 include!("tests/v2_family_lookup.rs");
 include!("tests/v2_family_lookup_cutover.rs");
+include!("tests/v2_ens_v1_object.rs");
 #[path = "tests/v2_family_lookup_redo.rs"]
 mod lookup_redo;
 #[path = "tests/v2_read_only_lookup.rs"]

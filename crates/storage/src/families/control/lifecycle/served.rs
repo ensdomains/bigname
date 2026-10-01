@@ -9,11 +9,11 @@ use serde_json::{Map, Value, json};
 
 use super::{
     Clock, NameFacts, ShadowName,
-    admission::{Authority, Probe, StagedName},
+    admission::{Authority, Probe, REGISTRAR, StagedName},
     control::{control_owner, served_owner},
     expiry::{choose, classify_expiry, grace_ends_at, live_entry},
     laterals::{
-        authority_context, expiry_candidate, latest_event_kind, registered_at, registrant,
+        authority_context, expiry_event, latest_event_kind, registered_at, registrant,
         registrar_resource,
     },
     select::select_v2,
@@ -283,8 +283,20 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         .and_then(servable_expiry);
 
     let selected_kind = selected.kind();
-    let expiry_seconds = expiry_candidate(&in_scope);
+    let expiry_event = expiry_event(&in_scope);
+    let expiry_seconds = expiry_event.and_then(|event| event.expiry_seconds);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
+    // The BaseRegistrar lease's own expiry, which `choose` below may replace with a live ENSv2
+    // entry's after the Universal Resolver cutover; null without a lease, as for a subname.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L326-L329 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L487 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L111-L115 @ ens_v2_sepolia_20260916@366de741)
+    let ens_v1_expiry = expiry_event
+        .filter(|event| event.source_family == REGISTRAR)
+        .and_then(|event| event.expiry_seconds)
+        .map_or(Value::Null, |seconds| json!(seconds));
     let selected_expiry = || {
         selected
             .event
@@ -399,6 +411,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         },
     );
     registration.insert("expiry".into(), registration_expiry);
+    registration.insert("ens_v1_expiry".into(), ens_v1_expiry);
     registration.insert("registered_at".into(), registered_at);
     registration.insert("released_at".into(), released_at.clone());
     registration.insert(

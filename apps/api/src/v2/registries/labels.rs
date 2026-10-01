@@ -202,7 +202,7 @@ pub(crate) async fn get_registry_labels(
                 child_name_rows.get(&row.child_logical_name_id),
                 child_summaries.get(&row.child_logical_name_id),
                 include_counts,
-            );
+            )?;
             subname.subregistry = subregistries.remove(&row.child_logical_name_id);
             let role_holder_count = include_counts.then(|| {
                 child_name_rows
@@ -211,12 +211,12 @@ pub(crate) async fn get_registry_labels(
                     .and_then(|resource| role_counts.get(&resource).copied())
                     .unwrap_or_default()
             });
-            RegistryLabel {
+            Ok(RegistryLabel {
                 name: subname,
                 role_holder_count,
-            }
+            })
         })
-        .collect();
+        .collect::<V2Result<_>>()?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
