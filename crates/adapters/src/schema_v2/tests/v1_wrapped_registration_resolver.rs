@@ -372,8 +372,9 @@ fn rewrap_logs(admissions: &[AddressAdmissionInput]) -> anyhow::Result<Vec<RawLo
 }
 
 /// A resolver write after a same-transaction unwrap and reclaim must replace the resolver set
-/// while the name was wrapped, both live and when state is restored from the retained rows, and
-/// a later wrap without a resolver must not bring the earlier resolver back.
+/// while the name was wrapped, both live and when state is restored from the retained rows. A
+/// later wrap without a resolver carries the replacement onto the new wrapper resource, or, after
+/// a clear, gives the new wrapper resource no pointer.
 fn assert_replacement_survives_restore(replacement: &str) -> anyhow::Result<()> {
     let (chain, manifests, admissions) = profile(
         "sepolia",
@@ -421,7 +422,7 @@ fn assert_replacement_survives_restore(replacement: &str) -> anyhow::Result<()> 
         sessions.push((shape, restored));
     }
     for (shape, session) in sessions {
-        let (rewrapped, _) = interpret_test_batch_incremental(
+        let (rewrapped, after) = interpret_test_batch_incremental(
             sepolia_input(
                 &chain,
                 &manifests,
@@ -431,16 +432,41 @@ fn assert_replacement_survives_restore(replacement: &str) -> anyhow::Result<()> 
             ),
             Some(session),
         )?;
+        let wrapper = rewrapped
+            .normalized_events
+            .iter()
+            .find(|event| {
+                event.event_kind == "SurfaceBound" && event.source_family == "ens_v1_wrapper_l1"
+            })
+            .and_then(|event| event.resource_id)
+            .expect("the rewrap binds a new wrapper resource");
         let pointers = rewrapped
             .normalized_events
             .iter()
             .filter(|event| event.event_kind == "ResolverChanged")
-            .map(|event| event.after_state["resolver"].clone())
+            .map(|event| {
+                (
+                    event.resource_id,
+                    event.after_state["resolver"]
+                        .as_str()
+                        .map(str::to_ascii_lowercase),
+                )
+            })
             .collect::<Vec<_>>();
         assert!(
-            pointers.iter().all(|resolver| *resolver != RESOLVER),
-            "{shape}: the rewrap revived the resolver replaced while unwrapped: {pointers:?}"
+            pointers
+                .iter()
+                .all(|(_, resolver)| resolver.as_deref() == Some(replacement)),
+            "{shape}: every pointer the rewrap emits carries the current resolver: {pointers:?}"
         );
+        assert_eq!(
+            pointers
+                .iter()
+                .any(|(resource, _)| *resource == Some(wrapper)),
+            expected.is_some(),
+            "{shape}: the new wrapper resource {wrapper} gets a pointer only for a set resolver: {pointers:?}"
+        );
+        assert_eq!(link(&after), expected, "{shape}: resolver after the rewrap");
     }
     Ok(())
 }
