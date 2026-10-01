@@ -1596,6 +1596,49 @@
           "data": "0x0000000000000000000000000000000000000000000000000000000000000001"
         }
       ]
+    },
+    {
+      "id": "ens_default_reverse_record",
+      "runner": "reverse_claim",
+      "manifests": [
+        {
+          "namespace": "ens",
+          "source_family": "ens_v1_reverse_l1",
+          "chain": "ethereum-sepolia",
+          "deployment_epoch": "ens_v1",
+          "file_path": "manifests/sepolia/ethereum/ens/ens_v1_reverse_l1/v1.toml",
+          "declaration_name": "default_reverse_registrar",
+          "role": "default_reverse_registrar",
+          "address": "0x00000000000000000000000000000000000000bb",
+          "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+          "events": []
+        }
+      ],
+      "blocks": [
+        {
+          "chain": "ethereum-sepolia",
+          "hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "parent_hash": null,
+          "number": 42,
+          "timestamp": 0
+        }
+      ],
+      "logs": [
+        {
+          "chain": "ethereum-sepolia",
+          "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "block_number": 42,
+          "transaction_hash": "0xtx2b",
+          "transaction_index": 0,
+          "log_index": 0,
+          "emitting_address": "0x00000000000000000000000000000000000000bb",
+          "topics": [
+            "0x8af7a4c7007a33f680904f3b64733396b730fef22d79555dee29801ca2e479a9",
+            "0x0000000000000000000000001111111111111111111111111111111111111111"
+          ],
+          "data": "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000965766572732e6574680000000000000000000000000000000000000000000000"
+        }
+      ]
     }
   ]
 }

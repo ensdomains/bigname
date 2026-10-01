@@ -401,6 +401,21 @@ pub(super) fn validate_manifest(
                 source.manifest_id
             );
         }
+        // The reverse identity follows the emitter role: ReverseClaimed claims `addr.reverse`,
+        // NameForAddrChanged writes the `default.reverse` name.
+        if source.source_family == "ens_v1_reverse_l1" {
+            let role = match event.name.as_str() {
+                "NameForAddrChanged" => "default_reverse_registrar",
+                _ => "reverse_registrar",
+            };
+            if event.emitter_roles != [role] {
+                bail!(
+                    "manifest {} source family ens_v1_reverse_l1 declares {} for roles other than {role}",
+                    source.manifest_id,
+                    event.name
+                );
+            }
+        }
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
                 "source family {} has no typed schema-v2 adapter for {}",
@@ -533,7 +548,10 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "TransferBatch(address,address,address,uint256[],uint256[])"
                 | "TransferSingle(address,address,address,uint256,uint256)"
         ),
-        "ens_v1_reverse_l1" => signature == "ReverseClaimed(address,bytes32)",
+        "ens_v1_reverse_l1" => matches!(
+            signature,
+            "ReverseClaimed(address,bytes32)" | "NameForAddrChanged(address,string)"
+        ),
         "basenames_base_primary" => signature == "NameForAddrChanged(address,string)",
         "ens_v2_registrar_l1" => matches!(
             signature,

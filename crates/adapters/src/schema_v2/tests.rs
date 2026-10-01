@@ -4814,6 +4814,46 @@ fn role_free_role_sensitive_event_is_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
+fn ens_reverse_events_must_come_from_their_own_registrar_role() -> anyhow::Result<()> {
+    const NAME_FOR_ADDR: &str = "event NameForAddrChanged(address indexed addr, string name)";
+    const CLAIMED: &str = "event ReverseClaimed(address indexed addr, bytes32 indexed node)";
+    let validate = |name, fragment, role| {
+        super::catalog::Catalog::new(
+            vec![manifest(
+                81,
+                "ens_v1_reverse_l1",
+                name,
+                fragment,
+                &[role],
+                &["ReverseChanged", "RecordChanged"],
+            )],
+            Vec::new(),
+            Vec::new(),
+        )
+        .map(|_| ())
+    };
+    validate(
+        "NameForAddrChanged",
+        NAME_FOR_ADDR,
+        "default_reverse_registrar",
+    )?;
+    validate("ReverseClaimed", CLAIMED, "reverse_registrar")?;
+    assert_eq!(
+        validate("NameForAddrChanged", NAME_FOR_ADDR, "reverse_registrar")
+            .expect_err("addr.reverse registrar has no NameForAddrChanged")
+            .to_string(),
+        "manifest 81 source family ens_v1_reverse_l1 declares NameForAddrChanged for roles other than default_reverse_registrar"
+    );
+    assert_eq!(
+        validate("ReverseClaimed", CLAIMED, "default_reverse_registrar")
+            .expect_err("default.reverse registrar has no ReverseClaimed")
+            .to_string(),
+        "manifest 81 source family ens_v1_reverse_l1 declares ReverseClaimed for roles other than reverse_registrar"
+    );
+    Ok(())
+}
+
+#[test]
 fn role_sensitive_single_admission_preserves_emitter_role() -> anyhow::Result<()> {
     let output = interpret_test_batch(BatchInput {
         chain_id: CHAIN.to_owned(),

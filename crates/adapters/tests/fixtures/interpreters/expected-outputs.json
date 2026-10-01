@@ -6223,6 +6223,107 @@
       "surface_bindings": [],
       "resources": [],
       "token_lineages": []
+    },
+    {
+      "id": "ens_default_reverse_record",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_reverse_claim:ReverseChanged:1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:0xtx2b:0:0x1111111111111111111111111111111111111111",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "ReverseChanged",
+          "source_family": "ens_v1_reverse_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-sepolia",
+          "block_number": 42,
+          "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "transaction_hash": "0xtx2b",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "block_number": 42,
+            "chain_id": "ethereum-sepolia",
+            "emitting_address": "0x00000000000000000000000000000000000000bb",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtx2b",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "claim_provenance": {
+              "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+              "contract_role": "default_reverse_registrar",
+              "emitting_address": "0x00000000000000000000000000000000000000bb",
+              "source_family": "ens_v1_reverse_l1"
+            },
+            "coin_type": "2147483648",
+            "namespace": "ens",
+            "reverse_label": "1111111111111111111111111111111111111111",
+            "reverse_name": "1111111111111111111111111111111111111111.default.reverse",
+            "reverse_namespace": "ens",
+            "reverse_node": "0xd581d46f693c2f67df218cb14dff109ba53124ad4c6a748abcd2a806cea3b75e",
+            "source_event": "NameForAddrChanged"
+          }
+        },
+        {
+          "event_identity": "ens_v1_reverse_claim:RecordChanged:1:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:0xtx2b:0:0x1111111111111111111111111111111111111111:name",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "RecordChanged",
+          "source_family": "ens_v1_reverse_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-sepolia",
+          "block_number": 42,
+          "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "transaction_hash": "0xtx2b",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "block_number": 42,
+            "chain_id": "ethereum-sepolia",
+            "emitting_address": "0x00000000000000000000000000000000000000bb",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtx2b",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "primary_claim_source": {
+              "address": "0x1111111111111111111111111111111111111111",
+              "claim_provenance": {
+                "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+                "contract_role": "default_reverse_registrar",
+                "emitting_address": "0x00000000000000000000000000000000000000bb",
+                "source_family": "ens_v1_reverse_l1"
+              },
+              "coin_type": "2147483648",
+              "namespace": "ens",
+              "reverse_name": "1111111111111111111111111111111111111111.default.reverse",
+              "reverse_node": "0xd581d46f693c2f67df218cb14dff109ba53124ad4c6a748abcd2a806cea3b75e"
+            },
+            "raw_name": "evers.eth",
+            "record_family": "name",
+            "record_key": "name",
+            "selector_key": null,
+            "source_event": "NameForAddrChanged"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
     }
   ]
 }
