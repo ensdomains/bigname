@@ -46,7 +46,11 @@ fn exact_expiry_migration_reset_inventory_matches_owned_families() {
     let literal: Vec<_> = list.split('\'').skip(1).step_by(2).collect();
     let unique: BTreeSet<_> = literal.iter().copied().collect();
     assert_eq!(literal.len(), unique.len(), "no duplicate reset entries");
-    assert_eq!(unique, reset_tables());
+    let expected: BTreeSet<_> = reset_tables()
+        .into_iter()
+        .chain(support::RETIRED_FAMILY_TABLES)
+        .collect();
+    assert_eq!(unique, expected);
 }
 
 /// The pending LabelRegistered grant followed by TokenResource's bound grant, owner and expiry,

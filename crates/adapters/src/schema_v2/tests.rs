@@ -773,9 +773,9 @@ mod v1_registrar {
         let label = "resolver-preimage"; let labelhash = keccak256(label.as_bytes()); let namehash = super::common::namehash(&[label.to_owned(), "eth".to_owned()]);
         let registration = base_registration(label, 42, 0);
         let encoded_name = [vec![u8::try_from(label.len())?], label.as_bytes().to_vec(), vec![3], b"eth".to_vec(), vec![0]].concat();
-        let preimage = raw_at(v2_resolver::AliasChanged { indexedFromName: keccak256(&encoded_name), indexedToName: keccak256(&encoded_name), fromName: encoded_name.clone().into(), toName: encoded_name.into() }.encode_log_data(), 2, 0, RESOLVER);
+        let preimage = raw_at(v2_resolver::NamedResource { resource: U256::from(1), name: encoded_name.into() }.encode_log_data(), 2, 0, RESOLVER);
         let renewal = raw_at(with_topic0(BaseNameRenewed { id: U256::from_be_slice(labelhash.as_slice()), expires: U256::from(999) }.encode_log_data(), keccak256(b"NameRenewed(uint256,uint256)")), 3, 0, CONTRACT);
-        let resolver_manifest = manifest_with_events(83, "ens", "ens_v2_resolver_l1", &[("AliasChanged", "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)", &[], &["AliasChanged", "PreimageObserved"])]);
+        let resolver_manifest = manifest_with_events(83, "ens", "ens_v2_resolver_l1", &[("NamedResource", "event NamedResource(uint256 indexed resource, bytes name)", &[], &["PreimageObserved"])]);
         let manifests = vec![lifecycle_manifest(), resolver_manifest]; let mut resolver_admission = admission(83, "resolver"); resolver_admission.address = RESOLVER.to_owned(); resolver_admission.role = None; let admissions = admissions().into_iter().chain([resolver_admission]).collect::<Vec<_>>();
         let before_renewal = interpret_test_batch(BatchInput { chain_id: CHAIN.to_owned(), manifests: manifests.clone(), discovery_rules: vec![], admissions: admissions.clone(), prior_events: vec![], blocks: vec![], raw_logs: vec![registration.clone(), preimage.clone()] })?;
         let registrar_resource = before_renewal.normalized_events.iter().find(|event| event.event_kind == "RegistrationGranted").and_then(|event| event.resource_id).expect("registrar resource");
@@ -1941,7 +1941,6 @@ mod v2_resolver {
 
     sol! {
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
-        event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName);
         event NamedResource(uint256 indexed resource, bytes name);
         event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key);
     }
@@ -16615,117 +16614,6 @@ fn ens_v2_shared_resolver_signature_requires_address_admission() -> anyhow::Resu
 }
 
 #[test]
-fn equal_alias_endpoints_emit_one_name_preimage_observation() -> anyhow::Result<()> {
-    let encoded_name = b"\x05alice\x03eth\0".to_vec();
-    let output = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest(
-            56,
-            "ens_v2_resolver_l1",
-            "AliasChanged",
-            "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-            &[],
-            &["AliasChanged", "PreimageObserved"],
-        )],
-        discovery_rules: Vec::new(),
-        admissions: vec![admission(56, "resolver")],
-        prior_events: Vec::new(),
-        blocks: Vec::new(),
-        raw_logs: vec![raw(v2_resolver::AliasChanged {
-            indexedFromName: keccak256(&encoded_name),
-            indexedToName: keccak256(&encoded_name),
-            fromName: encoded_name.clone().into(),
-            toName: encoded_name.into(),
-        }
-        .encode_log_data())],
-    })?;
-
-    assert_eq!(output.name_surfaces.len(), 1);
-    assert_eq!(
-        output
-            .normalized_events
-            .iter()
-            .filter(|event| event.event_kind == "AliasChanged")
-            .count(),
-        1
-    );
-    assert_eq!(
-        output
-            .normalized_events
-            .iter()
-            .filter(|event| event.event_kind == "PreimageObserved")
-            .count(),
-        1
-    );
-    let identities = output
-        .normalized_events
-        .iter()
-        .map(|event| &event.event_identity)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(identities.len(), output.normalized_events.len());
-    Ok(())
-}
-
-#[test]
-fn hostile_alias_endpoints_emit_shadow_preimages() -> anyhow::Result<()> {
-    let from_label = vec![0xff];
-    let to_label = b"a\0b".to_vec();
-    let from_name = vec![1, 0xff, 3, b'e', b't', b'h', 0];
-    let to_name = vec![3, b'a', 0, b'b', 3, b'e', b't', b'h', 0];
-    let output = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest(
-            74,
-            "ens_v2_resolver_l1",
-            "AliasChanged",
-            "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-            &[],
-            &["AliasChanged", "PreimageObserved"],
-        )],
-        discovery_rules: Vec::new(),
-        admissions: vec![admission(74, "resolver")],
-        prior_events: Vec::new(),
-        blocks: Vec::new(),
-        raw_logs: vec![raw(v2_resolver::AliasChanged {
-            indexedFromName: keccak256(&from_name),
-            indexedToName: keccak256(&to_name),
-            fromName: from_name.into(),
-            toName: to_name.into(),
-        }
-        .encode_log_data())],
-    })?;
-
-    assert!(
-        output
-            .normalized_events
-            .iter()
-            .any(|event| event.event_kind == "AliasChanged")
-    );
-    for (raw_label, namehash) in [
-        (
-            from_label.as_slice(),
-            super::common::namehash_raw([from_label.as_slice(), b"eth"].into_iter()),
-        ),
-        (
-            to_label.as_slice(),
-            super::common::namehash_raw([to_label.as_slice(), b"eth"].into_iter()),
-        ),
-    ] {
-        assert!(output.name_surfaces.iter().any(|surface| {
-            surface.namehash == namehash && surface.visibility_state == "shadow"
-        }));
-        assert!(
-            output
-                .label_preimages
-                .iter()
-                .any(|preimage| preimage.raw_label == raw_label)
-        );
-    }
-    assert!(output.surface_bindings.is_empty());
-    Ok(())
-}
-
-#[test]
 fn malformed_dns_wire_names_emit_no_normalized_identity_observation() -> anyhow::Result<()> {
     let malformed = vec![3, b'a', 0];
     let output = interpret_test_batch(BatchInput {
@@ -16734,49 +16622,27 @@ fn malformed_dns_wire_names_emit_no_normalized_identity_observation() -> anyhow:
             77,
             "ens",
             "ens_v2_resolver_l1",
-            &[
-                (
-                    "AliasChanged",
-                    "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)",
-                    &[],
-                    &["AliasChanged", "PreimageObserved"],
-                ),
-                (
-                    "NamedResource",
-                    "event NamedResource(uint256 indexed resource, bytes name)",
-                    &[],
-                    &["PreimageObserved"],
-                ),
-            ],
+            &[(
+                "NamedResource",
+                "event NamedResource(uint256 indexed resource, bytes name)",
+                &[],
+                &["PreimageObserved"],
+            )],
         )],
         discovery_rules: Vec::new(),
         admissions: vec![admission(77, "resolver")],
         prior_events: Vec::new(),
         blocks: Vec::new(),
-        raw_logs: vec![
-            raw_at(
-                v2_resolver::AliasChanged {
-                    indexedFromName: keccak256(&malformed),
-                    indexedToName: keccak256([]),
-                    fromName: malformed.clone().into(),
-                    toName: Vec::new().into(),
-                }
-                .encode_log_data(),
-                1,
-                0,
-                CONTRACT,
-            ),
-            raw_at(
-                v2_resolver::NamedResource {
-                    resource: U256::from(1),
-                    name: malformed.into(),
-                }
-                .encode_log_data(),
-                1,
-                1,
-                CONTRACT,
-            ),
-        ],
+        raw_logs: vec![raw_at(
+            v2_resolver::NamedResource {
+                resource: U256::from(1),
+                name: malformed.into(),
+            }
+            .encode_log_data(),
+            1,
+            0,
+            CONTRACT,
+        )],
     })?;
 
     assert!(output.normalized_events.is_empty());

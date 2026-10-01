@@ -64,7 +64,7 @@ fn v2_bound_names_cursor_rejects_wrong_chain_resolver_sort_or_snapshot() {
 fn v2_resolver_overview_serves_no_counts_or_sections() {
     // The stored summaries still carry every section and count; the overview serves none.
     let overview = crate::v2::build_resolver_overview(
-        resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS),
+        resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS),
         1,
         empty_bound_names(),
     );
@@ -561,7 +561,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
     });
     // Deliberately divergent dictionary fields test the renderer's precedence, without claiming
     // that a single protocol event produces all four independent owner/registrant values.
-    let row = address_name_name_current_row(
+    let mut row = address_name_name_current_row(
         "ens:precedence.eth",
         "precedence.eth",
         "precedence.eth",
@@ -574,6 +574,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
             "control":{"registry_owner":DIVERGENT_REGISTRY_OWNER,"owner":DIVERGENT_CONTROL_OWNER,"registrant":DIVERGENT_CONTROL_REGISTRANT},
             "wrapper_state":"locked", "wrapper_fuses":flags}),
     );
+    row.provenance["authority_selection"] = json!({"authority_arm": "ens_v1"});
     // The bound-name adapter delegates to this same name-record renderer.
     let record = serde_json::to_value(
         crate::v2::build_name_record(&row, None, Some(1), crate::v2::Status::Ok)
@@ -585,8 +586,13 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
         json!(DIVERGENT_REGISTRATION_REGISTRANT)
     );
     assert_eq!(record["registration_status"], json!("active"));
-    assert_eq!(record["wrapper_state"], json!("locked"));
-    assert_eq!(record["wrapper_fuses"], flags);
+    assert_eq!(record["authority"], json!("ens_v1"));
+    assert_eq!(
+        record["ens_v1"],
+        json!({"expires_at": null, "wrapper_state": "locked", "wrapper_fuses": flags})
+    );
+    assert!(record.get("wrapper_state").is_none(), "{record}");
+    assert!(record.get("wrapper_fuses").is_none(), "{record}");
     Ok(())
 }
 
@@ -1129,10 +1135,6 @@ fn unsupported_resolver_current_row(chain_id: &str, resolver_address: &str) -> R
     let mut row = resolver_current_row(chain_id, resolver_address);
     row.declared_summary = json!({
         "bindings": {
-            "status": "unsupported",
-            "unsupported_reason": "resolver_family_pending",
-        },
-        "aliases": {
             "status": "unsupported",
             "unsupported_reason": "resolver_family_pending",
         },

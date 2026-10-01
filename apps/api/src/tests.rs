@@ -471,6 +471,7 @@ include!("tests/v2_family_records.rs");
 include!("tests/v2_family_reverse_page.rs");
 include!("tests/v2_family_lookup.rs");
 include!("tests/v2_family_lookup_cutover.rs");
+include!("tests/v2_ens_v1_object.rs");
 #[path = "tests/v2_family_lookup_redo.rs"]
 mod lookup_redo;
 #[path = "tests/v2_read_only_lookup.rs"]
@@ -484,6 +485,7 @@ include!("tests/v2_list_cursor.rs");
 include!("tests/v2_collection_cursor_completion.rs");
 include!("tests/v2_family_children.rs");
 include!("tests/v2_family_registry_children.rs");
+include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_family_name_publication_changes.rs");
 include!("tests/v2_family_name_recompute.rs");
 include!("tests/v2_family_resolver_history.rs");

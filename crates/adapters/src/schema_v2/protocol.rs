@@ -453,11 +453,7 @@ pub(super) fn is_match_all(
         }),
         "ens_v2_resolver_l1" => matches!(
             event.name.as_str(),
-            "ResolverCreated"
-                | "AliasChanged"
-                | "NamedResource"
-                | "NamedTextResource"
-                | "NamedAddrResource"
+            "ResolverCreated" | "NamedResource" | "NamedTextResource" | "NamedAddrResource"
         ),
         _ => false,
     }
@@ -571,7 +567,6 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "NameUpdated(uint256,string)"
                 | "ABIUpdated(uint256,uint256)"
                 | "InterfaceUpdated(uint256,bytes4,address)"
-                | "AliasChanged(bytes,bytes,bytes,bytes)"
                 | "NamedResource(uint256,bytes)"
                 | "NamedTextResource(uint256,bytes,bytes32,string)"
                 | "NamedAddrResource(uint256,bytes,uint256)"

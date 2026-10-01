@@ -546,8 +546,8 @@ regeneration, because the passive-expiry refresh runs at every
 `TokenRegenerated`; each positive-value item in
 `TransferSingle` or `TransferBatch` with nonzero `from` and `to` →
 `TokenControlTransferred`; `SubregistryUpdated` → `SubregistryChanged`;
-`ParentUpdated` → `ParentChanged`; `AliasChanged` → `AliasChanged`;
-`EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19]
+`ParentUpdated` → `ParentChanged`;
+`EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-eac-l19]
 The deployed `ETHRegistry` and `UserRegistryImpl` ABIs both contain the transfer
 events, and upstream changes the stored owner only for a positive value; mint
 and burn use a zero endpoint and therefore do not become token-control
@@ -1100,7 +1100,7 @@ Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readm
 
 The L1 Resolver address appears in both `basenames_l1_compat` and `basenames_execution`. Transport ownership stays with `basenames_l1_compat`; execution entrypoint and verified-resolution routing stay with `basenames_execution`. Manifest declarations retain their authored checksummed address spelling; the projected topology serializes typed EVM addresses in lowercase.
 
-`basenames_execution` v2 capability-promotes only the [path class](glossary.md) where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `alias.final_target = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31"`. Alias-participating, wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
+`basenames_execution` v2 capability-promotes only the [path class](glossary.md) where `resolver_path[0].logical_name_id` equals the route surface, `wildcard.source = null`, `subregistry_path = []`, `transport.source_chain_id = "base-mainnet"`, `transport.target_chain_id = "ethereum-mainnet"`, and `transport.contract_address = "0xde9049636f4a1dfe0a64d1bfe3155c0a14c54f31"`. Wildcard-derived, linked-subregistry, transport-free, and offchain-gateway classes return selector-local `unsupported`.[^bn-readme-l71]
 
 `basenames_execution` does not admit verified primary-name lookup. The current
 verified primary-name product path is limited to ENS coin type `60`.
@@ -1149,7 +1149,7 @@ otherwise preserves each declaration's role except for the shared-event legacy c
   `InterfaceChanged`, `NameChanged`, `TextChanged`, and `VersionChanged`;
 - `basenames_base_resolver`: `ABIChanged`, `AddrChanged`, `AddressChanged`, `ContenthashChanged`,
   `NameChanged`, `TextChanged`, and `VersionChanged`;
-- `ens_v2_resolver_l1`: `AliasChanged`, `EACRolesChanged`, `NamedAddrResource`,
+- `ens_v2_resolver_l1`: `EACRolesChanged`, `NamedAddrResource`,
   `NamedResource`, `NamedTextResource`, `ResolverCreated`, `Upgraded`, and the record-ID generation's
   `Linked`, `AddressUpdated`, `ContenthashUpdated`, `ABIUpdated`, `InterfaceUpdated`,
   `TextUpdated`, `DataUpdated`, `NameUpdated`, and `ResourceArgument`.
@@ -1953,7 +1953,6 @@ above does not change that provenance rule.
 [^v2-pres-data]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2_sepolia_20260629@ccaeb58)
 
 [^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64)
-[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2_sepolia_20260629@ccaeb58)
 
 [^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
 [^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@a971bd64)

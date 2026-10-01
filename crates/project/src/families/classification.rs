@@ -3,7 +3,7 @@
 //! built from, so the row is classified again from it alone, block-pinned:
 //!
 //! - `observed_families`: every family an event proposed the resolver under, with its best
-//!   priority: 3 for an ENSv2 `Upgraded` proxy, an `AliasChanged` and either side of a
+//!   priority: 3 for an ENSv2 `Upgraded` proxy and either side of a
 //!   `ResolverChanged`, 4 for either side of a `PermissionChanged` scope (build.sql:5-86). Events
 //!   only add, so the map is a fold over the resolver's events.
 //! - `pointer_families`: per family, how many F4 and F5 pointer rows point at the resolver now,
@@ -29,7 +29,7 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::{BlockEvent, Position},
-    keys::{self, ZERO_ADDRESS},
+    keys::ZERO_ADDRESS,
     manifests,
     reduce::{Context, Preload, in_family, key_of, load_rows, raw_lower, set},
     store::{Row, RowSet},
@@ -55,12 +55,6 @@ fn resolver_family(source_family: &str) -> &'static str {
     }
 }
 
-const ALIAS_FAMILIES: [&str; 3] = [
-    "ens_v1_resolver_l1",
-    "ens_v2_resolver_l1",
-    "basenames_base_resolver",
-];
-
 pub(super) fn resolver(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_ascii_lowercase())
@@ -76,12 +70,6 @@ fn proposals(event: &BlockEvent) -> Vec<(String, &'static str, i64)> {
             found.extend(
                 resolver(raw_lower(&event.after, "proxy_address"))
                     .map(|address| (address, "ens_v2_resolver_l1", 3)),
-            );
-        }
-        "AliasChanged" if ALIAS_FAMILIES.contains(&family) => {
-            found.extend(
-                resolver(keys::alias_resolver(event))
-                    .map(|address| (address, resolver_family(family), 3)),
             );
         }
         "ResolverChanged" => {

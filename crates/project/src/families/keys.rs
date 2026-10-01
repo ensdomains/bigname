@@ -39,8 +39,6 @@ pub(crate) enum Space {
     Grant,
     /// F9: (authority kind, authority contract, owner, subject, relation kind).
     Approval,
-    /// F10: (resolver, alias identity) of per-resolver alias state.
-    ResolverAlias,
     /// F11: (namespace, child node) of an ENSv1 or Basenames child edge.
     ChildEdge,
     /// F12: (address, coin type, namespace) of a reverse tuple.
@@ -101,10 +99,9 @@ pub(crate) const LIFECYCLE_KINDS: [&str; 6] = [
     "ExpiryChanged",
     "TokenControlTransferred",
 ];
-const RECORD_EMITTER_KINDS: [&str; 5] = [
+const RECORD_EMITTER_KINDS: [&str; 4] = [
     "RecordChanged",
     "RecordVersionChanged",
-    "AliasChanged",
     "ResolverRecordLinked",
     "ResolverPermissionArgument",
 ];
@@ -182,34 +179,6 @@ pub(crate) fn grant_scope(after: &Value) -> Option<String> {
         ),
         _ => return None,
     })
-}
-
-/// The alias identity of an AliasChanged at its resolver.
-pub(crate) fn alias_identity(event: &BlockEvent) -> String {
-    event
-        .logical_name_id
-        .clone()
-        .or_else(|| {
-            [
-                "from_logical_name_id",
-                "from_namehash",
-                "from_dns_encoded_name",
-                "from_name",
-            ]
-            .iter()
-            .find_map(|field| event.after_text(field).or_else(|| event.before_text(field)))
-        })
-        .unwrap_or_else(|| event.position.event_identity.clone())
-}
-
-/// The resolver an AliasChanged is written at.
-pub(crate) fn alias_resolver(event: &BlockEvent) -> Option<String> {
-    lower(
-        event
-            .after_text("resolver")
-            .or_else(|| event.before_text("resolver"))
-            .or_else(|| text(&event.raw_fact_ref, "emitting_address")),
-    )
 }
 
 /// The resolver a record write is attributed to: after-state resolver, else the emitter.
@@ -313,12 +282,6 @@ fn derive_event(event: &BlockEvent, keys: &mut BlockKeys) {
                 ],
             );
         }
-    }
-    if kind == "AliasChanged" {
-        keys.add(
-            Space::ResolverAlias,
-            [alias_resolver(event), Some(alias_identity(event))],
-        );
     }
 }
 

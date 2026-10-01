@@ -1,8 +1,8 @@
 use bigname_domain::{
     resolution_topology::{
-        ResolutionAlias, ResolutionResolverHop, ResolutionRoute, ResolutionRoutePolicy,
-        ResolutionTopology, ResolutionTransport, ResolutionTransportContract,
-        ResolutionVersionBoundaries, ResolutionWildcard,
+        ResolutionResolverHop, ResolutionRoute, ResolutionRoutePolicy, ResolutionTopology,
+        ResolutionTransport, ResolutionTransportContract, ResolutionVersionBoundaries,
+        ResolutionWildcard,
     },
     vocabulary::{ChainId, EvmAddress, Namespace, SourceFamily},
 };
@@ -220,10 +220,6 @@ fn direct_null_topology(logical_name_id: &str, chain: ChainId) -> ResolutionTopo
             source: None,
             matched_labels: Some(Vec::new()),
         }),
-        alias: Some(ResolutionAlias {
-            final_target: None,
-            hops: Some(Vec::new()),
-        }),
         version_boundaries: Some(ResolutionVersionBoundaries {
             topology_version_boundary: None,
             record_version_boundary: None,
@@ -356,8 +352,6 @@ mod tests {
             );
         }
 
-        let mut alias = topology();
-        alias["alias"] = json!({"final_target":{},"hops":[{}]});
         let mut wildcard = topology();
         wildcard["wildcard"] =
             json!({"source":{"logical_name_id":"ens:ancestor"},"matched_labels":["alice"]});
@@ -373,7 +367,6 @@ mod tests {
         let mut malformed = topology();
         malformed["resolver_path"] = json!([]);
         for (label, shaped) in [
-            ("alias", alias),
             ("wildcard", wildcard),
             ("subregistry", subregistry),
             ("transport", transport),
@@ -550,7 +543,6 @@ mod tests {
                 "address": null
             }],
             "wildcard": {"source": null, "matched_labels": []},
-            "alias": {"final_target": null, "hops": []},
             "version_boundaries": {},
             "transport": {
                 "source_chain_id": null,

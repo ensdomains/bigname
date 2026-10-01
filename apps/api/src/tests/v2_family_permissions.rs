@@ -65,8 +65,8 @@ fn family_v2_role(
 /// `seed_family_routes_fixture` (alpha.eth and beta.eth on an ENSv1 resolver, bob holding a
 /// role on an ENSv1 resolver) plus the permissioned resolver: its manifest, its upgrade at 206,
 /// role changes for bob on alpha.eth (210), alice on beta.eth (211, narrowed at 213) and carol on
-/// a nameless resource (212), a record link for alpha.eth and a default link (214), and an alias
-/// (215); all published at 240.
+/// a nameless resource (212), and a record link for alpha.eth and a default link (214); all
+/// published at 240.
 async fn seed_family_permissions_fixture(database: &TestDatabase) -> Result<()> {
     seed_family_routes_events(database).await?;
     let alpha = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
@@ -196,16 +196,6 @@ async fn seed_family_permissions_fixture(database: &TestDatabase) -> Result<()> 
             "0x00",
             1,
         ),
-        family_v2_resolver_event(
-            "family-v2-alias",
-            None,
-            "AliasChanged",
-            (215, 0),
-            "ens_v2_resolver",
-            manifest_id,
-            json!({"source_event": "AliasChanged", "resolver": FAMILY_V2_RESOLVER,
-                   "from_name": "old.eth", "to_name": "alpha.eth", "active": true}),
-        ),
     ];
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_test_families(database, 240).await
@@ -227,7 +217,6 @@ fn family_permission_uris() -> Vec<(String, bool)> {
                 Uuid::from_u128(FAMILY_NAMELESS)), true),
         ("/v1/permissions?name=nobody.eth".to_owned(), false),
         (resolver.clone(), false),
-        (format!("{resolver}/aliases"), true),
         (format!("{resolver}/links"), true),
         (format!("{resolver}/roles"), true),
         (format!("/v1/resolvers/1/{FAMILY_RESOLVER}/roles"), false),
@@ -283,7 +272,41 @@ async fn v2_permissions_and_resolver_collections_from_families(
     database.cleanup().await
 }
 
+// A record-ID resolver's overview carries no alias section, and the retired `/aliases`
+// collection answers exactly like any unknown route.
+#[tokio::test]
+async fn record_id_resolver_has_no_alias_section_or_collection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_permissions_fixture(&database).await?;
+    let row = bigname_storage::load_phase_resolver_current(
+        &database.pool,
+        "ethereum-mainnet",
+        FAMILY_V2_RESOLVER,
+    )
+    .await?
+    .expect("the record-ID resolver has an overview row");
+    assert_eq!(row.declared_summary["links"]["status"], json!("supported"));
+    assert!(row.declared_summary.get("aliases").is_none(), "{:#}", row.declared_summary);
+    let (status, overview) =
+        read_family_response(&database, &format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}")).await?;
+    assert_eq!(status, StatusCode::OK, "{overview:#}");
+    assert!(overview["data"].get("aliases").is_none(), "{overview:#}");
 
+    let app = app_router(database.app_state());
+    let get = |uri: String| Request::builder().uri(uri).body(Body::empty());
+    let unknown = app.clone().oneshot(get("/no-such-route".to_owned())?).await?;
+    let removed = app
+        .clone()
+        .oneshot(get(format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/aliases"))?)
+        .await?;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(removed.status(), unknown.status());
+    assert_eq!(
+        to_bytes(removed.into_body(), usize::MAX).await?,
+        to_bytes(unknown.into_body(), usize::MAX).await?
+    );
+    database.cleanup().await
+}
 
 // The families keep no lineage check at request time, so a role whose evidence event is
 // orphaned after the publication is still listed, with the earliest readable event as its grant
@@ -368,7 +391,7 @@ async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_r
 async fn v2_resolver_family_reads_answer_409_after_preflight() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_permissions_fixture(&database).await?;
-    for suffix in ["", "/aliases", "/links", "/roles"] {
+    for suffix in ["", "/links", "/roles"] {
         let uri = format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}{suffix}");
         let (status, body) = v2_get_with_marker_flip_after_fence(
             &database, &uri,

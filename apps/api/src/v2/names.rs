@@ -152,11 +152,15 @@ pub(crate) async fn get_names(
     let data = storage_page
         .rows
         .iter()
-        .map(|row| SearchName {
-            lapsed_registration: super::name_record::lapsed_registration(&row.row.declared_summary),
-            ..build_search_name(row)
+        .map(|row| {
+            Ok(SearchName {
+                lapsed_registration: super::name_record::lapsed_registration(
+                    &row.row.declared_summary,
+                ),
+                ..build_search_name(row)?
+            })
         })
-        .collect();
+        .collect::<V2Result<_>>()?;
 
     Ok(Json(Envelope {
         data,

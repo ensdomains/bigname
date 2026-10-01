@@ -1,8 +1,7 @@
-//! Exhaustive reads of supported resolver alias and per-registration permission rows.
+//! Exhaustive reads of supported resolver record links and per-registration permission rows.
 use std::collections::BTreeMap;
 
 use super::{
-    overview_items::{compact_resolver_binding_item, summary_is_supported},
     parse_numeric_chain_id, product_resolver_reason, require_phase_target_snapshot,
     resolver_snapshot_scope,
 };
@@ -29,14 +28,6 @@ impl QueryParamAllowlist for ResolverCollectionParams {
     const ALLOWED: &'static [&'static str] = &["at", "finality", "cursor", "page_size"];
 }
 type ResolverCollectionQuery = StrictQueryParams<ResolverCollectionParams>;
-
-pub(crate) async fn get_resolver_aliases(
-    Path(path): Path<(String, String)>,
-    params: ResolverCollectionQuery,
-    State(state): State<AppState>,
-) -> V2Result<Json<Envelope<Vec<Value>>>> {
-    collection(path, params.into_inner(), state, "aliases").await
-}
 
 pub(crate) async fn get_resolver_links(
     Path(path): Path<(String, String)>,
@@ -110,12 +101,12 @@ async fn collection(
     require_phase_target_snapshot(&row.chain_positions, slug, &selected)?;
     let summary_key = match section {
         "roles" => "role_holders",
-        "links" => "links",
-        _ => "aliases",
+        _ => "links",
     };
     let summary = row.declared_summary.get(summary_key);
     let mut meta = snapshot_meta(&selected)?;
-    let supported = summary.is_some_and(summary_is_supported);
+    let supported = summary
+        .is_some_and(|summary| summary.get("status").and_then(Value::as_str) == Some("supported"));
     let (mut rows, total) = if supported {
         let height = selected
             .chain_positions
@@ -178,8 +169,7 @@ async fn collection(
                 item["powers"] = permission_powers_value(&item["powers"])?;
                 data.push(item);
             }
-            "links" => data.push(super::link_items::compact_resolver_link_item(&item)?),
-            _ => data.push(compact_resolver_binding_item(&item)?),
+            _ => data.push(super::link_items::compact_resolver_link_item(&item)?),
         }
     }
     super::revalidate_project_generations(

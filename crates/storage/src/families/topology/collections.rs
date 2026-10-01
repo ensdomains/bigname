@@ -1,6 +1,5 @@
-//! The resolver `/aliases`, `/links` and `/roles` collections over the aliases
-//! (`project_resolver_alias`, and the alias-path bindings through `project_resource_pointer`),
-//! the resolver links (`project_resolver_link`) and the grants (`project_grant`). Each page is
+//! The resolver `/links` and `/roles` collections over the resolver links
+//! (`project_resolver_link`) and the grants (`project_grant`). Each page is
 //! keyed `(key1, key2)` as the served collections are, and its total is an exact count over the
 //! same relation in the same statement (apps/api/src/v2/resolvers/collections/reads.rs), ordered
 //! and paged in SQL so the database's collation orders both alike. The readers take a keyset
@@ -8,8 +7,6 @@
 //! read-only REPEATABLE READ snapshot at the block the family marker names, and fails with
 //! [`FamilyPublicationUnavailable`] when the marker is not servable. The resolver routes serve
 //! them.
-use std::collections::{BTreeMap, BTreeSet};
-
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
@@ -20,10 +17,7 @@ use crate::families::{
         lifecycle::Clock,
         permissions::{ResourceInput, load_shadow_permissions_on, resolver_grant_evidence},
     },
-    name::{
-        CoverageShape, FamilyPublication, FamilyPublicationUnavailable, load_names_on,
-        publication_on, read_snapshot,
-    },
+    name::{FamilyPublication, FamilyPublicationUnavailable, publication_on, read_snapshot},
 };
 
 /// One page of a resolver collection: `(key1, key2, item)` rows in key order, and the total.
@@ -41,87 +35,6 @@ async fn marker(conn: &mut PgConnection, chain_id: &str) -> Result<FamilyPublica
         }
         .into()
     })
-}
-
-/// `/aliases`: the binding arm (names whose selected binding is an alias-path binding whose
-/// resource's current pointer is this resolver) then the event arm (active
-/// `project_resolver_alias` rows). A name's selected binding, raw name and namehash, and whether
-/// it is served at all, come from its composed row (`families::name`) under the current-name read
-/// filter.
-pub async fn load_resolver_aliases_shadow(
-    pool: &PgPool,
-    chain_id: &str,
-    resolver_address: &str,
-    after: Option<&(String, String)>,
-    limit: i64,
-) -> Result<FamilyCollectionPage> {
-    let address = resolver_address.to_ascii_lowercase();
-    let mut snapshot = read_snapshot(pool).await?;
-    marker(&mut snapshot, chain_id).await?;
-    let candidates: Vec<(String, Uuid)> = sqlx::query_as(
-        "/* storage:families.topology.alias_binding_candidates */
-         SELECT DISTINCT candidate.logical_name_id, candidate.surface_binding_id
-         FROM bigname_phase.project_binding_candidate candidate
-         JOIN bigname_phase.project_resource_pointer pointer
-           ON pointer.chain_id = $1 AND pointer.resource_id = candidate.resource_id
-          AND pointer.resolver_address = $2
-         WHERE candidate.binding_kind = 'resolver_alias_path'",
-    )
-    .bind(chain_id)
-    .bind(&address)
-    .fetch_all(&mut *snapshot)
-    .await
-    .with_context(|| format!("failed to load the alias bindings of {address}"))?;
-    let mut bindings: BTreeMap<String, BTreeSet<Uuid>> = BTreeMap::new();
-    for (name, binding) in candidates {
-        bindings.entry(name).or_default().insert(binding);
-    }
-    let names: Vec<String> = bindings.keys().cloned().collect();
-    let rows = load_names_on(&mut snapshot, &names, CoverageShape::Plain).await?;
-    let bound: Vec<Value> = rows
-        .values()
-        .filter(|row| {
-            row.surface_binding_id.is_some_and(|binding| {
-                bindings
-                    .get(&row.logical_name_id)
-                    .is_some_and(|candidates| candidates.contains(&binding))
-            })
-        })
-        .map(|row| {
-            json!({"logical_name_id": row.logical_name_id,
-                   "normalized_name": row.normalized_name, "namehash": row.namehash})
-        })
-        .collect();
-    let items = "WITH items AS (
-            SELECT 'binding'::text AS key1, bound ->> 'logical_name_id' AS key2,
-                jsonb_build_object('logical_name_id', bound -> 'logical_name_id',
-                    'normalized_name', bound -> 'normalized_name',
-                    'namehash', bound -> 'namehash') AS item
-            FROM jsonb_array_elements($7::jsonb) bound
-            UNION ALL
-            SELECT 'event', alias.alias_identity,
-                jsonb_strip_nulls(jsonb_build_object('logical_name_id', alias.logical_name_id,
-                    'alias_state', COALESCE(to_jsonb(alias.alias_state), '\"active\"'::jsonb),
-                    'chain_id', alias.chain_id, 'resolver_address', $2::text,
-                    'from_name', alias.from_name, 'to_name', alias.to_name,
-                    'from_dns_encoded_name', alias.from_dns_encoded_name,
-                    'to_dns_encoded_name', alias.to_dns_encoded_name,
-                    'to_logical_name_id', alias.to_logical_name_id,
-                    'to_resource_id', alias.to_resource_id))
-            FROM bigname_phase.project_resolver_alias alias
-            WHERE alias.chain_id = $1 AND alias.resolver_address = $2 AND alias.active
-        )";
-    let page = page(
-        &mut snapshot,
-        items,
-        (chain_id, &address, None),
-        after,
-        limit,
-        &Value::Array(bound),
-    )
-    .await?;
-    snapshot.commit().await?;
-    Ok(page)
 }
 
 /// `/links`: the latest link per node at this resolver with a non-zero record, names attached

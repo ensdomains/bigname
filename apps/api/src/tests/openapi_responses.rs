@@ -1,12 +1,11 @@
 use super::*;
 
 // The existing family conformance fixture captures fourteen product operations
-// and six diagnostics. These six complete the selected OpenAPI surface.
+// and six diagnostics. These five complete the selected OpenAPI surface.
 const ADDITIONAL_OPENAPI_OPERATIONS: &[&str] = &[
     "GET /v1/names",
     "GET /v1/registries/{chain_id}/{address}",
     "GET /v1/registries/{chain_id}/{address}/labels",
-    "GET /v1/resolvers/{chain_id}/{address}/aliases",
     "GET /v1/resolvers/{chain_id}/{address}/links",
     "GET /v1/resolvers/{chain_id}/{address}/roles",
 ];
@@ -173,39 +172,26 @@ async fn openapi_additional_operations_have_nonempty_response_captures() -> Resu
         json!(["set_addr", "set_text"]),
         manifest,
     )];
-    for (index, kind, after) in [
-        (
-            1,
-            "AliasChanged",
-            json!({"resolver":V2_RESOLVER_ADDRESS,"from_namehash":"alias-node","from_name":"alias.eth","to_name":"target.eth","alias_state":"active","active":true}),
-        ),
-        (
-            2,
-            "ResolverRecordLinked",
-            json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":V2_RESOLVER_ADDRESS,"node":format!("0x{:064x}",1),"resolver_record_id":"10"}),
-        ),
-    ] {
-        let mut event = history_event(
-            &format!("openapi-{kind}"),
-            None,
-            None,
-            Some("ethereum-mainnet"),
-            Some(150),
-            Some("0xcollection150"),
-            Some("0xopenapi"),
-            Some(index),
-            CanonicalityState::Canonical,
-        );
-        event.event_kind = kind.into();
-        event.source_family = "ens_v2_resolver_l1".into();
-        event.before_state = json!({});
-        event.after_state = after;
-        event.raw_fact_ref["emitting_address"] = json!(V2_RESOLVER_ADDRESS);
-        events.push(event);
-    }
+    let mut event = history_event(
+        "openapi-ResolverRecordLinked",
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(150),
+        Some("0xcollection150"),
+        Some("0xopenapi"),
+        Some(2),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "ResolverRecordLinked".into();
+    event.source_family = "ens_v2_resolver_l1".into();
+    event.before_state = json!({});
+    event.after_state = json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":V2_RESOLVER_ADDRESS,"node":format!("0x{:064x}",1),"resolver_record_id":"10"});
+    event.raw_fact_ref["emitting_address"] = json!(V2_RESOLVER_ADDRESS);
+    events.push(event);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_resolver_collection_inputs(&database).await?;
-    for (index, section) in [(3, "aliases"), (4, "links"), (5, "roles")] {
+    for (index, section) in [(3, "links"), (4, "roles")] {
         let payload = v2_resolver_payload_for_database(
             &database,
             &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),

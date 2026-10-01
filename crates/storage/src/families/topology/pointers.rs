@@ -9,75 +9,7 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-
-/// The resource's current pointer after the "no resolver" rejection: its latest named
-/// ResolverChanged, clears included, and nothing when that latest pointer is null, zero or empty.
-/// An empty resolver means no alias (Tate, 2026-09-26), the record pointer's rule. No traced
-/// producer writes an empty one (the registry adapters decode the address through `address_hex` and
-/// `nullable_address`), and the read rejects it regardless.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FamilyAliasSourcePointer {
-    pub chain_id: String,
-    pub resource_id: Uuid,
-    pub resolver_address: String,
-    pub pointer_position: Value,
-    pub namespace: Option<String>,
-    pub source_family: Option<String>,
-    pub namehash: Option<String>,
-}
-
-/// The resource's current resolver pointer for the alias topology join: latest, then reject
-/// null, zero or empty. Never the historical non-zero pointer, so a clear exposes no older
-/// pointer.
-pub async fn load_family_alias_source_pointer(
-    pool: &PgPool,
-    chain_id: &str,
-    resource_id: Uuid,
-) -> Result<Option<FamilyAliasSourcePointer>> {
-    let mut conn = pool.acquire().await?;
-    load_family_alias_source_pointer_on(&mut conn, chain_id, resource_id).await
-}
-
-pub(crate) async fn load_family_alias_source_pointer_on(
-    conn: &mut PgConnection,
-    chain_id: &str,
-    resource_id: Uuid,
-) -> Result<Option<FamilyAliasSourcePointer>> {
-    type PointerRow = (
-        Option<String>,
-        Option<Value>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let row: Option<PointerRow> = sqlx::query_as(
-        "SELECT resolver_address, pointer_position, namespace, source_family, namehash
-             FROM bigname_phase.project_resource_pointer
-             WHERE chain_id = $1 AND resource_id = $2 AND pointer_position IS NOT NULL",
-    )
-    .bind(chain_id)
-    .bind(resource_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .with_context(|| format!("failed to load the resource pointer of {resource_id}"))?;
-    Ok(row.and_then(
-        |(resolver_address, pointer_position, namespace, source_family, namehash)| {
-            let resolver_address = resolver_address
-                .filter(|address| !address.is_empty() && address != ZERO_ADDRESS)?;
-            Some(FamilyAliasSourcePointer {
-                chain_id: chain_id.to_owned(),
-                resource_id,
-                resolver_address,
-                pointer_position: pointer_position?,
-                namespace,
-                source_family,
-                namehash,
-            })
-        },
-    ))
-}
 
 /// The resource's latest non-zero pointer and its version boundary, the wildcard source.
 #[derive(Clone, Debug, PartialEq)]
