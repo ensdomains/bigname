@@ -457,23 +457,23 @@ fn push_order(
     });
 }
 
-/// Rows without a timestamp sort last ascending and first descending, as
-/// crates/storage/src/children/page.rs does.
+/// A missing timestamp is the smallest value: rows without one sort first ascending and last
+/// descending.
 fn null_rank_expr(order: ChildrenCurrentOrder, prefix: &str) -> String {
     match order {
         ChildrenCurrentOrder::Asc => {
-            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 1 ELSE 0 END")
+            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 0 ELSE 1 END")
         }
         ChildrenCurrentOrder::Desc => {
-            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 0 ELSE 1 END")
+            format!("CASE WHEN {prefix}sort_timestamp IS NULL THEN 1 ELSE 0 END")
         }
     }
 }
 
 fn null_rank(is_null: bool, order: ChildrenCurrentOrder) -> i32 {
     match (is_null, order) {
-        (true, ChildrenCurrentOrder::Asc) | (false, ChildrenCurrentOrder::Desc) => 1,
-        (false, ChildrenCurrentOrder::Asc) | (true, ChildrenCurrentOrder::Desc) => 0,
+        (false, ChildrenCurrentOrder::Asc) | (true, ChildrenCurrentOrder::Desc) => 1,
+        (true, ChildrenCurrentOrder::Asc) | (false, ChildrenCurrentOrder::Desc) => 0,
     }
 }
 

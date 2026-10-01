@@ -1586,8 +1586,9 @@ string / classified-null rule with its own sibling
 conditions under which the restrictions object itself is present.
 
 Null expiry is outside every expiry window. Collections that sort by expiry
-compare finite values numerically and put nulls last ascending, first
-descending. A registration that expired naturally retains its finite expiry;
+compare finite values numerically and treat a null as smaller than every finite
+value, so nulls come first ascending and last descending; every nullable list
+sort key follows the same rule. A registration that expired naturally retains its finite expiry;
 an explicit unregister is distinct from expiry.
 
 Classification follows the contract and retained registration state, not a

@@ -516,19 +516,19 @@ fn push_json_timestamp_coalesce_expr(builder: &mut QueryBuilder<'_, Postgres>, p
 fn timestamp_rank_expr(column: &str, order: AddressNamesCurrentOrder) -> String {
     match order {
         AddressNamesCurrentOrder::Asc => {
-            format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END")
+            format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
         }
         AddressNamesCurrentOrder::Desc => {
-            format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
+            format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END")
         }
     }
 }
 
 fn timestamp_null_rank(value: Option<UnixSeconds>, order: AddressNamesCurrentOrder) -> i32 {
     match (value.is_none(), order) {
-        (true, AddressNamesCurrentOrder::Asc) => 1,
-        (false, AddressNamesCurrentOrder::Asc) => 0,
-        (true, AddressNamesCurrentOrder::Desc) => 0,
-        (false, AddressNamesCurrentOrder::Desc) => 1,
+        (true, AddressNamesCurrentOrder::Asc) => 0,
+        (false, AddressNamesCurrentOrder::Asc) => 1,
+        (true, AddressNamesCurrentOrder::Desc) => 1,
+        (false, AddressNamesCurrentOrder::Desc) => 0,
     }
 }

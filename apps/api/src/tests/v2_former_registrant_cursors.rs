@@ -129,12 +129,13 @@ async fn v2_former_registrant_cursor_walks_explicit_unregisters_and_mixed_expiri
             let base = format!("{}&order={order}", former_cursor_route());
             let baseline = v2_names_payload(&database, &base).await?;
             let mut expected = if dated {
+                // A null expiry is the smallest value.
                 vec![
+                    "unregistered-a.eth",
+                    "unregistered-b.eth",
                     "dated-a.eth",
                     "dated-b.eth",
                     "dated-c.eth",
-                    "unregistered-a.eth",
-                    "unregistered-b.eth",
                 ]
             } else {
                 vec!["unregistered-a.eth", "unregistered-b.eth"]

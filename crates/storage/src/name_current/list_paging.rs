@@ -181,20 +181,20 @@ fn timestamp_sort_column(sort: NameCurrentListSort) -> &'static str {
 fn timestamp_rank_expr(column: &str, order: NameCurrentListOrder) -> String {
     match order {
         NameCurrentListOrder::Asc => {
-            format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END")
+            format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
         }
         NameCurrentListOrder::Desc => {
-            format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
+            format!("CASE WHEN {column} IS NULL THEN 1 ELSE 0 END")
         }
     }
 }
 
 fn timestamp_null_rank(value: Option<UnixSeconds>, order: NameCurrentListOrder) -> i32 {
     match (value.is_none(), order) {
-        (true, NameCurrentListOrder::Asc) => 1,
-        (false, NameCurrentListOrder::Asc) => 0,
-        (true, NameCurrentListOrder::Desc) => 0,
-        (false, NameCurrentListOrder::Desc) => 1,
+        (true, NameCurrentListOrder::Asc) => 0,
+        (false, NameCurrentListOrder::Asc) => 1,
+        (true, NameCurrentListOrder::Desc) => 1,
+        (false, NameCurrentListOrder::Desc) => 0,
     }
 }
 

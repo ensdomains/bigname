@@ -105,10 +105,11 @@ async fn expiry_keysets_preserve_numeric_order_nulls_and_fractional_windows() ->
         {"logical_name_id": "e", "resource_id": Uuid::from_u128(5), "declared_summary": {"registration": {"expiry": null}, "control": {"expiry": "1"}}}
     ]);
     for (order, expected) in [
-        (AddressNamesCurrentOrder::Asc, vec!["a", "b", "c", "d", "e"]),
+        // A null expiry is the smallest value.
+        (AddressNamesCurrentOrder::Asc, vec!["e", "a", "b", "c", "d"]),
         (
             AddressNamesCurrentOrder::Desc,
-            vec!["e", "c", "d", "b", "a"],
+            vec!["c", "d", "b", "a", "e"],
         ),
     ] {
         let mut cursor = None;

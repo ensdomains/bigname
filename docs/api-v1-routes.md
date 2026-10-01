@@ -668,7 +668,8 @@ collection route carry neither header.
   Such contract-specific no-expiry registrations serve `expires_at: null`,
   `expires_at_reason: "no_expiry"` and `grace_ends_at: null` across detail,
   lookup and collections. Null expiry never matches a window; collections with
-  `sort=expires_at` place nulls last ascending and first descending. A row
+  `sort=expires_at` treat a null as the smallest value, first ascending and
+  last descending. A row
   without a registration context omits these fields. See
   [Timestamp format and absent expiry](api-v1.md#timestamp-format-and-absent-expiry).
 - Released names: the listing means "registrations whose expiry falls in this
@@ -1634,8 +1635,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `sort` defaults to `name` and `order` to `asc`. `expires_at` and
   `registered_at` order by the child's own registration timestamps, read the
   same way `GET /v1/addresses/{address}/names` reads them; a child with no
-  current name row or no such timestamp sorts after every dated row ascending
-  and before every dated row descending. Ties, and the whole `name` sort, break
+  current name row or no such timestamp is the smallest value: it sorts before
+  every dated row ascending and after every dated row descending. Ties, and the
+  whole `name` sort, break
   by served name and then by child identity. Any other `sort` or `order` value
   returns `400 invalid_input`.
   `include_expired` defaults to `true`, which is the route's prior behaviour:
@@ -2942,8 +2944,9 @@ introduces it rebuilds Project from full history before serving the option; see
   event that was attributed to the name only once a later event named it, and
   is unrelated to `registered_at`, the registration time. Every listed row has
   a recorded first observation, and `sort=created_at` orders by that recorded
-  value, the same instant the row serves as `created_at`. A row with no such timestamp sorts after every dated row
-  ascending and before every dated row descending. Equal timestamps, and equal
+  value, the same instant the row serves as `created_at`. A row with no such
+  timestamp is the smallest value: it sorts before every dated row ascending and
+  after every dated row descending. Equal timestamps, and equal
   names, break ties by name identity and then by the grouped resource, in both
   orders.
   `relation` accepts a comma-separated set of v2 vocabulary values
@@ -2985,7 +2988,7 @@ introduces it rebuilds Project from full history before serving the option; see
   reason `released`) is outside every window. It sorts by
   `expires_at` only (`sort=expires_at` is the default here; any other value is
   `400 invalid_input`), ties broken by namespace, name and namehash, with null
-  expiry last ascending and first descending. Finite values and cursor
+  expiry as the smallest value, first ascending and last descending. Finite values and cursor
   positions compare numerically without calendar or safe-integer caps.
   `coin_type`,
   `authority`, `is_migrated`, `q` and nonempty `include` return `400 invalid_input` with

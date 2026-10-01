@@ -330,16 +330,17 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
         assert!(!listed(&rows, "known.alpha.eth"), "{query}: {rows:#?}");
         assert!(!listed(&rows, &unknown_name), "{query}: {rows:#?}");
     }
-    // An unknown expiry sorts last ascending, as for any row without one.
+    // An unknown expiry sorts first ascending, as for any row without one.
     let by_expiry = read("sort=expires_at".to_owned()).await?;
-    let first_unknown = by_expiry
+    let first_dated = by_expiry
         .iter()
-        .position(|row| row.get("expires_at").is_none())
-        .expect("a row without an expiry");
+        .position(|row| row.get("expires_at").is_some())
+        .expect("a row with an expiry");
+    assert!(first_dated > 0, "{by_expiry:#?}");
     assert!(
-        by_expiry[first_unknown..]
+        by_expiry[first_dated..]
             .iter()
-            .all(|row| row.get("expires_at").is_none()),
+            .all(|row| row.get("expires_at").is_some()),
         "{by_expiry:#?}"
     );
     // `q` matches the served text.
@@ -545,5 +546,65 @@ async fn v2_legacy_ownership_cursor_continues_but_wrong_filter_and_bad_anchor_fa
         assert_eq!(error["error"]["code"], json!("invalid_input"), "{case}: {error:#}");
     }
 
+    database.cleanup().await
+}
+
+/// A missing sort timestamp is the smallest value: undated rows come first ascending and last
+/// descending, and a walk of two-row pages lists exactly the one-page answer.
+async fn assert_undated_rows_are_smallest(database: &TestDatabase, base: &str, key: &str) -> Result<()> {
+    for order in ["asc", "desc"] {
+        let uri = format!("{base}&order={order}");
+        let (status, body) = read_family_response(database, &format!("{uri}&page_size=50")).await?;
+        anyhow::ensure!(status == StatusCode::OK, "{uri}: {body:#}");
+        let whole = rows_of(&[body]);
+        let walked = rows_of(&read_family_pages(database, &format!("{uri}&page_size=2")).await?);
+        assert_eq!(walked, whole, "{uri}");
+
+        let dated: Vec<bool> = whole
+            .iter()
+            .map(|row| row.get(key).is_some_and(|value| !value.is_null()))
+            .collect();
+        assert!(dated.contains(&true) && dated.contains(&false), "{uri}: {whole:#?}");
+        // Ascending, the rows from the first dated one on are all dated; descending, the rows from
+        // the first undated one on are all undated.
+        let tail_dated = order == "asc";
+        let boundary = dated.iter().position(|dated| *dated == tail_dated).expect("both kinds");
+        assert!(
+            dated[boundary..].iter().all(|dated| *dated == tail_dated),
+            "{uri}: {whole:#?}"
+        );
+        let stamps: Vec<i64> = whole
+            .iter()
+            .filter_map(|row| row.get(key)?.as_str()?.parse().ok())
+            .collect();
+        let mut sorted = stamps.clone();
+        sorted.sort();
+        if order == "desc" {
+            sorted.reverse();
+        }
+        assert_eq!(stamps, sorted, "{uri}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_undated_address_names_sort_as_the_smallest_value_across_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    for key in ["registered_at", "expires_at"] {
+        let base = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&sort={key}");
+        assert_undated_rows_are_smallest(&database, &base, key).await?;
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_undated_subnames_sort_as_the_smallest_value_across_pages() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_children_fixture(&database).await?;
+    for key in ["registered_at", "expires_at"] {
+        let base = format!("/v1/names/alpha.eth/subnames?sort={key}");
+        assert_undated_rows_are_smallest(&database, &base, key).await?;
+    }
     database.cleanup().await
 }

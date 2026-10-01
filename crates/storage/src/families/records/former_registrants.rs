@@ -55,12 +55,12 @@ struct Held {
 
 /// The sort key: undated rows after dated ones ascending, then expiry, namespace, name,
 /// namehash.
-type Key = (bool, Option<UnixSeconds>, String, String, String);
+// A missing expiry is the smallest value (`None` sorts before `Some`).
+type Key = (Option<UnixSeconds>, String, String, String);
 
 impl Held {
     fn key(&self) -> Key {
         (
-            self.expiry.is_none(),
             self.expiry,
             self.row.namespace.clone(),
             self.row.normalized_name.clone(),
@@ -74,7 +74,6 @@ fn cursor_key(cursor: &NameCurrentListCursor) -> Result<Key> {
         anyhow::bail!("a former-registrant cursor must carry an expiry position");
     };
     Ok((
-        expiry.is_none(),
         expiry,
         cursor.namespace.clone(),
         cursor.normalized_name.clone(),

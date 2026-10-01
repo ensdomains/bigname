@@ -1570,3 +1570,24 @@ No served value changes except the removed fields: the resolver overview no
 longer reports an `aliases` section, `/aliases` answers like any unknown route,
 lookup topology has no `alias` field, and the `set_alias` and
 `admin_set_alias` powers are no longer reported.
+
+### Missing sort keys sort as the smallest value
+
+The build that makes a missing `expires_at`, `registered_at` or `created_at`
+the smallest value in list sorts (first ascending, last descending) on
+[`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames),
+[`GET /v1/names/{name}/subnames`](api-v1-routes.md#get-v1namesnamesubnames) and
+[`GET /v1/names`](api-v1-routes.md#get-v1names) changes only API read paths,
+but those reads live in hashed storage sources
+(`crates/storage/src/address_names/query.rs` and the family readers under
+`crates/storage/src/families`), so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. An existing deployment runs the new binary for both the phase
+runner and the API, and finishes the full-history Interpret redo and the
+Project redo it installs before the matching API serves, as for any rotation;
+an API upgraded alone refuses the old build's family publication with
+`409 stale`. A cursor issued before the change on one of these sorts still
+continues after its saved position, but in the new order: a walk that crossed
+the change can miss the rows without the key, which moved to the other end, so
+a client that needs a complete list restarts from the first page.
