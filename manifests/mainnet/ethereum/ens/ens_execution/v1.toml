@@ -10,7 +10,7 @@ roots = []
 discovery_rules = []
 
 [capability_flags]
-verified_resolution = { status = "shadow", notes = "shadow execution traces and cache ownership are tracked before public verified-resolution reads ship" }
+verified_resolution = "supported"
 
 [[contracts]]
 role = "universal_resolver"

@@ -11,8 +11,8 @@ normalizer_version = "ensip15@ens-normalize-0.1.1"
 discovery_rules = []
 
 [capability_flags]
-exact_name_profile = { status = "shadow", notes = "BaseRegistrar lifecycle is indexed without claiming registrar-controller label coverage" }
-name_history = { status = "shadow", notes = "BaseRegistrar history is indexed before product reads depend on it" }
+exact_name_profile = "supported"
+name_history = "supported"
 
 [[roots]]
 name = "ETHRegistrar"

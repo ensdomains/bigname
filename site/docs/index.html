@@ -892,7 +892,7 @@ const ROUTES = [
     fields: [['capabilities', 'Keyed by <code>name_profile</code>, <code>subnames</code>, <code>name_history</code>, and <code>verified_records</code>, each holding <code>{completeness, unsupported_reason?}</code>. This is a deployment-level summary and not a guarantee about any one name.'], ['networks', '<code>[{network, chain_id?}]</code>.']],
     sample: { data: { namespace: 'ens', capabilities: { name_profile: { completeness: 'full' }, subnames: { completeness: 'full' }, name_history: { completeness: 'full' }, verified_records: { completeness: 'full' } }, networks: [ { network: 'ethereum', chain_id: 1 } ] }, meta: {} },
   },
-  outcomes: [['200', 'The summary. Under a Sepolia deployment profile the ENS <code>name_profile</code> capability is <code>partial</code>.'], ['404 not_found', 'The namespace is not served.']],
+  outcomes: [['200', 'The summary. <code>name_profile</code> and <code>name_history</code> are <code>full</code> whenever the namespace is served.'], ['404 not_found', 'The namespace is not served.']],
   related: ['status', 'diag-manifests'],
 },
 {

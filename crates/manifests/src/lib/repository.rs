@@ -11,7 +11,7 @@ use bigname_domain::{
 };
 
 use crate::attribution::validate_block_derived_preimage_attribution;
-use crate::model::RawSourceManifest;
+use crate::model::parse_authored_manifest;
 use crate::{
     ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
     ManifestLoadSummary,
@@ -120,9 +120,8 @@ fn load_manifest_file(root: &Path, path: &Path) -> Result<LoadedManifest> {
         .with_context(|| format!("manifest path {} is missing a file stem", path.display()))?;
     let raw_manifest = fs::read_to_string(path)
         .with_context(|| format!("failed to read manifest file {}", path.display()))?;
-    let manifest: SourceManifest = toml::from_str::<RawSourceManifest>(&raw_manifest)
-        .with_context(|| format!("failed to parse manifest TOML {}", path.display()))?
-        .into();
+    let manifest = parse_authored_manifest(&raw_manifest)
+        .with_context(|| format!("failed to parse manifest TOML {}", path.display()))?;
 
     validate_manifest_metadata(&manifest, path, &relative_path, &version_tag)?;
 

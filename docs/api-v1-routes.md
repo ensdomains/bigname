@@ -4373,25 +4373,29 @@ For a registrar lease first identified by a later readable observation, registra
   value is `{completeness, unsupported_reason?, chains?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
-  profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
-  declaration is supported while the admitted ENSv1 registrar declaration is
-  shadow because registrar-controller registration label coverage is absent.
-- Capabilities from manifest flags: `subnames`, `name_profile`, and
-  `name_history` aggregate the active manifests' capability flags (`full` when
-  every declaring manifest is supported, `partial` when some are, otherwise
-  `unsupported` with `unsupported_reason=not_supported_for_namespace`). They
-  carry no `chains` object.
+  omits `meta.as_of` and `meta.as_of_token`.
+- `subnames` aggregates the active manifests' `declared_children` flags:
+  `full` when every declaring manifest is supported, `partial` when some are,
+  otherwise `unsupported` with `unsupported_reason=not_supported_for_namespace`.
+  It is absent when no active manifest declares the flag. It carries no
+  `chains` object.
+- `name_profile` follows `GET /v1/names/{name}` and `name_history` follows
+  `GET /v1/names/{name}/history`. Those routes serve every name of a served
+  namespace, a name's support following its own authority decision, so both
+  are `full` whenever the namespace has at least one active manifest, and
+  `unsupported` with `unsupported_reason=not_supported_for_namespace` only
+  when it has none. They carry no `chains` object. The manifests'
+  `exact_name_profile` and `name_history` flags do not affect this summary.
 - Verified capabilities per chain: `verified_records` and
   `verified_primary_name` describe what this deployment's verified routes will
   execute, decided per declared network and reported under `chains`, keyed by
   the numeric chain id (`"1"`, `"11155111"`, `"8453"`). A chain entry is
   `{completeness: full}` when the lookup route table has an execution
   entrypoint for the namespace on that chain (ENS: Ethereum Mainnet or Sepolia;
-  Basenames: Base, executing through the Mainnet L1 Resolver), an active or,
-  where the route admits it, shadow manifest declares that entrypoint with a
-  `verified_resolution` flag the route accepts (ENS accepts `shadow`; Basenames
-  requires `supported` on manifest version 2), for `verified_primary_name` the
+  Basenames: Base, executing through the Mainnet L1 Resolver), a manifest
+  whose `rollout_status` is `active` or, where the route admits it (ENS),
+  `shadow` declares that entrypoint with a `supported` `verified_resolution`
+  flag (Basenames also requires manifest version 2), for `verified_primary_name` the
   same chain also has an active `ens_v1_registry_l1` manifest, and
   `BIGNAME_API_CHAIN_RPC_URLS` names a provider for the execution chain.
   Otherwise the entry is `unsupported` with one of
