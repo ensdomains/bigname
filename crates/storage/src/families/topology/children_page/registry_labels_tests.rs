@@ -1,10 +1,12 @@
 //! A registry's labels read keeps only the ENSv2 candidates under the parent's current
 //! subregistry and decides the other arms only for those children. Its rows and total must equal
 //! the statement without that narrowing on every case the arm selection distinguishes, and the
-//! narrowed count must probe the registration index by registry and the edge candidate index by
-//! child node, under custom and generic plans.
+//! narrowed count, executed under custom and generic plans, must probe the registration index by
+//! registry and the edge candidate index by child node in the latest-edge veto's cross-parent
+//! lookup.
 use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use serde_json::Value;
 use sqlx::{Row, raw_sql};
 
 use super::*;
@@ -138,27 +140,57 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
             raw_sql(&format!("SET plan_cache_mode = {mode}"))
                 .execute(&mut *conn)
                 .await?;
-            let plan: Vec<String> = sqlx::query_scalar(&format!(
-                "EXPLAIN (COSTS OFF) EXECUTE labels_count \
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE labels_count \
                  ('{ETH}', '{hash}', '{eth_registry}', '{eth_registry}')"
             ))
-            .fetch_all(&mut *conn)
+            .fetch_one(&mut *conn)
             .await?;
-            for (index, condition) in [
+            let mut found = Vec::new();
+            scans(&plan[0]["Plan"], &mut found);
+            // The registration join by registry; the edge lookup, driven by the ENSv2
+            // candidates' nodes; and, separately, the latest-edge veto's cross-parent `other`
+            // probe by child node.
+            for (relation, alias, index, column) in [
                 (
+                    "project_child_registration_state",
+                    "registration",
                     "project_child_registration_state_registry_idx",
-                    "(registry_contract_instance_id = ",
+                    "registry_contract_instance_id",
                 ),
-                ("project_child_edge_candidate_child_idx", "(child_node = "),
+                (
+                    "project_child_edge_candidate",
+                    "edge",
+                    "project_child_edge_candidate_child_idx",
+                    "child_node",
+                ),
+                (
+                    "project_child_edge_candidate",
+                    "other",
+                    "project_child_edge_candidate_child_idx",
+                    "child_node",
+                ),
             ] {
+                let probes: Vec<&Scan> = found
+                    .iter()
+                    .filter(|scan| scan.relation == relation && scan.alias == alias)
+                    .collect();
                 ensure!(
-                    plan.windows(2)
-                        .any(|lines| lines[0].contains(&format!("using {index} on"))
-                            && lines[1].contains("Index Cond:")
-                            && lines[1].contains(condition)),
-                    "{mode}: no probe of {index} on {condition}\n{}",
-                    plan.join("\n")
+                    probes.iter().any(|probe| probe.loops > 0),
+                    "{mode}: no executed scan of {relation} as {alias}\n{plan:#}"
                 );
+                for probe in probes {
+                    ensure!(
+                        !probe.indexes.is_empty()
+                            && probe.indexes.iter().all(|(name, condition)| {
+                                *name == index && condition.contains(column)
+                            }),
+                        "{mode}: {} of {relation} as {alias} is not a probe of {index} by \
+                         {column}: {:?}\n{plan:#}",
+                        probe.node_type,
+                        probe.indexes
+                    );
+                }
             }
         }
         Ok(())
@@ -166,6 +198,55 @@ async fn registry_labels_match_the_unnarrowed_relation_and_probe_the_indexes() -
     .await;
     database.cleanup().await?;
     result
+}
+
+/// One scan of a table in an `EXPLAIN (ANALYZE, FORMAT JSON)` plan, with each index it reads and
+/// that index's condition: an Index Scan or Index Only Scan reads its own index, a Bitmap Heap
+/// Scan the Bitmap Index Scans beneath it, and any other scan none.
+struct Scan<'a> {
+    relation: &'a str,
+    alias: &'a str,
+    node_type: &'a str,
+    indexes: Vec<(&'a str, &'a str)>,
+    loops: u64,
+}
+
+/// Every table scan in the plan, sub-plans and init plans included.
+fn scans<'a>(node: &'a Value, output: &mut Vec<Scan<'a>>) {
+    fn bitmap_indexes<'a>(node: &'a Value, output: &mut Vec<(&'a str, &'a str)>) {
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            if child["Node Type"] == "Bitmap Index Scan" {
+                output.push((
+                    child["Index Name"].as_str().unwrap_or_default(),
+                    child["Index Cond"].as_str().unwrap_or_default(),
+                ));
+            }
+            bitmap_indexes(child, output);
+        }
+    }
+    if let (Some(relation), Some(alias)) = (node["Relation Name"].as_str(), node["Alias"].as_str())
+    {
+        let node_type = node["Node Type"].as_str().unwrap_or_default();
+        let mut indexes = Vec::new();
+        match node_type {
+            "Index Scan" | "Index Only Scan" => indexes.push((
+                node["Index Name"].as_str().unwrap_or_default(),
+                node["Index Cond"].as_str().unwrap_or_default(),
+            )),
+            "Bitmap Heap Scan" => bitmap_indexes(node, &mut indexes),
+            _ => {}
+        }
+        output.push(Scan {
+            relation,
+            alias,
+            node_type,
+            indexes,
+            loops: node["Actual Loops"].as_u64().unwrap_or_default(),
+        });
+    }
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        scans(child, output);
+    }
 }
 
 /// The eth parent's subregistry is registry 1 and the other parent's registry 2. Child n is node
