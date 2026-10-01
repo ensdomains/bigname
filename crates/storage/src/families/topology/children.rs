@@ -53,8 +53,15 @@ pub(super) enum Parents<'a> {
 /// followed by a comma) for `parents`. `clock` holds one row per chain of the parents, and
 /// `selected` one row per served child with `pair_rank = 1`, before the page read filter, with
 /// its parent as `parent_logical_name_id`; an ENSv2 child carries the emitter of its
-/// registration event as `registry_address`, others null.
-pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parents: Parents<'a>) {
+/// registration event as `registry_address`, others null. For a registry's labels, `registry`
+/// keeps the ENSv2 candidates of a parent whose current subregistry it is, and the other arms'
+/// candidates only for those children: no other child can be a label, and another arm only
+/// decides the arm of a child it shares.
+pub(super) fn push_selected<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    parents: Parents<'a>,
+    registry: Option<&'a str>,
+) {
     builder.push(
         "parent_surface AS (
             SELECT surface.* FROM bigname_phase.name_surfaces surface
@@ -159,6 +166,65 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                          association.migration_correlation_id DESC
                 LIMIT 1
             ) registry ON TRUE
+        ), v2_candidates AS (
+            SELECT parent.logical_name_id AS parent_logical_name_id, parent.chain_id,
+                   child.logical_name_id AS child_logical_name_id, child.namespace,
+                   {v2_raw_name} AS raw_name, {v2_decoded_name} AS decoded_name,
+                   child.namehash, lower(child.labelhashes[1]) AS labelhash, NULL::text AS owner,
+                   registration.registrant, 'ens_v2' AS authority_arm,
+                   GREATEST(registration.block_number, subregistry.block_number) AS block_number,
+                   registration.transaction_index, registration.log_index,
+                   registration.event_identity,
+                   lower(registration_event.raw_fact_ref ->> 'emitting_address')
+                       AS registry_address
+            FROM parent JOIN clock ON clock.chain_id = parent.chain_id
+            JOIN bigname_phase.project_parent_subregistry subregistry
+              ON subregistry.chain_id = parent.chain_id
+             AND subregistry.logical_name_id = parent.logical_name_id
+             AND subregistry.subregistry_address NOT IN ('', {ZERO_ADDRESS})
+            JOIN bigname_phase.contract_instance_addresses address ON {v2_address}
+            JOIN bigname_phase.project_child_registration_state registration
+              ON registration.chain_id = parent.chain_id
+             AND registration.registry_contract_instance_id = address.contract_instance_id::text
+             AND registration.event_kind IS NOT NULL
+             AND registration.event_kind <> 'RegistrationReleased'
+            JOIN bigname_phase.name_surfaces child
+              ON child.logical_name_id = registration.logical_name_id
+             AND child.namespace = parent.namespace AND child.chain_id = parent.chain_id
+             AND child.visibility_state = 'active'
+             AND cardinality(child.labelhashes) = cardinality(parent.labelhashes) + 1
+             AND child.labelhashes[2:cardinality(child.labelhashes)] = parent.labelhashes
+             AND {child_readable}
+            LEFT JOIN bigname_phase.label_preimages preimage
+              ON preimage.labelhash = lower(child.labelhashes[1])
+            -- The registry a registry's labels read is the registration's emitter, as the
+            -- served labels read `raw_fact_refs[0].registration.emitting_address`.
+            LEFT JOIN bigname_phase.normalized_events registration_event
+              ON registration_event.event_identity = registration.event_identity
+            WHERE parent.raw_name <> ''",
+        parent_readable = readable_surface("surface"),
+        child_readable = readable_surface("child"),
+        migration_address = active_instance(
+            "address",
+            "subregistry.chain_id",
+            "subregistry.subregistry_address"
+        ),
+        v2_address = active_instance(
+            "address",
+            "subregistry.chain_id",
+            "subregistry.subregistry_address"
+        ),
+        v2_raw_name = label_raw_name("FALSE"),
+        v2_decoded_name = label_decoded_name("FALSE"),
+    ));
+    if let Some(registry) = registry {
+        // A registration's emitter is an address of the registry instance the parent's current
+        // subregistry names, so only that subregistry can hold the registry's labels.
+        builder.push(" AND subregistry.subregistry_address = ");
+        builder.push_bind(registry);
+    }
+    builder.push(format!(
+        "
         ), v1_edges AS (
             -- The latest edge for the child across parents and arms (ranked_v1), so a child is
             -- never served under a parent it has left.
@@ -198,7 +264,17 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                   -- the canonical order, including its parsed emission ordinal.
                   AND (other.parent_node, other.authority_arm)
                       <> (edge.parent_node, edge.authority_arm)
-                  AND {other_position} > {edge_position})
+                  AND {other_position} > {edge_position})",
+        zero_owner = zero_owner("edge.chain_id", "edge.namespace || ':' || edge.child_node"),
+        other_position = row_position("other"),
+        edge_position = row_position("edge"),
+    ));
+    if registry.is_some() {
+        // Another arm decides only children that also have an ENSv2 candidate here.
+        builder.push(" AND edge.child_node IN (SELECT lower(v2.namehash) FROM v2_candidates v2)");
+    }
+    builder.push(format!(
+        "
         ), candidates AS (
             SELECT parent.logical_name_id AS parent_logical_name_id, parent.chain_id,
                    edge.child_logical_name_id, edge.namespace,
@@ -231,39 +307,7 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                                  migration.migration_registry_contract_instance_id
                              AND history.exists)))
             UNION ALL
-            SELECT parent.logical_name_id, parent.chain_id, child.logical_name_id, child.namespace,
-                   {v2_raw_name}, {v2_decoded_name},
-                   child.namehash, lower(child.labelhashes[1]), NULL::text,
-                   registration.registrant, 'ens_v2',
-                   GREATEST(registration.block_number, subregistry.block_number),
-                   registration.transaction_index, registration.log_index,
-                   registration.event_identity,
-                   lower(registration_event.raw_fact_ref ->> 'emitting_address')
-            FROM parent JOIN clock ON clock.chain_id = parent.chain_id
-            JOIN bigname_phase.project_parent_subregistry subregistry
-              ON subregistry.chain_id = parent.chain_id
-             AND subregistry.logical_name_id = parent.logical_name_id
-             AND subregistry.subregistry_address NOT IN ('', {ZERO_ADDRESS})
-            JOIN bigname_phase.contract_instance_addresses address ON {v2_address}
-            JOIN bigname_phase.project_child_registration_state registration
-              ON registration.chain_id = parent.chain_id
-             AND registration.registry_contract_instance_id = address.contract_instance_id::text
-             AND registration.event_kind IS NOT NULL
-             AND registration.event_kind <> 'RegistrationReleased'
-            JOIN bigname_phase.name_surfaces child
-              ON child.logical_name_id = registration.logical_name_id
-             AND child.namespace = parent.namespace AND child.chain_id = parent.chain_id
-             AND child.visibility_state = 'active'
-             AND cardinality(child.labelhashes) = cardinality(parent.labelhashes) + 1
-             AND child.labelhashes[2:cardinality(child.labelhashes)] = parent.labelhashes
-             AND {child_readable}
-            LEFT JOIN bigname_phase.label_preimages preimage
-              ON preimage.labelhash = lower(child.labelhashes[1])
-            -- The registry a registry's labels read is the registration's emitter, as the
-            -- served labels read `raw_fact_refs[0].registration.emitting_address`.
-            LEFT JOIN bigname_phase.normalized_events registration_event
-              ON registration_event.event_identity = registration.event_identity
-            WHERE parent.raw_name <> ''
+            SELECT * FROM v2_candidates
         ), candidate_arms AS (
             -- Compute agreement over every candidate before selecting an arm. A correlated
             -- candidate scan here grows quadratically for parents whose children have no
@@ -289,21 +333,6 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
                OR (arm_summary.authority_arm IS NULL
                    AND candidate.first_arm = candidate.last_arm)
         ),",
-        parent_readable = readable_surface("surface"),
-        child_readable = readable_surface("child"),
-        migration_address = active_instance(
-            "address",
-            "subregistry.chain_id",
-            "subregistry.subregistry_address"
-        ),
-        v2_address = active_instance(
-            "address",
-            "subregistry.chain_id",
-            "subregistry.subregistry_address"
-        ),
-        zero_owner = zero_owner("edge.chain_id", "edge.namespace || ':' || edge.child_node"),
-        other_position = row_position("other"),
-        edge_position = row_position("edge"),
         candidate_position = row_position("candidate"),
         serving = serving("edge.chain_id", "edge.child_logical_name_id"),
         fuses = effective_child_fuses(
@@ -313,8 +342,6 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
         ),
         v1_raw_name = label_raw_name("parent.raw_name = ''"),
         v1_decoded_name = label_decoded_name("parent.raw_name = ''"),
-        v2_raw_name = label_raw_name("FALSE"),
-        v2_decoded_name = label_decoded_name("FALSE"),
     ));
 }
 

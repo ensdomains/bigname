@@ -284,6 +284,26 @@ window as the two above, with the phase runner, redo processes and API stopped. 
 `indisready` in `pg_index` and that `pg_get_indexdef` shows `(chain_id, logical_name_id)`,
 with `WHERE (logical_name_id IS NOT NULL)` on the key state index only.
 
+`20261001110000_project_child_registration_registry_index.sql` adds
+`project_child_registration_state_registry_idx` on `(chain_id,
+registry_contract_instance_id)`, and
+`20261001110100_project_child_edge_candidate_child_index.sql` adds
+`project_child_edge_candidate_child_idx` on `(chain_id, namespace, child_node)`; the child
+pages and counts, the registry labels read among them, probe both. Each is a plain
+`CREATE INDEX` with the same SHARE lock on its table until the schema-migration commits.
+Apply them with the phase runner, redo processes and API stopped, with the same
+`lock_timeout`, `statement_timeout` and retry procedure, `--target-version
+20261001110000` and then `20261001110100`. Afterwards, confirm both indexes are
+`indisvalid` and `indisready` and that `pg_get_indexdef` shows those columns.
+The same build narrows the child reads in `crates/storage/src/families`, so it also
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain even though no stored row changes. After the migrations, an existing deployment finishes the
+full-range Interpret redo and then the stamped Project redo it installs before the
+matching API serves, as the [handoff](#phase-runner-configuration) describes; until
+then its snapshot-selected reads answer `409 stale`. When this build ships together with the
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+change, which rotates the hash too, that change's single redo pair discharges both rotations.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -1592,6 +1612,33 @@ integration takes in the same release. Once the redo publishes, check on Sepolia
 that `GET /v1/names/nick.eth` serves `ens_v1.expires_at` as the BaseRegistrar
 lease date (`"1798608633"` at the time of writing) beside the top-level ENSv2
 `expires_at` (`"1803965433"`), with `ens_v1.wrapper_state` `"emancipated"`.
+
+### Registration time kept through the ENSv1→ENSv2 migration
+
+The build that keeps a migrated name's `registered_at` at its ENSv1 lease's
+registration time instead of the migration's block time
+([naming dictionary](api-v1.md#naming-dictionary)) reads the stored migration
+position the name state already holds. It adds no schema-migration, manifest
+change or historical ingest fetch, but the code lives in hashed storage sources
+(`crates/storage/src/families/control/lifecycle`), so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. An existing deployment finishes the full-history Interpret redo and the
+Project redo it installs before the matching API serves, as for any rotation;
+until then the fenced name routes answer `409 stale`. It ships batched with the
+TYR-116 release (the wrapped-registration resolver fix), whose single Interpret
+redo and Project rebuild discharge it. Once the redo publishes, check on Sepolia
+that `GET /v1/names/cosmic-heron.eth` serves `registered_at` `"1779115572"`,
+its May 2026 ENSv1 registration (block 10874493, tx
+0x61ab3b00cf6863c2aeeea3b584d4395fed2ebd1a65420d21f59d28bee536f988), equal to
+its `created_at`, while `migrated_at` stays `"1790687028"`, its
+`unlocked_wrapped` migration (block 11807758, tx
+0x4ed8fa96e344fc2bb29c61f6f0cce4e9f3e31a7acf5cc033917dd7ff7c39c554). Both are
+read from `GET /v1/names/cosmic-heron.eth/history?include=data`: the ENSv1 time
+is the `RegistrationGranted` row emitted by the ENSv1 BaseRegistrar
+(`0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85`), and the migration time is the
+`MigrationApplied` row (`type=migration`), which shares its block, transaction
+and log with the ENSv2 `RegistrationGranted` it accompanies. Each row carries
+its `block_number`, `transaction_hash` and block `timestamp`.
 
 ### Default reverse names
 

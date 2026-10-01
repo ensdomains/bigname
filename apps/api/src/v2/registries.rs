@@ -159,6 +159,7 @@ pub(crate) async fn get_registry(
         as_of_block,
         storage_cursor.as_ref(),
         params.page_size,
+        include_event_count,
     )
     .await
     .map_err(|_| internal_error(chain_id_slug, &normalized_address))?;
@@ -207,7 +208,7 @@ pub(crate) async fn get_registry(
             cursor: params.cursor.clone(),
             next_cursor: next_cursor.clone(),
             page_size: params.page_size,
-            total_count: None,
+            total_count: references.total_count,
             has_more: next_cursor.is_some(),
         },
         data: references.rows.iter().map(registry_name).collect(),
