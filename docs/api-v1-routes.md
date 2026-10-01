@@ -2871,7 +2871,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `coin_type` | query | string | no | none | Decimal coin type or evm, only with relation=resolves_to; omission defaults to 60 on that relation. evm matches all EVM coin types. |
 | `expires_after` | query | string | no | none | Inclusive expiry lower bound, only with relation=former_registrant. |
 | `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_registrant. |
-| `authority` | query | array of enum Authority | no | none | Comma-separated selected authority arms. Rows without an authority arm do not match. Not accepted with relation=former_registrant. |
+| `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_registrant. |
 | `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_registrant. |
 | `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_registrant. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
@@ -2912,14 +2912,15 @@ introduces it rebuilds Project from full history before serving the option; see
   as `ens_v0`, whose record the current registry does not hold yet
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f);
   `authority=ens_v0,ens_v1` returns both in one collection, each row keeping its
-  own `authority`. It is a primary-key probe of the name row per candidate
-  relation row, applied before grouping, sorting, pagination and
-  `page.total_count`. The set is comma-separated and unordered: blank segments
+  own `authority`. For an ordinary row it is a primary-key probe of the name
+  row per candidate relation row; a registry-child row, which has no name row,
+  compares the `authority` it serves directly. Both apply before grouping,
+  sorting, pagination and `page.total_count`. The set is comma-separated and unordered: blank segments
   are skipped and repeats collapse, as for `relation`, and a single value is
   the one-value set. A whitespace-only value is treated as absent. A value that
   names no authority (`authority=,`), any other value, or a repeated
-  `authority` parameter returns `400 invalid_input`. Rows with no selected arm
-  (Basenames) and ownerless registry rows match no set, including all three
+  `authority` parameter returns `400 invalid_input`. Rows that serve no
+  `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to

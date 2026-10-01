@@ -476,7 +476,7 @@
             "name": "authority",
             "in": "query",
             "required": false,
-            "description": "Comma-separated selected authority arms. Rows without an authority arm do not match. Not accepted with relation=former_registrant.",
+            "description": "Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_registrant.",
             "schema": {
               "type": "array",
               "items": {
