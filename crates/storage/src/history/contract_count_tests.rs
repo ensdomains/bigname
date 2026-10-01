@@ -135,17 +135,19 @@ const HANDOFF_FIXTURE: &str = r#"
     ANALYZE chain_lineage;
 "#;
 
-/// Every scan of `normalized_events`, subplans included, with its rows visited over all loops.
-fn event_scans<'a>(node: &'a Value, output: &mut Vec<(&'a Value, f64)>) {
+/// Every scan of `normalized_events`, subplans included, with its rows visited over all loops and
+/// whether it runs inside a subplan (the handoff representative lookup).
+fn event_scans<'a>(node: &'a Value, in_subplan: bool, output: &mut Vec<(&'a Value, f64, bool)>) {
+    let in_subplan = in_subplan || node["Parent Relationship"] == "SubPlan";
     if node["Relation Name"] == "normalized_events" {
         let visited = (node["Actual Rows"].as_f64().unwrap_or(0.0)
             + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
             * node["Actual Loops"].as_f64().unwrap_or(1.0);
-        output.push((node, visited));
+        output.push((node, visited, in_subplan));
     }
     if let Some(children) = node["Plans"].as_array() {
         for child in children {
-            event_scans(child, output);
+            event_scans(child, in_subplan, output);
         }
     }
 }
@@ -179,21 +181,22 @@ async fn contract_count_handoff_representatives_stay_on_their_block() -> Result<
             push_history_count_query(&mut count_query, &filter, true, None);
             let plan = explain_page(&mut connection, count_query, mode).await?;
             let mut scans = Vec::new();
-            event_scans(&plan[0]["Plan"], &mut scans);
+            event_scans(&plan[0]["Plan"], false, &mut scans);
+            // The representative lookup is the subplan scan, run once per counted copy.
             ensure!(
-                scans
-                    .iter()
-                    .any(|(scan, _)| scan["Actual Loops"].as_f64().unwrap_or(0.0) > 1.0),
+                scans.iter().any(|(scan, _, in_subplan)| {
+                    *in_subplan && scan["Actual Loops"].as_f64().unwrap_or(0.0) >= 4000.0
+                }),
                 "{mode:?}: no representative lookup ran: {plan}"
             );
-            for (scan, _) in &scans {
+            for (scan, _, _) in &scans {
                 ensure!(
                     scan["Node Type"] != "Seq Scan",
                     "{mode:?}: sequential event scan: {plan}"
                 );
             }
             // 4,000 counted copies plus about two rows per representative lookup.
-            let visited: f64 = scans.iter().map(|(_, visited)| visited).sum();
+            let visited: f64 = scans.iter().map(|(_, visited, _)| visited).sum();
             ensure!(
                 visited <= 20000.0,
                 "{mode:?}: visited {visited} event rows: {plan}"

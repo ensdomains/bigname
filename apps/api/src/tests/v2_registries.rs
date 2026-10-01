@@ -1040,7 +1040,7 @@ async fn v2_get_registry_late_labels_count_follows_a_rebind() -> Result<()> {
     seed_registry_fixture(&database).await?;
     let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
     let selected = registry_payload(&database, &uri).await?;
-    seed_unpublished_alpha_rebind(&database).await?;
+    seed_unpublished_alpha_rebind(&database, true).await?;
     let pool = database.pool.clone();
     let (status, payload) = registry_with_late_change(&database, &uri, || async move {
         publish_test_families_on(&pool, REGISTRY_CHAIN_ID, 84).await
@@ -1056,6 +1056,72 @@ async fn v2_get_registry_late_labels_count_follows_a_rebind() -> Result<()> {
     let rebound = registry_payload(&database, &uri).await?;
     assert_eq!(rebound["data"]["name"]["name"], json!("beta.eth"), "{rebound:#}");
     assert_eq!(rebound["data"]["counts"]["labels"], json!(2), "{rebound:#}");
+    database.cleanup().await
+}
+
+// A rebind that leaves alpha.eth's pointer in place: alpha.eth stays the registry's
+// representative pointing name (the earliest current pointer), so `name` and `counts.labels`
+// both describe alpha.eth, whose labels were released, while `referenced_by` lists both names.
+#[tokio::test]
+async fn v2_get_registry_counts_labels_under_its_representative_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    seed_unpublished_alpha_rebind(&database, false).await?;
+    publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 84).await?;
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z")
+        .await?;
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    assert_eq!(overview["data"]["name"]["name"], json!("alpha.eth"), "{overview:#}");
+    let referenced: Vec<&Value> = overview["data"]["referenced_by"]["data"]
+        .as_array()
+        .expect("referenced_by data")
+        .iter()
+        .map(|name| &name["name"])
+        .collect();
+    assert_eq!(referenced, [&json!("alpha.eth"), &json!("beta.eth")]);
+    assert_eq!(overview["data"]["counts"]["labels"], json!(0), "{overview:#}");
+    let labels = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}/labels"),
+    )
+    .await?;
+    assert_eq!(labels["page"]["total_count"], overview["data"]["counts"]["labels"]);
+    database.cleanup().await
+}
+
+// The count has no namespace filter: an event the same address emitted into another namespace
+// on this chain counts, while the bare feed reads only `ens`.
+#[tokio::test]
+async fn v2_get_registry_event_count_includes_every_namespace_the_feed_default_does_not() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let mut other = registry_event(
+        "registry-alpha-other-namespace",
+        None,
+        "ResolverChanged",
+        64,
+        ALPHA_REGISTRY,
+        json!({ "node": "node-other", "resolver": V2_ADDRESS }),
+    );
+    other.namespace = "basenames".to_owned();
+    other.log_index = Some(3);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[other]).await?;
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    let feed = registry_payload(
+        &database,
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
+    )
+    .await?;
+    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
+    assert_eq!(overview["data"]["counts"]["events"], json!(6), "{overview}");
     database.cleanup().await
 }
 
@@ -1079,9 +1145,11 @@ async fn v2_get_registry_late_labels_count_refuses_an_unservable_publication() -
     database.cleanup().await
 }
 
-/// At block 84, which no publication covers: the root registry clears alpha.eth's subregistry
-/// and points beta.eth at the alpha registry, which registers one.beta.eth and two.beta.eth.
-async fn seed_unpublished_alpha_rebind(database: &TestDatabase) -> Result<()> {
+/// At block 84, which no publication covers: the root registry points beta.eth at the alpha
+/// registry, which releases one.alpha.eth and two.alpha.eth and registers one.beta.eth and
+/// two.beta.eth. With `clear_alpha` the root also clears alpha.eth's pointer; without it
+/// alpha.eth keeps pointing at the registry.
+async fn seed_unpublished_alpha_rebind(database: &TestDatabase, clear_alpha: bool) -> Result<()> {
     upsert_phase_raw_blocks(
         &database.pool,
         &[raw_block(REGISTRY_CHAIN_ID, "0xregistry84", None, 84, 1_700_000_084)],
@@ -1138,7 +1206,28 @@ async fn seed_unpublished_alpha_rebind(database: &TestDatabase) -> Result<()> {
         json!({ "source_event": "SubregistryUpdated", "subregistry": ALPHA_REGISTRY }),
     );
     beta_pointer.log_index = Some(2);
-    events.extend([alpha_cleared, beta_pointer]);
+    if clear_alpha {
+        events.push(alpha_cleared);
+    }
+    events.push(beta_pointer);
+    for (index, (name, resource)) in [("one.alpha.eth", 0xA100), ("two.alpha.eth", 0xA110)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut release = registry_event(
+            &format!("registry-{name}-released"),
+            Some(&registry_logical_name_id(name)),
+            "RegistrationReleased",
+            84,
+            ALPHA_REGISTRY,
+            json!({ "source_event": "ParentUpdated",
+                    "terminal_reason": "registry_name_binding_changed", "status": "released",
+                    "registry_contract_instance_id": Uuid::from_u128(0xA190) }),
+        );
+        release.resource_id = Some(Uuid::from_u128(resource));
+        release.log_index = Some(20 + i64::try_from(index)?);
+        events.push(release);
+    }
     for (index, (name, resource)) in [("one.beta.eth", 0xB100), ("two.beta.eth", 0xB110)]
         .into_iter()
         .enumerate()

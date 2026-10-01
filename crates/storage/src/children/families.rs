@@ -106,12 +106,24 @@ pub(super) async fn registry_page(
     })
 }
 
-/// The labels `registry_address` holds at the current family publication of `chain_id`, under
-/// the name it serves in that same snapshot: the earliest name whose current ENSv2 subregistry
-/// pointer targets it, as the registry overview picks its `name`. Zero when no name points at
-/// it. The serving name is resolved here, not passed in, so a publication that rebinds the
-/// registry to another name between the caller's reads and this one cannot anchor the count to
-/// a parent the registry no longer serves.
+/// The registry's representative pointing name: the earliest name whose current ENSv2
+/// subregistry pointer targets it, the overview's `name` rule. With no reverse index on
+/// `project_parent_subregistry` this reads the chain's pointer rows.
+const SERVING_PARENT: &str = "/* storage:children.registry_serving_parent */
+    SELECT pointer.logical_name_id
+    FROM bigname_phase.project_parent_subregistry pointer
+    JOIN bigname_phase.name_surfaces surface
+      ON surface.logical_name_id = pointer.logical_name_id
+     AND surface.visibility_state = 'active'
+    WHERE pointer.chain_id = $1 AND pointer.subregistry_address = $2
+    ORDER BY pointer.block_number, pointer.transaction_index NULLS LAST,
+             pointer.log_index NULLS LAST, pointer.event_identity
+    LIMIT 1";
+
+/// The labels-route total of `registry_address` at the current family publication of
+/// `chain_id`: its labels under its representative pointing name ([`SERVING_PARENT`]) in that
+/// same snapshot, or zero when no name points at it. The name is resolved here, not passed in,
+/// so the count never anchors to a name read from an earlier publication.
 pub(super) async fn registry_count_current(
     pool: &PgPool,
     chain_id: &str,
@@ -120,23 +132,12 @@ pub(super) async fn registry_count_current(
     let registry = registry_address.to_ascii_lowercase();
     let mut transaction = read_snapshot(pool).await?;
     ensure_published(&mut transaction, &[chain_id.to_owned()]).await?;
-    let parent: Option<String> = sqlx::query_scalar(
-        "/* storage:children.registry_serving_parent */
-         SELECT pointer.logical_name_id
-         FROM bigname_phase.project_parent_subregistry pointer
-         JOIN bigname_phase.name_surfaces surface
-           ON surface.logical_name_id = pointer.logical_name_id
-          AND surface.visibility_state = 'active'
-         WHERE pointer.chain_id = $1 AND pointer.subregistry_address = $2
-         ORDER BY pointer.block_number, pointer.transaction_index NULLS LAST,
-                  pointer.log_index NULLS LAST, pointer.event_identity
-         LIMIT 1",
-    )
-    .bind(chain_id)
-    .bind(&registry)
-    .fetch_optional(&mut *transaction)
-    .await
-    .context("failed to read the name a registry serves")?;
+    let parent: Option<String> = sqlx::query_scalar(SERVING_PARENT)
+        .bind(chain_id)
+        .bind(&registry)
+        .fetch_optional(&mut *transaction)
+        .await
+        .context("failed to read the name a registry serves")?;
     let count = match parent {
         Some(parent) => count_children_on(&mut transaction, &parent, Some(&registry)).await?,
         None => 0,
@@ -189,3 +190,7 @@ fn row(child: FamilyChildRow) -> ChildrenCurrentRow {
         last_recomputed_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
+
+#[cfg(test)]
+#[path = "serving_parent_tests.rs"]
+mod serving_parent_tests;

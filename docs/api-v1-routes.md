@@ -4201,15 +4201,19 @@ For a registrar lease first identified by a later readable observation, registra
   `SourceManifestUpdated` payloads recorded during that admission to establish the
   registry role. The retained declaration identity and address must match; later re-admission neither changes
   an older interval's role nor fills the gap between admissions.
-  `counts.labels` is the exact
-  number of labels the registry currently holds (the rows of the labels route
-  below); it is `0` when no name currently points at the registry. `counts.events` is present only with
+  `counts.labels` is the total of the labels route below for the registry's
+  representative pointing name: the name `name` selects, the earliest name
+  whose current subregistry pointer targets the registry. Labels the registry
+  holds under another name that also points at it are not counted. It is `0`
+  when no name points at the registry. `counts.events` is present only with
   `include=counts` and counts the product-visible events the contract emitted
-  on this chain up to the selected position, without a namespace filter: the
-  rows `GET /v1/events?contract_address=` serves for this chain, since an ENSv2
-  registry's events are all in the feed's default `ens` namespace. The feed
-  itself spans every published chain. The count reads every event of the
-  contract rather than a projected total.
+  on this chain up to the selected position, in any namespace. For an ENSv2
+  registry, whose events are all in `ens`, it equals the `total_count` of
+  `GET /v1/events?contract_address=` at the same chain and block: that feed
+  defaults to the `ens` namespace, which is served on one chain. For an address
+  an operator also admits into another namespace on this chain, the overview
+  counts those events too and the default feed does not. The count reads every
+  event of the contract rather than a projected total.
   `counts.roles`, also present with `include=counts`, is the exact number of
   observed nonzero declared role assignments across the registry's root and
   label resources. One account on two resources counts twice; several role bits
@@ -4241,11 +4245,13 @@ For a registrar lease first identified by a later readable observation, registra
   current published position. The creation, pointer, reference, role and event
   evidence is revalidated against the publication before `counts.labels` is
   read. `counts.labels` is then sampled separately: in its own snapshot of the
-  current publication it finds the name the registry serves there and counts
-  that name's labels the registry registered, or `0` when no name points at the
-  registry. It is not covered by `meta.as_of`, so it can reflect labels added
+  current publication it finds the registry's representative pointing name
+  there and takes that name's labels-route total, or `0` when no name points at
+  the registry. It is not covered by `meta.as_of`, so it can reflect labels added
   or removed, a rollback, or a rebuild at a lower block published after the
-  check. If that publication is unavailable, the request returns `409 stale`.
+  check, and `name`, `parent_registry` and `referenced_by` can describe a
+  different publication from the one `counts.labels` sampled. If that
+  publication is unavailable, the request returns `409 stale`.
 - Status semantics: an unknown registry returns `404 not_found` at every
   selector, because the bounded read proves absence at the selected position.
   Malformed `chain_id` or `address` and an `include` value other than `counts`
