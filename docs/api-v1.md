@@ -2269,7 +2269,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | `owner` | string | optional | Current token or registry owner address, when known. |
 | `manager` | string | optional | Optional manager address. Current forward-read constructors do not emit this field; no null placeholder is served. |
 | `registrant` | string | optional | Current registrant address; omitted on released names. |
-| `registered_at` | string | optional | Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
@@ -2391,7 +2391,7 @@ Shared lookup feed/detail record. Detail adds supported registration and grouped
 | `owner` | string | optional | Current token or registry owner address, when known. |
 | `manager` | string | optional | Optional manager address. Current forward-read constructors do not emit this field; no null placeholder is served. |
 | `registrant` | string | optional | Current registrant address; omitted on released names. |
-| `registered_at` | string | optional | Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
@@ -2460,7 +2460,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `owner` | string | optional | Current token or registry owner address, when known. |
 | `registrant` | string | optional | Current registrant address; omitted on released names. |
 | `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
-| `registered_at` | string | optional | Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
@@ -2480,7 +2480,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `owner` | string | optional | Current token or registry owner address, when known. |
 | `registrant` | string | optional | Current registrant address; omitted on released names. |
 | `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
-| `registered_at` | string | optional | Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
@@ -2501,7 +2501,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `owner` | string | optional | Current token or registry owner address, when known. |
 | `registrant` | string | optional | Current registrant address; omitted on released names. |
 | `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
-| `registered_at` | string | optional | Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
+| `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `created_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `expires_at_reason` | enum ExpiryReason | when null_expiry | Reason for a classified null expiry; absent for finite expiry and absent registration context. |
