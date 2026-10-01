@@ -10,7 +10,7 @@ Legacy ENS indexing tends to conflate public name text, node identity, token ide
 - one public surface may rebind across time
 - one resource may appear under multiple public surfaces
 - token identifiers may change while backing authority does not
-- resolver aliasing and wildcard behavior may create observable surfaces without direct registry entries
+- wildcard behavior may create observable surfaces without direct registry entries (when this was written, the 2026-06-29 ENSv2 resolver's aliasing did too; that alias path was later retired and is no longer interpreted, see [upstream](../upstream.md))
 
 ## Decision
 
@@ -105,7 +105,7 @@ Resource-centric convenience rule:
 - address collections return surfaces by default; an ENSv1 registry child with no surface (a standalone registry-owner observation above) is the one row without a surface, listed for its current registry owner on its registry-only resource and named as its parent's child list names it
 - clients may opt into `dedupe_by=resource`, but that is never the default truth model
 - history must support `scope=surface|resource|both`
-- wrapping, migration, token regeneration, and aliasing can be represented without identity distortion
+- wrapping, migration, and token regeneration can be represented without identity distortion (the retired ENSv2 resolver aliasing was represented the same way while it was interpreted)
 
 ## Worked Examples
 
