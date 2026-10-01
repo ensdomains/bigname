@@ -522,7 +522,9 @@ async fn primary_name_rows_return_the_recorded_name() -> Result<()> {
 }
 
 // TYR-120. Each write to the ENS `default.reverse` registrar is its own primary-name row at coin
-// type 2147483648, with the name its `NameForAddrChanged` carried.
+// type 2147483648, with the name its `NameForAddrChanged` carried. Compatibility coverage: the
+// history reader already handled same-log `NameForAddrChanged` rows for any coin type, so this
+// does not exercise raw-event admission or the current-state fallback.
 #[tokio::test]
 async fn default_reverse_rows_return_the_recorded_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

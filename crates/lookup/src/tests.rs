@@ -3372,6 +3372,89 @@ async fn primary_name_stops_at_a_failed_or_whitespace_reverse_name() -> AnyResul
 }
 
 #[tokio::test]
+async fn primary_name_ends_without_a_usable_default_reverse_name() -> AnyResult<()> {
+    const DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let zero_resolver =
+        hex_string(&Address::from_str("0x0000000000000000000000000000000000000000")?.abi_encode());
+    let reverted = || RpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: Value::Null,
+    };
+    // (default answer, registrar declared, status, failure reason)
+    let cases = [
+        (
+            Some(RpcResponse::Result(Value::String(hex_string(
+                &"".abi_encode(),
+            )))),
+            true,
+            EnsPrimaryNameStatus::NotFound,
+            None,
+        ),
+        (
+            Some(reverted()),
+            true,
+            EnsPrimaryNameStatus::ExecutionFailed,
+            Some("resolver_call_failed"),
+        ),
+        (
+            Some(RpcResponse::Result(Value::String("0x1234".to_owned()))),
+            true,
+            EnsPrimaryNameStatus::ExecutionFailed,
+            Some("resolver_return_data_malformed"),
+        ),
+        (None, false, EnsPrimaryNameStatus::NotFound, None),
+    ];
+    for (default_answer, declared, status, failure_reason) in cases {
+        let mut responses = vec![RpcResponse::Result(Value::String(zero_resolver.clone()))];
+        responses.extend(default_answer);
+        let expected_calls = responses.len();
+        let (rpc_url, rpc_handle) = spawn_mock_rpc(responses).await?;
+        let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+        seed_manifest(
+            fixture.pool(),
+            ENS_NAMESPACE,
+            "ens_v1_registry_l1",
+            "registry",
+            ENS_REGISTRY,
+            "00000000-0000-0000-0000-000000000104",
+        )
+        .await?;
+        if declared {
+            seed_manifest(
+                fixture.pool(),
+                ENS_NAMESPACE,
+                "ens_v1_reverse_l1",
+                "default_reverse_registrar",
+                DEFAULT_REVERSE_REGISTRAR,
+                "00000000-0000-0000-0000-000000000105",
+            )
+            .await?;
+        }
+        let result = lookup_engine(fixture.pool(), &rpc_url)?
+            .lookup_ens_primary_name(ETHEREUM, target)
+            .await?;
+        fixture.cleanup().await?;
+        let requests = join_rpc(rpc_handle).await?;
+
+        assert_eq!(result.status, status);
+        assert_eq!(result.name, None);
+        assert_eq!(result.failure_reason.as_deref(), failure_reason);
+        assert_eq!(
+            requests.len(),
+            expected_calls,
+            "no forward call without a name"
+        );
+        if declared {
+            assert_eq!(requests[1]["params"][0]["to"], DEFAULT_REVERSE_REGISTRAR);
+        }
+        assert_hash_pinned(&requests, ETHEREUM_HASH);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResult<()> {
     let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
     let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
