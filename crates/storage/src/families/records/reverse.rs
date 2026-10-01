@@ -19,6 +19,9 @@ pub struct FamilyReverseClaim {
     /// row exists for the same namespace, reverse node and chain at another resolver. A
     /// diagnostic only: it does not establish that a claim is missing from the family.
     pub node_claim_at_other_resolver: bool,
+    /// The selected claim stores no name bytes: no claim, a version reset, or an empty string.
+    /// Unlike `claim_status`, whitespace or undecodable bytes are not empty.
+    pub claim_value_empty: bool,
 }
 
 /// The reverse claim of the tuple, `None` when the tuple has no `ReverseChanged`, read in one
@@ -156,6 +159,15 @@ pub(crate) async fn load_family_reverse_claim_on(
         .and_then(|claim| claim.after_state.get("raw_name"))
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let claim_value_empty = claim.is_none_or(|claim| {
+        let state = &claim.after_state;
+        state.get("raw_name_bytes").is_none()
+            && match state.get("raw_name") {
+                Some(Value::String(name)) => name.is_empty(),
+                Some(Value::Object(_)) => false,
+                _ => true,
+            }
+    });
     let raw_claim_name = match status.as_str() {
         "success" | "invalid_name" => raw_name.clone(),
         _ => None,
@@ -217,6 +229,7 @@ pub(crate) async fn load_family_reverse_claim_on(
             claim_name_is_normalized,
         },
         node_claim_at_other_resolver,
+        claim_value_empty,
     }))
 }
 

@@ -34,6 +34,7 @@ fn address(n: u64) -> String {
 
 struct Writer<'a> {
     fixture: &'a Fixture,
+    block: i64,
     log: i64,
 }
 
@@ -42,7 +43,7 @@ impl Writer<'_> {
         self.log += 1;
         let identity = format!("{kind}:{}", self.log);
         self.fixture
-            .event(Event::new(&identity, 1, self.log, kind, family).after(after))
+            .event(Event::new(&identity, self.block, self.log, kind, family).after(after))
             .await?;
         Ok(())
     }
@@ -121,6 +122,7 @@ async fn coin_60_falls_back_to_the_default_reverse_name() -> Result<()> {
     let fixture = Fixture::new("families_reverse_default", 2).await?;
     let mut writer = Writer {
         fixture: &fixture,
+        block: 1,
         log: 0,
     };
     // Claimed with a zero resolver, as the ENSv2 app does before setting the default name.
@@ -189,5 +191,77 @@ async fn coin_60_falls_back_to_the_default_reverse_name() -> Result<()> {
             .map(|claim| claim.row.claim_status),
         Some(PrimaryNameClaimStatus::Success)
     );
+    fixture.cleanup().await
+}
+
+// Upstream tests the name's byte length, so any stored bytes on a nonzero resolver stop the
+// fallback, even when the product cannot serve them; and the fallback follows later changes.
+#[tokio::test]
+async fn nonempty_addr_reverse_bytes_stop_the_fallback() -> Result<()> {
+    let fixture = Fixture::new("families_reverse_default_bytes", 2).await?;
+    let mut writer = Writer {
+        fixture: &fixture,
+        block: 1,
+        log: 0,
+    };
+    let whitespace = address(1);
+    writer.claim(&whitespace).await?;
+    writer.resolver(&whitespace, R1).await?;
+    writer.name(&whitespace, " ").await?;
+    writer.default_name(&whitespace, "evers.eth").await?;
+    let invalid = address(2);
+    writer.claim(&invalid).await?;
+    writer.resolver(&invalid, R1).await?;
+    writer.name(&invalid, "bad name.eth").await?;
+    writer.default_name(&invalid, "evers.eth").await?;
+    let moved = address(3);
+    writer.claim(&moved).await?;
+    writer.resolver(&moved, R1).await?;
+    writer.name(&moved, "bob.eth").await?;
+    writer.default_name(&moved, "carol.eth").await?;
+    let cleared = address(4);
+    writer.default_name(&cleared, "dave.eth").await?;
+    fixture.apply(1, FamilyMode::Normal).await?;
+    assert_eq!(
+        served(&fixture, &moved, "60")
+            .await?
+            .map(|claim| claim["name"].clone()),
+        Some(json!("bob.eth"))
+    );
+    // Block 2 clears the resolver of one node and the default name of another address.
+    writer.block = 2;
+    writer.resolver(&moved, ZERO).await?;
+    writer.default_name(&cleared, "").await?;
+    fixture.apply(2, FamilyMode::Normal).await?;
+
+    let addr = |status: &str, name: Option<&str>, address: &str| {
+        json!({"status": status, "name": name, "coin_type": "60",
+               "reverse_node": reverse_node(address, "addr")})
+    };
+    assert_eq!(
+        served(&fixture, &whitespace, "60").await?,
+        Some(addr("not_found", None, &whitespace))
+    );
+    assert_eq!(
+        served(&fixture, &invalid, "60").await?,
+        Some(addr("invalid_name", Some("bad name.eth"), &invalid))
+    );
+    assert_eq!(
+        served(&fixture, &moved, "60").await?,
+        Some(
+            json!({"status": "success", "name": "carol.eth", "coin_type": "60",
+                    "reverse_node": reverse_node(&moved, "default")})
+        )
+    );
+    for coin_type in ["60", "2147483648"] {
+        assert_eq!(
+            served(&fixture, &cleared, coin_type).await?,
+            Some(
+                json!({"status": "not_found", "name": null, "coin_type": coin_type,
+                        "reverse_node": reverse_node(&cleared, "default")})
+            ),
+            "coin type {coin_type}"
+        );
+    }
     fixture.cleanup().await
 }
