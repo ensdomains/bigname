@@ -1,0 +1,104 @@
+# Copy into ensdomains/bigname/.github/workflows/. Publishing a GitHub pre-release (tag v0.1.0-rc.1,
+# "Set as a pre-release") deploys that commit to staging through Komodo; a full release runs the same
+# staging deploy and then stops at the production gate, which is still a person following
+# docs/runbooks/deploy-indexer.md in bigname-internal.
+#
+# Needs a repository environment `staging` holding
+#   secrets  KOMODO_CF_ACCESS_CLIENT_ID, KOMODO_CF_ACCESS_CLIENT_SECRET   (Cloudflare Access service token)
+#            KOMODO_API_KEY, KOMODO_API_SECRET                           (Komodo service user, Execute on one Action)
+#   vars     KOMODO_URL = https://komodo.ops.bigname.sh
+#            KOMODO_ACTION = deploy-release (staging)
+# How the Action and the key are made: bigname-internal docs/04-deploy.md ("Releases to staging").
+name: Release
+on:
+  release:
+    types: [published]
+concurrency:
+  group: bigname-release
+  cancel-in-progress: false
+permissions:
+  contents: read
+  packages: read
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.r.outputs.image }}
+      commit: ${{ steps.r.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: tag -> commit on main -> image digest
+        id: r
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-list -n 1 "refs/tags/$TAG")
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::$TAG ($commit) is not on main; releases deploy main commits only"; exit 1; }
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          ref="$repo:${commit::7}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # the Docker Image workflow runs after CI on the merge; wait for it rather than deploying something older
+          for i in $(seq 1 40); do
+            digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"') && [ -n "$digest" ] && break
+            echo "image $ref not published yet ($i/40), waiting 60s"; sleep 60
+          done
+          [ -n "${digest:-}" ] || { echo "::error::no image for $ref after 40 minutes; did the Docker Image workflow run for $commit?"; exit 1; }
+          revision=$(docker buildx imagetools inspect "$ref" --format '{{json .Image.Config.Labels}}' | jq -r '."org.opencontainers.image.revision" // empty')
+          [ "$revision" = "$commit" ] || { echo "::error::image $ref was built from $revision, not $commit"; exit 1; }
+          echo "image=$repo@$digest" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit"      >> "$GITHUB_OUTPUT"
+          { echo "### $TAG"; echo "- image: \`$repo@$digest\`"; echo "- commit: \`$commit\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+  staging:
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: deploy-release on staging via Komodo
+        env:
+          KOMODO_URL: ${{ vars.KOMODO_URL }}
+          KOMODO_ACTION: ${{ vars.KOMODO_ACTION }}
+          CF_ID: ${{ secrets.KOMODO_CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.KOMODO_CF_ACCESS_CLIENT_SECRET }}
+          K_KEY: ${{ secrets.KOMODO_API_KEY }}
+          K_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          komodo() {  # <execute|read> <json body>
+            curl -sS --fail-with-body -m 60 "$KOMODO_URL/$1" -H "CF-Access-Client-Id: $CF_ID" -H "CF-Access-Client-Secret: $CF_SECRET" \
+              -H "X-Api-Key: $K_KEY" -H "X-Api-Secret: $K_SECRET" -H 'content-type: application/json' -d "$2"
+          }
+          # /execute returns at once with the Update; the Action keeps running in Komodo. Poll it.
+          body=$(jq -n --arg a "$KOMODO_ACTION" --arg i "$IMAGE" --arg c "$COMMIT" '{type:"RunAction",params:{action:$a,args:{image:$i,commit:$c}}}')
+          update=$(komodo execute "$body")
+          id=$(jq -r '._id."$oid" // empty' <<<"$update"); [ -n "$id" ] || { echo "::error::no update id in response: ${update:0:300}"; exit 1; }
+          echo "Komodo update $id ($KOMODO_URL/updates/$id)"
+          for i in $(seq 1 240); do   # 240 x 15s = 60 min
+            sleep 15
+            u=$(komodo read "$(jq -n --arg id "$id" '{type:"GetUpdate",params:{id:$id}}')")
+            [ "$(jq -r .status <<<"$u")" = Complete ] && break
+            [ $((i % 4)) = 0 ] && echo "still running ($((i / 4)) min)"
+          done
+          jq -r '.logs[] | "--- \(.stage)\n\(.stdout)\(if .stderr != "" then "\n[stderr]\n" + .stderr else "" end)"' <<<"$u"
+          if [ "$(jq -r .success <<<"$u")" = true ]; then
+            echo "### Staging: deployed $COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::deploy-release did not succeed; the log above says why (busy and refused are normal outcomes: re-run when the reason is gone)"
+            echo "### Staging: NOT deployed ($COMMIT)" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+  production:
+    needs: [resolve, staging]
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: not automated yet
+        run: |
+          echo "Production releases are still done by a person: bigname-internal docs/runbooks/deploy-indexer.md, then deploy-api." | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "- image: ${{ needs.resolve.outputs.image }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: ${{ needs.resolve.outputs.commit }}" >> "$GITHUB_STEP_SUMMARY"
