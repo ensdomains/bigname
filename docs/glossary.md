@@ -2288,8 +2288,9 @@ expiry never does.
 
 ## Shadow
 
-(1) manifest rollout/capability value: facts may be interpreted
-but general public reads are not enabled; (2) *shadow comparison*:
+(1) manifest `rollout_status` value (also an ABI entry marker, never a
+capability-flag status): facts may be interpreted but general public reads are
+not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
