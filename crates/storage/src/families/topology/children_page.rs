@@ -42,10 +42,33 @@ pub struct FamilyChildRow {
     pub registrant: Option<String>,
     /// The `authority` the child serves when it has no name row (`ens_v1` or `ens_v0`).
     pub registry_authority: Option<String>,
-    /// The child's only surface is a shadow one at or below the clock: a label-bearing event
-    /// named it under a label that fails normalization, so no name row composes for it.
-    pub shadow_surface: bool,
+    /// The child's only surface is a shadow one at or below the clock (its label fails
+    /// normalization, so no name row composes for it) and a NameWrapper or ENSv1 registrar event
+    /// observed that name, so wrapper state or a lease can be projected for it without a name
+    /// row. A shadow only another observer wrote, such as a resolver `NameChanged`, does not
+    /// count ([`LIFECYCLE_SHADOW`]).
+    pub lifecycle_shadow: bool,
 }
+
+/// Whether the child's only surface is a shadow one at or below the clock that a lifecycle
+/// observer named: the NameWrapper (`ens_v1_wrapper_l1`, `NameWrapped`) or the ENSv1 registrar
+/// and its controllers (`ens_v1_registrar_l1`, `NameRegistered` and `NameRenewed`). Each shadow
+/// observation writes a `PreimageObserved` event under the observer's source family
+/// (crates/adapters/src/schema_v2/identity.rs, `materialize`), and the surface row keeps only the
+/// earliest observation's provenance, so the events, not the row, tell the observers apart. The
+/// lookup reads `normalized_events_name_history_idx`.
+const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shadow'
+         AND child_surface.block_number <= clock.block_number
+         AND EXISTS (
+             SELECT 1 FROM bigname_phase.normalized_events observed
+             WHERE observed.logical_name_id = selected.child_logical_name_id
+               AND observed.chain_id = clock.chain_id
+               AND observed.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND observed.block_number <= clock.block_number
+               AND observed.event_kind = 'PreimageObserved'
+               AND observed.consumer_visibility = 'activated'
+               AND observed.source_family IN ('ens_v1_wrapper_l1', 'ens_v1_registrar_l1')),
+         FALSE)";
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
 /// the owner each serves when `owner` is given.
@@ -312,9 +335,7 @@ pub(super) fn push_children<'a>(
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    selected.registry_authority,
-                   COALESCE(child_surface.visibility_state = 'shadow'
-                            AND child_surface.block_number <= clock.block_number, FALSE)
-                       AS shadow_surface,
+                   {LIFECYCLE_SHADOW} AS lifecycle_shadow,
                    {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
@@ -381,7 +402,7 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             owner: row.try_get("owner")?,
             registrant: row.try_get("registrant")?,
             registry_authority: row.try_get("registry_authority")?,
-            shadow_surface: row.try_get("shadow_surface")?,
+            lifecycle_shadow: row.try_get("lifecycle_shadow")?,
         },
         row.try_get("sort_timestamp")?,
     )))

@@ -478,39 +478,26 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
     database.cleanup().await
 }
 
-/// A child NameWrapper wrapped under a label that fails normalization has only a shadow surface
-/// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `name_wrapped`), so no name row
-/// composes and both routes serve it from its registry. Its wrapper state and any lease are
-/// projected without a composed name, so its `ens_v1` object claims no lifecycle: no `expires_at`
-/// and no wrapper fields. A sibling no label-bearing event named keeps `expires_at: null`.
-#[tokio::test]
-async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_bounded_membership_blocks(&database, 240).await?;
-    let (alpha, alpha_resource) =
-        seed_family_name(&database, "alpha.eth", 0x7f1_0000, "ens_v1").await?;
-    insert_family_label_preimage(&database.pool, b"Wrapped").await?;
-    let shadowed = insert_registry_child(
-        &database,
-        "alpha.eth",
-        "Wrapped",
-        RC_OWNER,
-        202,
-        Uuid::from_u128(0x7f1_0011),
-    )
-    .await?;
-    let plain = insert_registry_child(
-        &database,
-        "alpha.eth",
-        "plain",
-        RC_OWNER,
-        203,
-        Uuid::from_u128(0x7f1_0012),
-    )
-    .await?;
-    let shadowed_id = format!("ens:{shadowed}");
-    // The shadow surface the wrapper adapter writes for the NameWrapped name in the same block.
-    let labels = ["Wrapped", "alpha", "eth"];
+/// The shadow surface Interpret writes for `<label>.alpha.eth`, a name whose label fails
+/// normalization (crates/adapters/src/schema_v2/identity.rs, `materialize`), with the
+/// `PreimageObserved` event of the `family` observer that named it, at `block`. Returns the
+/// child's name id.
+async fn insert_shadow_child_surface(
+    database: &TestDatabase,
+    child: &str,
+    label: &str,
+    family: &str,
+    source_event: &str,
+    block: i64,
+) -> Result<String> {
+    let id = format!("ens:{child}");
+    let labels = [label, "alpha", "eth"];
+    let mut dns = Vec::new();
+    for label in labels {
+        dns.push(u8::try_from(label.len())?);
+        dns.extend_from_slice(label.as_bytes());
+    }
+    dns.push(0);
     sqlx::query(
         "INSERT INTO bigname_phase.name_surfaces (
              logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
@@ -519,14 +506,15 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
              provenance, canonicality_state)
          VALUES ($1, 'ens', $2, $3, $4, $5, $6, $7, 'shadow',
                  '[{\"error\": \"raw label is not byte-identical to its normalized form\"}]',
-                 'normalization_gate', to_timestamp(1700000202), $8, '0xhistory202', 202,
-                 '{}'::jsonb, 'canonical')",
+                 'normalization_gate', to_timestamp(1700000000 + $9), $8,
+                 '0xhistory' || $9, $9, jsonb_build_object('source_event', $10::text),
+                 'canonical')",
     )
-    .bind(&shadowed_id)
+    .bind(&id)
     .bind(labels.join("."))
     .bind(labels.to_vec())
-    .bind(b"\x07Wrapped\x05alpha\x03eth\x00".to_vec())
-    .bind(&shadowed)
+    .bind(dns)
+    .bind(child)
     .bind(
         labels
             .iter()
@@ -535,7 +523,79 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     )
     .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
     .bind(FAMILY_CHAIN)
+    .bind(block)
+    .bind(source_event)
     .execute(&database.pool)
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[family_event(
+            &format!("rc-shadow-preimage-{label}"),
+            Some(&id),
+            None,
+            "PreimageObserved",
+            family,
+            block,
+            2,
+            json!({"source_event": source_event, "logical_name_id": id, "namehash": child,
+                   "visibility_state": "shadow", "deactivation_reason": "normalization_gate"}),
+        )],
+    )
+    .await?;
+    Ok(id)
+}
+
+/// A child NameWrapper wrapped under a label that fails normalization has only a shadow surface
+/// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `name_wrapped`), so no name row
+/// composes and both routes serve it from its registry. Its wrapper state and any lease are
+/// projected without a composed name, so its `ens_v1` object claims no lifecycle: no `expires_at`
+/// and no wrapper fields. A child whose only shadow a resolver `NameChanged` wrote has no such
+/// state and, like a sibling no label-bearing event named, keeps `expires_at: null`.
+#[tokio::test]
+async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f1_0000, "ens_v1").await?;
+    for label in [b"Wrapped".as_slice(), b"Named".as_slice()] {
+        insert_family_label_preimage(&database.pool, label).await?;
+    }
+    let mut children = Vec::new();
+    for (index, label) in ["Wrapped", "Named", "plain"].into_iter().enumerate() {
+        let offset = i64::try_from(index)?;
+        children.push(
+            insert_registry_child(
+                &database,
+                "alpha.eth",
+                label,
+                RC_OWNER,
+                202 + offset,
+                Uuid::from_u128(0x7f1_0011 + u128::try_from(index)?),
+            )
+            .await?,
+        );
+    }
+    let (wrapped, named, plain) = (&children[0], &children[1], &children[2]);
+    let wrapped_id = insert_shadow_child_surface(
+        &database,
+        wrapped,
+        "Wrapped",
+        "ens_v1_wrapper_l1",
+        "NameWrapped",
+        202,
+    )
+    .await?;
+    // An admitted PublicResolver's `setName` takes any string for a node its caller controls
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f),
+    // so a reverse record can name the registry child under a label that fails normalization.
+    insert_shadow_child_surface(
+        &database,
+        named,
+        "Named",
+        "ens_v1_resolver_l1",
+        "NameChanged",
+        203,
+    )
     .await?;
     // The NameWrapper resource the adapter writes beside the shadow surface.
     let wrapper_resource = Uuid::from_u128(0x7f1_0021);
@@ -568,13 +628,13 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
             ),
             family_event(
                 "rc-shadow-wrapped-fuses",
-                Some(&shadowed_id),
+                Some(&wrapped_id),
                 Some(wrapper_resource),
                 "PermissionScopeChanged",
                 "ens_v1_wrapper_l1",
                 202,
                 1,
-                json!({"source_event": "NameWrapped", "node": shadowed,
+                json!({"source_event": "NameWrapped", "node": wrapped,
                        "wrapper_state": "emancipated", "fuses": 65_536,
                        "expiry": 1_900_000_000i64}),
             ),
@@ -592,7 +652,11 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     );
     let subnames =
         rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
-    for (node, ens_v1) in [(&shadowed, json!({})), (&plain, json!({"expires_at": null}))] {
+    for (node, ens_v1) in [
+        (wrapped, json!({})),
+        (named, json!({"expires_at": null})),
+        (plain, json!({"expires_at": null})),
+    ] {
         let row = rows
             .iter()
             .find(|row| row["namehash"] == json!(node))

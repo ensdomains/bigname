@@ -204,7 +204,7 @@ pub(crate) async fn load_address_names_page_from(
             last_recomputed_at,
             served_owner,
             served_authority,
-            served_shadow_surface,
+            served_lifecycle_shadow,
         "#,
     );
     if sort.is_timestamp() {

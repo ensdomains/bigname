@@ -70,9 +70,9 @@ pub(crate) fn ens_v1(
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L147 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
 ///
-/// A child whose only name surface is a shadow one (`shadow_surface`: the surface bigname records,
-/// but keeps out of name reads, for a name that fails ENSIP-15 normalization) has no name row
-/// either, but it can be wrapped or leased. NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take any label
+/// A child whose only name surface is a shadow one (the surface bigname records, but keeps out of
+/// name reads, for a name that fails ENSIP-15 normalization) has no name row either, but it can
+/// be wrapped or leased. NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take any label
 /// bytes, `_addLabel` checks only the length, and `_wrap` emits `NameWrapped` with that name
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L585 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596-L630 @ ens_v1@91c966f)
@@ -80,15 +80,18 @@ pub(crate) fn ens_v1(
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f).
 /// For a name that fails normalization the wrapper adapter writes a shadow surface instead of a
 /// name (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs:133 and :258-267), so its wrapper
-/// state, and a `.eth` name's lease, are projected without a composed name. Its object then
-/// omits `expires_at` and the wrapper fields rather than claim it has no lease or wrapper state.
+/// state, and a `.eth` name's lease, are projected without a composed name. When a NameWrapper or
+/// ENSv1 registrar event observed the shadow (`lifecycle_shadow`) the object omits `expires_at`
+/// and the wrapper fields rather than claim the child has no lease or wrapper state. A shadow
+/// only another observer wrote, such as a resolver `NameChanged`, brings no lifecycle, so that
+/// child keeps the null expiry.
 pub(crate) fn ens_v1_of_registry_child(
     authority: Option<Authority>,
-    shadow_surface: bool,
+    lifecycle_shadow: bool,
 ) -> V2Result<Option<EnsV1>> {
     let ens_v1 = ens_v1(authority, &Value::Object(serde_json::Map::new()))?;
     Ok(ens_v1.map(|ens_v1| {
-        if shadow_surface {
+        if lifecycle_shadow {
             EnsV1 {
                 expires_at: None,
                 ..ens_v1
