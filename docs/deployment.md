@@ -284,16 +284,16 @@ window as the two above, with the phase runner, redo processes and API stopped. 
 `indisready` in `pg_index` and that `pg_get_indexdef` shows `(chain_id, logical_name_id)`,
 with `WHERE (logical_name_id IS NOT NULL)` on the key state index only.
 
-`20261001100000_project_child_registration_registry_index.sql` adds
+`20261001110000_project_child_registration_registry_index.sql` adds
 `project_child_registration_state_registry_idx` on `(chain_id,
 registry_contract_instance_id)`, and
-`20261001100100_project_child_edge_candidate_child_index.sql` adds
+`20261001110100_project_child_edge_candidate_child_index.sql` adds
 `project_child_edge_candidate_child_idx` on `(chain_id, namespace, child_node)`; the child
 pages and counts, the registry labels read among them, probe both. Each is a plain
 `CREATE INDEX` with the same SHARE lock on its table until the schema-migration commits.
 Apply them with the phase runner, redo processes and API stopped, with the same
 `lock_timeout`, `statement_timeout` and retry procedure, `--target-version
-20261001100000` and then `20261001100100`. Afterwards, confirm both indexes are
+20261001110000` and then `20261001110100`. Afterwards, confirm both indexes are
 `indisvalid` and `indisready` and that `pg_get_indexdef` shows those columns.
 
 The API binds to the configured `BIGNAME_API_HOST` and
