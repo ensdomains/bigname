@@ -155,9 +155,14 @@ async fn v2_ens_v1_object_on_an_unwrapped_lease_and_its_absence_under_ens_v2() -
     Ok(())
 }
 
-/// The registrar producer saturates a lease expiry above `i64::MAX` (`evm_abi`), which the
-/// Sepolia testnet premigration registrar can reach with a caller-chosen duration; the served
-/// lease date is then `i64::MAX`.
+/// A BaseRegistrar lease expiry is a `uint256`
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f),
+/// and the admitted Sepolia testnet premigration registrar checks only a minimum duration
+/// before passing the caller's duration to the BaseRegistrar
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L165 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L214-L217 @ ens_v2_sepolia_20260916@366de741),
+/// so a lease expiry above `i64::MAX` is reachable there. Our registrar producer saturates such
+/// an expiry (`evm_abi`), and the served lease date is then `i64::MAX`.
 #[tokio::test]
 async fn v2_ens_v1_object_serves_a_saturated_lease_expiry_as_i64_max() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
