@@ -596,6 +596,8 @@ Rules:
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
   readable subname count, applying the same optional prefix and expiry filters
   as the page before its cursor.
+  The registry overview's nested `referenced_by` page populates it only with
+  `include=counts`.
   Other routes populate it only where a precomputed count makes it
   cheap or where they explicitly document `include=total_count`; they must not
   otherwise run unconditional full counts on the request path.

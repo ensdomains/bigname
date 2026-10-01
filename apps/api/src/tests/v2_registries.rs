@@ -307,7 +307,8 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
         }])
     );
     assert_eq!(data["referenced_by"]["page"]["has_more"], json!(false));
-    assert_eq!(data["referenced_by"]["page"]["total_count"], json!(1));
+    // Without the count opt-in the reference total is not counted.
+    assert_eq!(data["referenced_by"]["page"]["total_count"], Value::Null);
     assert!(payload["meta"]["as_of"].is_object(), "{payload}");
     assert!(payload["meta"]["as_of_token"].is_string(), "{payload}");
     assert!(payload.get("page").is_none_or(Value::is_null));
@@ -321,6 +322,10 @@ async fn v2_get_registry_serves_name_parent_creation_counts_and_references() -> 
     assert_eq!(
         counted["data"]["counts"],
         json!({ "labels": 2, "events": 5, "roles": 0 })
+    );
+    assert_eq!(
+        counted["data"]["referenced_by"]["page"]["total_count"],
+        json!(1)
     );
 
     let child = registry_payload(&database, &format!("/v1/registries/1/{ONE_REGISTRY}")).await?;
@@ -357,7 +362,7 @@ async fn v2_get_registry_root_has_no_name_or_parent_and_declared_registries_reso
     );
     assert_eq!(
         root["data"]["referenced_by"]["page"]["total_count"],
-        json!(0)
+        Value::Null
     );
 
     let declared =
@@ -389,9 +394,19 @@ async fn v2_get_registry_counts_every_name_referencing_it_on_each_page() -> Resu
     .await?;
     publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 83).await?;
 
-    let first = registry_payload(
+    let uncounted = registry_payload(
         &database,
         &format!("/v1/registries/1/{ONE_REGISTRY}?page_size=1"),
+    )
+    .await?;
+    let references = &uncounted["data"]["referenced_by"];
+    assert_eq!(references["data"][0]["name"], json!("one.alpha.eth"));
+    assert_eq!(references["page"]["total_count"], Value::Null);
+    assert_eq!(references["page"]["has_more"], json!(true));
+
+    let first = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ONE_REGISTRY}?page_size=1&include=counts"),
     )
     .await?;
     let references = &first["data"]["referenced_by"];
@@ -403,7 +418,9 @@ async fn v2_get_registry_counts_every_name_referencing_it_on_each_page() -> Resu
         .expect("referenced_by next cursor");
     let second = registry_payload(
         &database,
-        &format!("/v1/registries/1/{ONE_REGISTRY}?page_size=1&cursor={next_cursor}"),
+        &format!(
+            "/v1/registries/1/{ONE_REGISTRY}?page_size=1&include=counts&cursor={next_cursor}"
+        ),
     )
     .await?;
     let references = &second["data"]["referenced_by"];
