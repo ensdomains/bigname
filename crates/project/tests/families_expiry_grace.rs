@@ -76,11 +76,23 @@ async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
 /// `LEASE_EXPIRY`, with a resolver set in the ENSv1 registry at `block + 2`.
 async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<String> {
     let logical_name_id = surface(fixture, name).await?;
+    lease(fixture, &logical_name_id, n, block, LEASE_EXPIRY).await?;
+    Ok(logical_name_id)
+}
+
+/// Lease `n` of the surface `logical_name_id`, as `leased` writes it, granted until `expiry`.
+async fn lease(
+    fixture: &Fixture,
+    logical_name_id: &str,
+    n: u32,
+    block: i64,
+    expiry: u64,
+) -> Result<()> {
     let lease = uuid(0x1000 + n);
     fixture
         .binding(
             &uuid(100 + n),
-            &logical_name_id,
+            logical_name_id,
             &lease,
             "ens_v1",
             block,
@@ -94,7 +106,7 @@ async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<Str
             0,
             "SurfaceBound",
             "ens_v1_registrar_l1",
-            Some(&logical_name_id),
+            Some(logical_name_id),
             Some(&lease),
             json!({"authority_kind": "registrar", "state_derived": false,
                    "registry_contract": REGISTRY, "owner_getter": OWNER}),
@@ -107,20 +119,19 @@ async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<Str
             0,
             "RegistrationGranted",
             "ens_v1_registrar_l1",
-            Some(&logical_name_id),
+            Some(logical_name_id),
             Some(&lease),
             json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
-                   "expiry": LEASE_EXPIRY}),
+                   "expiry": expiry}),
             REGISTRAR,
         )
         .await?;
-    resolver(fixture, &logical_name_id, block + 2).await?;
-    Ok(logical_name_id)
+    resolver(fixture, logical_name_id, block + 2).await
 }
 
 async fn resolver(fixture: &Fixture, logical_name_id: &str, block: i64) -> Result<()> {
     let node = logical_name_id.trim_start_matches("ens:");
-    let identity = format!("resolver-{logical_name_id}");
+    let identity = format!("resolver-{logical_name_id}-{block}");
     fixture
         .event(
             Event::new(&identity, block, 5, "ResolverChanged", "ens_v1_registry_l1")
@@ -650,15 +661,51 @@ async fn renewals_the_reservation_the_cutover_and_the_migration_keep_the_registr
 #[tokio::test]
 async fn only_a_registration_after_a_release_starts_a_new_registration_time() -> Result<()> {
     let fixture = Fixture::new("families_expiry_grace_registered_again", 14).await?;
-    let dave = leased(&fixture, "dave.eth", 2, 1).await?;
-    // The lease ran out and the label was registered again: the registrar emits a new grant.
-    lease_event(&fixture, &dave, 2, 4, "RegistrationGranted", LEASE_EXPIRY).await?;
-    reserved(&fixture, &dave, 2, 5).await?;
-    migrated(&fixture, &dave, 2, 6).await?;
-    fixture.apply(6, FamilyMode::Normal).await?;
+    // A family run needs every block between two of its blocks and walks at most 256 per run, so
+    // this fixture cannot span the months a lease and its grace take at 12 seconds a block. The
+    // first lease's expiry is instead set past enough that its 90-day grace ends before block 4;
+    // the lifecycle fold reads the expiry and the release, not the time between blocks.
+    let first_expiry = u64::try_from(block_time(4)).expect("block time") - 90 * DAY - 1;
+    let dave = surface(&fixture, "dave.eth").await?;
+    lease(&fixture, &dave, 2, 1, first_expiry).await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    ensure!(times(&fixture, &dave).await? == (Some(block_time(2)), None));
+
+    // At block 4 the interpreter releases the old lease from the block, as it does at the first
+    // block past the grace; the registration that follows is a new lease with its own resource
+    // and binding.
+    fixture
+        .event(
+            Event::new(
+                "dave-lease-released",
+                4,
+                0,
+                "RegistrationReleased",
+                "ens_v1_registrar_l1",
+            )
+            .name(&dave)
+            .resource(&uuid(0x1002))
+            .synthesised()
+            .before(json!({"registrant": OWNER}))
+            .after(json!({"expiry": first_expiry, "released_at": block_time(4),
+                          "source_event": "RegistrationReleased"}))
+            .raw(json!({"kind": "raw_block", "emitting_address": REGISTRAR})),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 4 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(102))
+    .execute(&fixture.pool)
+    .await?;
+    lease(&fixture, &dave, 3, 4, LEASE_EXPIRY).await?;
+    reserved(&fixture, &dave, 3, 7).await?;
+    migrated(&fixture, &dave, 3, 8).await?;
+    fixture.apply(8, FamilyMode::Normal).await?;
     let migrated_times = times(&fixture, &dave).await?;
     ensure!(
-        migrated_times == (Some(block_time(4)), Some(block_time(6))),
+        migrated_times == (Some(block_time(5)), Some(block_time(8))),
         "{migrated_times:?}"
     );
 
@@ -667,37 +714,37 @@ async fn only_a_registration_after_a_release_starts_a_new_registration_time() ->
         .event(
             Event::new(
                 "dave-unregistered",
-                8,
+                10,
                 1,
                 "RegistrationReleased",
                 "ens_v2_registry_l1",
             )
             .name(&dave)
-            .resource(&uuid(0x2002))
+            .resource(&uuid(0x2003))
             .before(json!({"registrant": OWNER}))
             .after(
-                json!({"registry_contract_instance_id": "eth", "token_id": "2",
-                              "released_at": block_time(8)}),
+                json!({"registry_contract_instance_id": "eth", "token_id": "3",
+                              "released_at": block_time(10)}),
             )
             .raw(json!({"emitting_address": V2_REGISTRY})),
         )
         .await?;
     sqlx::query(
-        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 8 * 12)
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 10 * 12)
          WHERE surface_binding_id = $1::uuid",
     )
-    .bind(uuid(202))
+    .bind(uuid(203))
     .execute(&fixture.pool)
     .await?;
-    v2_registered(&fixture, &dave, &uuid(212), &uuid(0x2102), "3", 10).await?;
-    fixture.apply(10, FamilyMode::Normal).await?;
-    let again = times(&fixture, &dave).await?;
+    v2_registered(&fixture, &dave, &uuid(213), &uuid(0x2103), "4", 12).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let registered_again = times(&fixture, &dave).await?;
     ensure!(
-        again == (Some(block_time(10)), Some(block_time(6))),
-        "{again:?}"
+        registered_again == (Some(block_time(12)), Some(block_time(8))),
+        "{registered_again:?}"
     );
 
-    fixture.assert_undo_restores(10).await?;
-    fixture.assert_rebuild_equal(10).await?;
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }

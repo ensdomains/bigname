@@ -6308,7 +6308,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -6712,7 +6712,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7008,7 +7008,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7085,7 +7085,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -7165,7 +7165,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
@@ -8171,7 +8171,7 @@
           },
           "registered_at": {
             "type": "string",
-            "description": "Start of the current registration, which renewals and the ENSv1→ENSv2 migration keep; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+            "description": "Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
           "created_at": {
             "type": "string",
