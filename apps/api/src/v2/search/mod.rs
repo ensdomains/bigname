@@ -17,7 +17,7 @@ use super::list_cursor::{ListCursor, ListPosition};
 use super::{
     AtSelector, Envelope, Finality, Page, QueryParams, RawQueryParams, RegistrationStatus, V2Error,
     V2Result, api_error_to_v2,
-    name_record::name_registration_fields,
+    name_record::{ens_v1_of_row, name_registration_fields},
     support::{derive_public_namespace_set, revalidate_public_namespace_set},
     support::{
         explicit_namespace_request_scope, request_scope_meta,
@@ -71,6 +71,9 @@ pub(crate) struct SearchName {
     pub(crate) expires_at_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
+    /// Present while the name's authority is `ens_v1` or `ens_v0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ens_v1: Option<crate::v2::name_record::EnsV1>,
     /// On `GET /v1/names` rows only: the last holder of a released registration
     /// (`name_record::lapsed_registration`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,7 +254,11 @@ pub(crate) async fn get_search(
         .map(|cursor| search_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
-    let data = storage_page.rows.iter().map(build_search_name).collect();
+    let data = storage_page
+        .rows
+        .iter()
+        .map(build_search_name)
+        .collect::<V2Result<_>>()?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -265,10 +272,11 @@ pub(crate) async fn get_search(
     }))
 }
 
-pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
+pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName> {
     let registration = name_registration_fields(Some(&row.row), &row.row.namespace);
+    let ens_v1 = ens_v1_of_row(Some(&row.row))?;
 
-    SearchName {
+    Ok(SearchName {
         name: row.row.normalized_name.clone(),
         display_name: row.row.canonical_display_name.clone(),
         namespace: row.row.namespace.clone(),
@@ -281,8 +289,9 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> SearchName {
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
+        ens_v1,
         lapsed_registration: None,
-    }
+    })
 }
 
 /// The search cursor binds `q`, `match` and the namespace anchor; it holds the last row's

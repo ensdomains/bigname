@@ -561,7 +561,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
     });
     // Deliberately divergent dictionary fields test the renderer's precedence, without claiming
     // that a single protocol event produces all four independent owner/registrant values.
-    let row = address_name_name_current_row(
+    let mut row = address_name_name_current_row(
         "ens:precedence.eth",
         "precedence.eth",
         "precedence.eth",
@@ -574,6 +574,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
             "control":{"registry_owner":DIVERGENT_REGISTRY_OWNER,"owner":DIVERGENT_CONTROL_OWNER,"registrant":DIVERGENT_CONTROL_REGISTRANT},
             "wrapper_state":"locked", "wrapper_fuses":flags}),
     );
+    row.provenance["authority_selection"] = json!({"authority_arm": "ens_v1"});
     // The bound-name adapter delegates to this same name-record renderer.
     let record = serde_json::to_value(
         crate::v2::build_name_record(&row, None, Some(1), crate::v2::Status::Ok)
@@ -585,8 +586,13 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
         json!(DIVERGENT_REGISTRATION_REGISTRANT)
     );
     assert_eq!(record["registration_status"], json!("active"));
-    assert_eq!(record["wrapper_state"], json!("locked"));
-    assert_eq!(record["wrapper_fuses"], flags);
+    assert_eq!(record["authority"], json!("ens_v1"));
+    assert_eq!(
+        record["ens_v1"],
+        json!({"expires_at": null, "wrapper_state": "locked", "wrapper_fuses": flags})
+    );
+    assert!(record.get("wrapper_state").is_none(), "{record}");
+    assert!(record.get("wrapper_fuses").is_none(), "{record}");
     Ok(())
 }
 

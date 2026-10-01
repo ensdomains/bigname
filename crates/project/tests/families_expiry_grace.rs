@@ -218,7 +218,8 @@ async fn upgraded(
     Ok(())
 }
 
-/// The served expiry, grace end, resolver address and unresolvable reason of a composed name.
+/// The served expiry, the ENSv1 lease's own expiry, grace end, resolver address and
+/// unresolvable reason of a composed name.
 async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     let row = load_family_name(&fixture.pool, logical_name_id)
         .await?
@@ -227,6 +228,7 @@ async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     Ok(json!({
         "arm": row.provenance["authority_selection"]["authority_arm"],
         "expiry": summary["registration"]["expiry"],
+        "ens_v1_expiry": summary["registration"]["ens_v1_expiry"],
         "grace_ends_at": summary["registration"]["grace_ends_at"],
         "resolver": summary["resolver"]["address"],
         "unresolvable_reason": summary.get("unresolvable_reason").cloned().unwrap_or(Value::Null),
@@ -248,6 +250,8 @@ fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&
     json!({
         "arm": "ens_v1",
         "expiry": expiry.to_string(),
+        // The lease's own date, whichever expiry the name serves.
+        "ens_v1_expiry": LEASE_EXPIRY.to_string(),
         "grace_ends_at": (expiry + grace_days * DAY).to_string(),
         "resolver": resolver,
         "unresolvable_reason": reason,
@@ -415,6 +419,7 @@ async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_an
     ensure!(
         row["arm"] == json!("ens_v2")
             && row["expiry"] == json!(RESERVED_EXPIRY.to_string())
+            && row["ens_v1_expiry"].is_null()
             && row["grace_ends_at"] == json!((RESERVED_EXPIRY + 28 * DAY).to_string()),
         "{row}"
     );

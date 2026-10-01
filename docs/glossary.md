@@ -625,7 +625,7 @@ parent fuse changes after that bit is burned.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L730 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L547 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L553 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="emancipated"` only while the wrapper
+The API exposes this as `ens_v1.wrapper_state="emancipated"` only while the wrapper
 expiry is not earlier than the served block timestamp. After that boundary,
 NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
@@ -1752,7 +1752,7 @@ owner-controlled permissions to be revoked.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1025 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1067 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="locked"` only while the wrapper expiry
+The API exposes this as `ens_v1.wrapper_state="locked"` only while the wrapper expiry
 is not earlier than the served block timestamp; after that boundary the
 NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
@@ -2454,7 +2454,7 @@ conditions for its internal wrapped guard.
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L67 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1080 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="wrapped"`. Passing the stored wrapper
+The API exposes this as `ens_v1.wrapper_state="wrapped"`. Passing the stored wrapper
 expiry clears effective fuses but does not remove a plain wrapped name or this
 state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L101 @ ens_v1@91c966f)

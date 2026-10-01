@@ -6542,6 +6542,33 @@
         ],
         "description": "Typed [expiry-effective NameWrapper fuse word](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#expiry-effective-namewrapper-fuse-word); each boolean reports whether the corresponding fuse is burnt."
       },
+      "EnsV1": {
+        "type": "object",
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "BaseRegistrar lease expiry as a decimal Unix-second string, or null when the name has no lease, such as any subname. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead."
+          },
+          "wrapper_state": {
+            "$ref": "#/components/schemas/WrapperState",
+            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value.\n\nPresence condition: The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
+            "x-presence": "when wrapper_backed"
+          },
+          "wrapper_fuses": {
+            "$ref": "#/components/schemas/WrapperFuses",
+            "description": "Typed [expiry-effective NameWrapper fuse word](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#expiry-effective-namewrapper-fuse-word).\n\nPresence condition: The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
+            "x-presence": "when wrapper_backed"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "expires_at"
+        ],
+        "description": "What only ENSv1 holds about a name while ENSv1 decides it: the BaseRegistrar lease date and the NameWrapper position. Name-shaped rows carry it as `ens_v1` exactly while the name's authority is `ens_v1` or `ens_v0`; see the [naming dictionary](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary)."
+      },
       "NameRecord": {
         "type": "object",
         "properties": {
@@ -6598,19 +6625,14 @@
             "description": "Current registration and control lifecycle label.\n\nPresence condition: The record is not the identity-only unsupported name object. Indexed coverage downgrades produce that identity-only object; a verified lookup failure can retain the registration summary even when its result status is unsupported.",
             "x-presence": "when full_record"
           },
-          "wrapper_state": {
-            "$ref": "#/components/schemas/WrapperState",
-            "description": "Current [NameWrapper lifecycle](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#naming-dictionary) value.\n\nPresence condition: The full record has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
-            "x-presence": "when wrapper_backed"
-          },
-          "wrapper_fuses": {
-            "$ref": "#/components/schemas/WrapperFuses",
-            "description": "Typed [expiry-effective NameWrapper fuse word](https://github.com/ensdomains/bigname/blob/main/docs/glossary.md#expiry-effective-namewrapper-fuse-word).\n\nPresence condition: The full record has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together.",
-            "x-presence": "when wrapper_backed"
-          },
           "authority": {
             "$ref": "#/components/schemas/Authority",
             "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+          },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
           },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
@@ -7057,6 +7079,11 @@
             "$ref": "#/components/schemas/Authority",
             "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
           },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name, on `profile=detail` records only; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
+          },
           "migrated_at": {
             "type": "string",
             "description": "Decimal string of Unix seconds; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
@@ -7293,6 +7320,11 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name; present exactly while the authority its name detail serves is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
+          },
           "lapsed_registration": {
             "$ref": "#/components/schemas/LapsedRegistration",
             "description": "Last holder and release cause for a supported lapsed registration; absent for other release causes and for non-released names."
@@ -7369,6 +7401,11 @@
               "null"
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+          },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name; present exactly while the authority its name detail serves is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
@@ -7453,6 +7490,11 @@
           "authority": {
             "$ref": "#/components/schemas/Authority",
             "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+          },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name; present exactly while its authority is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
           },
           "migrated_at": {
             "type": "string",
@@ -8455,6 +8497,11 @@
               "null"
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+          },
+          "ens_v1": {
+            "$ref": "#/components/schemas/EnsV1",
+            "description": "What only ENSv1 holds about the name; present exactly while the authority its name detail serves is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "x-presence": "when ens_v1_authority"
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",

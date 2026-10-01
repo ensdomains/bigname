@@ -1539,6 +1539,14 @@ Expiry and grace). Schema-migration
 table reads as not cut over, and the content-hash rotation that ships with it
 rebuilds the families.
 
+Because the cutover can replace the served expiry, the composed registration
+also keeps `registration.ens_v1_expiry`: the expiry of the latest admitted
+BaseRegistrar event the expiry read selects for the name, before that choice,
+and `null` when the selected event is not the BaseRegistrar's (a subname, an
+ENSv2 registration). The API serves it as `ens_v1.expires_at`
+(`docs/api-v1.md` § Naming dictionary). It is composed at read like the rest of
+the registration block, so no stored family changes.
+
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
 one resource's latest pointer, including unnamed changes, for root, alias and
 wildcard composition. `project_named_resource_pointer` keeps the latest named
