@@ -12,7 +12,6 @@ pub const APPROVED_SIGNATURE: &str = "Approved(address,bytes32,address,bool)";
 const ERC1967_UPGRADED_SIGNATURE: &str = "Upgraded(address)";
 const ENS_V2_UNIQUE_RESOLVER_EVENT_SIGNATURES: &[&str] = &[
     "ResolverCreated()",
-    "AliasChanged(bytes,bytes,bytes,bytes)",
     "NamedResource(uint256,bytes)",
     "NamedTextResource(uint256,bytes,bytes32,string)",
     "NamedAddrResource(uint256,bytes,uint256)",
@@ -155,7 +154,7 @@ mod tests {
     fn v2_selects_creation_and_its_unique_topics() {
         let generic_text = topic0("TextChanged(bytes32,string,string,string)");
         let mut manifest = ens_v2_unique_resolver_topic0s();
-        assert_eq!(manifest.len(), 5);
+        assert_eq!(manifest.len(), 4);
         assert!(manifest.contains(&resolver_creation_topic0()));
         manifest.push(generic_text.clone());
         assert_eq!(

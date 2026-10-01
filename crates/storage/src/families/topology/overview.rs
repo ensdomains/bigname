@@ -1,8 +1,7 @@
 //! The resolver overview row from the F3 classification (`project_resolver_classification`),
 //! in the `resolver_current` row shape the resolver routes read. The classification, support and
 //! declaring manifest are the F3 row's; the section support the routes gate on (`bindings`,
-//! `aliases`, `links`, `permissions`, `role_holders`) is derived from it, without counts or
-//! samples:
+//! `links`, `permissions`, `role_holders`) is derived from it, without counts or samples:
 //!
 //! - enumeration is supported for a supported resolver that is neither an ENSv1 resolver nor a
 //!   `public_resolver_v2`; such a supported resolver reports
@@ -67,7 +66,6 @@ pub(crate) const FAMILY_RESOLVER_SUMMARY: &str = r#"(
     SELECT jsonb_build_object(
         'classification', COALESCE(classification_row.classification, '{}'::jsonb) - 'upgrade',
         'bindings', sections.enumeration,
-        'aliases', sections.enumeration,
         'permissions', sections.enumeration,
         'role_holders', sections.enumeration,
         'event_summary', sections.enumeration,

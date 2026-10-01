@@ -59,7 +59,13 @@ public-chain deployment or rotate either canonical authority.
 The `ens_v2_sepolia_20260629` checkout retains implementation evidence for the
 admitted 2026-06-29 old-model Sepolia families only where the archived ABI does
 not prove the claim; it is not authority for a future deployment or current
-ENSv2 source semantics. The `ens_v2_sepolia_dev` checkout is retained only so deprecated manifest versions
+ENSv2 source semantics. That generation's resolver `AliasChanged` event
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19-L24 @ ens_v2_sepolia_20260629@ccaeb58)
+is no longer interpreted: no manifest declares it, and the official 2026-09-15
+`PermissionedResolver` ABI has no such event, sharing records between names
+through `Linked` record IDs instead
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L3-L1313 @ ens_v2_sepolia_20260916@366de741).
+The `ens_v2_sepolia_dev` checkout is retained only so deprecated manifest versions
 keep their embedded ABI, behavior, address, and range evidence verifiable after
 upstream removed the `sepolia-dev` artifact directory; it must not support new
 behavior claims or active admission.

@@ -1,4 +1,4 @@
-//! The same-log ordering matrix, second half: F6, F7, F9, F10, F11, F12 and F13. The first half
+//! The same-log ordering matrix, second half: F6, F7, F9, F11, F12 and F13. The first half
 //! (families_ordering_matrix.rs) explains the shape: two facts of one key at one (block,
 //! transaction, log) whose emission ordinal (docs/glossary.md#emission-ordinal) and identity bytes
 //! disagree, written in the reverse of the ordinal order; the higher ordinal wins, where the old
@@ -311,49 +311,6 @@ async fn f9_the_account_approval_is_the_higher_ordinal() -> Result<()> {
         pick(&row, &["approved", "event_identity"]),
         json!({"approved": false, "event_identity": facts.later})
     );
-    settle(fixture).await
-}
-
-// F10: an alias set (ordinal 9) and removed (ordinal 10) at one log. The name's and the
-// resolver's alias rows are the removal.
-#[tokio::test]
-async fn f10_the_alias_is_the_higher_ordinal() -> Result<()> {
-    let fixture = Fixture::new("families_matrix_f10", 20).await?;
-    let named = name(10);
-    let facts = Pair::tenth("ens_v2_resolver", 5, "AliasChanged");
-    let alias = |active: bool| {
-        json!({"resolver": RESOLVER_1, "active": active,
-               "alias_state": if active { "active" } else { "removed" },
-               "to_logical_name_id": name(11)})
-    };
-    pair(
-        &fixture,
-        &facts,
-        fact(
-            "AliasChanged",
-            "ens_v2_resolver_l1",
-            alias(false),
-            RESOLVER_1,
-        )
-        .name(&named),
-        fact(
-            "AliasChanged",
-            "ens_v2_resolver_l1",
-            alias(true),
-            RESOLVER_1,
-        )
-        .name(&named),
-    )
-    .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await?;
-    for table in ["project_name_alias", "project_resolver_alias"] {
-        let row = only(&fixture, table).await?;
-        assert_eq!(
-            pick(&row, &["active", "alias_state", "event_identity"]),
-            json!({"active": false, "alias_state": "removed", "event_identity": facts.later}),
-            "{table}"
-        );
-    }
     settle(fixture).await
 }
 

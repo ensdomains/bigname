@@ -50,8 +50,6 @@ tables! {
     RESOURCE_ADMIN_AGGREGATE = "project_resource_admin_aggregate" ["chain_id", "resource_id"];
     ACCOUNT_APPROVAL = "project_account_approval"
         ["chain_id", "authority_kind", "authority_contract", "owner", "subject", "relation_kind"];
-    NAME_ALIAS = "project_name_alias" ["chain_id", "logical_name_id"];
-    RESOLVER_ALIAS = "project_resolver_alias" ["chain_id", "resolver_address", "alias_identity"];
     CHILD_EDGE_CANDIDATE = "project_child_edge_candidate"
         ["chain_id", "namespace", "parent_node", "child_node", "authority_arm"];
     PARENT_SUBREGISTRY = "project_parent_subregistry" ["chain_id", "logical_name_id"];

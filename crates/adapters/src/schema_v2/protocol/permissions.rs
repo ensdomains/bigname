@@ -300,6 +300,8 @@ const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
 ];
 
 // Review this vocabulary against the admitted historical ENSv2 resolver role constants.
+// `ROLE_SET_ALIAS` and its admin bit (28, 156) are left unnamed: that generation's alias
+// path is no longer interpreted (docs/upstream.md).
 // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/libraries/PermissionedResolverLib.sol:L7 @ ens_v2_sepolia_20260629@ccaeb58)
 const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (0, "set_addr"),
@@ -309,7 +311,6 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (16, "set_abi"),
     (20, "set_interface"),
     (24, "set_name"),
-    (28, "set_alias"),
     (32, "clear_records"),
     (36, "set_data"),
     (120, "can_name"),
@@ -321,7 +322,6 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (144, "admin_set_abi"),
     (148, "admin_set_interface"),
     (152, "admin_set_name"),
-    (156, "admin_set_alias"),
     (160, "admin_clear_records"),
     (164, "admin_set_data"),
     (248, "admin_can_name"),
@@ -361,6 +361,7 @@ mod tests {
             source
                 .lines()
                 .filter(|line| line.contains("uint256 internal constant ROLE_"))
+                .filter(|line| !line.contains("ROLE_SET_ALIAS"))
                 .count()
         };
         assert_eq!(REGISTRY_ROLE_BITS.len(), role_count(&registry));

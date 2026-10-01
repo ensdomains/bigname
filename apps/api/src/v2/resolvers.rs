@@ -6,7 +6,7 @@ pub(crate) mod generation_test_hooks;
 
 #[path = "resolvers/collections.rs"]
 mod collections;
-pub(crate) use collections::{get_resolver_aliases, get_resolver_links, get_resolver_roles};
+pub(crate) use collections::{get_resolver_links, get_resolver_roles};
 
 use axum::{
     Json,
@@ -32,9 +32,6 @@ pub(crate) use bound_names_cursor::{
 
 #[path = "resolvers/link_items.rs"]
 mod link_items;
-
-#[path = "resolvers/overview_items.rs"]
-mod overview_items;
 
 #[path = "resolvers/role_grants.rs"]
 mod role_grants;
@@ -64,7 +61,7 @@ impl QueryParamAllowlist for ResolverQueryParams {
 pub(crate) type ResolverQuery = StrictQueryParams<ResolverQueryParams>;
 
 /// The resolver overview: its identity, its mirror declaration and the names bound to it. It
-/// carries no section counts or samples; the `/aliases`, `/links` and `/roles` collections page
+/// carries no section counts or samples; the `/links` and `/roles` collections page
 /// those rows with exact totals (docs/api-v1-routes.md, the resolver overview).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ResolverOverview {
