@@ -2967,10 +2967,11 @@ introduces it rebuilds Project from full history before serving the option; see
   on the row; `created_at` is the name's first observation, the block time of
   the earliest event attributed to the name, including an earlier registrar
   event that was attributed to the name only once a later event named it, and
-  is unrelated to `registered_at`, the registration time. Every listed row has
-  a recorded first observation, and `sort=created_at` orders by that recorded
-  value, the same instant the row serves as `created_at`. A row with no such
-  timestamp is the smallest value: it sorts before every dated row ascending and
+  is unrelated to `registered_at`, the registration time. A row with a name row
+  has a recorded first observation, and `sort=created_at` orders by that
+  recorded value, the same instant the row serves as `created_at`. A surface-less
+  ENSv1 registry child listed without a name row serves no `created_at`. A row
+  with no such timestamp is the smallest value: it sorts before every dated row ascending and
   after every dated row descending. Equal timestamps, and equal
   names, break ties by name identity and then by the grouped resource, in both
   orders.
