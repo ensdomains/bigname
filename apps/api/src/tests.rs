@@ -328,15 +328,14 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"]["capabilities"]["name_profile"],
-        json!({ "completeness": "partial" })
-    );
-    // The registrar manifests declare a shadow `name_history` flag; history serves every name.
-    assert_eq!(
-        payload["data"]["capabilities"]["name_history"],
-        json!({ "completeness": "full" })
-    );
+    // Name reads and name history serve every name whatever the registrar manifests' flags say.
+    for capability in ["name_profile", "name_history"] {
+        assert_eq!(
+            payload["data"]["capabilities"][capability],
+            json!({ "completeness": "full" }),
+            "{capability}"
+        );
+    }
     assert_eq!(
         payload["data"]["networks"],
         json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }])
@@ -391,16 +390,21 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
 }
 
 #[tokio::test]
-async fn v2_namespace_name_history_is_full_where_name_history_serves_rows() -> Result<()> {
+async fn v2_namespace_profile_and_history_are_full_where_names_serve() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_routes_fixture(&database).await?;
     let (status, namespace) = read_family_response(&database, "/v1/namespaces/ens").await?;
     assert_eq!(status, StatusCode::OK, "{namespace:#}");
-    assert_eq!(
-        namespace["data"]["capabilities"]["name_history"],
-        json!({ "completeness": "full" }),
-        "{namespace:#}"
-    );
+    for capability in ["name_profile", "name_history"] {
+        assert_eq!(
+            namespace["data"]["capabilities"][capability],
+            json!({ "completeness": "full" }),
+            "{capability}: {namespace:#}"
+        );
+    }
+    let (status, name) = read_family_response(&database, "/v1/names/alpha.eth").await?;
+    assert_eq!(status, StatusCode::OK, "{name:#}");
+    assert_eq!(name["data"]["name"], json!("alpha.eth"), "{name:#}");
     let (status, history) = read_family_response(&database, "/v1/names/alpha.eth/history").await?;
     assert_eq!(status, StatusCode::OK, "{history:#}");
     assert!(

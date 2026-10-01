@@ -4339,21 +4339,19 @@ For a registrar lease first identified by a later readable observation, registra
   value is `{completeness, unsupported_reason?, chains?}` using the common
   completeness vocabulary. `networks` is an array of `{network, chain_id?}`
   entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`. Under the Sepolia deployment
-  profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
-  declaration is supported while the admitted ENSv1 registrar declaration is
-  shadow because registrar-controller registration label coverage is absent.
-- Capabilities from manifest flags: `subnames` and `name_profile` aggregate
-  the active manifests' capability flags (`full` when every declaring manifest
-  is supported, `partial` when some are, otherwise `unsupported` with
-  `unsupported_reason=not_supported_for_namespace`). They carry no `chains`
-  object.
-- `name_history` follows `GET /v1/names/{name}/history`, which serves the
-  admitted events of every name whatever the manifests' `name_history` flags
-  say: it is `full` whenever the namespace has at least one active manifest,
-  and `unsupported` with `unsupported_reason=not_supported_for_namespace` only
-  when it has none. It carries no `chains` object. The manifests'
-  `name_history` flag no longer affects this summary.
+  omits `meta.as_of` and `meta.as_of_token`.
+- `subnames` aggregates the active manifests' `declared_children` flags:
+  `full` when every declaring manifest is supported, `partial` when some are,
+  otherwise `unsupported` with `unsupported_reason=not_supported_for_namespace`.
+  It is absent when no active manifest declares the flag. It carries no
+  `chains` object.
+- `name_profile` follows `GET /v1/names/{name}` and `name_history` follows
+  `GET /v1/names/{name}/history`. Those routes serve every name of a served
+  namespace, a name's support following its own authority decision, so both
+  are `full` whenever the namespace has at least one active manifest, and
+  `unsupported` with `unsupported_reason=not_supported_for_namespace` only
+  when it has none. They carry no `chains` object. The manifests'
+  `exact_name_profile` and `name_history` flags do not affect this summary.
 - Verified capabilities per chain: `verified_records` and
   `verified_primary_name` describe what this deployment's verified routes will
   execute, decided per declared network and reported under `chains`, keyed by

@@ -4,8 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use bigname_domain::vocabulary::{ChainId, Namespace as NamespaceId, SourceFamily};
-use bigname_lookup::{ChainRpcUrls, verified_execution_entrypoint};
+use bigname_lookup::ChainRpcUrls;
 use bigname_manifests::{
     ActiveManifestVersion, CapabilitySupportStatus, ExecutionManifestVersion,
     NamespaceManifestSnapshot, load_execution_manifests_for_namespace,
@@ -22,16 +21,14 @@ use super::{
     numeric_to_slug, slug_to_numeric,
 };
 
+mod verified;
+
+use verified::verified_capabilities;
+
 const UNSUPPORTED_REASON: &str = "not_supported_for_namespace";
-const NOT_SUPPORTED_FOR_CHAIN: &str = "not_supported_for_chain";
-const EXECUTION_ENTRYPOINT_NOT_DECLARED: &str = "execution_entrypoint_not_declared";
-const EXECUTION_PROVIDER_NOT_CONFIGURED: &str = "execution_provider_not_configured";
-const VERIFIED_RECORDS_CAPABILITY: &str = "verified_records";
-const VERIFIED_PRIMARY_NAME_CAPABILITY: &str = "verified_primary_name";
+const SUBNAMES_CAPABILITY: &str = "subnames";
+const NAME_PROFILE_CAPABILITY: &str = "name_profile";
 const NAME_HISTORY_CAPABILITY: &str = "name_history";
-const VERIFIED_RESOLUTION_FLAG: &str = "verified_resolution";
-const ACTIVE_ROLLOUT_STATUS: &str = "active";
-const SHADOW_ROLLOUT_STATUS: &str = "shadow";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Namespace {
@@ -151,226 +148,60 @@ fn build_namespace(
 fn aggregate_capabilities(
     manifests: &[ActiveManifestVersion],
 ) -> V2Result<BTreeMap<String, NamespaceCapability>> {
-    let mut capability_counts = BTreeMap::<String, (usize, usize)>::new();
-
+    let (mut declared_count, mut supported_count) = (0_usize, 0_usize);
     for manifest in manifests {
         for (raw_name, flag) in &manifest.capability_flags {
-            let product_name = product_capability_name(raw_name)?.to_owned();
-            // Verified capabilities are decided per chain from the execution table below, not
-            // from the manifest flag alone, which stays `shadow` on ENS while the route serves.
-            if product_name == VERIFIED_RECORDS_CAPABILITY
-                || product_name == NAME_HISTORY_CAPABILITY
-            {
+            // Only `declared_children` feeds the summary. Name reads and name history serve every
+            // name of a served namespace, and verified capabilities are decided per chain.
+            if product_capability_name(raw_name)? != SUBNAMES_CAPABILITY {
                 continue;
             }
-            let (declared_count, supported_count) =
-                capability_counts.entry(product_name).or_default();
-            *declared_count += 1;
+            declared_count += 1;
             if flag.status == CapabilitySupportStatus::Supported {
-                *supported_count += 1;
+                supported_count += 1;
             }
         }
     }
 
-    let mut capabilities = capability_counts
-        .into_iter()
-        .map(|(capability, (declared_count, supported_count))| {
-            let completeness = if supported_count == declared_count {
-                Completeness::Full
-            } else if supported_count > 0 {
-                Completeness::Partial
-            } else {
-                Completeness::Unsupported
-            };
-            let unsupported_reason =
-                (completeness == Completeness::Unsupported).then(|| UNSUPPORTED_REASON.to_owned());
-
-            (
-                capability,
-                NamespaceCapability {
-                    completeness,
-                    unsupported_reason,
-                    chains: BTreeMap::new(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    // Name history serves the admitted events of every name, whatever a manifest's
-    // `name_history` flag says, so it depends only on the namespace having an active manifest.
-    let history_completeness = if manifests.is_empty() {
-        Completeness::Unsupported
-    } else {
-        Completeness::Full
-    };
-    capabilities.insert(
-        NAME_HISTORY_CAPABILITY.to_owned(),
-        NamespaceCapability {
-            completeness: history_completeness,
-            unsupported_reason: manifests.is_empty().then(|| UNSUPPORTED_REASON.to_owned()),
-            chains: BTreeMap::new(),
+    let mut capabilities = BTreeMap::new();
+    if declared_count > 0 {
+        let completeness = if supported_count == declared_count {
+            Completeness::Full
+        } else if supported_count > 0 {
+            Completeness::Partial
+        } else {
+            Completeness::Unsupported
+        };
+        capabilities.insert(
+            SUBNAMES_CAPABILITY.to_owned(),
+            NamespaceCapability {
+                completeness,
+                unsupported_reason: (completeness == Completeness::Unsupported)
+                    .then(|| UNSUPPORTED_REASON.to_owned()),
+                chains: BTreeMap::new(),
+            },
+        );
+    }
+    let served = NamespaceCapability {
+        completeness: if manifests.is_empty() {
+            Completeness::Unsupported
+        } else {
+            Completeness::Full
         },
-    );
+        unsupported_reason: manifests.is_empty().then(|| UNSUPPORTED_REASON.to_owned()),
+        chains: BTreeMap::new(),
+    };
+    for capability in [NAME_PROFILE_CAPABILITY, NAME_HISTORY_CAPABILITY] {
+        capabilities.insert(capability.to_owned(), served.clone());
+    }
     Ok(capabilities)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VerifiedCapability {
-    Records,
-    PrimaryName,
-}
-
-impl VerifiedCapability {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Records => VERIFIED_RECORDS_CAPABILITY,
-            Self::PrimaryName => VERIFIED_PRIMARY_NAME_CAPABILITY,
-        }
-    }
-}
-
-/// `verified_records` and `verified_primary_name`, decided per declared network from what the
-/// lookup engine will actually execute: the route table's entrypoint for the namespace and
-/// chain, a manifest declaring that entrypoint with a usable `verified_resolution` flag (shadow
-/// manifests count where the route admits them, as ENS does), and a configured provider for the
-/// execution chain. Per-name support classes still apply on the routes themselves; this is
-/// deployment-level support.
-fn verified_capabilities(
-    namespace: &str,
-    manifests: &[ActiveManifestVersion],
-    execution_manifests: &[ExecutionManifestVersion],
-    rpc_urls: &ChainRpcUrls,
-) -> BTreeMap<String, NamespaceCapability> {
-    [VerifiedCapability::Records, VerifiedCapability::PrimaryName]
-        .into_iter()
-        .map(|kind| {
-            (
-                kind.name().to_owned(),
-                verified_capability(kind, namespace, manifests, execution_manifests, rpc_urls),
-            )
-        })
-        .collect()
-}
-
-fn verified_capability(
-    kind: VerifiedCapability,
-    namespace: &str,
-    manifests: &[ActiveManifestVersion],
-    execution_manifests: &[ExecutionManifestVersion],
-    rpc_urls: &ChainRpcUrls,
-) -> NamespaceCapability {
-    let chains = manifests
-        .iter()
-        .map(|manifest| manifest.chain.as_str())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|chain| {
-            (
-                chain_capability_key(chain),
-                verified_chain_capability(
-                    kind,
-                    namespace,
-                    chain,
-                    manifests,
-                    execution_manifests,
-                    rpc_urls,
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let supported_count = chains
-        .values()
-        .filter(|chain| chain.completeness == Completeness::Full)
-        .count();
-    let completeness = if supported_count == 0 {
-        Completeness::Unsupported
-    } else if supported_count == chains.len() {
-        Completeness::Full
-    } else {
-        Completeness::Partial
-    };
-    let unsupported_reason = (completeness == Completeness::Unsupported).then(|| {
-        let reasons = chains
-            .values()
-            .filter_map(|chain| chain.unsupported_reason.as_deref())
-            .collect::<BTreeSet<_>>();
-        match reasons.iter().next() {
-            Some(reason) if reasons.len() == 1 => (*reason).to_owned(),
-            Some(_) => NOT_SUPPORTED_FOR_CHAIN.to_owned(),
-            None => UNSUPPORTED_REASON.to_owned(),
-        }
-    });
-    NamespaceCapability {
-        completeness,
-        unsupported_reason,
-        chains,
-    }
-}
-
-fn chain_capability_key(chain: &str) -> String {
-    slug_to_numeric(chain).map_or_else(|| chain.to_owned(), |numeric| numeric.to_string())
-}
-
-fn verified_chain_capability(
-    kind: VerifiedCapability,
-    namespace: &str,
-    chain: &str,
-    manifests: &[ActiveManifestVersion],
-    execution_manifests: &[ExecutionManifestVersion],
-    rpc_urls: &ChainRpcUrls,
-) -> NamespaceChainCapability {
-    let Ok(namespace_id) = namespace.parse::<NamespaceId>() else {
-        return NamespaceChainCapability::unsupported(UNSUPPORTED_REASON);
-    };
-    if kind == VerifiedCapability::PrimaryName && namespace_id != NamespaceId::Ens {
-        return NamespaceChainCapability::unsupported(UNSUPPORTED_REASON);
-    }
-    let Some(entrypoint) = chain
-        .parse::<ChainId>()
-        .ok()
-        .and_then(|chain_id| verified_execution_entrypoint(namespace_id, chain_id))
-    else {
-        return NamespaceChainCapability::unsupported(NOT_SUPPORTED_FOR_CHAIN);
-    };
-    let execution_declared = execution_manifests.iter().any(|manifest| {
-        manifest.source_family == entrypoint.source_family.as_str()
-            && manifest.chain == entrypoint.chain_id.as_str()
-            && (manifest.rollout_status == ACTIVE_ROLLOUT_STATUS
-                || (entrypoint.allow_shadow && manifest.rollout_status == SHADOW_ROLLOUT_STATUS))
-            && entrypoint
-                .required_manifest_version
-                .is_none_or(|version| i64::try_from(manifest.manifest_version) == Ok(version))
-            && manifest
-                .capability_flags
-                .get(VERIFIED_RESOLUTION_FLAG)
-                .is_some_and(|flag| {
-                    flag.status == CapabilitySupportStatus::Supported
-                        || (entrypoint.allow_shadow
-                            && flag.status == CapabilitySupportStatus::Shadow)
-                })
-    });
-    if !execution_declared {
-        return NamespaceChainCapability::unsupported(EXECUTION_ENTRYPOINT_NOT_DECLARED);
-    }
-    // Primary-name lookup also reads the ENSv1 registry on the same chain for the reverse leg.
-    if kind == VerifiedCapability::PrimaryName
-        && !manifests.iter().any(|manifest| {
-            manifest.source_family == SourceFamily::EnsV1RegistryL1.as_str()
-                && manifest.chain == chain
-        })
-    {
-        return NamespaceChainCapability::unsupported(EXECUTION_ENTRYPOINT_NOT_DECLARED);
-    }
-    if rpc_urls.url_for(entrypoint.chain_id.as_str()).is_none() {
-        return NamespaceChainCapability::unsupported(EXECUTION_PROVIDER_NOT_CONFIGURED);
-    }
-    NamespaceChainCapability::full()
 }
 
 fn product_capability_name(raw_name: &str) -> V2Result<&'static str> {
     match raw_name {
-        "declared_children" => Ok("subnames"),
-        "exact_name_profile" => Ok("name_profile"),
-        "name_history" => Ok("name_history"),
+        "declared_children" => Ok(SUBNAMES_CAPABILITY),
+        "exact_name_profile" => Ok(NAME_PROFILE_CAPABILITY),
+        "name_history" => Ok(NAME_HISTORY_CAPABILITY),
         "verified_resolution" => Ok("verified_records"),
         _ => {
             error!(
@@ -428,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capability_aggregation_maps_full_partial_and_unsupported() {
+    fn capability_aggregation_maps_subnames_and_serves_profile_and_history() {
         let manifests = vec![
             manifest(
                 "ens_l1",
@@ -443,6 +274,7 @@ mod tests {
                 "ens_l2",
                 "base-mainnet",
                 [
+                    ("declared_children", CapabilitySupportStatus::Unsupported),
                     ("verified_resolution", CapabilitySupportStatus::Unsupported),
                     ("name_history", CapabilitySupportStatus::Unsupported),
                 ],
@@ -451,19 +283,30 @@ mod tests {
                 "ens_l3",
                 "ethereum-mainnet",
                 [
-                    ("exact_name_profile", CapabilitySupportStatus::Shadow),
+                    ("exact_name_profile", CapabilitySupportStatus::Unsupported),
                     ("name_history", CapabilitySupportStatus::Unsupported),
                 ],
             ),
         ];
+        let flag_free = vec![manifest("basenames_base_registrar", "base-mainnet", [])];
 
         let capabilities =
             aggregate_capabilities(&manifests).expect("capability aggregation must succeed");
+        let full = NamespaceCapability {
+            completeness: Completeness::Full,
+            unsupported_reason: None,
+            chains: BTreeMap::new(),
+        };
+        let unsupported = NamespaceCapability {
+            completeness: Completeness::Unsupported,
+            unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
+            chains: BTreeMap::new(),
+        };
 
         assert_eq!(
             capabilities["subnames"],
             NamespaceCapability {
-                completeness: Completeness::Full,
+                completeness: Completeness::Partial,
                 unsupported_reason: None,
                 chains: BTreeMap::new(),
             }
@@ -472,246 +315,18 @@ mod tests {
             !capabilities.contains_key("verified_records"),
             "verified capabilities are decided per chain, not from the manifest flag"
         );
-        assert_eq!(
-            capabilities["name_history"],
-            NamespaceCapability {
-                completeness: Completeness::Full,
-                unsupported_reason: None,
-                chains: BTreeMap::new(),
-            },
-            "name history ignores the manifests' unsupported name_history flags"
-        );
-        assert_eq!(
-            aggregate_capabilities(&[]).expect("an empty namespace aggregates")["name_history"],
-            NamespaceCapability {
-                completeness: Completeness::Unsupported,
-                unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
-                chains: BTreeMap::new(),
-            }
-        );
-        assert_eq!(
-            capabilities["name_profile"],
-            NamespaceCapability {
-                completeness: Completeness::Partial,
-                unsupported_reason: None,
-                chains: BTreeMap::new(),
-            }
-        );
-    }
-
-    fn rpc_urls(entries: &[&str]) -> ChainRpcUrls {
-        ChainRpcUrls::from_entries(
-            &entries
-                .iter()
-                .map(|entry| format!("{entry}=http://rpc.test"))
-                .collect::<Vec<_>>(),
-        )
-        .expect("test RPC map must be valid")
-    }
-
-    fn chain_entry(reason: Option<&str>) -> NamespaceChainCapability {
-        reason.map_or(NamespaceChainCapability::full(), |reason| {
-            NamespaceChainCapability::unsupported(reason)
-        })
-    }
-
-    fn execution_manifest(
-        source_family: &str,
-        chain: &str,
-        manifest_version: u64,
-        rollout_status: &str,
-        status: CapabilitySupportStatus,
-    ) -> ExecutionManifestVersion {
-        ExecutionManifestVersion {
-            manifest_version,
-            source_family: source_family.to_owned(),
-            chain: chain.to_owned(),
-            rollout_status: rollout_status.to_owned(),
-            capability_flags: BTreeMap::from([(
-                "verified_resolution".to_owned(),
-                CapabilityFlag {
-                    status,
-                    notes: None,
-                },
-            )]),
-        }
-    }
-
-    #[test]
-    fn sepolia_ens_verified_capabilities_follow_manifests_and_provider_configuration() {
-        let active = vec![
-            manifest(
-                "ens_v1_registry_l1",
-                "ethereum-sepolia",
-                [("declared_children", CapabilitySupportStatus::Supported)],
-            ),
-            manifest(
-                "ens_v2_registry_l1",
-                "ethereum-sepolia",
-                [("declared_children", CapabilitySupportStatus::Supported)],
-            ),
-        ];
-        let execution = vec![execution_manifest(
-            "ens_execution",
-            "ethereum-sepolia",
-            1,
-            "shadow",
-            CapabilitySupportStatus::Shadow,
-        )];
-
-        let configured = verified_capabilities(
-            "ens",
-            &active,
-            &execution,
-            &rpc_urls(&["ethereum-sepolia", "ethereum-mainnet"]),
-        );
-        for capability in ["verified_records", "verified_primary_name"] {
+        let flag_free =
+            aggregate_capabilities(&flag_free).expect("a namespace without flags aggregates");
+        let empty = aggregate_capabilities(&[]).expect("an empty namespace aggregates");
+        assert!(!flag_free.contains_key("subnames") && !empty.contains_key("subnames"));
+        for capability in ["name_profile", "name_history"] {
             assert_eq!(
-                configured[capability],
-                NamespaceCapability {
-                    completeness: Completeness::Full,
-                    unsupported_reason: None,
-                    chains: BTreeMap::from([("11155111".to_owned(), chain_entry(None))]),
-                },
-                "{capability}"
+                capabilities[capability], full,
+                "{capability} ignores the manifests' unsupported flags"
             );
+            assert_eq!(flag_free[capability], full, "{capability}");
+            assert_eq!(empty[capability], unsupported, "{capability}");
         }
-
-        let unconfigured =
-            verified_capabilities("ens", &active, &execution, &rpc_urls(&["ethereum-mainnet"]));
-        for capability in ["verified_records", "verified_primary_name"] {
-            assert_eq!(
-                unconfigured[capability],
-                NamespaceCapability {
-                    completeness: Completeness::Unsupported,
-                    unsupported_reason: Some(EXECUTION_PROVIDER_NOT_CONFIGURED.to_owned()),
-                    chains: BTreeMap::from([(
-                        "11155111".to_owned(),
-                        chain_entry(Some(EXECUTION_PROVIDER_NOT_CONFIGURED)),
-                    )]),
-                },
-                "{capability}"
-            );
-        }
-
-        let without_execution =
-            verified_capabilities("ens", &active, &[], &rpc_urls(&["ethereum-sepolia"]));
-        assert_eq!(
-            without_execution["verified_records"]
-                .unsupported_reason
-                .as_deref(),
-            Some(EXECUTION_ENTRYPOINT_NOT_DECLARED)
-        );
-        let unsupported_flag = vec![execution_manifest(
-            "ens_execution",
-            "ethereum-sepolia",
-            1,
-            "active",
-            CapabilitySupportStatus::Unsupported,
-        )];
-        let unsupported_flag = verified_capabilities(
-            "ens",
-            &active,
-            &unsupported_flag,
-            &rpc_urls(&["ethereum-sepolia"]),
-        );
-        assert_eq!(
-            unsupported_flag["verified_records"]
-                .unsupported_reason
-                .as_deref(),
-            Some(EXECUTION_ENTRYPOINT_NOT_DECLARED)
-        );
-        let without_registry = verified_capabilities(
-            "ens",
-            &active[1..],
-            &execution,
-            &rpc_urls(&["ethereum-sepolia"]),
-        );
-        assert_eq!(
-            without_registry["verified_records"].completeness,
-            Completeness::Full
-        );
-        assert_eq!(
-            without_registry["verified_primary_name"]
-                .unsupported_reason
-                .as_deref(),
-            Some(EXECUTION_ENTRYPOINT_NOT_DECLARED)
-        );
-    }
-
-    #[test]
-    fn verified_capabilities_report_chains_outside_the_execution_table() {
-        let active = vec![
-            manifest("basenames_l1_compat", "ethereum-mainnet", []),
-            manifest("basenames_base_registry", "base-mainnet", []),
-        ];
-        let execution = vec![execution_manifest(
-            "basenames_execution",
-            "ethereum-mainnet",
-            2,
-            "active",
-            CapabilitySupportStatus::Supported,
-        )];
-        let capabilities = verified_capabilities(
-            "basenames",
-            &active,
-            &execution,
-            &rpc_urls(&["ethereum-mainnet"]),
-        );
-        assert_eq!(
-            capabilities["verified_records"],
-            NamespaceCapability {
-                completeness: Completeness::Partial,
-                unsupported_reason: None,
-                chains: BTreeMap::from([
-                    ("1".to_owned(), chain_entry(Some(NOT_SUPPORTED_FOR_CHAIN))),
-                    ("8453".to_owned(), chain_entry(None)),
-                ]),
-            }
-        );
-        assert_eq!(
-            capabilities["verified_primary_name"],
-            NamespaceCapability {
-                completeness: Completeness::Unsupported,
-                unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
-                chains: BTreeMap::from([
-                    ("1".to_owned(), chain_entry(Some(UNSUPPORTED_REASON))),
-                    ("8453".to_owned(), chain_entry(Some(UNSUPPORTED_REASON))),
-                ]),
-            }
-        );
-
-        // Basenames execution is pinned to manifest version 2 and never admits shadow.
-        for (version, rollout_status) in [(1, "active"), (2, "shadow")] {
-            let pinned = vec![execution_manifest(
-                "basenames_execution",
-                "ethereum-mainnet",
-                version,
-                rollout_status,
-                CapabilitySupportStatus::Supported,
-            )];
-            let pinned = verified_capabilities(
-                "basenames",
-                &active,
-                &pinned,
-                &rpc_urls(&["ethereum-mainnet"]),
-            );
-            assert_eq!(
-                pinned["verified_records"].chains["8453"],
-                chain_entry(Some(EXECUTION_ENTRYPOINT_NOT_DECLARED)),
-                "version {version} {rollout_status}"
-            );
-        }
-
-        let none = verified_capabilities("ens", &[], &[], &rpc_urls(&[]));
-        assert_eq!(
-            none["verified_records"],
-            NamespaceCapability {
-                completeness: Completeness::Unsupported,
-                unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),
-                chains: BTreeMap::new(),
-            }
-        );
     }
 
     #[test]
@@ -792,7 +407,7 @@ mod tests {
         assert_eq!(error.envelope().error.code, "invalid_input");
     }
 
-    fn manifest<const N: usize>(
+    pub(super) fn manifest<const N: usize>(
         source_family: &str,
         chain: &str,
         capabilities: [(&str, CapabilitySupportStatus); N],
