@@ -1676,8 +1676,12 @@ name as the coin type `60` fallback
 ([primary-name route](api-v1-routes.md#get-v1addressesaddressprimary-name))
 adds a `default_reverse_registrar` contract and its `NameForAddrChanged` event
 to the `ens_v1_reverse_l1` manifests: Sepolia
-`0x4F382928805ba0e23B30cFB75fC9E848e82DFD47` from block `8579966` and Mainnet
-`0x283F227c4Bd38ecE252C4Ae7ECE650B0e913f1f9` from block `22764819`
+`0x4F382928805ba0e23B30cFB75fC9E848e82DFD47` from block `8579966`
+(upstream: .refs/ens_v1/deployments/sepolia/DefaultReverseRegistrar.json:L2 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/sepolia/DefaultReverseRegistrar.json:L270 @ ens_v1@91c966f)
+and Mainnet `0x283F227c4Bd38ecE252C4Ae7ECE650B0e913f1f9` from block `22764819`
+(upstream: .refs/ens_v1/deployments/mainnet/DefaultReverseRegistrar.json:L2 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/mainnet/DefaultReverseRegistrar.json:L270 @ ens_v1@91c966f)
 ([manifests](manifests.md#ens-mainnet)). It also changes
 `crates/adapters/src` and the family readers under
 `crates/storage/src/families`, so it rotates the
