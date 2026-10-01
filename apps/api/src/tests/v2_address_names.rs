@@ -1821,6 +1821,8 @@ async fn v2_get_address_names_filters_by_authority_and_reports_migration() -> Re
     assert_eq!(rows[0]["name"], json!("alpha.eth"));
     assert_eq!(rows[0]["authority"], json!("ens_v2"));
     assert_eq!(rows[0]["migrated_at"], json!("1717180007"));
+    // The migration keeps the ENSv1 lease's registration time.
+    assert_eq!(rows[0]["registered_at"], json!("1704153600"));
     assert_eq!(rows[1]["name"], json!("beta.eth"));
     assert_eq!(rows[1]["authority"], json!("ens_v1"));
     assert!(rows[1].get("migrated_at").is_none());

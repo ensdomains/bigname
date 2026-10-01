@@ -195,6 +195,8 @@ pub struct NameFacts {
     /// F1 `project_name_state.authority_start_positions`: the latest AuthorityEpochChanged per
     /// arm.
     pub authority_starts: Value,
+    /// F1 `project_name_state.migration_position`: the name's latest ENSv1→ENSv2 `MigrationApplied`.
+    pub migration: Option<Position>,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
     /// Whether the chain resolves `.eth` names through ENSv2 at the publication
