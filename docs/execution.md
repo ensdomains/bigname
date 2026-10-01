@@ -215,10 +215,13 @@ ENS's reverse resolver gives the `name(node)` call a 100,000 gas stipend and
 treats its failure, out of gas included, as an empty answer that skips
 `default.reverse`
 (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f).
-bigname's `name(node)` call therefore sets its gas to 100,000 plus the
-transaction's intrinsic cost, 21,000 base plus 16 gas per nonzero and 4 per
-zero calldata byte, so the resolver frame receives exactly 100,000 (121,576 when
-all 36 bytes of the `name(node)` calldata are nonzero). A call that runs out of
+bigname's `name(node)` call reproduces only that gas bound: it sets its gas to
+100,000 plus the transaction's intrinsic cost, 21,000 base plus 16 gas per
+nonzero and 4 per zero calldata byte, so the resolver frame receives 100,000
+when the provider's gas cap admits that limit (121,576 when all 36 bytes of the
+`name(node)` calldata are nonzero). It is a plain top-level `eth_call` from the
+zero address, not a static call from ETHReverseResolver
+([divergence](upstream.md#verified-reverse-name-call-context)). A call that runs out of
 gas or reverts ends the lookup as `execution_failed` without the default read;
 the other reverse-leg calls carry no gas field. The forward
 `addr:60` leg is different: it calls the Universal Resolver's `resolve(name,

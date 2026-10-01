@@ -278,6 +278,35 @@ to the applicable entries below.
 > the resolver itself.
 > **Since**: `2026-10-01`
 
+<a id="verified-reverse-name-call-context"></a>
+> **Verified reverse `name()` call is not a static call from the reverse
+> resolver**: the verified primary-name leg reads the reverse node's resolver
+> `name(node)` with a top-level `eth_call` whose gas is set so the resolver
+> frame gets 100,000 gas. That call is not a static call, and its caller is the
+> zero address. The gas bound is the only part of the upstream call context it
+> reproduces. Two differences follow, both reachable only through a resolver an
+> address installs on its own reverse node through the admitted
+> `ReverseRegistrar`, and both affecting only that address's own primary name:
+> (1) a `name` that writes storage and then returns an empty string fails
+> upstream's static call, which ends the lookup with no name, while bigname's
+> call succeeds, sees the empty string and falls back to the `default.reverse`
+> name; (2) a `name` whose answer depends on its caller can return one name to
+> ETHReverseResolver and another to bigname. ETHReverseResolver has no
+> deployment in either profile today: neither profile declares it and the
+> pinned Sepolia and Mainnet deployment artifacts include none, so this
+> describes the upstream source, not a live contract.
+> **Upstream**: ETHReverseResolver reads the name with
+> `resolver.staticcall{gas: 100_000}` from its own address
+> `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)`;
+> an address can claim its reverse node with any resolver
+> `(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74-L98 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/api-v1-routes.md` § `GET /v1/addresses/{address}/primary-name`
+> and `docs/execution.md`; implemented in `crates/lookup/src/primary_name.rs`.
+> **Why**: with no ETHReverseResolver deployed there is no contract whose
+> caller identity to reproduce, and a direct call keeps the reverse leg to plain
+> hash-pinned `eth_call`s. Revisit if ETHReverseResolver ships.
+> **Since**: `2026-10-01`
+
 <a id="ensv1-authority-without-an-ensv2-entry"></a>
 > **ENSv1 authority for a `.eth` name without an ENSv2 entry** — bigname follows the chain for ENSv1 and ENSv2 name authority: a current ENSv2 registration decides, a premigration reservation defers to ENSv1, a released or expired ENSv2 registration stays with ENSv2 as released, and a name that never had an ENSv2 registration is decided by a live ENSv1 registration, or by its history when neither arm holds it. For a name ENSv1 decides without a live ENSv2 entry the ENSv2 Universal Resolver answers nothing: it reads only ENSv2 registries, keeps the nearest ancestor's resolver when a label has no live entry, and the deployment registers `eth` without a resolver, so the lookup fails with `ResolverNotFound`. bigname still serves the name's ownership and registration from its live ENSv1 registration, or as the released ENSv1 registration when that has ended. What it resolves to depends on the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): before it, clients resolve through ENSv1 and bigname serves the ENSv1 resolver and records; from it, bigname follows the Universal Resolver and serves no resolver or records for the name or any name below it, with `unresolvable_reason: "no_live_ens_v2_entry"` (`docs/api-v1.md` § Expiry and grace). On Sepolia at block `11807425` that covered 172 `.eth` second-level names held on ENSv1 (13 never reserved, 159 whose reservation passed its expiry unclaimed) and 149 live names below them.
 > **Upstream**: the Universal Resolver walks only the ENSv2 root registry and its subregistries, taking an entry's resolver only when it is nonzero `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L56-L63 @ ens_v2_sepolia_20260916@366de741)` `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)`; the registry returns no resolver for an expired entry `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L283-L286 @ ens_v2_sepolia_20260916@366de741)`; the deployment registers `eth` with a zero resolver `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)`; a missing resolver fails the lookup `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L406-L408 @ ens_v2_sepolia_20260916@366de741)`. Premigration normally reserves every live ENSv1 `.eth` name with `ENSV1Resolver` as its resolver, which closes this gap for those names `(upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L3-L8 @ ens_v2_sepolia_20260916@366de741)`.

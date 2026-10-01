@@ -3375,7 +3375,8 @@ introduces it rebuilds Project from full history before serving the option; see
   ([divergence](upstream.md#known-divergences)). The verified source's reverse
   leg calls the registry's `resolver`, then that resolver's `name` with the call
   gas set so the resolver gets the 100,000 gas ENS's reverse resolver allows it
-  ([execution](execution.md)), and when the resolver is zero or `name`
+  ([execution](execution.md)); the call is not static and comes from the zero
+  address ([divergence](upstream.md#verified-reverse-name-call-context)), and when the resolver is zero or `name`
   succeeds with an empty string calls `nameForAddr(address)` on the
   `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
   `name` call that reverts or runs out of gas ends the lookup with
