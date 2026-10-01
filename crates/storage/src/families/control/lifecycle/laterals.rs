@@ -49,6 +49,11 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
 pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<crate::UnixSeconds> {
+    expiry_event(in_scope).and_then(|event| event.expiry_seconds)
+}
+
+/// The event the expiry lateral reads (`expiry_candidate`).
+pub(super) fn expiry_event<'a>(in_scope: &[&Tagged<'a>]) -> Option<&'a LifecycleEvent> {
     latest(
         in_scope.iter().filter(|tagged| {
             let event = tagged.event;
@@ -68,7 +73,7 @@ pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<crate::UnixSe
         }),
         |tagged| &tagged.event.position,
     )
-    .and_then(|tagged| tagged.event.expiry_seconds)
+    .map(|tagged| tagged.event)
 }
 
 /// The registrant: the latest admitted grant,

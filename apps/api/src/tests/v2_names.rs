@@ -494,6 +494,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "created_at": "1675296000",
                 "expires_at": "1700000000",
                 "grace_ends_at": "1707776000",
+                "ens_v1": {"expires_at": "1700000000"},
                 "lapsed_registration": {
                     "registrant": HOLDER,
                     "held_through": "registrar",
@@ -512,7 +513,8 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "registered_at": "1706832000",
                 "created_at": "1706832000",
                 "expires_at": "1900000000",
-                "grace_ends_at": "1907776000"
+                "grace_ends_at": "1907776000",
+                "ens_v1": {"expires_at": "1900000000"}
             }
         ]),
         "the released name keeps its place at its old expiry, with no registrant or owner, and \

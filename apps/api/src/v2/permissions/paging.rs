@@ -14,6 +14,20 @@ const SUBJECT_CURSOR_KEY: &str = "subject";
 const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
 const SCOPE_CURSOR_KEY: &str = "scope";
 
+/// `filters` with the name compared by the node it names, so every spelling of a node, a
+/// bracketed labelhash included, continues the same cursor.
+fn by_node(filters: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut filters = filters.clone();
+    if let (Some(name), Some(namespace)) = (
+        filters.get(super::NAME_FILTER_KEY),
+        filters.get(super::NAMESPACE_FILTER_KEY),
+    ) {
+        let node = crate::v2::support::route_logical_name_id(namespace, name);
+        filters.insert(super::NAME_FILTER_KEY.to_owned(), node);
+    }
+    filters
+}
+
 pub(super) fn permissions_cursor_payload(
     cursor: &PermissionsCurrentAccountResourceCursor,
     filters: &BTreeMap<String, String>,
@@ -40,7 +54,7 @@ pub(super) fn permissions_storage_cursor(
     if payload.sort != PERMISSIONS_SORT {
         return Err(invalid_cursor_error());
     }
-    if &payload.filters != expected_filters {
+    if by_node(&payload.filters) != by_node(expected_filters) {
         return Err(invalid_cursor_error());
     }
     if payload.last_item.len() != 3 {

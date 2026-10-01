@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::v2::name_record::LapsedRegistration;
+use crate::v2::name_record::{EnsV1, LapsedRegistration};
 use crate::v2::record_groups::{AbiSource, RecordGroups};
 use crate::v2::{
     AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
@@ -154,6 +154,9 @@ pub(crate) struct LookupRecord {
     pub(crate) resolution: Option<AddressNameResolution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
+    /// Present on `profile=detail` records whose authority is `ens_v1` or `ens_v0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ens_v1: Option<EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) migrated_at: Option<String>,
     pub(crate) status: Status,

@@ -1571,6 +1571,28 @@ longer reports an `aliases` section, `/aliases` answers like any unknown route,
 lookup topology has no `alias` field, and the `set_alias` and
 `admin_set_alias` powers are no longer reported.
 
+### ENSv1 lease date on name rows
+
+The build that serves the `ens_v1` object on name-shaped rows
+([naming dictionary](api-v1.md#naming-dictionary)) keeps the BaseRegistrar
+lease expiry as `registration.ens_v1_expiry` in the composed name row. Nothing
+stores that value, and the build adds no schema-migration, manifest change or
+historical ingest fetch, but the code that composes it lives in hashed storage
+sources (`crates/storage/src/families/control/lifecycle`), so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. An existing deployment finishes the full-history Interpret redo and the
+Project redo it installs before the matching API serves, as for any rotation;
+until then the fenced name routes answer `409 stale`. It ships batched with the
+TYR-116 release (the wrapped-registration resolver fix), whose single Interpret
+redo and Project rebuild discharge both.
+
+The build also moves `wrapper_state` and `wrapper_fuses` off the top level of
+name-shaped rows into `ens_v1`, a breaking response change that the app
+integration takes in the same release. Once the redo publishes, check on Sepolia
+that `GET /v1/names/nick.eth` serves `ens_v1.expires_at` as the BaseRegistrar
+lease date (`"1798608633"` at the time of writing) beside the top-level ENSv2
+`expires_at` (`"1803965433"`), with `ens_v1.wrapper_state` `"emancipated"`.
+
 ### Missing sort keys sort as the smallest value
 
 The build that makes a missing `expires_at`, `registered_at` or `created_at`

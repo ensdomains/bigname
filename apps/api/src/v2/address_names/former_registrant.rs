@@ -23,7 +23,7 @@ use crate::v2::{
     collection_snapshot::CollectionSnapshot,
     cursor::invalid_cursor_error,
     list_cursor::{ListCursor, ListPosition},
-    name_record::{lapsed_registration, load_migrated_at},
+    name_record::{ens_v1_of_row, lapsed_registration, load_migrated_at},
     name_rows_error,
     vocab::Authority,
 };
@@ -135,7 +135,7 @@ pub(super) async fn get_address_former_registrants(
                 migrated_at_by_name.get(&row.logical_name_id).cloned(),
             )
         })
-        .collect();
+        .collect::<V2Result<_>>()?;
     let next_cursor = page
         .next_cursor
         .as_ref()
@@ -185,9 +185,9 @@ fn former_row(
     row: &NameCurrentRow,
     primary_name: Option<&str>,
     migrated_at: Option<String>,
-) -> AddressName {
+) -> V2Result<AddressName> {
     let registration = name_registration_fields(Some(row), &row.namespace);
-    AddressName {
+    Ok(AddressName {
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
         namespace: row.namespace.clone(),
@@ -206,6 +206,7 @@ fn former_row(
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         authority: Authority::from_provenance(&row.provenance),
+        ens_v1: ens_v1_of_row(Some(row))?,
         migrated_at,
         relations: vec![Relation::FormerRegistrant],
         is_primary: primary_name == Some(row.normalized_name.as_str()),
@@ -216,7 +217,7 @@ fn former_row(
         record_count: None,
         role_summary: None,
         restrictions: None,
-    }
+    })
 }
 
 fn timestamp_filter(value: Option<UnixSeconds>) -> String {
