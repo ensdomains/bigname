@@ -1589,5 +1589,13 @@ wrapped `.eth` name whose earlier registration set its resolver through
 expiry and grace, serves the resolver from the new registration rather than the
 earlier one, including any later change or clear. The same holds when the
 registry owner left by an earlier unwrap set a resolver earlier in the block of
-the new registration. Before the release is recorded, confirm that both redos
-adopted the new hash.
+the new registration.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666-L671 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L396 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L95 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+Before the release is recorded, confirm that both redos adopted the new hash.
