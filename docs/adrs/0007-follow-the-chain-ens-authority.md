@@ -123,6 +123,12 @@ no longer gates serving, so a future Mainnet ENSv2 admission serves each
 selected name as soon as its manifests are active. See
 [architecture](../architecture.md#ensv1ensv2-current-authority). Linear TYR-20.
 
+Amendment (2026-10-01, TYR-130): `/v1/namespaces` no longer aggregates the
+`exact_name_profile` flag. It reports `name_profile` (and `name_history`) as
+`full` whenever the namespace has an active manifest, and no served output
+reads the flag; capability flags are `unsupported` or `supported` only. See
+[manifests](../manifests.md#capability_flags).
+
 ## Context
 
 During the ENSv1→ENSv2 migration one `.eth` name can have facts on both
