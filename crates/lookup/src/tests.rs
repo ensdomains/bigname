@@ -3211,6 +3211,96 @@ async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> An
     Ok(())
 }
 
+// TYR-120. The reverse leg follows ENS's ETH reverse resolver: with a zero registry resolver or an
+// empty name it reads the manifest-declared `default.reverse` registrar's `nameForAddr`.
+#[tokio::test]
+async fn primary_name_falls_back_to_the_default_reverse_registrar() -> AnyResult<()> {
+    const DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let resolver_word = |address: &str| -> AnyResult<RpcResponse> {
+        Ok(RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(address)?.abi_encode(),
+        ))))
+    };
+    let name = |name: &str| RpcResponse::Result(Value::String(hex_string(&name.abi_encode())));
+    let cases = [
+        (
+            vec![resolver_word("0x0000000000000000000000000000000000000000")?],
+            Some("default"),
+        ),
+        (
+            vec![resolver_word(reverse_resolver)?, name("")],
+            Some("default"),
+        ),
+        (
+            vec![resolver_word(reverse_resolver)?, name("alice.eth")],
+            None,
+        ),
+    ];
+    for (reverse_leg, fallback) in cases {
+        let mut responses = reverse_leg;
+        let reverse_calls = responses.len();
+        if fallback.is_some() {
+            responses.push(name("alice.eth"));
+        }
+        responses.push(RpcResponse::Result(encoded_address_result(target)?));
+        let (rpc_url, rpc_handle) = spawn_mock_rpc(responses).await?;
+        let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+        seed_manifest(
+            fixture.pool(),
+            ENS_NAMESPACE,
+            "ens_v1_registry_l1",
+            "registry",
+            ENS_REGISTRY,
+            "00000000-0000-0000-0000-000000000104",
+        )
+        .await?;
+        seed_manifest(
+            fixture.pool(),
+            ENS_NAMESPACE,
+            "ens_v1_reverse_l1",
+            "default_reverse_registrar",
+            DEFAULT_REVERSE_REGISTRAR,
+            "00000000-0000-0000-0000-000000000105",
+        )
+        .await?;
+        let result = lookup_engine(fixture.pool(), &rpc_url)?
+            .lookup_ens_primary_name(ETHEREUM, target)
+            .await?;
+        fixture.cleanup().await?;
+        let requests = join_rpc(rpc_handle).await?;
+
+        assert_eq!(result.status, EnsPrimaryNameStatus::Success);
+        assert_eq!(result.name.as_deref(), Some("alice.eth"));
+        assert_eq!(result.forward_address.as_deref(), Some(target));
+        let answered_by = if fallback.is_some() {
+            DEFAULT_REVERSE_REGISTRAR
+        } else {
+            reverse_resolver
+        };
+        assert_eq!(
+            result.reverse_resolver_address.as_deref(),
+            Some(answered_by)
+        );
+        assert_eq!(requests[0]["params"][0]["to"], ENS_REGISTRY);
+        if fallback.is_some() {
+            let call = &requests[reverse_calls]["params"][0];
+            assert_eq!(call["to"], DEFAULT_REVERSE_REGISTRAR);
+            assert_eq!(
+                call["data"],
+                format!("0x4ec3bd23{:0>64}", target.trim_start_matches("0x"))
+            );
+        }
+        assert_eq!(
+            requests.last().expect("forward call")["params"][0]["to"],
+            UNIVERSAL_RESOLVER
+        );
+        assert_hash_pinned(&requests, ETHEREUM_HASH);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResult<()> {
     let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";

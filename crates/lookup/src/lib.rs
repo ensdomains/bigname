@@ -48,6 +48,8 @@ pub const BASENAMES_EXECUTION_SOURCE_FAMILY: &str = SourceFamily::BasenamesExecu
 pub const ENS_UNIVERSAL_RESOLVER_ROLE: &str = "universal_resolver";
 pub const BASENAMES_L1_RESOLVER_ROLE: &str = "l1_resolver";
 pub const ENS_REGISTRY_ROLE: &str = "registry";
+pub const ENS_V1_REVERSE_SOURCE_FAMILY: &str = SourceFamily::EnsV1ReverseL1.as_str();
+pub const ENS_DEFAULT_REVERSE_REGISTRAR_ROLE: &str = "default_reverse_registrar";
 
 /// The Ethereum L1 chains an ENS deployment profile can execute against: Mainnet for the
 /// `mainnet` profile and Sepolia for the `sepolia` profile. Verified records and verified
