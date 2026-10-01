@@ -3,16 +3,16 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=98
-expected_runnable=95
+expected_total=99
+expected_runnable=96
 expected_ignored=3
 expected_shard_1_runnable=32
 expected_shard_1_ignored=1
-expected_shard_1_filtered=65
+expected_shard_1_filtered=66
 expected_shard_2_runnable=32
 expected_shard_2_ignored=1
-expected_shard_2_filtered=65
-expected_shard_3_runnable=31
+expected_shard_2_filtered=66
+expected_shard_3_runnable=32
 expected_shard_3_ignored=1
 expected_shard_3_filtered=66
 
@@ -125,6 +125,7 @@ shard_3_tests=(
     "scenarios::reverse_primary_claims::undeclared_reverse_resolver_record_populates_declared_claim"
     "scenarios::support::tests::canonical_event_readiness_adds_only_requested_record_key"
     "scenarios::support::tests::temp_dirs_created_concurrently_are_distinct"
+    "scenarios::wrapper_registration::born_wrapped_registration_serves_its_resolver"
     "scenarios::wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry"
     "scenarios::wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event"
 )
