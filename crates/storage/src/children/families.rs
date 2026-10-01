@@ -13,7 +13,7 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction, types::time::OffsetDateTime};
 
 use crate::families::{
-    name::read_snapshot,
+    name::{ensure_published, read_snapshot},
     topology::{
         FamilyChildRow, RegistryLabels, children_page_on, count_children_of_parents_on,
         count_children_on, require_publication,
@@ -106,15 +106,41 @@ pub(super) async fn registry_page(
     })
 }
 
-pub(super) async fn registry_count(
+/// The labels `registry_address` holds at the current family publication of `chain_id`, under
+/// the name it serves in that same snapshot: the earliest name whose current ENSv2 subregistry
+/// pointer targets it, as the registry overview picks its `name`. Zero when no name points at
+/// it. The serving name is resolved here, not passed in, so a publication that rebinds the
+/// registry to another name between the caller's reads and this one cannot anchor the count to
+/// a parent the registry no longer serves.
+pub(super) async fn registry_count_current(
     pool: &PgPool,
-    parent_logical_name_id: &str,
+    chain_id: &str,
     registry_address: &str,
 ) -> Result<i64> {
     let registry = registry_address.to_ascii_lowercase();
-    let mut transaction = snapshot(pool, &[parent_logical_name_id.to_owned()]).await?;
-    let count =
-        count_children_on(&mut transaction, parent_logical_name_id, Some(&registry)).await?;
+    let mut transaction = read_snapshot(pool).await?;
+    ensure_published(&mut transaction, &[chain_id.to_owned()]).await?;
+    let parent: Option<String> = sqlx::query_scalar(
+        "/* storage:children.registry_serving_parent */
+         SELECT pointer.logical_name_id
+         FROM bigname_phase.project_parent_subregistry pointer
+         JOIN bigname_phase.name_surfaces surface
+           ON surface.logical_name_id = pointer.logical_name_id
+          AND surface.visibility_state = 'active'
+         WHERE pointer.chain_id = $1 AND pointer.subregistry_address = $2
+         ORDER BY pointer.block_number, pointer.transaction_index NULLS LAST,
+                  pointer.log_index NULLS LAST, pointer.event_identity
+         LIMIT 1",
+    )
+    .bind(chain_id)
+    .bind(&registry)
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("failed to read the name a registry serves")?;
+    let count = match parent {
+        Some(parent) => count_children_on(&mut transaction, &parent, Some(&registry)).await?,
+        None => 0,
+    };
     close(transaction).await?;
     i64::try_from(count).context("registry label count overflow")
 }

@@ -61,9 +61,8 @@ pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,
     ChildrenCurrentPageFilter, ChildrenCurrentRow, ChildrenCurrentSort, ChildrenCurrentSortValue,
     ChildrenCurrentSummary, RegistryChildrenPage, RegistryLabelOwnerFilter,
-    count_registry_children_current, load_children_current_page,
-    load_children_current_page_filtered, load_children_current_summaries,
-    load_registry_children_current_page,
+    count_registry_labels_current, load_children_current_page, load_children_current_page_filtered,
+    load_children_current_summaries, load_registry_children_current_page,
 };
 pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,

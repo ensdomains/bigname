@@ -967,15 +967,42 @@ async fn reach(control: &crate::v2::collection_snapshot::finish_test_hooks::Fini
         .context("registry request never reached the hook")
 }
 
+/// Runs the overview, pausing once its publication check has passed, runs `late` (the change a
+/// publication makes while the labels count is read), and returns the response.
+async fn registry_with_late_change<F, Fut>(
+    database: &TestDatabase,
+    uri: &str,
+    late: F,
+) -> Result<(StatusCode, Value)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    use crate::v2::collection_snapshot::finish_test_hooks;
+    let (_before_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
+    let request = spawn_registry_request(database, uri.to_owned());
+    reach(&before_check).await?;
+    // The publication check consumed the first hook; this one pauses the labels count.
+    let (_after_guard, after_check) = finish_test_hooks::install(&database.pool).await?;
+    before_check.resume().await;
+    reach(&after_check).await?;
+    late().await?;
+    after_check.resume().await;
+    let response = request.await.context("registry request task panicked")??;
+    let status = response.status();
+    Ok((status, read_json(response).await?))
+}
+
 // The block-bounded evidence stays fenced on the publication; the current labels count is read
 // after that check, so a publication during it does not refuse the overview and its new label
-// is counted while `meta.as_of` stays at the checked publication.
+// is counted while the selected evidence and `meta` stay at the checked publication.
 #[tokio::test]
 async fn v2_get_registry_counts_labels_published_after_the_publication_check() -> Result<()> {
     use crate::v2::collection_snapshot::finish_test_hooks;
     let database = TestDatabase::new_migrated().await?;
     seed_registry_fixture(&database).await?;
     let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let selected = registry_payload(&database, &uri).await?;
 
     let (_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
     let request = spawn_registry_request(&database, uri.clone());
@@ -989,25 +1016,156 @@ async fn v2_get_registry_counts_labels_published_after_the_publication_check() -
     assert_eq!(payload["error"]["code"], json!("stale"));
 
     seed_unpublished_alpha_label(&database).await?;
-    let (_before_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
-    let request = spawn_registry_request(&database, uri);
-    reach(&before_check).await?;
-    // The publication check consumed the first hook; this one pauses the labels count.
-    let (_after_guard, after_check) = finish_test_hooks::install(&database.pool).await?;
-    before_check.resume().await;
-    reach(&after_check).await?;
-    publish_test_families_on(&database.pool, REGISTRY_CHAIN_ID, 84).await?;
-    after_check.resume().await;
-    let response = request.await.context("registry request task panicked")??;
-    let status = response.status();
-    let payload: Value = read_json(response).await?;
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        publish_test_families_on(&pool, REGISTRY_CHAIN_ID, 84).await
+    })
+    .await?;
     assert_eq!(status, StatusCode::OK, "{payload:#}");
     assert_eq!(
         payload["data"]["counts"],
         json!({ "labels": 3, "events": 5, "roles": 0 })
     );
-    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(83));
+    assert_eq!(payload["meta"], selected["meta"]);
+    assert_eq!(payload["data"]["name"], selected["data"]["name"]);
+    assert_eq!(payload["data"]["referenced_by"], selected["data"]["referenced_by"]);
     database.cleanup().await
+}
+
+// A later publication rebinds the alpha registry from alpha.eth to beta.eth, keeping its two
+// labels. The late count follows the name the registry serves at its own snapshot.
+#[tokio::test]
+async fn v2_get_registry_late_labels_count_follows_a_rebind() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let selected = registry_payload(&database, &uri).await?;
+    seed_unpublished_alpha_rebind(&database).await?;
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        publish_test_families_on(&pool, REGISTRY_CHAIN_ID, 84).await
+    })
+    .await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(payload["data"]["counts"]["labels"], json!(2), "{payload:#}");
+    assert_eq!(payload["meta"], selected["meta"]);
+    assert_eq!(payload["data"]["name"]["name"], json!("alpha.eth"));
+
+    seed_schema_v2_ens_lookup_head(&database.pool, 84, "0xregistry84", "2023-11-14T22:14:44Z")
+        .await?;
+    let rebound = registry_payload(&database, &uri).await?;
+    assert_eq!(rebound["data"]["name"]["name"], json!("beta.eth"), "{rebound:#}");
+    assert_eq!(rebound["data"]["counts"]["labels"], json!(2), "{rebound:#}");
+    database.cleanup().await
+}
+
+// The late count checks its own publication: one that becomes unservable after the overview's
+// check refuses the request rather than counting nothing.
+#[tokio::test]
+async fn v2_get_registry_late_labels_count_refuses_an_unservable_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+    let pool = database.pool.clone();
+    let (status, payload) = registry_with_late_change(&database, &uri, || async move {
+        sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
+            .execute(&pool)
+            .await?;
+        Ok(())
+    })
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+    database.cleanup().await
+}
+
+/// At block 84, which no publication covers: the root registry clears alpha.eth's subregistry
+/// and points beta.eth at the alpha registry, which registers one.beta.eth and two.beta.eth.
+async fn seed_unpublished_alpha_rebind(database: &TestDatabase) -> Result<()> {
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(REGISTRY_CHAIN_ID, "0xregistry84", None, 84, 1_700_000_084)],
+    )
+    .await?;
+    for (name, base, arm) in [
+        ("beta.eth", 0xB000, "ens_v1"),
+        ("one.beta.eth", 0xB100, "ens_v2"),
+        ("two.beta.eth", 0xB110, "ens_v2"),
+    ] {
+        seed_family_identity_inputs(
+            &database.pool,
+            "ens",
+            name,
+            REGISTRY_CHAIN_ID,
+            84,
+            "0xregistry84",
+            Uuid::from_u128(base),
+            Uuid::from_u128(base + 1),
+            Uuid::from_u128(base + 2),
+            arm,
+        )
+        .await?;
+    }
+    let beta = registry_logical_name_id("beta.eth");
+    let mut beta_grant = family_event(
+        "registry-beta-grant",
+        Some(&beta),
+        Some(Uuid::from_u128(0xB000)),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        84,
+        0,
+        json!({"authority_kind":"registrar", "registrant":V2_ADDRESS, "expiry":1_900_000_000_i64}),
+    );
+    beta_grant.block_hash = Some("0xregistry84".into());
+    let mut events = vec![beta_grant];
+    let mut alpha_cleared = registry_event(
+        "registry-alpha-pointer-cleared",
+        Some(&registry_logical_name_id("alpha.eth")),
+        "SubregistryChanged",
+        84,
+        ROOT_REGISTRY,
+        json!({ "source_event": "SubregistryUpdated",
+                "subregistry": "0x0000000000000000000000000000000000000000" }),
+    );
+    alpha_cleared.log_index = Some(1);
+    let mut beta_pointer = registry_event(
+        "registry-beta-pointer",
+        Some(&beta),
+        "SubregistryChanged",
+        84,
+        ROOT_REGISTRY,
+        json!({ "source_event": "SubregistryUpdated", "subregistry": ALPHA_REGISTRY }),
+    );
+    beta_pointer.log_index = Some(2);
+    events.extend([alpha_cleared, beta_pointer]);
+    for (index, (name, resource)) in [("one.beta.eth", 0xB100), ("two.beta.eth", 0xB110)]
+        .into_iter()
+        .enumerate()
+    {
+        let log = 3 + 2 * i64::try_from(index)?;
+        let mut grant = registry_event(
+            &format!("registry-{name}-registered"),
+            Some(&registry_logical_name_id(name)),
+            "RegistrationGranted",
+            84,
+            ALPHA_REGISTRY,
+            json!({ "source_event": "LabelRegistered",
+                    "registry_contract_instance_id": Uuid::from_u128(0xA190),
+                    "status": "registered", "registrant": V2_ADDRESS,
+                    "expiry": 1_900_000_000_i64, "authority_kind": "ens_v2_registry" }),
+        );
+        grant.resource_id = Some(Uuid::from_u128(resource));
+        grant.log_index = Some(log + 1);
+        let mut transfer = grant.clone();
+        transfer.event_identity.push_str("-transfer");
+        transfer.event_kind = "TokenControlTransferred".into();
+        transfer.log_index = Some(log);
+        transfer.after_state = json!({"source_event": "Transfer", "to": V2_ADDRESS});
+        events.extend([grant, transfer]);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok(())
 }
 
 /// `three.alpha.eth`, registered by the alpha registry at block 84, which no publication covers.

@@ -227,13 +227,11 @@ pub(crate) async fn get_registry(
     // refuse the bounded evidence above.
     #[cfg(test)]
     super::collection_snapshot::finish_test_hooks::run(&state.pool).await?;
-    let labels = match (is_current, serving.as_ref()) {
-        (false, _) => None,
-        (true, None) => Some(0),
-        (true, Some(pointer)) => Some(
-            bigname_storage::count_registry_children_current(
+    let labels = if is_current {
+        Some(
+            bigname_storage::count_registry_labels_current(
                 &state.pool,
-                &pointer.logical_name_id,
+                chain_id_slug,
                 &normalized_address,
             )
             .await
@@ -241,7 +239,9 @@ pub(crate) async fn get_registry(
                 super::SnapshotReadResource::Registry,
                 |_| internal_error(chain_id_slug, &normalized_address),
             ))?,
-        ),
+        )
+    } else {
+        None
     };
     let mut data = build_registry_overview(
         registry,
