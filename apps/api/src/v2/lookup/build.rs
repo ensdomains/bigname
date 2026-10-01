@@ -67,6 +67,7 @@ pub(super) fn build_forward_feed_record(
         relations: Vec::new(),
         resolution: None,
         authority: None,
+        ens_v1: None,
         migrated_at: None,
         status,
         unsupported_reason,
@@ -130,6 +131,7 @@ pub(super) fn build_reverse_feed_record(
         relations: lookup_relations(&record.relation_facets),
         resolution: None,
         authority: None,
+        ens_v1: None,
         migrated_at: None,
         status,
         unsupported_reason,
@@ -187,6 +189,7 @@ fn build_detail_record(
     let resolver = name_record::identity_row_serves_resolver(&record.row)
         .then(|| name_record::resolver(&record.row.declared_summary))
         .flatten();
+    let authority = Authority::from_provenance(&record.row.provenance);
 
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
@@ -236,7 +239,8 @@ fn build_detail_record(
         is_primary,
         relations,
         resolution: None,
-        authority: Authority::from_provenance(&record.row.provenance),
+        authority,
+        ens_v1: name_record::ens_v1(authority, &record.row.declared_summary)?,
         migrated_at: None,
         status,
         unsupported_reason,
@@ -286,6 +290,7 @@ fn authority_unsupported_record(
         relations: Vec::new(),
         resolution: None,
         authority: None,
+        ens_v1: None,
         migrated_at: None,
         status,
         unsupported_reason,

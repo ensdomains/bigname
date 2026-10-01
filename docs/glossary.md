@@ -618,7 +618,7 @@ parent fuse changes after that bit is burned.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L730 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L547 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L553 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="emancipated"` only while the wrapper
+The API exposes this as `ens_v1.wrapper_state="emancipated"` only while the wrapper
 expiry is not earlier than the served block timestamp. After that boundary,
 NameWrapper reads the fuses and owner as zero, so `wrapper_state` is omitted.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
@@ -1745,7 +1745,7 @@ owner-controlled permissions to be revoked.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1025 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1067 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="locked"` only while the wrapper expiry
+The API exposes this as `ens_v1.wrapper_state="locked"` only while the wrapper expiry
 is not earlier than the served block timestamp; after that boundary the
 NameWrapper reads both owner and fuses as zero and `wrapper_state` is omitted.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843 @ ens_v1@91c966f)
@@ -1798,11 +1798,15 @@ PostgreSQL `escape` encoding of the whole stored child name — the parent porti
 included, since the encoding runs over the whole byte string. A
 normalization-failing label takes the placeholder rather than the escape form:
 its decoded text is a valid string but not a name for the proven node, and
-escaping it would serve the same misleading text. Neither is
-reserved syntax — a label really spelled that way produces the same string — so
-a caller distinguishing rows should use `namehash` and `labelhash`, not the
-served text. A non-name form is not addressable and may not be fed back into a
-name-shaped route.
+escaping it would serve the same misleading text. The placeholder label is
+reserved syntax: bigname's normalizer rejects `[` and `]`
+([name inputs](api-v1.md#name-inputs)), so a real label spelled that way
+is itself served as its own labelhash's placeholder, and a caller can recognize
+the placeholder from the text. The escape form is not reserved, since a label
+really spelled like escape output produces the same string. `namehash` and
+`labelhash` stay the stable identifiers. The placeholder is accepted as a
+[name input](api-v1.md#name-inputs) for its node, which serves no name row while
+it has no name surface; the escape form is not.
 
 ## Normalized event
 
@@ -2440,7 +2444,7 @@ conditions for its internal wrapped guard.
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L67 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1080 @ ens_v1@91c966f)
-The API exposes this as `wrapper_state="wrapped"`. Passing the stored wrapper
+The API exposes this as `ens_v1.wrapper_state="wrapped"`. Passing the stored wrapper
 expiry clears effective fuses but does not remove a plain wrapped name or this
 state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L101 @ ens_v1@91c966f)

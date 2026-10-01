@@ -340,7 +340,11 @@ collection route carry neither header.
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
   records, on `status=unsupported` records, and, for `authority`, on ownerless
-  registry rows. Reverse inputs accept no
+  registry rows. `profile=detail` records whose `authority` is `ens_v1` or
+  `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
+  wrapper_fuses?}`, the ENSv1 lease date and NameWrapper position) exactly as
+  name detail does; feed records carry no `expires_at` and no `ens_v1`.
+  Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
   A name result classified as `registration_status=unregistered` always omits
@@ -639,8 +643,10 @@ collection route carry neither header.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
   `owner`, `registrant`, `registration_status`, `registered_at`, `created_at`,
-  `expires_at` and `grace_ends_at`. Every row has an `expires_at` inside the
-  window. `expires_at` is the served expiry of
+  `expires_at` and `grace_ends_at`, and the `ens_v1` object while the name's
+  authority is `ens_v1` or `ens_v0` (see
+  [the naming dictionary](api-v1.md#naming-dictionary)). Every row has an
+  `expires_at` inside the window. `expires_at` is the served expiry of
   [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
   cutover a `.eth` name with a live ENSv2 entry is listed by that entry's
   expiry, before it by its ENSv1 lease's. A name
@@ -706,7 +712,7 @@ collection route carry neither header.
 <!-- openapi:parameters GET /v1/names/{name} -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
@@ -763,7 +769,8 @@ collection route carry neither header.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
-  the same object when backed. For a `.eth` second-level name
+  the same object when backed, plus the `ens_v1` object while `authority` is
+  `ens_v1` or `ens_v0`. For a `.eth` second-level name
   `registration_id` is the BaseRegistrar lease whether or not the name is
   wrapped; see
   [registration identity of wrapped names](api-v1.md#registration-identity-of-wrapped-names).
@@ -773,11 +780,20 @@ collection route carry neither header.
   [lapsed registration](api-v1.md#lapsed-registration) for the supported causes,
   pinned contract evidence, and expiry/grace field rules. It serves no current
   `registrant`. The block is omitted for names that are not released and for other
-  release causes. An ENSv1 wrapper-backed row also carries
+  release causes. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?}`:
+  `expires_at` is the BaseRegistrar lease's own expiry, `null` without a
+  lease, which after the Universal Resolver cutover can differ from the
+  top-level ENSv2 `expires_at` (see [Expiry and grace](api-v1.md#expiry-and-grace)).
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L326-L329 @ ens_v2_sepolia_20260916@366de741)
+  An ENSv1 wrapper-backed name's `ens_v1` also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
   [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
   `wrapper_fuses` object defined in [`api-v1.md`](api-v1.md#naming-dictionary).
+  Neither field is served at the top level, and an `ens_v2` name has no
+  `ens_v1` object.
   The tristate is bigname vocabulary derived from the enforcing NameWrapper
   guards, not an upstream enum. Both fields are omitted after an emancipated or
   locked wrapper position expires; a plain wrapped position remains `wrapped`
@@ -872,7 +888,7 @@ collection route carry neither header.
   Each requested key is one record call; a route that follows CCIP-Read can
   add continuation calls per key. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
-  `registration_status`, `wrapper_state`, `wrapper_fuses`, `authority`,
+  `registration_status`, `authority`, `ens_v1`,
   `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
   projection values because they are not resolver records. Verified responses
@@ -1051,7 +1067,7 @@ its value map:
 <!-- openapi:parameters GET /v1/names/{name}/records -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot. |
 | `finality` | query | enum Finality | no | `latest` | Snapshot finality; latest is the default. |
@@ -1586,7 +1602,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 <!-- openapi:parameters GET /v1/names/{name}/subnames -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
@@ -1649,7 +1665,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
-  `created_at`, and `expires_at`. An ENSv1 or Basenames registry child with no
+  `created_at`, and `expires_at`, and the `ens_v1` object while the child's
+  authority is `ens_v1` or `ens_v0`: a subname has no lease, so its
+  `ens_v1.expires_at` is `null`, and a wrapped one carries its NameWrapper
+  state there. An ENSv1 or Basenames registry child with no
   current name row serves its node's current registry owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
   `NewOwner` moves it. A child whose registry owner is the zero address, one
@@ -1670,14 +1689,19 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   encoded by PostgreSQL's `escape` rule: a NUL as `\000`, each byte above `0x7f`
   as a backslash and three octal digits, a backslash doubled, and every other
   byte verbatim. The rule runs over the whole string, so a non-ASCII parent
-  portion is octal-escaped along with the label. Neither form is reserved syntax
-  — a label really spelled `[<64 hex digits>].<parent>`, or really spelled like
-  escape output such as `\377bad`, produces the same string — so distinguish
-  rows by `namehash` and `labelhash` rather than by parsing the served text.
+  portion is octal-escaped along with the label. The placeholder label
+  `[<64 hex digits>]` is reserved syntax. bigname's normalizer rejects `[` and
+  `]` ([name inputs](api-v1.md#name-inputs)), so a real label spelled that way is
+  itself served as the placeholder of its own
+  labelhash and never as its text. Clients can therefore recognize the
+  placeholder from the served text. The escape form is not reserved: a label
+  really spelled like escape output, such as `\377bad`, produces the same
+  string. `namehash` and `labelhash` remain the stable identifiers of a row.
   Both forms come from ENSv1 and Basenames registry edges; an ENSv2 child
-  bigname cannot name is absent from the page instead. Neither form is
-  addressable, and neither may be fed
-  back into a name-shaped route. Resolver records are not included here;
+  bigname cannot name is absent from the page instead. The placeholder label
+  is a [name input](api-v1.md#name-inputs) for its node. That node has no name
+  row while it has no name surface, so name routes answer it `404 not_found`.
+  The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
   `include=counts` adds `subname_count`, the row's direct subname count.
@@ -2196,7 +2220,7 @@ the controller a name's `manager` or `role_holder`.
 <!-- openapi:parameters GET /v1/names/{name}/history -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | path | string | yes | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | path | string | yes | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
@@ -2659,7 +2683,8 @@ introduces it rebuilds Project from full history before serving the option; see
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, normalized `name` when supplied, and an explicitly requested public
+  `address`, the node a `name` names when supplied (so equivalent
+  [name inputs](api-v1.md#name-inputs) share a cursor), and an explicitly requested public
   `registration_id`. It also binds the namespace when explicit or implied by a
   name (and namespace absence for an address-only request, matching its
   all-namespace result set), `include=lineage`, the fixed sort and the last
@@ -3103,8 +3128,9 @@ introduces it rebuilds Project from full history before serving the option; see
   fields, `include=counts`, and `is_primary` belong to the
   [representative name](glossary.md#representative-name), the group member
   that sorts first by name text, then by namespace and namehash. Rows also
-  carry `authority` and `migrated_at` with the same meaning as on
-  `GET /v1/names/{name}`: `ens_v0`, `ens_v1` or `ens_v2`, and the block time
+  carry `authority`, `ens_v1` and `migrated_at` with the same meaning as on
+  `GET /v1/names/{name}`: `ens_v0`, `ens_v1` or `ens_v2`, the ENSv1 lease date
+  and NameWrapper position while ENSv1 decides the name, and the block time
   of the migration boundary that proved an `ens_v2` arm. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut; a `resolves_to` row evaluates it against the
@@ -3224,7 +3250,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `namehash` is the child node, `owner` the registry owner, and
   `permission_resource_id` the node's registry-only resource. The registry
   records no lease for it, so `registrant`, `registered_at`, `created_at`,
-  `expires_at`, `authority`, and `migrated_at` are absent,
+  `expires_at`, `authority`, `ens_v1`, and `migrated_at` are absent,
   `registration_status` is the value the subnames route serves for a child with
   no name row, and `is_primary` is `false`. `relation=owner` and
   `relation=registrant` never list it; any `authority` value and
@@ -3606,7 +3632,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary. Each result is built only from the selected current
   registration: a migrated name uses its ENSv2 owner, registrant, status, and
-  expiry. A name whose exact-name projection is unsupported is omitted from
+  expiry. A name that ENSv1 decides carries the `ens_v1` object, as on
+  `GET /v1/names`. A name whose exact-name projection is unsupported is omitted from
   search results whatever the reason. Today that is a name with no selected
   current binding (`current_authority_not_projected`, for example when both
   arms have only history and nothing is open), or a row an earlier Project
@@ -3677,7 +3704,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
 | `namespace` | query | string | no | none | Inferred from name when supplied; defaults to ens only when neither name nor resolver is supplied. A bare resolver selector spans namespaces. |
-| `name` | query | string | no | none | ENS name; name-shaped paths normalize it before reading. |
+| `name` | query | string | no | none | ENS name, normalized before reading; a label may be spelled as its bracketed labelhash `[<64 lowercase hex digits>]` (see Name inputs in api-v1.md). |
 | `address` | query | string | no | none | EVM address in hexadecimal form. |
 | `resolver` | query | string | no | none | Resolver selector in numeric-chain-id:hex-address form; matches emitted events and current/previous resolver-pointer changes. |
 | `contract_address` | query | string | no | none | Case-insensitive emitting contract address; combines with resolver and other filters. |
@@ -3882,8 +3909,8 @@ For a registrar lease first identified by a later readable observation, registra
   `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
   registry whose resolvers answer for the names bound to it; `bound_names`
   still lists this resolver's own bindings, not the mirrored ENSv1 resolvers'.
-  Those rows use the same optional, atomic `wrapper_state` and `wrapper_fuses`
-  contract as exact-name detail; the fields are present only for a current
+  Those rows use the same `ens_v1` object as exact-name detail; its optional,
+  atomic `wrapper_state` and `wrapper_fuses` are present only for a current
   ENSv1 NameWrapper registration at the served projection timestamp.
   Once exact-name authority is activated, `bound_names` includes a logical
   name only under the resolver selected by its current registration. A
@@ -4541,7 +4568,8 @@ so there is no persisted artifact to explain. See
 - Request parameters: query `namespace`, `name`, `address`,
   `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
-  rejected by the shared latest-state collection rule. When `name` is present
+  rejected by the shared latest-state collection rule. `name` is a
+  [name input](api-v1.md#name-inputs). When `name` is present
   and `namespace` is omitted, namespace is inferred from the name; `namespace`
   defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of raw normalized-event rows in

@@ -462,6 +462,8 @@ async fn v2_unix_timestamps_wrapper_keeps_finite_values_and_classifies_sentinels
         let expected = reason.map_or_else(|| json!(expiry.to_string()), |_| Value::Null);
         assert_eq!(record["expires_at"], expected, "{body:#}");
         assert_eq!(record["expires_at_reason"], json!(reason), "{body:#}");
+        // The wrapper expiry is the subname's only expiry; it has no lease date.
+        assert_eq!(record["ens_v1"].get("expires_at"), Some(&Value::Null), "{body:#}");
         let permissions = v2_permissions_payload_for_database(
             &database,
             &format!("/v1/permissions?registration_id={wrapper}"),

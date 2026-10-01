@@ -1305,7 +1305,12 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
     if namespace == "ens" {
         keys.push("token_id");
         keys.push("authority");
+        keys.push("ens_v1");
         assert_eq!(record["authority"], "ens_v1");
+        // An unwrapped lease before any cutover: the lease date is the served expiry and no
+        // wrapper fields appear.
+        assert_keys(&record["ens_v1"], &["expires_at"]);
+        assert_eq!(record["ens_v1"]["expires_at"], record["expires_at"]);
     }
     assert_keys(record, &keys);
     for field in ["registered_at", "created_at", "expires_at", "grace_ends_at"] {
