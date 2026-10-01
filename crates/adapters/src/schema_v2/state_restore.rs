@@ -262,9 +262,14 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
             "resource:registry-only:{}:{namehash}",
             event.chain_id
         ));
+        // The copies of one registry write come back in no fixed order within their block; the
+        // registry-read copy wins among them. A write from a later block always replaces the link.
+        let written_at = event.block_timestamp.map(time::OffsetDateTime::unix_timestamp);
         let already_registry_linked = state
             .v1_resolver_link(&event.namespace, namehash)
-            .is_some_and(|link| link.resource_id == Some(registry_resource_id));
+            .is_some_and(|link| {
+                link.resource_id == Some(registry_resource_id) && link.written_at == written_at
+            });
         let resolver = event
             .after_state
             .get("resolver")
@@ -286,6 +291,7 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             );
+            state.set_v1_resolver_link_written_at(&event.namespace, namehash, written_at);
         }
     }
     if event.event_kind == "ResolverChanged"

@@ -22,6 +22,8 @@ mod registrar;
 #[path = "state_registrar_evidence.rs"]
 mod registrar_evidence;
 pub(super) use registrar::v1_key;
+#[path = "state_resolver_links.rs"]
+mod resolver_links;
 #[path = "state_surfaces.rs"]
 mod surfaces;
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +56,8 @@ pub(super) struct V1ResolverLink {
     pub resource_id: Option<Uuid>,
     pub logical_name_id: Option<String>,
     pub source_role: Option<String>,
+    /// Block timestamp of the restored registry write that set this link.
+    pub written_at: Option<i64>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct V1WrapperData {

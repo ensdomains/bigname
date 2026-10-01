@@ -22,6 +22,9 @@ mod resolver_announcements;
 #[path = "tests/v1_pre_surface_resolver.rs"]
 mod v1_pre_surface_resolver;
 
+#[path = "tests/v1_resolver_after_reregistration.rs"]
+mod v1_resolver_after_reregistration;
+
 #[path = "tests/wrapper_permissions.rs"]
 mod wrapper_permissions;
 
