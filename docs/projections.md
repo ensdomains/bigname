@@ -163,6 +163,17 @@ live reservation remains a [released v2 authority](glossary.md#released-v2-autho
 tombstone; otherwise a live ENSv1 binding selects ENSv1, and a name with no open
 binding follows its history.
 
+On chain the ENSv1→ENSv2 migration takes a `.eth` name's ENSv1 token and
+registers the name in the ENSv2 `.eth` registry at the expiry of its
+premigration reservation
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L153-L165 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L475 @ ens_v2_sepolia_20260916@366de741);
+upstream says nothing about a registration start. bigname's own rule is that the
+migration does not start a new registration, so a name with an ENSv1 registrar
+lease keeps that lease's `registered_at`, and a migrated name without one, such
+as a subname, starts its registration at the ENSv2 grant.
+
 ## Exact-name projection
 
 The composed exact-name row assembles current registration, authority, control, resolver,
@@ -617,8 +628,9 @@ fail the verdict is a fourth state: the text is a valid string but not a name
 for the proven node — serving it would attach a spelling that re-hashes to a
 different node — and escaping it would serve the same misleading text, so
 Composition keeps the raw label bytes, withholds the decoded text and both name
-columns, and the placeholder serves. None of these shapes is an addressable
-name. A preimage improves readability but does not create ownership or
+columns, and the placeholder serves. None of these shapes is a name: the
+placeholder is accepted as a [name input](api-v1.md#name-inputs) for the node,
+and the escape form is not. A preimage improves readability but does not create ownership or
 exact-name authority. ENSv2 direct and linked
 children derive from admitted graph events rather than token enumeration, and
 join the child's own active surface, so none of the name-less shapes arises
@@ -1544,6 +1556,16 @@ Expiry and grace). Schema-migration
 `20260929200000_project_universal_resolver_proxy.sql` adds the table; an empty
 table reads as not cut over, and the content-hash rotation that ships with it
 rebuilds the families.
+
+Because the cutover can replace the served expiry, the composed registration
+also keeps `registration.ens_v1_expiry`: the expiry of the latest admitted
+BaseRegistrar event the expiry read selects for the name, before that choice,
+and `null` when the selected event is not the BaseRegistrar's (a subname, an
+ENSv2 registration). The API serves it as `ens_v1.expires_at`
+(`docs/api-v1.md` § Naming dictionary). It is composed at read like the rest of
+the registration block, so no stored family changes, but the code that composes
+it is interpretation input and rotates the interpreter content hash
+([deployment](deployment.md#ensv1-lease-date-on-name-rows)).
 
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
 one resource's latest pointer, including unnamed changes, for root and

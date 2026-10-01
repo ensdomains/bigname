@@ -317,13 +317,14 @@ async fn v2_get_name_serves_a_root_registry_pointer_without_projected_authority(
 async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Wrapped).await?;
 
-    assert_eq!(payload["data"]["wrapper_state"], json!("locked"));
-    assert_eq!(payload["data"]["wrapper_fuses"]["fuses"], json!(196_609));
-    assert_eq!(payload["data"]["wrapper_fuses"]["cannot_unwrap"], json!(true));
-    assert_eq!(
-        payload["data"]["wrapper_fuses"]["parent_cannot_control"],
-        json!(true)
-    );
+    let ens_v1 = &payload["data"]["ens_v1"];
+    assert_eq!(ens_v1["wrapper_state"], json!("locked"), "{payload}");
+    assert_eq!(ens_v1["wrapper_fuses"]["fuses"], json!(196_609));
+    assert_eq!(ens_v1["wrapper_fuses"]["cannot_unwrap"], json!(true));
+    assert_eq!(ens_v1["wrapper_fuses"]["parent_cannot_control"], json!(true));
+    assert_eq!(ens_v1["expires_at"], json!("1798859045"), "the lease, not the wrapper expiry");
+    assert!(payload["data"].get("wrapper_state").is_none(), "{payload}");
+    assert!(payload["data"].get("wrapper_fuses").is_none(), "{payload}");
     Ok(())
 }
 

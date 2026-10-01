@@ -5,7 +5,9 @@
 //! reservation's expiry and the 28-day ENSv2 grace while it does. After the cutover a `.eth`
 //! name that ENSv1 decides without a live ENSv2 entry, and every name below it, serve no
 //! resolver. A block that changes a proxy recomposes the summaries of the reserved names, and
-//! undo and rebuild restore them.
+//! undo and rebuild restore them. The registration time of such a name is its ENSv1
+//! registration's through renewals, the reservation, the cutover and the ENSv1→ENSv2 migration;
+//! only a new registration after a release starts a new one (TYR-131).
 #[path = "families_support/mod.rs"]
 mod support;
 
@@ -19,6 +21,7 @@ use support::{CHAIN, Event, Fixture, hash, uuid};
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000000e6";
+const NAME_WRAPPER: &str = "0x00000000000000000000000000000000000000e7";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const RESOLVER: &str = "0x00000000000000000000000000000000000000d1";
 const TOP_PROXY: &str = "0xeeeeeeee14d718c2b47d9923deab1335e144eeee";
@@ -74,11 +77,23 @@ async fn surface(fixture: &Fixture, name: &str) -> Result<String> {
 /// `LEASE_EXPIRY`, with a resolver set in the ENSv1 registry at `block + 2`.
 async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<String> {
     let logical_name_id = surface(fixture, name).await?;
+    lease(fixture, &logical_name_id, n, block, LEASE_EXPIRY).await?;
+    Ok(logical_name_id)
+}
+
+/// Lease `n` of the surface `logical_name_id`, as `leased` writes it, granted until `expiry`.
+async fn lease(
+    fixture: &Fixture,
+    logical_name_id: &str,
+    n: u32,
+    block: i64,
+    expiry: u64,
+) -> Result<()> {
     let lease = uuid(0x1000 + n);
     fixture
         .binding(
             &uuid(100 + n),
-            &logical_name_id,
+            logical_name_id,
             &lease,
             "ens_v1",
             block,
@@ -92,7 +107,7 @@ async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<Str
             0,
             "SurfaceBound",
             "ens_v1_registrar_l1",
-            Some(&logical_name_id),
+            Some(logical_name_id),
             Some(&lease),
             json!({"authority_kind": "registrar", "state_derived": false,
                    "registry_contract": REGISTRY, "owner_getter": OWNER}),
@@ -105,20 +120,19 @@ async fn leased(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<Str
             0,
             "RegistrationGranted",
             "ens_v1_registrar_l1",
-            Some(&logical_name_id),
+            Some(logical_name_id),
             Some(&lease),
             json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
-                   "expiry": LEASE_EXPIRY}),
+                   "expiry": expiry}),
             REGISTRAR,
         )
         .await?;
-    resolver(fixture, &logical_name_id, block + 2).await?;
-    Ok(logical_name_id)
+    resolver(fixture, logical_name_id, block + 2).await
 }
 
 async fn resolver(fixture: &Fixture, logical_name_id: &str, block: i64) -> Result<()> {
     let node = logical_name_id.trim_start_matches("ens:");
-    let identity = format!("resolver-{logical_name_id}");
+    let identity = format!("resolver-{logical_name_id}-{block}");
     fixture
         .event(
             Event::new(&identity, block, 5, "ResolverChanged", "ens_v1_registry_l1")
@@ -218,7 +232,8 @@ async fn upgraded(
     Ok(())
 }
 
-/// The served expiry, grace end, resolver address and unresolvable reason of a composed name.
+/// The served expiry, the ENSv1 lease's own expiry, grace end, resolver address and
+/// unresolvable reason of a composed name.
 async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     let row = load_family_name(&fixture.pool, logical_name_id)
         .await?
@@ -227,6 +242,7 @@ async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Value> {
     Ok(json!({
         "arm": row.provenance["authority_selection"]["authority_arm"],
         "expiry": summary["registration"]["expiry"],
+        "ens_v1_expiry": summary["registration"]["ens_v1_expiry"],
         "grace_ends_at": summary["registration"]["grace_ends_at"],
         "resolver": summary["resolver"]["address"],
         "unresolvable_reason": summary.get("unresolvable_reason").cloned().unwrap_or(Value::Null),
@@ -248,6 +264,8 @@ fn expect(expiry: u64, grace_days: u64, resolver: Option<&str>, reason: Option<&
     json!({
         "arm": "ens_v1",
         "expiry": expiry.to_string(),
+        // The lease's own date, whichever expiry the name serves.
+        "ens_v1_expiry": LEASE_EXPIRY.to_string(),
         "grace_ends_at": (expiry + grace_days * DAY).to_string(),
         "resolver": resolver,
         "unresolvable_reason": reason,
@@ -415,6 +433,7 @@ async fn an_ens_v2_registration_serves_its_expiry_and_the_ens_v2_grace_before_an
     ensure!(
         row["arm"] == json!("ens_v2")
             && row["expiry"] == json!(RESERVED_EXPIRY.to_string())
+            && row["ens_v1_expiry"].is_null()
             && row["grace_ends_at"] == json!((RESERVED_EXPIRY + 28 * DAY).to_string()),
         "{row}"
     );
@@ -473,5 +492,542 @@ async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publicati
     ensure!(summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64));
     fixture.assert_undo_restores(9).await?;
     fixture.assert_rebuild_equal(9).await?;
+    fixture.cleanup().await
+}
+
+/// The block time `Fixture::lineage` gives `block`, in Unix seconds.
+fn block_time(block: i64) -> i64 {
+    1_800_000_000 + block * 12
+}
+
+/// A composed name's registration time and migration time, in Unix seconds, as the name summary
+/// and the name state hold them.
+async fn times(fixture: &Fixture, logical_name_id: &str) -> Result<(Option<i64>, Option<i64>)> {
+    let registered: Option<i64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM registered_at)::bigint FROM project_name_summary
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let migrated: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM migrated_at)::bigint FROM project_name_state
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?;
+    Ok((registered, migrated.flatten()))
+}
+
+/// A registrar event of `name`'s lease `n` at `block`.
+async fn lease_event(
+    fixture: &Fixture,
+    name: &str,
+    n: u32,
+    block: i64,
+    kind: &str,
+    expiry: u64,
+) -> Result<()> {
+    fixture
+        .write(
+            block,
+            1,
+            kind,
+            "ens_v1_registrar_l1",
+            Some(name),
+            Some(&uuid(0x1000 + n)),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                   "expiry": expiry}),
+            REGISTRAR,
+        )
+        .await?;
+    Ok(())
+}
+
+/// An ENSv2 `eth` registry entry `entry` with token `token`, registered to `OWNER` at `block`
+/// and bound under ens_v2 there.
+async fn v2_registered(
+    fixture: &Fixture,
+    name: &str,
+    binding: &str,
+    entry: &str,
+    token: &str,
+    block: i64,
+) -> Result<()> {
+    fixture
+        .binding(binding, name, entry, "ens_v2", block, 1, None)
+        .await?;
+    fixture
+        .write(
+            block,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(name),
+            Some(entry),
+            json!({"registry_contract_instance_id": "eth", "token_id": token,
+                   "status": "registered", "registrant": OWNER, "owner": OWNER,
+                   "expiry": RESERVED_EXPIRY}),
+            V2_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+/// `name`'s lease `n` migrates at `block`: its ENSv1 binding closes, and in one transaction the
+/// reserved ENSv2 entry is registered and bound. The MigrationApplied takes the ENSv2 grant's
+/// exact position, as the adapter's boundary event copies it from the correlated registration
+/// (`crates/adapters/src/schema_v2/migration/support.rs`, `boundary_event`).
+async fn migrated(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + $2 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(100 + n))
+    .bind(block)
+    .execute(&fixture.pool)
+    .await?;
+    let entry = uuid(0x2000 + n);
+    v2_registered(
+        fixture,
+        name,
+        &uuid(200 + n),
+        &entry,
+        &format!("{n}"),
+        block,
+    )
+    .await?;
+    fixture
+        .write(
+            block,
+            1,
+            "MigrationApplied",
+            "ens_v2_migration_l1",
+            Some(name),
+            Some(&entry),
+            json!({"migration_path": "unwrapped"}),
+            V2_REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn renewals_the_reservation_the_cutover_and_the_migration_keep_the_registration_time()
+-> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_registered_at", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    let granted = Some(block_time(2));
+    lease_event(
+        &fixture,
+        &alice,
+        1,
+        3,
+        "RegistrationRenewed",
+        LEASE_EXPIRY + 365 * DAY,
+    )
+    .await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    ensure!(times(&fixture, &alice).await? == (granted, None));
+
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let reserved_after_cutover = served(&fixture, &alice).await?;
+    ensure!(
+        reserved_after_cutover["expiry"] == json!(RESERVED_EXPIRY.to_string()),
+        "{reserved_after_cutover}"
+    );
+    ensure!(times(&fixture, &alice).await? == (granted, None));
+
+    migrated(&fixture, &alice, 1, 7).await?;
+    fixture.apply(7, FamilyMode::Normal).await?;
+    ensure!(served(&fixture, &alice).await?["arm"] == json!("ens_v2"));
+    let migrated_times = times(&fixture, &alice).await?;
+    ensure!(
+        migrated_times == (granted, Some(block_time(7))),
+        "{migrated_times:?}"
+    );
+
+    fixture.assert_undo_restores(7).await?;
+    fixture.assert_rebuild_equal(7).await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn only_a_registration_after_a_release_starts_a_new_registration_time() -> Result<()> {
+    let fixture = Fixture::new("families_expiry_grace_registered_again", 14).await?;
+    // A family run needs every block between two of its blocks and walks at most 256 per run, so
+    // this fixture cannot span the months a lease and its grace take at 12 seconds a block. The
+    // first lease's expiry is instead set past enough that its 90-day grace ends before block 4;
+    // the lifecycle fold reads the expiry and the release, not the time between blocks.
+    let first_expiry = u64::try_from(block_time(4)).expect("block time") - 90 * DAY - 1;
+    let dave = surface(&fixture, "dave.eth").await?;
+    lease(&fixture, &dave, 2, 1, first_expiry).await?;
+    fixture.apply(3, FamilyMode::Normal).await?;
+    ensure!(times(&fixture, &dave).await? == (Some(block_time(2)), None));
+
+    // At block 4 the interpreter releases the old lease from the block, as it does at the first
+    // block past the grace; the registration that follows is a new lease with its own resource
+    // and binding.
+    fixture
+        .event(
+            Event::new(
+                "dave-lease-released",
+                4,
+                0,
+                "RegistrationReleased",
+                "ens_v1_registrar_l1",
+            )
+            .name(&dave)
+            .resource(&uuid(0x1002))
+            .synthesised()
+            .before(json!({"registrant": OWNER}))
+            .after(json!({"expiry": first_expiry, "released_at": block_time(4),
+                          "source_event": "RegistrationReleased"}))
+            .raw(json!({"kind": "raw_block", "emitting_address": REGISTRAR})),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 4 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(102))
+    .execute(&fixture.pool)
+    .await?;
+    lease(&fixture, &dave, 3, 4, LEASE_EXPIRY).await?;
+    reserved(&fixture, &dave, 3, 7).await?;
+    migrated(&fixture, &dave, 3, 8).await?;
+    fixture.apply(8, FamilyMode::Normal).await?;
+    let migrated_times = times(&fixture, &dave).await?;
+    ensure!(
+        migrated_times == (Some(block_time(5)), Some(block_time(8))),
+        "{migrated_times:?}"
+    );
+
+    // The migrated registration is unregistered, and the label is registered again in ENSv2.
+    fixture
+        .event(
+            Event::new(
+                "dave-unregistered",
+                10,
+                1,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .name(&dave)
+            .resource(&uuid(0x2003))
+            .before(json!({"registrant": OWNER}))
+            .after(
+                json!({"registry_contract_instance_id": "eth", "token_id": "3",
+                              "released_at": block_time(10)}),
+            )
+            .raw(json!({"emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + 10 * 12)
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(203))
+    .execute(&fixture.pool)
+    .await?;
+    v2_registered(&fixture, &dave, &uuid(213), &uuid(0x2103), "4", 12).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let registered_again = times(&fixture, &dave).await?;
+    ensure!(
+        registered_again == (Some(block_time(12)), Some(block_time(8))),
+        "{registered_again:?}"
+    );
+
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+/// A registrar renewal of a wrapped `.eth` lease: the BaseRegistrar's own `NameRenewed`, as the
+/// adapter writes it on the lease
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f),
+/// plus the NameWrapper expiry derived from it (registrar family, `authority_kind = wrapper`,
+/// the lease expiry plus 90 days). The admitted wrapped controller renews through
+/// `NameWrapper.renew`, which renews the lease on the BaseRegistrar and then stores the
+/// returned expiry plus its 90-day grace for a wrapped name
+/// (upstream: .refs/basenames/lib/ens-contracts/contracts/ethregistrar/ETHRegistrarController.sol:L210-L226 @ basenames@1809bbc)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L318 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f).
+async fn renewed_wrapped(
+    fixture: &Fixture,
+    logical_name_id: &str,
+    lease: &str,
+    wrapper: &str,
+    block: i64,
+    expiry: u64,
+) -> Result<()> {
+    let registrar = json!({"source_event": "NameRenewed", "authority_kind": "registrar",
+                           "registrant": OWNER, "expiry": expiry});
+    for (log, kind) in [(1, "RegistrationRenewed"), (2, "ExpiryChanged")] {
+        fixture
+            .write(
+                block,
+                log,
+                kind,
+                "ens_v1_registrar_l1",
+                Some(logical_name_id),
+                Some(lease),
+                registrar.clone(),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    fixture
+        .write(
+            block,
+            3,
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            Some(logical_name_id),
+            Some(wrapper),
+            json!({"source_event": "NameRenewed", "authority_kind": "wrapper",
+                   "expiry": expiry + 90 * DAY, "registrar_expiry": expiry}),
+            REGISTRAR,
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewed_lease_date()
+-> Result<()> {
+    const RENEWED: u64 = LEASE_EXPIRY + 365 * DAY;
+    const RENEWED_AGAIN: u64 = RENEWED + 365 * DAY;
+    let fixture = Fixture::new("families_expiry_grace_wrapped_renewal", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let nick = surface(&fixture, "nick.eth").await?;
+    let (lease, wrapper) = (uuid(0x5001), uuid(0x5002));
+    fixture
+        .binding(&uuid(501), &nick, &lease, "ens_v1", 1, 0, Some(2))
+        .await?;
+    fixture
+        .write(
+            1,
+            0,
+            "SurfaceBound",
+            "ens_v1_registrar_l1",
+            Some(&nick),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner_getter": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            1,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&nick),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                   "expiry": LEASE_EXPIRY}),
+            REGISTRAR,
+        )
+        .await?;
+    // Wrapped emancipated at block 2.
+    fixture
+        .binding(&uuid(502), &nick, &wrapper, "ens_v1", 2, 0, None)
+        .await?;
+    fixture
+        .write(
+            2,
+            0,
+            "SurfaceBound",
+            "ens_v1_wrapper_l1",
+            Some(&nick),
+            Some(&wrapper),
+            json!({"source_event": "NameWrapped", "authority_kind": "wrapper",
+                   "wrapped_registrar_resource_id": lease,
+                   "node": nick.trim_start_matches("ens:")}),
+            NAME_WRAPPER,
+        )
+        .await?;
+    fixture
+        .write(
+            2,
+            1,
+            "AuthorityEpochChanged",
+            "ens_v1_wrapper_l1",
+            Some(&nick),
+            Some(&wrapper),
+            json!({"source_event": "NameWrapped", "authority_kind": "wrapper", "owner": OWNER}),
+            NAME_WRAPPER,
+        )
+        .await?;
+    // PARENT_CANNOT_CONTROL | IS_DOT_ETH.
+    fixture
+        .write(
+            2,
+            3,
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            None,
+            Some(&wrapper),
+            json!({"source_event": "NameWrapped", "wrapper_state": "emancipated",
+                   "fuses": 196_608}),
+            NAME_WRAPPER,
+        )
+        .await?;
+    fixture
+        .write(
+            2,
+            2,
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            Some(&nick),
+            Some(&wrapper),
+            json!({"source_event": "NameWrapped", "expiry": LEASE_EXPIRY + 90 * DAY}),
+            NAME_WRAPPER,
+        )
+        .await?;
+    resolver(&fixture, &nick, 2).await?;
+    reserved(&fixture, &nick, 5, 3).await?;
+    upgraded(
+        &fixture,
+        4,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(4, FamilyMode::Normal).await?;
+    let row = served(&fixture, &nick).await?;
+    ensure!(
+        row["expiry"] == json!(RESERVED_EXPIRY.to_string())
+            && row["ens_v1_expiry"] == json!(LEASE_EXPIRY.to_string()),
+        "before renewal: {row}"
+    );
+
+    // ETHRegistrarController.renew on the wrapped name.
+    renewed_wrapped(&fixture, &nick, &lease, &wrapper, 5, RENEWED).await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let row = served(&fixture, &nick).await?;
+    ensure!(
+        row["ens_v1_expiry"] == json!(RENEWED.to_string()),
+        "after the controller renewal: {row}"
+    );
+    ensure!(
+        row["expiry"] == json!(RESERVED_EXPIRY.to_string()),
+        "the reservation still decides the served expiry: {row}"
+    );
+
+    // ETHRenewerV1 after the cutover: the ENSv2 entry's expiry moves, then the BaseRegistrar
+    // renews the lease and the NameWrapper expiry follows it
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/AbstractETHRegistrar.sol:L132-L133 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L153-L155 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L119-L124 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRenewerV1.sol:L140-L146 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L318 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f).
+    const RESERVED_AGAIN: u64 = RENEWED_AGAIN + 62 * DAY;
+    fixture
+        .write(
+            6,
+            0,
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            Some(&nick),
+            Some(&uuid(0x2005)),
+            json!({"registry_contract_instance_id": "eth", "token_id": "5",
+                   "expiry": RESERVED_AGAIN}),
+            V2_REGISTRY,
+        )
+        .await?;
+    renewed_wrapped(&fixture, &nick, &lease, &wrapper, 6, RENEWED_AGAIN).await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let row = served(&fixture, &nick).await?;
+    ensure!(
+        row["ens_v1_expiry"] == json!(RENEWED_AGAIN.to_string()),
+        "after the ENSv2 renewer: {row}"
+    );
+    ensure!(
+        row["expiry"] == json!(RESERVED_AGAIN.to_string()),
+        "the renewed reservation decides the served expiry: {row}"
+    );
+
+    fixture.assert_undo_restores(6).await?;
+    fixture.assert_rebuild_equal(6).await?;
+    fixture.cleanup().await
+}
+
+/// The ENSv2 owner's BatchRegistrar can extend a reservation without the BaseRegistrar
+/// (`BatchRegistrar.batchRegister` renews a RESERVED entry to a later expiry)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741). The served expiry
+/// and grace follow the reservation, the lease date stays, and the lease's own grace deadline
+/// (lease + 90 days) no longer equals the served one.
+#[tokio::test]
+async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_grace_deadlines()
+-> Result<()> {
+    const EXTENDED: u64 = RESERVED_EXPIRY + 30 * DAY;
+    let fixture = Fixture::new("families_expiry_grace_batch_extension", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let aligned = served(&fixture, &alice).await?;
+    ensure!(
+        aligned["grace_ends_at"] == json!((LEASE_EXPIRY + 90 * DAY).to_string()),
+        "premigration aligns the two grace deadlines: {aligned}"
+    );
+
+    fixture
+        .write(
+            6,
+            0,
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            Some(&alice),
+            Some(&uuid(0x2001)),
+            json!({"registry_contract_instance_id": "eth", "token_id": "1", "expiry": EXTENDED}),
+            V2_REGISTRY,
+        )
+        .await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let row = served(&fixture, &alice).await?;
+    ensure!(
+        row["expiry"] == json!(EXTENDED.to_string())
+            && row["grace_ends_at"] == json!((EXTENDED + 28 * DAY).to_string())
+            && row["ens_v1_expiry"] == json!(LEASE_EXPIRY.to_string()),
+        "{row}"
+    );
+    ensure!(
+        row["grace_ends_at"] != json!((LEASE_EXPIRY + 90 * DAY).to_string()),
+        "the lease's grace deadline and the served one differ: {row}"
+    );
+    fixture.assert_undo_restores(6).await?;
+    fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }

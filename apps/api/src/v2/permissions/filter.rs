@@ -47,6 +47,7 @@ pub(super) struct ResolvedPermissionsFilter {
 pub(super) struct NormalizedNameFilter {
     pub(super) namespace: String,
     pub(super) normalized_name: String,
+    pub(super) logical_name_id: String,
 }
 
 #[derive(Debug)]
@@ -95,8 +96,12 @@ pub(super) async fn resolve_permissions_filter(
 ) -> V2Result<ResolvedPermissionsFilter> {
     let resolved_name_row = match inputs.name_filter.as_ref() {
         Some(name_filter) => Some(
-            load_current_name_row(state, &name_filter.namespace, &name_filter.normalized_name)
-                .await?,
+            load_current_name_row(
+                state,
+                &name_filter.logical_name_id,
+                &name_filter.normalized_name,
+            )
+            .await?,
         ),
         None => None,
     };
@@ -340,6 +345,7 @@ fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNam
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
     Ok(Some(NormalizedNameFilter {
+        logical_name_id: normalized.logical_name_id(&namespace),
         namespace,
         normalized_name: normalized.normalized_name.to_owned(),
     }))
