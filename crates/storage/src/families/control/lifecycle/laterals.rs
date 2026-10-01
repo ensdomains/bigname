@@ -47,8 +47,11 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 
 /// The ENSv1 grant an ENSv2 grant continues: for the grant the name's latest ENSv1→ENSv2
 /// migration wrote in its own transaction, the name's latest registrar grant before that
-/// migration. On chain the ENSv1→ENSv2 migration takes the name's ENSv1 token and registers the
-/// name in the ENSv2 `.eth` registry at the expiry of its premigration reservation
+/// migration. The adapter gives the MigrationApplied the ENSv2 grant's own block, transaction and
+/// log position (`boundary_event` in `crates/adapters/src/schema_v2/migration/support.rs`), so
+/// the match is on the transaction and the ENSv1 grant is any registrar grant before it. On
+/// chain the ENSv1→ENSv2 migration takes the name's ENSv1 token and registers the name in the
+/// ENSv2 `.eth` registry at the expiry of its premigration reservation
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L153-L165 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L475 @ ens_v2_sepolia_20260916@366de741).

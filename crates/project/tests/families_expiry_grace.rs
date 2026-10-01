@@ -572,7 +572,9 @@ async fn v2_registered(
 }
 
 /// `name`'s lease `n` migrates at `block`: its ENSv1 binding closes, and in one transaction the
-/// reserved ENSv2 entry is registered and bound and the MigrationApplied follows.
+/// reserved ENSv2 entry is registered and bound. The MigrationApplied takes the ENSv2 grant's
+/// exact position, as the adapter's boundary event copies it from the correlated registration
+/// (`crates/adapters/src/schema_v2/migration/support.rs`, `boundary_event`).
 async fn migrated(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<()> {
     sqlx::query(
         "UPDATE surface_bindings SET active_to = to_timestamp(1800000000 + $2 * 12)
@@ -595,7 +597,7 @@ async fn migrated(fixture: &Fixture, name: &str, n: u32, block: i64) -> Result<(
     fixture
         .write(
             block,
-            2,
+            1,
             "MigrationApplied",
             "ens_v2_migration_l1",
             Some(name),
