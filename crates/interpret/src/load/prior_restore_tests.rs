@@ -58,7 +58,7 @@ fn reference_statement() -> String {
                ranked.event_identity,
                ranked.raw_fact_ref ->> '{STATE_SCOPE_KEY}',
                ranked.block_number,
-               ranked.block_hash,
+               ARRAY[ranked.transaction_index, ranked.log_index],
                ranked.retained_block_timestamp,
                ranked.after_state
         FROM ranked

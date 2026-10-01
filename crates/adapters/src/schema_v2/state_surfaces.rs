@@ -47,6 +47,7 @@ impl State {
                 resource_id,
                 logical_name_id,
                 source_role,
+                written_at: None,
             };
             self.v1_resolver_links.insert(key.clone(), link.clone());
             if retain_linked_resource && let Some(resource_id) = resource_id {
@@ -68,6 +69,7 @@ impl State {
                             .surface_known
                             .then(|| registrar.logical_name_id.clone()),
                         source_role,
+                        written_at: None,
                     },
                 );
             }
@@ -78,73 +80,7 @@ impl State {
         previous
     }
 
-    pub(in crate::schema_v2) fn remember_v1_resolver_linked_resource(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        resolver: &str,
-        resource_id: Uuid,
-        logical_name_id: Option<String>,
-    ) {
-        let key = v1_key(namespace, namehash);
-        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
-            self.remove_v1_resolver_linked_resource(&key, resource_id);
-            return;
-        }
-        let Some(selected) = self.v1_resolver_links.get(&key) else {
-            return;
-        };
-        if selected.source_role.as_deref() != Some("registry_old")
-            || !selected.resolver_address.eq_ignore_ascii_case(resolver)
-        {
-            return;
-        }
-        self.v1_resolver_linked_resources
-            .entry(key)
-            .or_default()
-            .insert(
-                resource_id,
-                V1ResolverLink {
-                    resolver_address: selected.resolver_address.clone(),
-                    resource_id: Some(resource_id),
-                    logical_name_id,
-                    source_role: selected.source_role.clone(),
-                },
-            );
-    }
-
-    pub(in crate::schema_v2) fn restore_v1_resolver_linked_resource(
-        &mut self,
-        namespace: &str,
-        namehash: &str,
-        resolver: &str,
-        resource_id: Uuid,
-        logical_name_id: Option<String>,
-        source_role: &str,
-    ) {
-        let key = v1_key(namespace, namehash);
-        if resolver.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
-            self.remove_v1_resolver_linked_resource(&key, resource_id);
-            return;
-        }
-        if source_role != "registry_old" {
-            return;
-        }
-        self.v1_resolver_linked_resources
-            .entry(key)
-            .or_default()
-            .insert(
-                resource_id,
-                V1ResolverLink {
-                    resolver_address: resolver.to_owned(),
-                    resource_id: Some(resource_id),
-                    logical_name_id,
-                    source_role: Some(source_role.to_owned()),
-                },
-            );
-    }
-
-    fn remove_v1_resolver_linked_resource(&mut self, key: &str, resource_id: Uuid) {
+    pub(super) fn remove_v1_resolver_linked_resource(&mut self, key: &str, resource_id: Uuid) {
         let remove_name = self
             .v1_resolver_linked_resources
             .get_mut(key)
@@ -186,6 +122,7 @@ impl State {
                     resource_id: Some(resource_id),
                     logical_name_id: link.logical_name_id.clone(),
                     source_role: link.source_role.clone(),
+                    written_at: None,
                 })
             })
             .or_else(|| {
@@ -355,6 +292,7 @@ impl State {
                         .surface_known
                         .then(|| authority.logical_name_id.clone()),
                     source_role: retired.source_role.clone(),
+                    written_at: None,
                 });
             }
             if let Some(anchor) = self.v1_registry_read_anchors.get(&key) {
@@ -363,6 +301,7 @@ impl State {
                     resource_id: Some(anchor.resource_id),
                     logical_name_id: anchor.surface_known.then(|| anchor.logical_name_id.clone()),
                     source_role: retired.source_role.clone(),
+                    written_at: None,
                 });
             }
         }
