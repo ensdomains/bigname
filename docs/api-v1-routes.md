@@ -1670,7 +1670,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `ens_v1.expires_at` is `null`, and a wrapped one carries its NameWrapper
   state there. An ENSv1 registry child with no current name row serves
   `authority` from the registry that holds its record, `ens_v1`, or `ens_v0`
-  while only the 2017 registry does
+  while only the 2017 registry does: the current registry answers `owner(node)`
+  and `resolver(node)` from the 2017 registry while `recordExists(node)` is false,
+  that is while its own stored owner is zero, and it stores a zero owner as its
+  own address, so a record once written stays
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L35 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f)
   ([registry generation](glossary.md#registry-generation)); a Basenames child
   and one whose owner is the zero address serve none. An ENSv1 or Basenames
   registry child with no current name row serves its node's current registry
@@ -3261,8 +3267,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `registration_status` is the value the subnames route serves for a child with
   no name row, and `is_primary` is `false`. `authority` is the registry
   generation that owns the node: `ens_v1`, or `ens_v0` while only the 2017
-  registry holds its record ([registry generation](glossary.md#registry-generation)),
-  and its `ens_v1` object carries only a null `expires_at`, as it holds no lease.
+  registry holds its record, because the current registry's `owner(node)` and
+  `resolver(node)` read the 2017 registry until its own `recordExists(node)`
+  turns true
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L35 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L153-L157 @ ens_v1@91c966f)
+  ([registry generation](glossary.md#registry-generation));
+  its `ens_v1` object carries only a null `expires_at`, as it holds no lease.
   `relation=owner` and `relation=registrant` never list it; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
