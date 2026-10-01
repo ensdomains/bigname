@@ -1,8 +1,9 @@
 use bigname_adapters::schema_v2::{
-    PriorEventInput,
+    PriorEventInput, PriorWritePosition,
     seam::{
-        INTERPRETER_STATE_KEY, STATE_SCOPE_KEY, SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY,
-        retained_event_state_key, retained_prior_state_key,
+        INTERPRETER_STATE_KEY, LOG_INDEX_KEY, STATE_SCOPE_KEY,
+        SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY, TRANSACTION_INDEX_KEY, retained_event_state_key,
+        retained_prior_state_key,
     },
 };
 use futures_util::TryStreamExt;
@@ -35,7 +36,9 @@ pub(super) async fn events(
     let query = EVENTS
         .replace("{state_key}", INTERPRETER_STATE_KEY)
         .replace("{state_scope}", STATE_SCOPE_KEY)
-        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY);
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
+        .replace("{transaction_index}", TRANSACTION_INDEX_KEY)
+        .replace("{log_index}", LOG_INDEX_KEY);
     let mut rows = sqlx::query_as::<_, EventRow>(&query)
         .bind(chain)
         .bind(before)
@@ -146,6 +149,11 @@ fn decode_event(
         emitting_address: field!("emitting_address"),
         state_scope: field!(STATE_SCOPE_KEY),
         block_timestamp,
+        write_position: PriorWritePosition::from_parts(
+            field!("block_number"),
+            field!(TRANSACTION_INDEX_KEY),
+            field!(LOG_INDEX_KEY),
+        ),
         after_state,
     })
 }

@@ -53,6 +53,7 @@ impl State {
             v1_resolvers: OrdMap::new(),
             v1_resolver_links: OrdMap::new(),
             v1_resolver_linked_resources: OrdMap::new(),
+            v1_resolver_write_marks: OrdMap::new(),
             known_source_manifest_ids,
             restore_error: None,
             v1_migrated_nodes: OrdSet::new(),
@@ -128,6 +129,7 @@ impl State {
         self.v1_resolvers = replayed.v1_resolvers;
         self.v1_resolver_links = replayed.v1_resolver_links;
         self.v1_resolver_linked_resources = replayed.v1_resolver_linked_resources;
+        self.v1_resolver_write_marks = replayed.v1_resolver_write_marks;
         self.v1_migrated_nodes = replayed.v1_migrated_nodes;
         self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
     }

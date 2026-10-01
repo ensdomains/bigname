@@ -269,8 +269,8 @@ pub async fn load_registry_serving_pointer(
     let address = address.to_ascii_lowercase();
     let mut builder = current_pointers_to_registry(chain_id, &address, as_of_block);
     builder.push(
-        " ORDER BY pointer.block_number NULLS LAST, pointer.transaction_index NULLS LAST, \
-         pointer.log_index NULLS LAST, pointer.event_identity LIMIT 1",
+        " SELECT * FROM matched ORDER BY block_number NULLS LAST, \
+         transaction_index NULLS LAST, log_index NULLS LAST, event_identity LIMIT 1",
     );
     let row = builder
         .build()
@@ -291,6 +291,7 @@ pub async fn load_registry_references_page(
     as_of_block: Option<i64>,
     cursor: Option<&RegistryReferenceKeysetCursor>,
     page_size: u64,
+    count_total: bool,
 ) -> Result<RegistryReferencePage> {
     let address = address.to_ascii_lowercase();
     let limit = checked_page_limit_i64(
@@ -303,32 +304,72 @@ pub async fn load_registry_references_page(
         "registry references page_size must be positive",
         "registry references page_size does not fit in usize",
     )?;
-    let mut builder = current_pointers_to_registry(chain_id, &address, as_of_block);
-    if let Some(cursor) = cursor {
-        builder.push(" AND (surface.raw_name, pointer.logical_name_id) > (");
-        builder.push_bind(cursor.display_name.clone());
-        builder.push(", ");
-        builder.push_bind(cursor.logical_name_id.clone());
-        builder.push(")");
-    }
-    builder.push(" ORDER BY surface.raw_name, pointer.logical_name_id LIMIT ");
-    builder.push_bind(limit);
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load names referencing registry {chain_id}:{address}"))?
+    let mut builder =
+        references_page_query(chain_id, &address, as_of_block, cursor, limit, count_total);
+    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+        format!("failed to load names referencing registry {chain_id}:{address}")
+    })?;
+    let total_count = match rows.first() {
+        Some(row) if count_total => Some(
+            u64::try_from(row.try_get::<i64, _>("total_count")?)
+                .context("negative registry reference count")?,
+        ),
+        None if count_total => Some(0),
+        _ => None,
+    };
+    let rows = rows
         .into_iter()
+        .filter(|row| {
+            matches!(
+                row.try_get::<Option<String>, _>("logical_name_id"),
+                Ok(Some(_))
+            )
+        })
         .map(decode_subregistry_pointer)
         .collect::<Result<Vec<_>>>()?;
     let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
         RegistryReferenceKeysetCursor::from(row)
     });
-    Ok(RegistryReferencePage { rows, next_cursor })
+    Ok(RegistryReferencePage {
+        rows,
+        next_cursor,
+        total_count,
+    })
+}
+
+/// One keyset page of `matched`, with the exact total before the cursor only when
+/// `count_total` asks for it: an unrequested total is not counted on the request path.
+fn references_page_query<'a>(
+    chain_id: &'a str,
+    address: &'a str,
+    as_of_block: Option<i64>,
+    cursor: Option<&RegistryReferenceKeysetCursor>,
+    limit: i64,
+    count_total: bool,
+) -> QueryBuilder<'a, Postgres> {
+    let mut builder = current_pointers_to_registry(chain_id, address, as_of_block);
+    builder.push(", page AS (SELECT * FROM matched WHERE TRUE");
+    if let Some(cursor) = cursor {
+        builder.push(" AND (display_name, logical_name_id) > (");
+        builder.push_bind(cursor.display_name.clone());
+        builder.push(", ");
+        builder.push_bind(cursor.logical_name_id.clone());
+        builder.push(")");
+    }
+    builder.push(" ORDER BY display_name, logical_name_id LIMIT ");
+    builder.push_bind(limit);
+    builder.push(if count_total {
+        ") SELECT total.total_count, page.*
+         FROM (SELECT count(*) AS total_count FROM matched) total LEFT JOIN page ON TRUE
+         ORDER BY page.display_name, page.logical_name_id"
+    } else {
+        ") SELECT * FROM page ORDER BY display_name, logical_name_id"
+    });
+    builder
 }
 
 /// Current pointers (latest per name) whose target is `address`, joined to the active name
-/// surface. Callers append ordering and paging.
+/// surface, as the CTE `matched` (left open: callers append the statement that reads it).
 fn current_pointers_to_registry<'a>(
     chain_id: &'a str,
     address: &'a str,
@@ -379,9 +420,10 @@ fn current_pointers_to_registry<'a>(
         )
         "#,
     );
+    builder.push(", matched AS (");
     builder.push(POINTER_SELECT);
     builder.push(
-        r#"
+        r#", pointer.transaction_index, pointer.log_index, pointer.event_identity
         FROM pointer
         JOIN bigname_phase.name_surfaces surface
           ON surface.logical_name_id = pointer.logical_name_id
@@ -389,6 +431,7 @@ fn current_pointers_to_registry<'a>(
         WHERE pointer.subregistry = "#,
     );
     builder.push_bind(address);
+    builder.push(")");
     builder
 }
 
@@ -424,4 +467,22 @@ fn decode_subregistry_pointer(row: PgRow) -> Result<SubregistryPointer> {
         transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
         block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::references_page_query;
+
+    #[test]
+    fn references_are_counted_only_when_the_total_is_requested() {
+        let counted = references_page_query("ethereum-sepolia", "0xab", None, None, 2, true);
+        assert!(
+            counted
+                .sql()
+                .contains("count(*) AS total_count FROM matched")
+        );
+        let paged = references_page_query("ethereum-sepolia", "0xab", None, None, 2, false);
+        assert!(!paged.sql().contains("count("), "{}", paged.sql());
+        assert!(paged.sql().contains("FROM page"));
+    }
 }
