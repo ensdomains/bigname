@@ -3549,9 +3549,10 @@ introduces it rebuilds Project from full history before serving the option; see
   and sends the claim to the first case. None of the
   three cases dispatches a forward resolver call. The projected claim is
   checked before any provider call, except a `default.reverse` name served
-  past a nonzero `addr.reverse` resolver: the projection may not hold that
-  resolver's name, so the check runs only on the name the live reverse leg
-  returns. A live reverse claim has
+  past a nonzero `addr.reverse` resolver, including one the registry projection
+  holds for a reverse node claimed through a reverse registrar no manifest
+  admits: the projection may not hold that resolver's name, so the check runs
+  only on the name the live reverse leg returns. A live reverse claim has
   already used its reverse-leg provider calls (two, or three with the
   `default.reverse` read) before the name-level refusal
   is known. A consumer reads `unsupported_reason` to distinguish a projected

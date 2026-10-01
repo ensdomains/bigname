@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
 
-use super::reverse::load_family_reverse_claim_on;
+use super::reverse::{load_family_reverse_claim_on, node_resolver};
 use crate::{
     PrimaryNameClaimStatus, PrimaryNameCurrentSnapshot,
     families::name::{FamilyPublication, servable_publication},
@@ -84,6 +84,7 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
         // resolver whose name has any bytes, else the `default.reverse` name. The test is the
         // stored value's length, not its classification: a whitespace name stops the fallback.
         // (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L53-L69 @ ens_v1@91c966f)
+        let addr_tuple = loaded.is_some();
         let addr_has_resolver = loaded
             .as_ref()
             .is_some_and(|(claim, _)| has_resolver(claim));
@@ -102,7 +103,13 @@ pub(crate) async fn load_family_primary_name_snapshots_on(
             .await?;
             if let Some((mut fallback, _)) = fallback {
                 fallback.row.coin_type = coin_type.clone();
-                fallback.default_past_resolver = addr_has_resolver;
+                // Without a projected tuple (a node claimed through a registrar no manifest
+                // admits), the registry projection still holds the node's resolver.
+                fallback.default_past_resolver = if addr_tuple {
+                    addr_has_resolver
+                } else {
+                    addr_reverse_has_resolver(conn, &fallback, &address, namespace).await?
+                };
                 claim = Some(fallback);
             }
         }
@@ -159,6 +166,32 @@ async fn load_tuple(
         value_empty = hydrated_empty;
     }
     Ok(Some((claim, value_empty)))
+}
+
+/// Whether the projected registry or resource pointer of `<address>.addr.reverse`, on the chain of
+/// `claim`, names a nonzero resolver.
+async fn addr_reverse_has_resolver(
+    conn: &mut PgConnection,
+    claim: &PrimaryNameCurrentSnapshot,
+    address: &str,
+    namespace: &str,
+) -> Result<bool> {
+    let Some(chain_id) = claim
+        .row
+        .claim_provenance
+        .get("chain_id")
+        .and_then(Value::as_str)
+    else {
+        return Ok(false);
+    };
+    let label = address.strip_prefix("0x").unwrap_or(address);
+    let node = format!(
+        "{:#x}",
+        crate::ens_namehash_label_bytes(&[label.as_bytes(), b"addr", b"reverse"])
+    );
+    Ok(node_resolver(conn, chain_id, namespace, &node)
+        .await?
+        .is_some_and(|resolver| !resolver.is_empty() && resolver != ZERO_ADDRESS))
 }
 
 /// Whether the claim's reverse node has a nonzero resolver.

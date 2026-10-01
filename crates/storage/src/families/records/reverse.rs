@@ -241,6 +241,18 @@ pub(crate) async fn load_family_reverse_claim_on(
 /// select: a state-derived ENSv1 `ResolverChanged` with the parent in `node` and the reverse
 /// node in `child_node` is keyed here and would be skipped there. Returns its event id and
 /// resolver.
+/// The current resolver the registry-node or resource pointer of `node` names, if any.
+pub(super) async fn node_resolver(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    namespace: &str,
+    node: &str,
+) -> Result<Option<String>> {
+    Ok(node_pointer(conn, chain_id, namespace, node)
+        .await?
+        .and_then(|(_, resolver)| resolver))
+}
+
 async fn node_pointer(
     conn: &mut PgConnection,
     chain_id: &str,
