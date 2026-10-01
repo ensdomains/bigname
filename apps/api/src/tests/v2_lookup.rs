@@ -558,6 +558,10 @@ async fn wrapped_name_lookup_uses_the_registrar_lease_handle() -> Result<()> {
         subname["data"][0]["record"]["registration_id"],
         json!(subname_wrapper.to_string())
     );
+    // Lookup detail carries the wrapper state; a wrapped subname has no lease date.
+    let ens_v1 = &subname["data"][0]["record"]["ens_v1"];
+    assert_eq!(ens_v1.get("expires_at"), Some(&Value::Null), "{subname:#}");
+    assert_eq!(ens_v1["wrapper_state"], json!("wrapped"), "{subname:#}");
 
     database.cleanup().await
 }

@@ -347,11 +347,7 @@ pub(crate) fn parse_events_filter(
         .map(|name| {
             let normalized = normalize_inferred_route_name(name)
                 .map_err(|error| V2Error::invalid_input(error.message))?;
-            let namespace = namespace.unwrap_or(normalized.namespace);
-            Ok::<_, V2Error>(bigname_storage::logical_name_id_for_name(
-                namespace,
-                &normalized.normalized_name,
-            ))
+            Ok::<_, V2Error>(normalized.logical_name_id(namespace.unwrap_or(normalized.namespace)))
         })
         .transpose()?;
     let resource_id = params

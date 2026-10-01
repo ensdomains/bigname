@@ -98,8 +98,7 @@ pub(crate) async fn get_history(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let logical_name_id =
-        bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    let logical_name_id = normalized.logical_name_id(&namespace);
     children::refuse_registrar_root(child_registrations, &namespace, &logical_name_id)?;
     let cursor_binding = HistoryCursorBinding {
         namespace: &namespace,
@@ -134,9 +133,10 @@ pub(crate) async fn get_history(
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
     // The first page proves the name exists. A continuation does not look it up again: its cursor
-    // binds the name, and its rows come only from evidence at or below the published block.
-    if storage_cursor.is_none() {
-        let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+    // binds the name, and its rows come only from evidence at or below the published block. A
+    // bracketed spelling serves the name of the node's row, when a continuation finds one.
+    let load_parent = || async {
+        bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
             .map_err(super::name_rows_error(
                 super::SnapshotReadResource::Name,
@@ -147,22 +147,34 @@ pub(crate) async fn get_history(
                         namespace, normalized.normalized_name
                     ))
                 },
-            ))?;
-        if parent.is_none() {
-            snapshot
-                .ensure_families_published(&state, super::SnapshotReadResource::Name)
-                .await?;
-            let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
-                .await
-                .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
-            if current_fence != interpret_redo_fence {
-                return Err(history_redo_stale_error());
-            }
-            return Err(V2Error::not_found(format!(
-                "name {} was not found in namespace {namespace}",
-                normalized.normalized_name
-            )));
+            ))
+    };
+    let mut anchor_name = normalized.normalized_name.clone();
+    if storage_cursor.is_some() {
+        // Only a name for the rows: a failed read leaves the spelling, as a plain continuation
+        // reads nothing here.
+        if normalized.has_hashed_label()
+            && let Ok(Some(parent)) =
+                bigname_storage::load_name_current(&state.pool, &logical_name_id).await
+        {
+            anchor_name = parent.normalized_name;
         }
+    } else if let Some(parent) = load_parent().await? {
+        anchor_name = parent.normalized_name;
+    } else {
+        snapshot
+            .ensure_families_published(&state, super::SnapshotReadResource::Name)
+            .await?;
+        let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
+            .await
+            .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
+        if current_fence != interpret_redo_fence {
+            return Err(history_redo_stale_error());
+        }
+        return Err(V2Error::not_found(format!(
+            "name {} was not found in namespace {namespace}",
+            normalized.normalized_name
+        )));
     }
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
@@ -190,7 +202,7 @@ pub(crate) async fn get_history(
             summary_mode,
             options: &options,
             interpret_redo_fence: &interpret_redo_fence,
-            anchor_name: &normalized.normalized_name,
+            anchor_name: &anchor_name,
             include,
         },
         child_registrations,

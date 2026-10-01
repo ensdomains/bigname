@@ -39,7 +39,7 @@ use super::{
     load_address_name_record_counts, name_registration_fields, order_to_storage, sort_to_storage,
 };
 use crate::v2::name_filter::NameMatch;
-use crate::v2::name_record::{load_migrated_at, registration_id};
+use crate::v2::name_record::{ens_v1_of_row, load_migrated_at, registration_id};
 use crate::v2::vocab::{Authority, AuthoritySet};
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -349,6 +349,7 @@ pub(super) async fn get_address_resolves_to(
                 expires_at_reason: registration.expires_at_reason,
                 grace_ends_at: registration.grace_ends_at,
                 authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
+                ens_v1: ens_v1_of_row(name_row)?,
                 migrated_at: migrated_at_by_name.get(&entry.logical_name_id).cloned(),
                 relations: vec![Relation::ResolvesTo],
                 is_primary,

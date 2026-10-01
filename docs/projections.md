@@ -628,8 +628,9 @@ fail the verdict is a fourth state: the text is a valid string but not a name
 for the proven node — serving it would attach a spelling that re-hashes to a
 different node — and escaping it would serve the same misleading text, so
 Composition keeps the raw label bytes, withholds the decoded text and both name
-columns, and the placeholder serves. None of these shapes is an addressable
-name. A preimage improves readability but does not create ownership or
+columns, and the placeholder serves. None of these shapes is a name: the
+placeholder is accepted as a [name input](api-v1.md#name-inputs) for the node,
+and the escape form is not. A preimage improves readability but does not create ownership or
 exact-name authority. ENSv2 direct and linked
 children derive from admitted graph events rather than token enumeration, and
 join the child's own active surface, so none of the name-less shapes arises
@@ -1555,6 +1556,16 @@ Expiry and grace). Schema-migration
 `20260929200000_project_universal_resolver_proxy.sql` adds the table; an empty
 table reads as not cut over, and the content-hash rotation that ships with it
 rebuilds the families.
+
+Because the cutover can replace the served expiry, the composed registration
+also keeps `registration.ens_v1_expiry`: the expiry of the latest admitted
+BaseRegistrar event the expiry read selects for the name, before that choice,
+and `null` when the selected event is not the BaseRegistrar's (a subname, an
+ENSv2 registration). The API serves it as `ens_v1.expires_at`
+(`docs/api-v1.md` § Naming dictionary). It is composed at read like the rest of
+the registration block, so no stored family changes, but the code that composes
+it is interpretation input and rotates the interpreter content hash
+([deployment](deployment.md#ensv1-lease-date-on-name-rows)).
 
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
 one resource's latest pointer, including unnamed changes, for root and
