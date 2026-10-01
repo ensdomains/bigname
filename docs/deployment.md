@@ -1570,3 +1570,23 @@ No served value changes except the removed fields: the resolver overview no
 longer reports an `aliases` section, `/aliases` answers like any unknown route,
 lookup topology has no `alias` field, and the `set_alias` and
 `admin_set_alias` powers are no longer reported.
+
+### Authority of registry children with no name surface
+
+The build that serves `authority` on an ENSv1 registry child with no name
+surface (a `setSubnodeOwner` or `setSubnodeRecord` node with no registrar
+lease), from the registry generation that owns its node, on
+`GET /v1/addresses/{address}/names` and `GET /v1/names/{name}/subnames`, and
+lets the address-names `authority` filter match it
+([api-v1-routes](api-v1-routes.md#get-v1addressesaddressnames)), changes
+`crates/storage/src/families`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch, and it changes no projected row: the value is read from
+`project_registry_node_state` at request time. It ships in the same
+full-history Interpret redo and Project redo as
+[Resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name),
+and an existing deployment finishes both redos before the matching API serves,
+as for any rotation. Subname rows also gain the optional `authority` field,
+taken from the child's name row when it has one. Before the release is
+recorded, confirm that both redos adopted the new hash.

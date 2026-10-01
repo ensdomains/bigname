@@ -2045,8 +2045,10 @@ node other than the root is a `NewOwner` from its parent
 Project records `old` for a name on the ENSv1
 [authority epoch](#authority-epoch) arm when the 2017 registry recorded an
 owner for the node and no current-registry ownership record has been observed,
-and `current` otherwise. The API serves `old` as `authority=ens_v0`. The first
-current-registry `NewOwner` or `Transfer` for the node is its
+and `current` otherwise. The API serves `old` as `authority=ens_v0`. An ENSv1
+registry child with no name surface, which has no selected arm, serves its
+node's generation the same way: `ens_v0` for `old`, `ens_v1` for `current`.
+The first current-registry `NewOwner` or `Transfer` for the node is its
 [registry fallback handoff](#registry-fallback-handoff) and makes the name
 `current` for good; a later zero owner does not bring the 2017 registry back.
 The root is always `current`, because the current registry's constructor

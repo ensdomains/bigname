@@ -1649,8 +1649,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
-  `created_at`, and `expires_at`. An ENSv1 or Basenames registry child with no
-  current name row serves its node's current registry owner, `owner(node)`: the
+  `created_at`, `expires_at`, and `authority`. An ENSv1 registry child with no
+  current name row serves `authority` from the registry that holds its record,
+  `ens_v1`, or `ens_v0` while only the 2017 registry does
+  ([registry generation](glossary.md#registry-generation)); a Basenames child
+  and one whose owner is the zero address serve none. An ENSv1 or Basenames
+  registry child with no current name row serves its node's current registry
+  owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
   `NewOwner` moves it. A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
@@ -2876,8 +2881,9 @@ introduces it rebuilds Project from full history before serving the option; see
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `authority` keeps only rows whose current name row would serve one of the
-  listed `authority` values, so `ens_v1` alone no longer matches a name served
+  `authority` keeps only rows that serve one of the listed `authority` values,
+  from the current name row or, for an ENSv1 registry child with no name row,
+  from the registry that holds its record, so `ens_v1` alone no longer matches a name served
   as `ens_v0`, whose record the current registry does not hold yet
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f);
   `authority=ens_v0,ens_v1` returns both in one collection, each row keeping its
@@ -3224,11 +3230,13 @@ introduces it rebuilds Project from full history before serving the option; see
   `namehash` is the child node, `owner` the registry owner, and
   `permission_resource_id` the node's registry-only resource. The registry
   records no lease for it, so `registrant`, `registered_at`, `created_at`,
-  `expires_at`, `authority`, and `migrated_at` are absent,
+  `expires_at`, and `migrated_at` are absent,
   `registration_status` is the value the subnames route serves for a child with
-  no name row, and `is_primary` is `false`. `relation=owner` and
-  `relation=registrant` never list it; any `authority` value and
-  `is_migrated=true` omit it and `is_migrated=false` keeps it; `q` matches its
+  no name row, and `is_primary` is `false`. `authority` is the registry
+  generation that owns the node: `ens_v1`, or `ens_v0` while only the 2017
+  registry holds its record ([registry generation](glossary.md#registry-generation)).
+  `relation=owner` and `relation=registrant` never list it; `authority` matches
+  it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A
   registry `Transfer` moves the row to the new owner. Once a surface names the

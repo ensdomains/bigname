@@ -7110,6 +7110,10 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
+          "authority": {
+            "$ref": "#/components/schemas/Authority",
+            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
+          },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
             "description": "Current subregistry pointer, omitted when no current pointer is known."
@@ -7192,7 +7196,7 @@
           },
           "authority": {
             "$ref": "#/components/schemas/Authority",
-            "description": "Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+            "description": "Registry generation that owns the node: the selected authority arm, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
           },
           "migrated_at": {
             "type": "string",
@@ -8195,6 +8199,10 @@
               "null"
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
+          },
+          "authority": {
+            "$ref": "#/components/schemas/Authority",
+            "description": "Registry generation that owns the node, as the child's name row serves it, or for an ENSv1 registry child with no name row its registry's, `ens_v1` or `ens_v0`; omitted when none applies or for an ownerless registry row without a retained registrar binding."
           },
           "subregistry": {
             "$ref": "#/components/schemas/ContractRef",
