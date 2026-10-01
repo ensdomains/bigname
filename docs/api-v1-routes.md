@@ -4380,11 +4380,17 @@ For a registrar lease first identified by a later readable observation, registra
   profile, ENS `name_profile` completeness is `partial`: the ENSv2 registrar
   declaration is supported while the admitted ENSv1 registrar declaration is
   shadow because registrar-controller registration label coverage is absent.
-- Capabilities from manifest flags: `subnames`, `name_profile`, and
-  `name_history` aggregate the active manifests' capability flags (`full` when
-  every declaring manifest is supported, `partial` when some are, otherwise
-  `unsupported` with `unsupported_reason=not_supported_for_namespace`). They
-  carry no `chains` object.
+- Capabilities from manifest flags: `subnames` and `name_profile` aggregate
+  the active manifests' capability flags (`full` when every declaring manifest
+  is supported, `partial` when some are, otherwise `unsupported` with
+  `unsupported_reason=not_supported_for_namespace`). They carry no `chains`
+  object.
+- `name_history` follows `GET /v1/names/{name}/history`, which serves the
+  admitted events of every name whatever the manifests' `name_history` flags
+  say: it is `full` whenever the namespace has at least one active manifest,
+  and `unsupported` with `unsupported_reason=not_supported_for_namespace` only
+  when it has none. It carries no `chains` object. The manifests'
+  `name_history` flag no longer affects this summary.
 - Verified capabilities per chain: `verified_records` and
   `verified_primary_name` describe what this deployment's verified routes will
   execute, decided per declared network and reported under `chains`, keyed by

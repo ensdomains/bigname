@@ -28,6 +28,7 @@ const EXECUTION_ENTRYPOINT_NOT_DECLARED: &str = "execution_entrypoint_not_declar
 const EXECUTION_PROVIDER_NOT_CONFIGURED: &str = "execution_provider_not_configured";
 const VERIFIED_RECORDS_CAPABILITY: &str = "verified_records";
 const VERIFIED_PRIMARY_NAME_CAPABILITY: &str = "verified_primary_name";
+const NAME_HISTORY_CAPABILITY: &str = "name_history";
 const VERIFIED_RESOLUTION_FLAG: &str = "verified_resolution";
 const ACTIVE_ROLLOUT_STATUS: &str = "active";
 const SHADOW_ROLLOUT_STATUS: &str = "shadow";
@@ -157,7 +158,9 @@ fn aggregate_capabilities(
             let product_name = product_capability_name(raw_name)?.to_owned();
             // Verified capabilities are decided per chain from the execution table below, not
             // from the manifest flag alone, which stays `shadow` on ENS while the route serves.
-            if product_name == VERIFIED_RECORDS_CAPABILITY {
+            if product_name == VERIFIED_RECORDS_CAPABILITY
+                || product_name == NAME_HISTORY_CAPABILITY
+            {
                 continue;
             }
             let (declared_count, supported_count) =
@@ -169,7 +172,7 @@ fn aggregate_capabilities(
         }
     }
 
-    Ok(capability_counts
+    let mut capabilities = capability_counts
         .into_iter()
         .map(|(capability, (declared_count, supported_count))| {
             let completeness = if supported_count == declared_count {
@@ -191,7 +194,23 @@ fn aggregate_capabilities(
                 },
             )
         })
-        .collect())
+        .collect::<BTreeMap<_, _>>();
+    // Name history serves the admitted events of every name, whatever a manifest's
+    // `name_history` flag says, so it depends only on the namespace having an active manifest.
+    let history_completeness = if manifests.is_empty() {
+        Completeness::Unsupported
+    } else {
+        Completeness::Full
+    };
+    capabilities.insert(
+        NAME_HISTORY_CAPABILITY.to_owned(),
+        NamespaceCapability {
+            completeness: history_completeness,
+            unsupported_reason: manifests.is_empty().then(|| UNSUPPORTED_REASON.to_owned()),
+            chains: BTreeMap::new(),
+        },
+    );
+    Ok(capabilities)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -455,6 +474,15 @@ mod tests {
         );
         assert_eq!(
             capabilities["name_history"],
+            NamespaceCapability {
+                completeness: Completeness::Full,
+                unsupported_reason: None,
+                chains: BTreeMap::new(),
+            },
+            "name history ignores the manifests' unsupported name_history flags"
+        );
+        assert_eq!(
+            aggregate_capabilities(&[]).expect("an empty namespace aggregates")["name_history"],
             NamespaceCapability {
                 completeness: Completeness::Unsupported,
                 unsupported_reason: Some(UNSUPPORTED_REASON.to_owned()),

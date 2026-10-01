@@ -332,12 +332,10 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
         payload["data"]["capabilities"]["name_profile"],
         json!({ "completeness": "partial" })
     );
+    // The registrar manifests declare a shadow `name_history` flag; history serves every name.
     assert_eq!(
         payload["data"]["capabilities"]["name_history"],
-        json!({
-            "completeness": "unsupported",
-            "unsupported_reason": "not_supported_for_namespace"
-        })
+        json!({ "completeness": "full" })
     );
     assert_eq!(
         payload["data"]["networks"],
@@ -389,6 +387,28 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
         );
     }
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_namespace_name_history_is_full_where_name_history_serves_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_family_routes_fixture(&database).await?;
+    let (status, namespace) = read_family_response(&database, "/v1/namespaces/ens").await?;
+    assert_eq!(status, StatusCode::OK, "{namespace:#}");
+    assert_eq!(
+        namespace["data"]["capabilities"]["name_history"],
+        json!({ "completeness": "full" }),
+        "{namespace:#}"
+    );
+    let (status, history) = read_family_response(&database, "/v1/names/alpha.eth/history").await?;
+    assert_eq!(status, StatusCode::OK, "{history:#}");
+    assert!(
+        history["data"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "{history:#}"
+    );
     database.cleanup().await
 }
 
