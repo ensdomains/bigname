@@ -208,9 +208,10 @@ Current compact identity exceptions are intentional:
 - `GET /v1/resources/lookup`, `GET /v1/roles`, and
   `GET /v1/names/{namespace}/{name}/roles` expose `resource_id` because resource
   identity is the route's purpose.
-- resolver-overview binding and alias items may expose `logical_name_id`,
-  `resource_id`, and `surface_binding_id` because they are route-owned resolver fan-in
-  identities.
+- resolver-overview binding items may expose `logical_name_id`, `resource_id`, and
+  `surface_binding_id` because they are route-owned resolver fan-in identities. (This
+  plan also covered resolver alias items; the ENSv2 resolver alias path they described
+  was later retired and is no longer served, see [upstream](../upstream.md).)
 
 If a compact route needs a field for an app screen, it should add that field directly to
 the compact DTO instead of tunneling a full subdocument through `meta`.

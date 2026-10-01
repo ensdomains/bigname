@@ -162,12 +162,6 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
     let mut non_ethereum = row.clone();
     non_ethereum.chain_positions["ethereum"]["chain_id"] = json!("base-mainnet");
     rejected.push(non_ethereum);
-    let mut alias = row.clone();
-    alias.declared_summary["topology"]["alias"] = json!({
-        "final_target": {"logical_name_id":"ens:target"},
-        "hops": [{"logical_name_id":"ens:target"}]
-    });
-    rejected.push(alias);
     let mut wildcard = row.clone();
     wildcard.declared_summary["topology"]["wildcard"] = json!({
         "source": {"logical_name_id":"ens:ancestor"},
@@ -210,7 +204,7 @@ fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_
         "resolver_path": [{"logical_name_id":row.logical_name_id,
             "chain_id":"ethereum-sepolia", "address":null}],
         "wildcard":{"source":null,"matched_labels":[]},
-        "alias":{"final_target":null,"hops":[]}, "version_boundaries":{},
+        "version_boundaries":{},
         "transport":{"source_chain_id":null,"target_chain_id":null,
             "contract_address":null,"latest_event_kind":null}
     });
@@ -259,11 +253,6 @@ fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_
     let mut wrong_slot = row.clone();
     wrong_slot.chain_positions = json!({"ethereum":{"chain_id":"ethereum-sepolia"}});
     rejected.push(wrong_slot);
-    let mut alias = row.clone();
-    alias.declared_summary["topology"]["alias"] = json!({
-        "final_target":{"logical_name_id":"ens:other"},"hops":[{"logical_name_id":"ens:other"}]
-    });
-    rejected.push(alias);
     let mut malformed = row.clone();
     malformed.declared_summary["topology"]["resolver_path"] = json!([]);
     rejected.push(malformed);

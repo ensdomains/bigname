@@ -21,11 +21,6 @@ loc = 604
 justification = "Name-surface materialization distinguishes active from shadow V1 surfaces so a later registry resolver can link only to a serving-visible name; the four-line active-surface notification keeps that identity decision at its operating boundary."
 
 [[files]]
-path = "crates/adapters/src/schema_v2/protocol.rs"
-loc = 602
-justification = "The source-family dispatch gained the ens_execution Universal Resolver proxy arm (TYR-90); its decoding lives in the protocol/universal_resolver.rs sibling, and the dispatch and signature tables stay together."
-
-[[files]]
 path = "crates/adapters/src/schema_v2/protocol/v1/registry.rs"
 loc = 634
 justification = "Registry event decoding and its atomic control/read transition remain together while shared owner classification and authority emission live in the bounded authority-transition sibling; the file remains below the review threshold."

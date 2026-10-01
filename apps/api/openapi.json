@@ -4547,269 +4547,13 @@
         }
       }
     },
-    "/v1/resolvers/{chain_id}/{address}/aliases": {
-      "get": {
-        "operationId": "get_v1_resolvers_chain_id_address_aliases",
-        "tags": [
-          "resolvers"
-        ],
-        "description": "See [GET /v1/resolvers/{chain_id}/{address}/aliases](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressaliases-links-and-roles).",
-        "parameters": [
-          {
-            "name": "chain_id",
-            "in": "path",
-            "required": true,
-            "description": "Supported numeric EVM chain ID.",
-            "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "name": "address",
-            "in": "path",
-            "required": true,
-            "description": "EVM address in hexadecimal form.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "at",
-            "in": "query",
-            "required": false,
-            "description": "Decimal Unix seconds, RFC 3339 timestamp, or opaque meta.as_of_token selecting a supported snapshot.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "finality",
-            "in": "query",
-            "required": false,
-            "description": "Snapshot finality; latest is the default.",
-            "schema": {
-              "$ref": "#/components/schemas/Finality",
-              "default": "latest"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "description": "Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "page_size",
-            "in": "query",
-            "required": false,
-            "description": "Maximum rows per page: 1 through 200.",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200,
-              "default": 50
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The requested answer, including the empty or in-band outcomes documented below.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResolverAliasesResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "`invalid_input`: Malformed input, unknown query parameter, unsupported parameter combination, or a value rejected by the route rules.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "invalid_input"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "`not_found`: The selected resource or namespace does not exist.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "not_found"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "408": {
-            "description": "`request_timeout`: The configured whole-request deadline expired.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "request_timeout"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "`conflict`: The explicit snapshot selector cannot form a canonical snapshot or, for lookup, its selected positions cannot be combined.\n\n`stale`: The publication or selected position cannot be served coherently, or the route's publication revalidation requires retry.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "conflict",
-                                "stale"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "`internal_error`: Unexpected serving failure; verified provider transport failures also use this error.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "internal_error"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "`overloaded`: The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "allOf": [
-                    {
-                      "$ref": "#/components/schemas/ErrorEnvelope"
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "error": {
-                          "type": "object",
-                          "properties": {
-                            "code": {
-                              "enum": [
-                                "overloaded"
-                              ]
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/resolvers/{chain_id}/{address}/links": {
       "get": {
         "operationId": "get_v1_resolvers_chain_id_address_links",
         "tags": [
           "resolvers"
         ],
-        "description": "See [GET /v1/resolvers/{chain_id}/{address}/links](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressaliases-links-and-roles).",
+        "description": "See [GET /v1/resolvers/{chain_id}/{address}/links](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
             "name": "chain_id",
@@ -5065,7 +4809,7 @@
         "tags": [
           "resolvers"
         ],
-        "description": "See [GET /v1/resolvers/{chain_id}/{address}/roles](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddressaliases-links-and-roles).",
+        "description": "See [GET /v1/resolvers/{chain_id}/{address}/roles](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#get-v1resolverschain_idaddresslinks-and-roles).",
         "parameters": [
           {
             "name": "chain_id",
@@ -5965,7 +5709,6 @@
           "set_abi",
           "set_interface",
           "set_name",
-          "set_alias",
           "clear_records",
           "set_data",
           "link",
@@ -5976,7 +5719,6 @@
           "admin_set_abi",
           "admin_set_interface",
           "admin_set_name",
-          "admin_set_alias",
           "admin_clear_records",
           "admin_set_data",
           "admin_link"
@@ -6025,7 +5767,6 @@
           "set_abi": "ENSv2 resolvers `ROLE_SET_ABI` (bit 16; bit 12 on the record resolver).",
           "set_interface": "ENSv2 resolvers `ROLE_SET_INTERFACE` (bit 20; bit 16 on the record resolver).",
           "set_name": "ENSv2 resolvers `ROLE_SET_NAME` (bit 24; bit 20 on the record resolver).",
-          "set_alias": "ENSv2 resolver (20260629) `ROLE_SET_ALIAS` (bit 28).",
           "clear_records": "ENSv2 resolver (20260629) `ROLE_CLEAR` (bit 32): may clear a name's records.",
           "set_data": "ENSv2 resolvers `ROLE_SET_DATA` (bit 36; bit 24 on the record resolver).",
           "link": "ENSv2 record resolver `ROLE_LINK` (bit 28).",
@@ -6036,7 +5777,6 @@
           "admin_set_abi": "ENSv2 resolvers `ROLE_SET_ABI_ADMIN` (bit 144; bit 140 on the record resolver).",
           "admin_set_interface": "ENSv2 resolvers `ROLE_SET_INTERFACE_ADMIN` (bit 148; bit 144 on the record resolver).",
           "admin_set_name": "ENSv2 resolvers `ROLE_SET_NAME_ADMIN` (bit 152; bit 148 on the record resolver).",
-          "admin_set_alias": "ENSv2 resolver (20260629) `ROLE_SET_ALIAS_ADMIN` (bit 156).",
           "admin_clear_records": "ENSv2 resolver (20260629) `ROLE_CLEAR_ADMIN` (bit 160).",
           "admin_set_data": "ENSv2 resolvers `ROLE_SET_DATA_ADMIN` (bit 164; bit 152 on the record resolver).",
           "admin_link": "ENSv2 record resolver `ROLE_LINK_ADMIN` (bit 156)."
@@ -9063,68 +8803,6 @@
         "additionalProperties": false,
         "description": "Closed history payload fields. The event type and retained evidence determine which fields appear; an empty object is valid. See [history event payloads](https://github.com/ensdomains/bigname/blob/main/docs/api-v1-routes.md#history-event-payloads-includedata-includeraw)."
       },
-      "ResolverAlias": {
-        "type": "object",
-        "properties": {
-          "namespace": {
-            "type": "string",
-            "description": "Resolved public namespace slug."
-          },
-          "name": {
-            "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
-          },
-          "display_name": {
-            "type": "string",
-            "description": "Display form of the name."
-          },
-          "namehash": {
-            "type": "string",
-            "description": "Hexadecimal ENS namehash."
-          },
-          "resolver": {
-            "$ref": "#/components/schemas/ContractRef",
-            "description": "Resolver contract for this answer."
-          },
-          "state": {
-            "type": "string",
-            "enum": [
-              "active",
-              "removed",
-              "unknown"
-            ],
-            "description": "Latest alias state on an alias-event row."
-          },
-          "from_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Alias source name; always present on alias-event rows."
-          },
-          "to_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Alias target name; null for a removed or unknown target."
-          },
-          "from_display_name": {
-            "type": "string",
-            "description": "Display form of the alias source when retained."
-          },
-          "to_display_name": {
-            "type": "string",
-            "description": "Display form of the alias target when retained."
-          },
-          "to_registration_id": {
-            "type": "string",
-            "description": "Target registration handle when retained."
-          }
-        },
-        "additionalProperties": false,
-        "description": "A supported resolver binding or alias-event item; the route defines the two forms."
-      },
       "LinkEvent": {
         "type": "object",
         "properties": {
@@ -9610,33 +9288,6 @@
         "required": [
           "meta",
           "data"
-        ],
-        "description": "Success envelope for the corresponding product operation."
-      },
-      "ResolverAliasesResponse": {
-        "type": "object",
-        "properties": {
-          "meta": {
-            "$ref": "#/components/schemas/Meta",
-            "description": "Response metadata; present even when empty."
-          },
-          "data": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ResolverAlias"
-            },
-            "description": "Requested result data."
-          },
-          "page": {
-            "$ref": "#/components/schemas/Page",
-            "description": "Standard collection pagination metadata."
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "meta",
-          "data",
-          "page"
         ],
         "description": "Success envelope for the corresponding product operation."
       },

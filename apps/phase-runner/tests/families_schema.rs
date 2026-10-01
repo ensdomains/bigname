@@ -33,8 +33,6 @@ const FAMILY_TABLES: &[&str] = &[
     "project_grant",
     "project_resource_admin_aggregate",
     "project_account_approval",
-    "project_name_alias",
-    "project_resolver_alias",
     "project_child_edge_candidate",
     "project_parent_subregistry",
     "project_reverse_tuple",

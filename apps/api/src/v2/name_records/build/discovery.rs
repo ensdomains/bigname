@@ -60,7 +60,7 @@ pub(crate) fn ens_universal_resolver_discovery_candidate(row: &NameCurrentRow) -
         return false;
     };
     let Some(topology_value) = row.declared_summary.get("topology") else {
-        // Ordinary direct projected rows omit topology. Special alias, wildcard,
+        // Ordinary direct projected rows omit topology. Special wildcard,
         // subregistry, and transport shapes carry explicit topology and are
         // checked below.
         return true;

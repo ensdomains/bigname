@@ -2101,22 +2101,9 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
                         "namehash": "namehash:beta.eth",
                         "resource_id": "00000000-0000-0000-0000-00000000b102",
                         "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
-                        "binding_kind": "resolver_alias_path",
+                        "binding_kind": "declared_registry_path",
                     }
                 ],
-            },
-            "aliases": {
-                "status": "supported",
-                "count": 1,
-                "items": [{
-                    "logical_name_id": "ens:beta.eth",
-                    "canonical_display_name": "Beta.eth",
-                    "normalized_name": "beta.eth",
-                    "namehash": "namehash:beta.eth",
-                    "resource_id": "00000000-0000-0000-0000-00000000b102",
-                    "surface_binding_id": "00000000-0000-0000-0000-00000000b103",
-                    "binding_kind": "resolver_alias_path",
-                }],
             },
             "permissions": {
                 "status": "supported",
@@ -2239,35 +2226,6 @@ fn resolver_current_row(chain_id: &str, resolver_address: &str) -> ResolverCurre
     }
 }
 
-fn resolver_current_row_with_writer_alias(
-    chain_id: &str,
-    resolver_address: &str,
-) -> ResolverCurrentRow {
-    let mut row = resolver_current_row(chain_id, resolver_address);
-    row.declared_summary["aliases"]["count"] = json!(2);
-    row.declared_summary["aliases"]["items"]
-        .as_array_mut()
-        .expect("resolver aliases fixture must be an array")
-        .push(json!({
-            "logical_name_id": "ens:alias.eth",
-            "resource_id": "00000000-0000-0000-0000-00000000b104",
-            "binding_kind": "resolver_alias_path",
-            "alias_state": "active",
-            "active": true,
-            "chain_id": chain_id,
-            "resolver_address": resolver_address,
-            "from_dns_encoded_name": "0x05616c6961730365746800",
-            "to_dns_encoded_name": "0x04626574610365746800",
-            "from_name": "alias.eth",
-            "to_name": "beta.eth",
-            "to_logical_name_id": "ens:beta.eth",
-            "to_resource_id": "00000000-0000-0000-0000-00000000b102",
-            "latest_event_kind": "AliasChanged",
-        }));
-    row.declared_summary["event_summary"]["count"] = json!(4);
-    row.declared_summary["event_summary"]["by_kind"]["AliasChanged"] = json!(1);
-    row
-}
 
 fn exact_name_row(
     logical_name_id: &str,

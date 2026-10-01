@@ -220,13 +220,6 @@ pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
     // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
     RoleInsensitiveEvent {
         source_family: "ens_v2_resolver_l1",
-        event: "AliasChanged",
-        justification: V2_RESOLVER_JUSTIFICATION,
-        adapter_file: V2_RESOLVER_ADAPTER,
-    },
-    // Adapter: crates/adapters/src/schema_v2/protocol/v2_resolver.rs.
-    RoleInsensitiveEvent {
-        source_family: "ens_v2_resolver_l1",
         event: "EACRolesChanged",
         justification: V2_RESOLVER_JUSTIFICATION,
         adapter_file: V2_RESOLVER_ADAPTER,
