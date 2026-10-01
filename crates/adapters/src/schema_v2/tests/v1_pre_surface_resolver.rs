@@ -432,7 +432,7 @@ fn state_derived_pointer(output: &BatchOutput) -> Option<&NormalizedEvent> {
     })
 }
 
-fn compact_prior(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
+pub(super) fn compact_prior(events: &[NormalizedEvent]) -> Vec<PriorEventInput> {
     let prior = events.iter().map(prior_event).collect::<Vec<_>>();
     let mut last_index = std::collections::HashMap::new();
     for (index, event) in prior.iter().enumerate() {

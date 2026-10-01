@@ -390,6 +390,66 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     Ok(())
 }
 
+/// A born-wrapped registration that sets a resolver: `_wrapETH2LD` emits
+/// `NameWrapped` and then sets the registry resolver in the same transaction,
+/// so the name serves that resolver from the wrapper resource it is bound to.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
+#[tokio::test]
+async fn born_wrapped_registration_serves_its_resolver() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let alice = accounts[1];
+    let resolver = deployment.public_resolver.address;
+
+    let registered = ens_v1::register_wrapped_eth_name(
+        &rpc,
+        &deployment,
+        "wrappedresolver",
+        alice,
+        YEAR,
+        resolver,
+        0,
+    )
+    .await?;
+    let tx_hash = &registered.register_tx_hash;
+    let ready_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+           WHERE event_kind = 'ResolverChanged' \
+             AND source_family = 'ens_v1_registry_l1' \
+             AND lower(after_state->>'resolver') = '{resolver:#x}' \
+             AND transaction_hash = '{tx_hash}' \
+             AND canonicality_state = 'canonical')"
+    );
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
+
+    let wrapper_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events \
+         WHERE transaction_hash = $1 \
+           AND source_family = 'ens_v1_wrapper_l1' \
+           AND event_kind = 'SurfaceBound' \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(tx_hash)
+    .fetch_one(&run.db.pool)
+    .await?;
+    let body = exact_name(&run.api, "ens", "wrappedresolver.eth").await?;
+    assert_eq!(
+        pointer(&body, "/data/resource_id"),
+        wrapper_resource.to_string()
+    );
+    assert_eq!(
+        pointer(&body, "/declared_state/resolver/address"),
+        format!("{resolver:#x}"),
+        "the resolver set after NameWrapped must serve from the wrapper resource: {body}"
+    );
+
+    run.db.cleanup().await?;
+    Ok(())
+}
+
 /// A parent must burn CANNOT_UNWRAP before it can burn a parent-controlled
 /// fuse on a child; setChildFuses ORs the live bitmap, while extendExpiry
 /// emits ExpiryExtended after normalising to the parent expiry.

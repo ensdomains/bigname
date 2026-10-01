@@ -17,7 +17,7 @@ const CUSTOM_RESOLVER: &str = "0x00000000000000000000000000000000000c0570";
 
 /// The checked-in manifests of `profile` for `families`, as interpretation inputs, and one
 /// declared admission per `[[contracts]]` entry.
-fn profile(
+pub(super) fn profile(
     profile: &str,
     families: &[&str],
 ) -> anyhow::Result<(String, Vec<ManifestInput>, Vec<AddressAdmissionInput>)> {
@@ -60,7 +60,7 @@ fn profile(
     Ok((chain.expect("profile chain"), manifests, admissions))
 }
 
-fn declared_address(admissions: &[AddressAdmissionInput], role: &str) -> String {
+pub(super) fn declared_address(admissions: &[AddressAdmissionInput], role: &str) -> String {
     admissions
         .iter()
         .find(|admission| admission.role.as_deref() == Some(role))

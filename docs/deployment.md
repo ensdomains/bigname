@@ -1516,6 +1516,25 @@ the schema-migration is applied first. It ships inside the TYR-61 batch, whose s
 redo and Project rebuild discharge this; collection cursors continue as
 described above.
 
+### Resolver set while registering a wrapped name
+
+The build that keeps a registry resolver write that follows `NameWrapped` in a
+wrapped registration transaction on the wrapper resource, instead of moving it
+to the registrar resource the NameWrapper holds
+([projections](projections.md#records-shared-through-resolver-links)), changes
+`crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no manifest change and no historical
+ingest fetch. An existing deployment finishes the full-history Interpret redo
+and the Project redo it installs before the matching API serves, as for any
+rotation. Only that redo corrects names already registered this way: when the
+Project redo publishes, a wrapped name whose registration transaction set a
+resolver serves its latest resolver state rather than none, including any later
+change or clear. Before the release is recorded, confirm that both redos
+adopted the new hash, then compare Sepolia `taytems.eth` (registered at block
+4052977) with `source=verified` at the same published block: the resolver and
+the record values must agree.
+
 ### Retired resolver alias path
 
 The build that stops interpreting the 2026-06-29 ENSv2 resolver `AliasChanged`
