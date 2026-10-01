@@ -319,6 +319,66 @@ async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<(
     database.cleanup().await
 }
 
+// TYR-120. With an empty `addr.reverse` name, coin type 60 serves the `default.reverse` name, as
+// ENS's ETH reverse resolver does; coin type 2147483648 reads the default name itself.
+#[tokio::test]
+async fn v2_get_primary_name_falls_back_to_the_default_reverse_name() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_005,
+                "block_hash": "0xprimary-default-reverse",
+                "timestamp": "2026-04-17T00:00:05Z"
+            }
+        }))
+        .await?;
+    let indexed = |coin_type: &str| {
+        format!(
+            "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?coin_type={coin_type}&source=indexed"
+        )
+    };
+    publish_primary_claim(
+        &database.lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"",
+    )
+    .await?;
+    publish_primary_claim(
+        &database.lookup_pool,
+        ENS_DEFAULT_REVERSE,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"evers.eth",
+    )
+    .await?;
+    for coin_type in ["60", "2147483648"] {
+        let payload = v2_primary_name_payload_for_database(&database, &indexed(coin_type)).await?;
+        assert_eq!(
+            payload["data"]["answers"],
+            json!([{"source": "indexed", "status": "ok", "name": "evers.eth"}]),
+            "coin type {coin_type}"
+        );
+    }
+
+    // A non-empty addr.reverse name on the reverse node's resolver wins.
+    publish_primary_claim(
+        &database.lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
+    )
+    .await?;
+    let payload = v2_primary_name_payload_for_database(&database, &indexed("60")).await?;
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([{"source": "indexed", "status": "ok", "name": "taytems.eth"}])
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_primary_name_reports_an_unnormalizable_stored_claim_as_invalid_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

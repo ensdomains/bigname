@@ -137,6 +137,11 @@ struct TestDatabase {
 /// resolver the fixtures' ENS reverse nodes point at.
 const ENS_REVERSE_REGISTRAR: &str = "0xa58e81fe9b61b5c3fe2afd33cf304c454abfc7cb";
 const BASENAMES_REVERSE_REGISTRAR: &str = "0x0000000000d8e504002cc26e3ec46d81971c1664";
+/// The Mainnet ENSIP-19 `default.reverse` registrar
+/// (manifests/mainnet/ethereum/ens/ens_v1_reverse_l1/v1.toml).
+const ENS_DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
+/// The `source` of [`publish_primary_claim`] for a write to the ENS `default.reverse` registrar.
+const ENS_DEFAULT_REVERSE: &str = "ens-default";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const ENS_REVERSE_RESOLVER: &str = "0x231b0ee14048e9dccd1d247744d114a4eb5e8e63";
 
@@ -174,11 +179,12 @@ fn primary_claim_hex(raw: &[u8]) -> Value {
 /// crates/adapters/src/schema_v2/protocol/v1/: reverse.rs (`ReverseClaimed`), registry.rs
 /// (`NewResolver`), resolver.rs (`NameChanged`, `record_after`).
 ///
-/// Basenames (`basenames_base_primary`, coin type 2147492101) emits NameForAddrChanged: the
-/// reverse change and the direct claim naming the tuple, both from the one log
-/// (reverse.rs, `NameForAddrChanged`).
+/// Basenames (`basenames_base_primary`, coin type 2147492101) and the ENS `default.reverse`
+/// registrar (`ens_v1_reverse_l1`, source [`ENS_DEFAULT_REVERSE`], coin type 2147483648) emit
+/// NameForAddrChanged: the reverse change and the direct claim naming the tuple, both from the
+/// one log (reverse.rs, `NameForAddrChanged`).
 fn primary_claim_events(
-    namespace: &str,
+    source: &str,
     address: &str,
     name: &[u8],
     registrar_instance: Uuid,
@@ -186,10 +192,27 @@ fn primary_claim_events(
 ) -> Result<Vec<PrimaryClaimEvent>> {
     let address = address.to_ascii_lowercase();
     let label = address.strip_prefix("0x").unwrap_or(&address).to_owned();
-    let (family, registrar, coin_type, suffix) = match namespace {
-        "ens" => ("ens_v1_reverse_l1", ENS_REVERSE_REGISTRAR, "60", "addr.reverse"),
+    let (namespace, family, role, registrar, coin_type, suffix) = match source {
+        "ens" => (
+            "ens",
+            "ens_v1_reverse_l1",
+            "reverse_registrar",
+            ENS_REVERSE_REGISTRAR,
+            "60",
+            "addr.reverse",
+        ),
+        ENS_DEFAULT_REVERSE => (
+            "ens",
+            "ens_v1_reverse_l1",
+            "default_reverse_registrar",
+            ENS_DEFAULT_REVERSE_REGISTRAR,
+            "2147483648",
+            "default.reverse",
+        ),
         "basenames" => (
+            "basenames",
             "basenames_base_primary",
+            "reverse_registrar",
             BASENAMES_REVERSE_REGISTRAR,
             "2147492101",
             "80002105.reverse",
@@ -200,7 +223,7 @@ fn primary_claim_events(
     let node = bigname_lookup::ens_namehash_hex(&reverse_name)?;
     let claim_provenance = json!({
         "source_family": family,
-        "contract_role": "reverse_registrar",
+        "contract_role": role,
         "contract_instance_id": registrar_instance.to_string(),
         "emitting_address": registrar,
     });
@@ -217,7 +240,7 @@ fn primary_claim_events(
             "claim_provenance": claim_provenance,
         })
     };
-    if namespace == "basenames" {
+    if source != "ens" {
         let mut claim = json!({
             "source_event": "NameForAddrChanged",
             "address": address,
@@ -307,10 +330,15 @@ fn primary_claim_derivation(family: &str) -> &'static str {
 /// are declared in their family manifests first, as the adapters only emit declared sources.
 async fn publish_primary_claim(
     pool: &PgPool,
-    namespace: &str,
+    source: &str,
     address: &str,
     name: &[u8],
 ) -> Result<()> {
+    let namespace = if source == ENS_DEFAULT_REVERSE {
+        "ens"
+    } else {
+        source
+    };
     let chain = if namespace == "basenames" {
         "base-mainnet"
     } else {
@@ -325,21 +353,27 @@ async fn publish_primary_claim(
     .fetch_one(pool)
     .await
     .with_context(|| format!("a primary claim needs a readable {chain} block"))?;
-    let (reverse_family, registrar) = if namespace == "basenames" {
-        ("basenames_base_primary", BASENAMES_REVERSE_REGISTRAR)
-    } else {
-        ("ens_v1_reverse_l1", ENS_REVERSE_REGISTRAR)
+    let (reverse_family, role, registrar) = match source {
+        "basenames" => (
+            "basenames_base_primary",
+            "reverse_registrar",
+            BASENAMES_REVERSE_REGISTRAR,
+        ),
+        ENS_DEFAULT_REVERSE => (
+            "ens_v1_reverse_l1",
+            "default_reverse_registrar",
+            ENS_DEFAULT_REVERSE_REGISTRAR,
+        ),
+        _ => (
+            "ens_v1_reverse_l1",
+            "reverse_registrar",
+            ENS_REVERSE_REGISTRAR,
+        ),
     };
-    let (reverse_manifest, registrar_instance) = declare_family_fixture_contract(
-        pool,
-        namespace,
-        chain,
-        reverse_family,
-        "reverse_registrar",
-        registrar,
-    )
-    .await?;
-    let (resolver_manifest, resolver_instance) = if namespace == "basenames" {
+    let (reverse_manifest, registrar_instance) =
+        declare_family_fixture_contract(pool, namespace, chain, reverse_family, role, registrar)
+            .await?;
+    let (resolver_manifest, resolver_instance) = if source != "ens" {
         (None, Uuid::nil())
     } else {
         let (manifest, instance) = declare_family_fixture_contract(
@@ -354,7 +388,7 @@ async fn publish_primary_claim(
         (Some(manifest), instance)
     };
     let claim = primary_claim_events(
-        namespace,
+        source,
         address,
         name,
         registrar_instance,
