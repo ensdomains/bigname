@@ -12,7 +12,7 @@ roots = []
 discovery_rules = []
 
 [capability_flags]
-verified_resolution = { status = "shadow", notes = "shadow execution ownership is fixed before the promoted public Basenames verified-resolution manifest version becomes active" }
+verified_resolution = "supported"
 
 [[contracts]]
 role = "l1_resolver"

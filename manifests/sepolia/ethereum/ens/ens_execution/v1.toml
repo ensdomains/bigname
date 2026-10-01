@@ -25,7 +25,7 @@ verified_authority_arms = ["ens_v1", "ens_v2"]
 universal_resolver_implementations = ["0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3"]
 
 [capability_flags]
-verified_resolution = { status = "shadow", notes = "verified resolution through the official Sepolia Universal Resolver for both ENSv1 and ENSv2 authority" }
+verified_resolution = { status = "supported", notes = "verified resolution through the official Sepolia Universal Resolver for both ENSv1 and ENSv2 authority" }
 
 # The client-facing Universal Resolver proxy. Its `Upgraded` events are admitted so that the
 # cutover to ENSv2 resolution is read from chain data. The pinned artifact has no receipt; the

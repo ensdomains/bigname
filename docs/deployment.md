@@ -1164,8 +1164,7 @@ routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
 `verified_records` and `verified_primary_name` as `unsupported` with
 `unsupported_reason=execution_provider_not_configured` for chain `11155111`;
 with it, both report `full`. The Sepolia entrypoint is the checked-in active
-`manifests/sepolia/ethereum/ens/ens_execution/v1.toml` (its verified-resolution
-flag stays `shadow`), which the normal
+`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
 manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections.
@@ -1668,6 +1667,33 @@ the new registration.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 Before the release is recorded, confirm that both redos adopted the new hash.
+
+### Capability flags without shadow
+
+The build that removes `shadow` as a capability-flag status
+([manifests](manifests.md#capability_flags)) and flips the checked-in `shadow`
+flags to `supported` changes `crates/manifests/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain, although no interpreted or projected row changes. It needs no
+schema-migration and no historical ingest fetch. It changes the payloads of the
+active Sepolia `ens_execution`, `ens_v1_registrar_l1` and `ens_v2_registrar_l1`
+manifests and the active Mainnet `ens_v1_registrar_l1` manifest, so manifest
+synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) for
+`ethereum-sepolia` (and `ethereum-mainnet` under the Mainnet profile), and the
+Interpret redo that discharges it runs with `--attest-watch-set-coverage`: a
+capability flag widens no watch-plan range. The Mainnet `ens_execution` and
+`basenames_execution` v1 manifests are `shadow` rollouts, so their changed
+payloads record no marker and do not invalidate the Base Project phase.
+
+Ship it with the
+[resolver set while registering a wrapped name](#resolver-set-while-registering-a-wrapped-name)
+release: that release's full-history Interpret redo and Project redo on every
+chain discharge this rotation and the marker too, and the matching API serves
+only after both redos publish, as for any rotation. Before the release is
+recorded, confirm that `GET /v1/namespaces/ens` reports `name_profile` and
+`name_history` as `full` and that the Sepolia `verified_records` and
+`verified_primary_name` are unchanged.
 
 ### Default reverse names
 
