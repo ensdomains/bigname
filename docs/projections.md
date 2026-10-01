@@ -1203,7 +1203,13 @@ the raw event that first materializes the active surface. A wrapper-provided
 surface links the retained registry read resource without binding that dormant
 registry resource while wrapper control remains current. Same-transaction
 registration reconciliation leaves that registry-read pointer on the dormant
-registry resource rather than retargeting it to registrar control. Record
+registry resource rather than retargeting it to registrar control. A registry row
+that is already on the wrapper resource bound by an earlier `NameWrapped` for
+the same node in the registration transaction, such as the resolver write
+`registerAndWrapETH2LD` makes after wrapping, stays on that wrapper resource,
+the one the name is served from. Its registry-read copy follows the ordinary
+registration reconciliation rules, and a registry write that comes after a
+later ownership write in the same transaction is reconciled as before. Record
 attribution remains node-keyed and provider-free. If a registrar registration
 makes the registrar resource current before the retained registry-only
 authority can be materialized, the same observation still marks that retained
