@@ -1597,7 +1597,15 @@ lease date (`"1798608633"` at the time of writing) beside the top-level ENSv2
 
 The build that serves `authority` on an ENSv1 registry child with no name
 surface (a `setSubnodeOwner` or `setSubnodeRecord` node with no registrar
-lease), from the registry generation that owns its node, on
+lease: both write the child's registry owner, emit `NewOwner` and create no
+registrar lease
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)),
+from the registry generation that owns its node: `ens_v0` while the deployed
+registry still answers for the node from the 2017 registry, which it does
+until it holds a record of its own
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f),
+and `ens_v1` after; on
 `GET /v1/addresses/{address}/names` and `GET /v1/names/{name}/subnames`, and
 lets the address-names `authority` filter match it
 ([api-v1-routes](api-v1-routes.md#get-v1addressesaddressnames)), changes
@@ -1611,5 +1619,5 @@ full-history Interpret redo and Project redo as
 and an existing deployment finishes both redos before the matching API serves,
 as for any rotation. Such a child also carries the `ens_v1` object, with a
 null `expires_at` because it holds no lease. Subname rows also gain the
-optional `authority` field, taken from the child's name row when it has one. Before the release is
-recorded, confirm that both redos adopted the new hash.
+optional `authority` field, taken from the child's name row when it has one.
+Before the release is recorded, confirm that both redos adopted the new hash.
