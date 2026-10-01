@@ -1545,7 +1545,9 @@ BaseRegistrar event the expiry read selects for the name, before that choice,
 and `null` when the selected event is not the BaseRegistrar's (a subname, an
 ENSv2 registration). The API serves it as `ens_v1.expires_at`
 (`docs/api-v1.md` § Naming dictionary). It is composed at read like the rest of
-the registration block, so no stored family changes.
+the registration block, so no stored family changes, but the code that composes
+it is interpretation input and rotates the interpreter content hash
+([deployment](deployment.md#ensv1-lease-date-on-name-rows)).
 
 F5 keeps two independently owned pointer keys. `project_resource_pointer` keeps
 one resource's latest pointer, including unnamed changes, for root, alias and

@@ -6550,7 +6550,7 @@
               "string",
               "null"
             ],
-            "description": "BaseRegistrar lease expiry as a decimal Unix-second string, or null when the name has no lease, such as any subname. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead."
+            "description": "BaseRegistrar lease expiry as a decimal Unix-second string, exact up to `9223372036854775807` and served as that value above it, or null when the name has no lease, such as any subname. After the Universal Resolver cutover the top-level `expires_at` of a name with a live ENSv2 entry is that entry's expiry instead. The lease's grace deadline is this value plus 90 days."
           },
           "wrapper_state": {
             "$ref": "#/components/schemas/WrapperState",

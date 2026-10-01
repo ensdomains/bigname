@@ -683,3 +683,60 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
     fixture.assert_rebuild_equal(6).await?;
     fixture.cleanup().await
 }
+
+/// The ENSv2 owner's BatchRegistrar can extend a reservation without the BaseRegistrar
+/// (`BatchRegistrar.batchRegister` renews a RESERVED entry to a later expiry). The served expiry
+/// and grace follow the reservation, the lease date stays, and the lease's own grace deadline
+/// (lease + 90 days) no longer equals the served one.
+#[tokio::test]
+async fn extending_only_the_reservation_leaves_the_lease_date_and_splits_the_grace_deadlines()
+-> Result<()> {
+    const EXTENDED: u64 = RESERVED_EXPIRY + 30 * DAY;
+    let fixture = Fixture::new("families_expiry_grace_batch_extension", 12).await?;
+    execution_manifest(&fixture, None, 0, TOP_PROXY, 0).await?;
+    let alice = leased(&fixture, "alice.eth", 1, 1).await?;
+    reserved(&fixture, &alice, 1, 4).await?;
+    upgraded(
+        &fixture,
+        5,
+        TOP_PROXY,
+        "universal_resolver",
+        ADMITTED,
+        "admitted_universal_resolver",
+    )
+    .await?;
+    fixture.apply(5, FamilyMode::Normal).await?;
+    let aligned = served(&fixture, &alice).await?;
+    ensure!(
+        aligned["grace_ends_at"] == json!((LEASE_EXPIRY + 90 * DAY).to_string()),
+        "premigration aligns the two grace deadlines: {aligned}"
+    );
+
+    fixture
+        .write(
+            6,
+            0,
+            "ExpiryChanged",
+            "ens_v2_registry_l1",
+            Some(&alice),
+            Some(&uuid(0x2001)),
+            json!({"registry_contract_instance_id": "eth", "token_id": "1", "expiry": EXTENDED}),
+            V2_REGISTRY,
+        )
+        .await?;
+    fixture.apply(6, FamilyMode::Normal).await?;
+    let row = served(&fixture, &alice).await?;
+    ensure!(
+        row["expiry"] == json!(EXTENDED.to_string())
+            && row["grace_ends_at"] == json!((EXTENDED + 28 * DAY).to_string())
+            && row["ens_v1_expiry"] == json!(LEASE_EXPIRY.to_string()),
+        "{row}"
+    );
+    ensure!(
+        row["grace_ends_at"] != json!((LEASE_EXPIRY + 90 * DAY).to_string()),
+        "the lease's grace deadline and the served one differ: {row}"
+    );
+    fixture.assert_undo_restores(6).await?;
+    fixture.assert_rebuild_equal(6).await?;
+    fixture.cleanup().await
+}

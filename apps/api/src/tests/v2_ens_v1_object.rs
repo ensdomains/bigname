@@ -1,9 +1,11 @@
 // The `ens_v1` object on name-shaped rows (TYR-115): the BaseRegistrar lease date and the
 // NameWrapper state while ENSv1 decides a name, absent while ENSv2 does.
 
-/// Alice's lease, renewed to the given expiry, wrapped emancipated and premigrated into ENSv2
-/// with the 62-day continuity bonus, with the Universal Resolver cut over: the shape of a live
-/// wrapped Sepolia name such as nick.eth.
+/// Alice's lease, registered with nick.eth's lease date and marked wrapped emancipated on the
+/// lease resource itself, premigrated into ENSv2 with the 62-day continuity bonus, with the
+/// Universal Resolver cut over: the response shape of a live wrapped Sepolia name such as
+/// nick.eth. The faithful wrapped-resource and renewal paths are in
+/// `crates/project/tests/families_expiry_grace.rs`.
 async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> Result<()> {
     const LEASE_EXPIRY: u64 = 1_798_608_633;
     const RESERVED_EXPIRY: u64 = LEASE_EXPIRY + 62 * 86_400;
@@ -151,4 +153,28 @@ async fn v2_ens_v1_object_on_an_unwrapped_lease_and_its_absence_under_ens_v2() -
     assert_eq!(registered["data"]["authority"], json!("ens_v2"), "{registered:#}");
     assert!(registered["data"].get("ens_v1").is_none(), "{registered:#}");
     Ok(())
+}
+
+/// The registrar producer saturates a lease expiry above `i64::MAX` (`evm_abi`), which the
+/// Sepolia testnet premigration registrar can reach with a caller-chosen duration; the served
+/// lease date is then `i64::MAX`.
+#[tokio::test]
+async fn v2_ens_v1_object_serves_a_saturated_lease_expiry_as_i64_max() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET after_state = jsonb_set(after_state, '{expiry}', $1::jsonb)
+         WHERE event_identity = 'alice-RegistrationGranted'",
+    )
+    .bind(json!(i64::MAX))
+    .execute(&database.pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let detail = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    assert_eq!(
+        detail["data"]["ens_v1"],
+        json!({"expires_at": "9223372036854775807"}),
+        "{detail:#}"
+    );
+    database.cleanup().await
 }
