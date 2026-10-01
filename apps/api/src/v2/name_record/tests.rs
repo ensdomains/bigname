@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::v2::vocab::WrapperState;
 
 #[test]
 fn registration_status_classifier_covers_authority_kind_domain() {
@@ -206,6 +207,43 @@ fn wrapper_metadata_accepts_locked_is_dot_eth_with_parent_cannot_control() {
     assert!(fuses.cannot_unwrap);
     assert!(fuses.parent_cannot_control);
     assert!(fuses.is_dot_eth);
+}
+
+#[test]
+fn ens_v1_object_follows_authority_and_carries_the_lease_expiry() {
+    let mut summary = wrapper_summary("emancipated", (1 << 16) | (1 << 17));
+    summary["registration"] = json!({"expiry": "1803965433", "ens_v1_expiry": "1798608633"});
+    let object = |authority| {
+        ens_v1(authority, &summary)
+            .expect("valid wrapper summary")
+            .map(|object| serde_json::to_value(object).expect("ens_v1 serializes"))
+    };
+    for authority in [Authority::EnsV1, Authority::EnsV0] {
+        let object = object(Some(authority)).expect("ENSv1 authority serves ens_v1");
+        assert_eq!(object["expires_at"], json!("1798608633"));
+        assert_eq!(object["wrapper_state"], json!("emancipated"));
+        assert_eq!(
+            object["wrapper_fuses"]["parent_cannot_control"],
+            json!(true)
+        );
+    }
+    assert_eq!(object(Some(Authority::EnsV2)), None);
+    assert_eq!(object(None), None);
+
+    // No lease: the key is present with null; no wrapper state: the wrapper keys are omitted.
+    let object = serde_json::to_value(
+        ens_v1(
+            Some(Authority::EnsV1),
+            &json!({"registration": {"expiry": "1"}}),
+        )
+        .expect("summary without wrapper metadata")
+        .expect("ENSv1 authority serves ens_v1"),
+    )
+    .expect("ens_v1 serializes");
+    assert_eq!(object, json!({"expires_at": null}));
+
+    // Inconsistent stored wrapper metadata fails whatever the authority.
+    assert!(ens_v1(Some(Authority::EnsV2), &json!({"wrapper_state": "locked"})).is_err());
 }
 
 fn wrapper_summary(state: &str, fuses: u32) -> serde_json::Value {

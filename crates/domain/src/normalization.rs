@@ -220,6 +220,21 @@ mod tests {
         assert!(!error.message().is_empty());
     }
 
+    // The API reserves `[<64 hex digits>]` as a labelhash spelling because no normalized label
+    // can contain a square bracket (docs/api-v1.md#name-inputs).
+    #[test]
+    fn rejects_square_brackets() {
+        let hex = "0".repeat(64);
+        for name in [
+            format!("[{hex}].eth"),
+            "[a].eth".to_owned(),
+            "a[b.eth".to_owned(),
+            "a]b.eth".to_owned(),
+        ] {
+            assert!(normalize_name(&name).is_err(), "{name}");
+        }
+    }
+
     #[test]
     fn normalizes_emoji_presentation() {
         let name = normalize_name("🅰️🅱.eth").expect("emoji name normalizes");

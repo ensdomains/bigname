@@ -3,8 +3,10 @@ use bigname_storage::{AddressNameCurrentEntry, NameCurrentRow};
 
 use super::{AddressName, AddressNameRoleSummary, relation_from_storage};
 use crate::v2::{
-    Authority,
-    name_record::{name_registration_fields, registration_id},
+    Authority, V2Result,
+    name_record::{
+        ens_v1_of_registry_child, ens_v1_of_row, name_registration_fields, registration_id,
+    },
 };
 
 pub(crate) fn build_address_name(
@@ -15,14 +17,25 @@ pub(crate) fn build_address_name(
     subname_count: Option<u64>,
     record_count: Option<u64>,
     role_summary: Option<Vec<AddressNameRoleSummary>>,
-) -> AddressName {
+) -> V2Result<AddressName> {
     let registration = name_registration_fields(name_row, &entry.namespace);
 
     // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
     // route serves for it (`subnames::build_subname` with no name row), its registry owner and
     // the registration fields of no name row, on its registry-only resource, with the authority of
     // the registry that owns its node.
-    AddressName {
+    let authority = match name_row {
+        Some(row) => Authority::from_provenance(&row.provenance),
+        None => entry
+            .served_authority
+            .as_deref()
+            .and_then(Authority::from_wire),
+    };
+    let ens_v1 = match name_row {
+        Some(_) => ens_v1_of_row(name_row)?,
+        None => ens_v1_of_registry_child(authority)?,
+    };
+    Ok(AddressName {
         name: entry.normalized_name.clone(),
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
@@ -36,13 +49,8 @@ pub(crate) fn build_address_name(
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
-        authority: match name_row {
-            Some(row) => Authority::from_provenance(&row.provenance),
-            None => entry
-                .served_authority
-                .as_deref()
-                .and_then(Authority::from_wire),
-        },
+        authority,
+        ens_v1,
         migrated_at,
         relations: entry
             .relations
@@ -59,7 +67,7 @@ pub(crate) fn build_address_name(
         record_count,
         role_summary,
         restrictions: None,
-    }
+    })
 }
 
 /// The value `GET /v1/permissions?registration_id=` resolves to this row's permission resource:

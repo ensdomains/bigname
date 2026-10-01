@@ -444,6 +444,9 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
             .find(|row| row["namehash"] == json!(node))
             .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
         assert_eq!(subname["authority"], row["authority"], "{subname:#}");
+        // No lease, so ENSv1's own object carries only a null expiry.
+        assert_eq!(row["ens_v1"], json!({"expires_at": null}), "{row:#}");
+        assert_eq!(subname["ens_v1"], row["ens_v1"], "{subname:#}");
     }
     let alpha_row = rows
         .iter()

@@ -21,7 +21,7 @@ use super::{
     StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, load_subregistry_refs,
     name_chain_id, resolve_v2_snapshot_for, snapshot_block_for_chain, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
-    vocab::{Authority, RegistrationStatus, Resolver, Source, Status, WrapperFuses, WrapperState},
+    vocab::{Authority, RegistrationStatus, Resolver, Source, Status},
 };
 
 #[path = "name_record/counts.rs"]
@@ -29,6 +29,8 @@ mod counts;
 #[path = "name_record/declared.rs"]
 mod declared;
 
+#[path = "name_record/ens_v1.rs"]
+mod ens_v1;
 #[path = "name_record/inventory.rs"]
 mod inventory;
 #[path = "name_record/values.rs"]
@@ -43,6 +45,7 @@ use declared::{
     chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
     declared_owner, declared_registered_at, declared_registrant, declared_registration,
 };
+pub(crate) use ens_v1::{EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row};
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
@@ -86,11 +89,9 @@ pub(crate) struct NameRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_status: Option<RegistrationStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) wrapper_state: Option<WrapperState>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) wrapper_fuses: Option<WrapperFuses>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ens_v1: Option<EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) lapsed_registration: Option<LapsedRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,8 +319,8 @@ pub(crate) fn build_name_record(
                 .and_then(|addresses| addresses.get("60").cloned())
         })
         .flatten();
-    let (wrapper_state, wrapper_fuses) = wrapper_metadata(&row.declared_summary)?
-        .map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
+    let authority = Authority::from_provenance(&row.provenance);
+    let ens_v1 = ens_v1(authority, &row.declared_summary)?;
     let resolver = row_serves_resolver(row)
         .then(|| resolver(&row.declared_summary))
         .flatten();
@@ -342,9 +343,8 @@ pub(crate) fn build_name_record(
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
         registration_status: Some(registration.registration_status),
-        wrapper_state,
-        wrapper_fuses,
-        authority: Authority::from_provenance(&row.provenance),
+        authority,
+        ens_v1,
         lapsed_registration: lapsed_registration(&row.declared_summary),
         migrated_at: None,
         name: row.normalized_name.clone(),

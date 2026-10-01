@@ -107,6 +107,8 @@ pub(crate) struct AddressName {
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ens_v1: Option<crate::v2::name_record::EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) migrated_at: Option<String>,
     pub(crate) relations: Vec<Relation>,
@@ -422,7 +424,7 @@ pub(crate) async fn get_address_names(
                 }),
                 record_counts_by_name.get(&entry.logical_name_id).copied(),
                 role_summary,
-            );
+            )?;
             if include_role_summary {
                 row.restrictions = permission_summaries
                     .get(&entry.resource_id)
