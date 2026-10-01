@@ -269,12 +269,12 @@ and `orphaned` (on a losing branch; kept for audit, excluded from reads).
 ## Capability promotion ("graduation")
 
 the deliberate, doc-first act of
-moving a capability from `shadow`/`unsupported` to publicly `supported`.
+moving a capability from `unsupported` to publicly `supported`.
 Nothing else promotes a capability: backfill completion, conformance passes,
 and manifest presence are necessary evidence, never the promotion itself.
 Serving an individual exact name is not a capability promotion: a name whose
 selected authority carries no refusal is served once its source families are
-admitted, and `exact_name_profile` only reports the namespace-level declaration
+admitted, and `exact_name_profile` is only a namespace-level declaration
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)).
 
 ## Checkpoint promotion
@@ -1538,11 +1538,10 @@ Both lookups use label-hash indexes and then compare the labels themselves; see
 ## Exact-name profile (`exact_name_profile`)
 
 a per-manifest capability flag that declares whether a source family's
-exact-name reads are supported for the namespace. `/v1/namespaces` aggregates the
-declarations into the `name_profile` capability and its completeness. Today the
-only family whose active manifest carries `supported` is the ENSv2 Sepolia
-registrar; the flag also exists in `shadow` elsewhere (for example the Mainnet
-ENSv1 registrar). The flag does not decide whether an individual name is served:
+exact-name reads are supported for the namespace. No served output reads it:
+`/v1/namespaces` reports `name_profile` as `full` whenever the namespace has an
+active manifest, because name reads serve every name of a served namespace. The
+flag does not decide whether an individual name is served either:
 a name's support follows its authority decision, so an ENSv2 name selected
 without a refusal is supported whether or not a registrar event exists for it;
 see [architecture](architecture.md#ensv1ensv2-current-authority). The coverage
@@ -2305,8 +2304,9 @@ expiry never does.
 
 ## Shadow
 
-(1) manifest rollout/capability value: facts may be interpreted
-but general public reads are not enabled; (2) *shadow comparison*:
+(1) manifest `rollout_status` value (also an ABI entry marker, never a
+capability-flag status): facts may be interpreted but general public reads are
+not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 

@@ -15,7 +15,7 @@ For each manifest or discovery change, state:
 
 1. why the source, contract, or discovery edge is authoritative
 2. whether admission is direct, root-reachable, discovered, or migration allow-listed
-3. capability flag changes and whether behavior is `unsupported`, `shadow`, or `supported`
+3. capability flag changes and whether behavior is `unsupported` or `supported` (`shadow` is a `rollout_status` value, never a capability state)
 4. watch-plan and invalidation effects
 5. upstream citation or explicit bigname divergence
 
@@ -23,7 +23,7 @@ For each manifest or discovery change, state:
 
 - Capability flags gate behavior; public contract existence alone does not.
 - Unsupported capability must surface explicitly in coverage or typed errors.
-- `exact_name_profile` is the one exception: a namespace-level declaration that `/v1/namespaces` reports as `name_profile`; it does not gate whether a name is served, which follows the authority decision (`docs/manifests.md` "Capability policy", and the 2026-09-25 amendment in `docs/adrs/0007-follow-the-chain-ens-authority.md`).
+- `exact_name_profile` and `name_history` are exceptions: no served output reads them. `/v1/namespaces` reports `name_profile` and `name_history` as `full` whenever the namespace has an active manifest, and neither flag gates whether a name is served, which follows the authority decision (`docs/manifests.md` "`capability_flags`" and "Capability policy", and the amendments in `docs/adrs/0007-follow-the-chain-ens-authority.md`).
 - Adapters consume manifest decisions; they must not rely on hidden config.
 - New addresses, roles, source families, or discovery-rule admissions cite `.refs/` deployment metadata or Solidity.
 - Schema or capability-meaning changes require `$contract-impact`.
