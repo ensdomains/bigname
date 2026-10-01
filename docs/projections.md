@@ -1203,7 +1203,17 @@ the raw event that first materializes the active surface. A wrapper-provided
 surface links the retained registry read resource without binding that dormant
 registry resource while wrapper control remains current. Same-transaction
 registration reconciliation leaves that registry-read pointer on the dormant
-registry resource rather than retargeting it to registrar control. Record
+registry resource rather than retargeting it to registrar control. When one
+registry resolver write produces both that registry-read pointer and a row on a
+registrar or wrapper resource, replay keeps the registry-read pointer whichever
+of the two rows it restores first, because stored rows from one block come back
+in no fixed order. A registry resolver write in a later block always replaces
+the pointer, wherever its rows were reconciled: a wrapped `.eth` name registered
+again after expiry and grace with a resolver selects that resolver rather than
+one set through `NameWrapper.setResolver` during the earlier registration.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L666-L671 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1016-L1018 @ ens_v1@91c966f)
+Record
 attribution remains node-keyed and provider-free. If a registrar registration
 makes the registrar resource current before the retained registry-only
 authority can be materialized, the same observation still marks that retained
