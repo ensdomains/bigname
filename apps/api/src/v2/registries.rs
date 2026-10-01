@@ -163,19 +163,6 @@ pub(crate) async fn get_registry(
     .await
     .map_err(|_| internal_error(chain_id_slug, &normalized_address))?;
 
-    let labels = match serving.as_ref() {
-        Some(pointer) => bigname_storage::count_registry_children_current(
-            &state.pool,
-            &pointer.logical_name_id,
-            &normalized_address,
-        )
-        .await
-        .map_err(super::name_rows_error(
-            super::SnapshotReadResource::Registry,
-            |_| internal_error(chain_id_slug, &normalized_address),
-        ))?,
-        None => 0,
-    };
     let roles = if include_event_count {
         Some(
             role_counts::registry_role_count(
@@ -193,6 +180,7 @@ pub(crate) async fn get_registry(
         Some(
             bigname_storage::count_contract_events(
                 &state.pool,
+                "ens",
                 chain_id_slug,
                 &normalized_address,
                 &product_history_event_kinds(),
@@ -235,6 +223,27 @@ pub(crate) async fn get_registry(
             .as_of
             .as_ref()
             .and_then(|positions| positions.get(&numeric_chain_id.to_string()));
+    // The labels count reads current state, not the selected block, and takes seconds on a
+    // large registry: read it after the publication check so a publication during it does not
+    // refuse the bounded evidence above.
+    #[cfg(test)]
+    super::collection_snapshot::finish_test_hooks::run(&state.pool).await?;
+    let labels = match (is_current, serving.as_ref()) {
+        (false, _) => None,
+        (true, None) => Some(0),
+        (true, Some(pointer)) => Some(
+            bigname_storage::count_registry_children_current(
+                &state.pool,
+                &pointer.logical_name_id,
+                &normalized_address,
+            )
+            .await
+            .map_err(super::name_rows_error(
+                super::SnapshotReadResource::Registry,
+                |_| internal_error(chain_id_slug, &normalized_address),
+            ))?,
+        ),
+    };
     let mut data = build_registry_overview(
         registry,
         numeric_chain_id,
@@ -244,9 +253,6 @@ pub(crate) async fn get_registry(
         referenced_by,
     );
     data.counts.roles = roles;
-    if !is_current {
-        data.counts.labels = None;
-    }
     Ok(Json(Envelope {
         data,
         page: None,
@@ -258,8 +264,8 @@ fn build_registry_overview(
     registry: RegistryContractRow,
     chain_id: u64,
     serving: Option<&SubregistryPointer>,
-    labels: i64,
-    events: Option<i64>,
+    labels: Option<i64>,
+    events: Option<u64>,
     referenced_by: ReferencedBy,
 ) -> RegistryOverview {
     let created = registry.created;
@@ -278,9 +284,9 @@ fn build_registry_overview(
         created_transaction_hash: created.transaction_hash,
         created_basis: created_basis(created.basis).to_owned(),
         counts: RegistryCounts {
-            labels: u64::try_from(labels).ok(),
+            labels: labels.and_then(|count| u64::try_from(count).ok()),
             roles: None,
-            events: events.map(|count| u64::try_from(count).unwrap_or_default()),
+            events,
         },
         referenced_by,
     }

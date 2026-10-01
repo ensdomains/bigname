@@ -908,3 +908,102 @@ async fn declared_registry_reads_honor_start_retirement_and_retraction() -> Resu
     );
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_get_registry_event_count_matches_the_events_feed_total() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    // A registrar-surface snapshot replays retained state; the feed does not serve it.
+    let mut snapshot = registry_event(
+        "registry-two-snapshot-expiry",
+        Some(&registry_logical_name_id("two.alpha.eth")),
+        "ExpiryChanged",
+        64,
+        ALPHA_REGISTRY,
+        json!({ "source_event": "ReadableNameObserved", "state_derived": true,
+                "registrar_surface_snapshot": true, "expiry": 1_900_000_000_i64 }),
+    );
+    snapshot.log_index = Some(2);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[snapshot]).await?;
+
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    let feed = registry_payload(
+        &database,
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
+    )
+    .await?;
+    assert_eq!(feed["page"]["total_count"], json!(5), "{feed}");
+    assert_eq!(
+        overview["data"]["counts"]["events"], feed["page"]["total_count"],
+        "{overview}"
+    );
+    database.cleanup().await
+}
+
+fn spawn_registry_request(
+    database: &TestDatabase,
+    uri: String,
+) -> tokio::task::JoinHandle<Result<Response, std::convert::Infallible>> {
+    let state = database.app_state();
+    tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    })
+}
+
+async fn reach(control: &crate::v2::collection_snapshot::finish_test_hooks::FinishControl) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), control.wait_until_reached())
+        .await
+        .context("registry request never reached the hook")
+}
+
+// The block-bounded evidence stays fenced on the publication; the current labels count is read
+// after that check, so a publication during it does not refuse the overview.
+#[tokio::test]
+async fn v2_get_registry_counts_labels_after_the_publication_check() -> Result<()> {
+    use crate::v2::collection_snapshot::finish_test_hooks;
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let uri = format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts");
+
+    let (_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
+    let request = spawn_registry_request(&database, uri.clone());
+    reach(&before_check).await?;
+    commit_family_block(&database.pool).await?;
+    before_check.resume().await;
+    let response = request.await.context("registry request task panicked")??;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    let (_before_guard, before_check) = finish_test_hooks::install(&database.pool).await?;
+    let request = spawn_registry_request(&database, uri);
+    reach(&before_check).await?;
+    // The publication check consumed the first hook; this one pauses the labels count.
+    let (_after_guard, after_check) = finish_test_hooks::install(&database.pool).await?;
+    before_check.resume().await;
+    reach(&after_check).await?;
+    commit_family_block(&database.pool).await?;
+    after_check.resume().await;
+    let response = request.await.context("registry request task panicked")??;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(
+        payload["data"]["counts"],
+        json!({ "labels": 2, "events": 5, "roles": 0 })
+    );
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(83));
+    database.cleanup().await
+}

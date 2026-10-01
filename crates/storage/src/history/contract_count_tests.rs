@@ -1,4 +1,5 @@
 //! The real page/count builders must use the emitter bound, including with prepared plans.
+use super::super::super::contract_count::contract_count_filter;
 use super::super::super::summary::push_history_count_query;
 use super::*;
 
@@ -62,13 +63,17 @@ async fn contract_count_and_page_use_emitter_index_on_large_history() -> Result<
                 ("explicit-missing-key", Some("absent"), &["RecordChanged"][..], 0),
                 ("explicit-missing-kind", None, &["RecordVersionChanged"][..], 0),
             ] {
+                // The registry overview's `counts.events` statement, plus the feed's record key.
+                let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
                 let filter = EventHistoryReadFilter {
-                    namespace: Some("ens".into()),
-                    contract_address: Some("0x0000000000000000000000000000000000000076".into()),
-                    event_kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
                     record_key: key.map(str::to_owned),
-                    block_window: Some(window(&[("ethereum-mainnet", None, Some(11200))])),
-                    ..Default::default()
+                    ..contract_count_filter(
+                        "ens",
+                        "ethereum-mainnet",
+                        "0x0000000000000000000000000000000000000076",
+                        &kinds,
+                        Some(11200),
+                    )
                 };
                 let mut count_query = QueryBuilder::<Postgres>::new("");
                 push_history_count_query(&mut count_query, &filter, true, None);

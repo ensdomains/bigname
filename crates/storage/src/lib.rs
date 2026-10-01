@@ -75,8 +75,8 @@ pub use history::{
     HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
     HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
     HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, load_address_history,
-    load_address_history_for_relations, load_address_history_page,
+    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, count_contract_events,
+    load_address_history, load_address_history_for_relations, load_address_history_page,
     load_address_history_page_for_relations, load_bounded_record_attribution,
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
@@ -158,7 +158,7 @@ pub use record_inventory::{
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
-    RegistryReferencePage, SubregistryPointer, count_contract_events, load_registry_contract,
+    RegistryReferencePage, SubregistryPointer, load_registry_contract,
     load_registry_references_page, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };

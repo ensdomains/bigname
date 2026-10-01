@@ -4226,8 +4226,8 @@ For a registrar lease first identified by a later readable observation, registra
   `referenced_by.page` object; its cursor binds the chain and registry. The
   top-level response has no `page`. Continuations bind only an explicitly
   requested `at` position; without one, each page selects the current publication.
-  A publication changed during the request returns `409 stale`; retry with the
-  same cursor. Legacy publication fields are ignored, but an old `at` field must
+  A publication changed before the labels count is read returns `409 stale`;
+  retry with the same cursor. Legacy publication fields are ignored, but an old `at` field must
   be supplied and match: old cursors cannot distinguish an implicit selection
   from an explicit pin. Dropping or changing it returns `400 invalid_input` once.
 - Snapshot behavior: the route selects the chain's served position like the
@@ -4236,7 +4236,9 @@ For a registrar lease first identified by a later readable observation, registra
   an `at` or `finality` selector shows the registry as it stood then.
   `counts.labels` reads the current child collection and is `null` for a
   historical selection that differs from the current published position.
-  Current reads revalidate their publication before returning.
+  Current reads revalidate their publication before returning, except
+  `counts.labels`: it is read after that check as the current count, so it can
+  include labels published during the request.
 - Status semantics: an unknown registry returns `404 not_found` at every
   selector, because the bounded read proves absence at the selected position.
   Malformed `chain_id` or `address` and an `include` value other than `counts`
