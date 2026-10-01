@@ -483,8 +483,16 @@ async fn rotating_the_declared_proxy_reclassifies_retained_upgrades_at_publicati
 }
 
 /// A registrar renewal of a wrapped `.eth` lease: the BaseRegistrar's own `NameRenewed`, as the
-/// adapter writes it on the lease, plus the NameWrapper expiry the wrapped controller derives
-/// from it (registrar family, `authority_kind = wrapper`, the lease expiry plus 90 days).
+/// adapter writes it on the lease
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L168 @ ens_v1@91c966f),
+/// plus the NameWrapper expiry derived from it (registrar family, `authority_kind = wrapper`,
+/// the lease expiry plus 90 days). The admitted wrapped controller renews through
+/// `NameWrapper.renew`, which renews the lease on the BaseRegistrar and then stores the
+/// returned expiry plus its 90-day grace for a wrapped name
+/// (upstream: .refs/basenames/lib/ens-contracts/contracts/ethregistrar/ETHRegistrarController.sol:L210-L226 @ basenames@1809bbc)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L318 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f).
 async fn renewed_wrapped(
     fixture: &Fixture,
     logical_name_id: &str,
@@ -685,7 +693,8 @@ async fn a_wrapped_eth_name_renewed_through_the_base_registrar_serves_the_renewe
 }
 
 /// The ENSv2 owner's BatchRegistrar can extend a reservation without the BaseRegistrar
-/// (`BatchRegistrar.batchRegister` renews a RESERVED entry to a later expiry). The served expiry
+/// (`BatchRegistrar.batchRegister` renews a RESERVED entry to a later expiry)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741). The served expiry
 /// and grace follow the reservation, the lease date stays, and the lease's own grace deadline
 /// (lease + 90 days) no longer equals the served one.
 #[tokio::test]

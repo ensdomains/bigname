@@ -2,10 +2,19 @@
 // NameWrapper state while ENSv1 decides a name, absent while ENSv2 does.
 
 /// Alice's lease, registered with nick.eth's lease date and marked wrapped emancipated on the
-/// lease resource itself, premigrated into ENSv2 with the 62-day continuity bonus, with the
-/// Universal Resolver cut over: the response shape of a live wrapped Sepolia name such as
-/// nick.eth. The faithful wrapped-resource and renewal paths are in
-/// `crates/project/tests/families_expiry_grace.rs`.
+/// lease resource itself, premigrated into ENSv2 with the Universal Resolver cut over. The
+/// Sepolia testnet premigration registrar registers the BaseRegistrar lease and then reserves
+/// the label in ENSv2 at the lease expiry plus the 62-day continuity bonus
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L177-L178 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L249-L266 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741).
+/// No manifest declares the premigration registrar's own address: it acts as a controller of
+/// the BaseRegistrar declared in `manifests/sepolia/ethereum/ens/ens_v1_registrar_l1/v1.toml`
+/// (`docs/manifests.md`, ENSv2 migration driver)
+/// (upstream: .refs/ens_v2/contracts/script/migration.ts:L1594-L1607 @ ens_v2@a971bd64).
+/// This is the response shape of a live wrapped Sepolia name such as nick.eth, whose lease
+/// date the Sepolia check in `docs/deployment.md` records. The faithful wrapped-resource and
+/// renewal paths are in `crates/project/tests/families_expiry_grace.rs`.
 async fn seed_alice_wrapped_reserved_after_cutover(database: &TestDatabase) -> Result<()> {
     const LEASE_EXPIRY: u64 = 1_798_608_633;
     const RESERVED_EXPIRY: u64 = LEASE_EXPIRY + 62 * 86_400;
