@@ -47,8 +47,14 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 
 /// The ENSv1 grant an ENSv2 grant continues: for the grant the name's latest ENSv1→ENSv2
 /// migration wrote in its own transaction, the name's latest registrar grant before that
-/// migration. The ENSv1→ENSv2 migration moves a live lease, so its ENSv2 registration keeps that
-/// lease's registration time; a name with no registrar grant (a subname) has none to keep.
+/// migration. On chain the ENSv1→ENSv2 migration takes the name's ENSv1 token and registers the
+/// name in the ENSv2 `.eth` registry at the expiry of its premigration reservation
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L153-L165 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L475 @ ens_v2_sepolia_20260916@366de741).
+/// Upstream says nothing about a registration start; bigname's own rule is that the migration
+/// does not start a new registration, so the ENSv2 registration keeps the lease's registration
+/// time, and a name with no registrar grant (a subname) has none to keep.
 pub(super) fn migrated_lease<'a>(
     facts: &NameFacts,
     tagged: &[Tagged<'a>],

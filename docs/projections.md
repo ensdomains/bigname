@@ -163,6 +163,17 @@ live reservation remains a [released v2 authority](glossary.md#released-v2-autho
 tombstone; otherwise a live ENSv1 binding selects ENSv1, and a name with no open
 binding follows its history.
 
+On chain the ENSv1→ENSv2 migration takes a `.eth` name's ENSv1 token and
+registers the name in the ENSv2 `.eth` registry at the expiry of its
+premigration reservation
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/UnlockedMigrationController.sol:L153-L165 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L473-L475 @ ens_v2_sepolia_20260916@366de741);
+upstream says nothing about a registration start. bigname's own rule is that the
+migration does not start a new registration, so a name with an ENSv1 registrar
+lease keeps that lease's `registered_at`, and a migrated name without one, such
+as a subname, starts its registration at the ENSv2 grant.
+
 ## Exact-name projection
 
 The composed exact-name row assembles current registration, authority, control, resolver,

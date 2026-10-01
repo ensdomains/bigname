@@ -809,8 +809,10 @@ written in the boundary's transaction continues the ENSv1 lease it replaces, so
 the served `registered_at` stays that lease's registration time through the
 boundary, as it does through renewals and the
 [premigration reservation](#premigration-reservation); `migrated_at` records the
-boundary itself. Only a release followed by a new registration starts a new
-registration time (see [`registered_at`](api-v1.md#naming-dictionary)).
+boundary itself. A migrated name with no ENSv1 registrar lease, such as a
+subname, has no lease to continue and starts its registration at the ENSv2
+grant. Only a release followed by a new registration starts a new registration
+time (see [`registered_at`](api-v1.md#naming-dictionary)).
 
 ## Migration expiry jump
 
