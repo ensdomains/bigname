@@ -306,6 +306,15 @@ async fn interpret_through_head(
     from_block: i64,
     mode: InterpretRunMode,
 ) -> Result<()> {
+    interpret_through(pool, from_block, HEAD, mode).await
+}
+
+async fn interpret_through(
+    pool: &PgPool,
+    from_block: i64,
+    to_block: i64,
+    mode: InterpretRunMode,
+) -> Result<()> {
     let engine = Engine::new(pool.clone())
         .with_blocks_per_batch(std::num::NonZeroU32::new(200_000).expect("non-zero"));
     let mut resume_current = None;
@@ -314,7 +323,7 @@ async fn interpret_through_head(
             .run_batch(BatchRequest {
                 chain_id: CHAIN.to_owned(),
                 from_block,
-                to_block: HEAD,
+                to_block,
                 resume_current,
                 mode,
             })
@@ -497,6 +506,59 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
             (OLD_WRITE_AFTER_CUTOVER, None, "active".to_owned()),
         ]
     );
+
+    // After the synchronization head the retired declaration caps the old registry's
+    // re-announced admission, so its next write derives nothing (TYR-195), while the
+    // redeploy's registry keeps naming.
+    for number in [HEAD + 1, HEAD + 2] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, parent_hash, block_number, block_timestamp,
+                 canonicality_state
+             ) VALUES ($1, $1 || '-block-' || $2::text, $1 || '-block-' || ($2 - 1)::text, $2,
+                       to_timestamp($2), 'canonical')",
+        )
+        .bind(CHAIN)
+        .bind(number)
+        .execute(pool)
+        .await?;
+    }
+    transaction(pool, HEAD + 1, OLD_REGISTRY).await?;
+    log(
+        pool,
+        HEAD + 1,
+        OLD_REGISTRY,
+        reservation("after", 1_900_000_000)?,
+    )
+    .await?;
+    transaction(pool, HEAD + 2, NEW_REGISTRY).await?;
+    log(
+        pool,
+        HEAD + 2,
+        NEW_REGISTRY,
+        reservation("fresh", 1_900_000_000)?,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads SET latest_block_number = $2, latest_block_hash = $3
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(HEAD + 2)
+    .bind(block_hash(CHAIN, HEAD + 2))
+    .execute(pool)
+    .await?;
+    interpret_through(pool, HEAD + 1, HEAD + 2, InterpretRunMode::Normal).await?;
+    let after_head: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT block_number, logical_name_id IS NOT NULL FROM normalized_events
+         WHERE chain_id = $1 AND block_number > $2 AND event_kind = 'RegistrationReserved'
+         ORDER BY block_number",
+    )
+    .bind(CHAIN)
+    .bind(HEAD)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(after_head, [(HEAD + 2, true)]);
 
     std::fs::remove_dir_all(previous)?;
     scratch.cleanup().await

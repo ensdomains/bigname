@@ -375,7 +375,7 @@ to the applicable entries below.
 > `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L377-L399 @ ens_v2_sepolia_20260916@366de741)`
 > `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L240-L249 @ ens_v2_sepolia_20260916@366de741)`;
 > its deployment gives `reverse` the `ENSV1Resolver`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L26-L37 @ ens_v2_sepolia_20260916@366de741)`,
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05)`,
 > which finds the reverse node's ENSv1 resolver and passes `name` to it with no
 > `default.reverse` read
 > `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)`

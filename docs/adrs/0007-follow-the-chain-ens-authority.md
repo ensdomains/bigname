@@ -261,7 +261,7 @@ either halt.
   `PermissionedRegistry.sol` L207-L219, L466 and L471, cited above. A migration
   `WrapperRegistry` skips that role check: `WrapperRegistry.sol` L247.
 - Premigration reservations carry `ENSV1Resolver`: `premigration.md` L3-L8 and
-  L151-L152, and `BatchRegistrar.sol` L64-L65, cited above.
+  L167-L168, and `BatchRegistrar.sol` L64-L65, cited above.
 - The Universal Resolver reads only ENSv2 registries, and `ENSV1Resolver`
   forwards to the ENSv1 registry: `UniversalResolverV2.sol` L56-L63,
   `LibResolution.sol` L58-L85, `PermissionedRegistry.sol` L283-L286 and
