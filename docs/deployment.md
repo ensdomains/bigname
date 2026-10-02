@@ -2089,8 +2089,8 @@ The build that re-requests `null` receipts and transactions in place (see
 no schema-migration, so it needs no redo and no historical ingest fetch. A
 phase that fails with a retryable error now waits the initial restart delay
 again once a later batch settles, including an idle Live poll, instead of
-keeping the longer delay an earlier run of failures reached. An HTTP 400 that says the provider cannot
-route the request to a node that serves it is retried with backoff instead of
-stopping the chain as a data integrity fault. The runner exports three new
+keeping the longer delay an earlier run of failures reached. An HTTP 400 that
+says the provider cannot route the request to a node that serves it is retried
+with backoff instead of stopping the chain as a data integrity fault. The runner exports three new
 counters for Ingest and Live RPC traffic, described in the
 [monitoring runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic).

@@ -17,14 +17,15 @@ impl IngestRpcCounters {
         Ok(Self {
             requests: registry.int_counter_vec(
                 "phase_runner_ingest_rpc_requests_total",
-                "HTTP requests Ingest and Live sent to the source's RPC endpoint, one per single \
-                 call or batch, including retries, by outcome (ok or failed).",
+                "HTTP attempts Ingest and Live made to the source's RPC endpoint, recorded on \
+                 completion or failure, one per single call or batch, retries included, by \
+                 outcome (ok or failed); an attempt abandoned in flight is not counted.",
                 &["chain", "source", "outcome"],
             )?,
             calls: registry.int_counter_vec(
                 "phase_runner_ingest_rpc_calls_total",
-                "JSON-RPC calls Ingest and Live sent to the source's RPC endpoint, each call of \
-                 a batch and each retry counted once.",
+                "JSON-RPC calls of the recorded HTTP attempts to the source's RPC endpoint, \
+                 each retry counted again.",
                 &["chain", "source", "method"],
             )?,
             null_results: registry.int_counter_vec(

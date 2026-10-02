@@ -189,8 +189,10 @@ failure reason. `provider omitted receipt for selected transaction …` or
 `provider omitted transaction for selected log …` is that case: lower
 `BIGNAME_INGEST_RPC_MAX_IN_FLIGHT` or `BIGNAME_INGEST_RPC_BATCH_SIZE`
 ([RPC settings](../deployment.md#phase-runner-configuration)). Transport,
-routing and reorg-position errors are not, and lowering those settings does
-not help them.
+routing and reorg-position errors do not show the re-requests ran out;
+diagnose them on their own. Lowering the in-flight limit or batch size can
+help rate limits and load-related timeouts; it does nothing for a genuine
+reorg.
 
 ## Served lag
 

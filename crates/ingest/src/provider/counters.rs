@@ -21,9 +21,11 @@ pub struct RpcCount {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RpcCountKind {
-    /// HTTP requests sent, one per single call or batch, labelled `ok` or `failed`.
+    /// HTTP attempts recorded on completion or failure, one per single call or batch,
+    /// retries included, labelled `ok` or `failed`. An attempt abandoned in flight is not
+    /// counted.
     Requests,
-    /// JSON-RPC calls sent, each call of a batch counted once.
+    /// The JSON-RPC calls of those recorded attempts, each retry counted again.
     Calls,
     /// Receipts and transactions of selected logs that the provider answered null.
     NullResults,
