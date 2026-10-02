@@ -176,7 +176,7 @@ async fn publish_release(database: &TestDatabase, unregister: bool, migrated: bo
 }
 
 #[tokio::test]
-async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> Result<()> {
+async fn v2_former_owner_real_unregister_uses_canonical_release_time() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     publish_release(&database, true, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
@@ -187,13 +187,13 @@ async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> R
     assert_eq!(
         profile["data"]["lapsed_registration"],
         json!({
-            "registrant": HOLDER, "held_through": "registry", "release_kind": "unregistered",
+            "owner": HOLDER, "held_through": "registry", "release_kind": "unregistered",
             "released_at": "1700000122"
         })
     );
     let (status, former) = read_family_response(
         &database,
-        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&namespace=ens"),
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_owner&namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{former}");
@@ -208,7 +208,7 @@ async fn v2_former_registrant_real_unregister_uses_canonical_release_time() -> R
 }
 
 #[tokio::test]
-async fn v2_former_registrant_real_displacement_is_not_an_unregister() -> Result<()> {
+async fn v2_former_owner_real_displacement_is_not_an_unregister() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     publish_release(&database, false, false).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
@@ -222,7 +222,7 @@ async fn v2_former_registrant_real_displacement_is_not_an_unregister() -> Result
     );
     let (status, former) = read_family_response(
         &database,
-        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&namespace=ens"),
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_owner&namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{former}");
@@ -231,7 +231,7 @@ async fn v2_former_registrant_real_displacement_is_not_an_unregister() -> Result
 }
 
 #[tokio::test]
-async fn v2_former_registrant_preserves_name_detail_migration_timestamp() -> Result<()> {
+async fn v2_former_owner_preserves_name_detail_migration_timestamp() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     publish_release(&database, true, true).await?;
     let profile = v2_names_payload(&database, "/v1/names/departed.eth").await?;
@@ -243,7 +243,7 @@ async fn v2_former_registrant_preserves_name_detail_migration_timestamp() -> Res
     assert_eq!(profile["data"]["migrated_at"], "1700000121", "{profile}");
     let (status, former) = read_family_response(
         &database,
-        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&namespace=ens"),
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_owner&namespace=ens"),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{former}");

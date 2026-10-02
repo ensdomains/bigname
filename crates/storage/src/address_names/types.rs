@@ -29,7 +29,6 @@ pub struct AddressNameCurrentRow {
 /// Supported current-relation facets for the first ENSv1 address-name slice.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum AddressNameRelation {
-    Registrant,
     TokenHolder,
     EffectiveController,
     /// The address holds an ENSv2 registry role on the name's current registration.
@@ -39,7 +38,6 @@ pub enum AddressNameRelation {
 impl AddressNameRelation {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Registrant => "registrant",
             Self::TokenHolder => "token_holder",
             Self::EffectiveController => "effective_controller",
             Self::RoleHolder => "role_holder",
@@ -48,7 +46,6 @@ impl AddressNameRelation {
 
     pub(super) fn parse(value: &str) -> Result<Self> {
         match value {
-            "registrant" => Ok(Self::Registrant),
             "token_holder" => Ok(Self::TokenHolder),
             "effective_controller" => Ok(Self::EffectiveController),
             "role_holder" => Ok(Self::RoleHolder),

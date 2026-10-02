@@ -322,7 +322,6 @@ async fn load_bound_name_rows(
             labelhash: None,
             token_id: None,
             owner: None,
-            registrant: None,
             created_at: None,
             registration_date: None,
             expiry_date: None,

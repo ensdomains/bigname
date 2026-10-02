@@ -66,12 +66,9 @@ pub enum ReverseIdentityRoles {
 impl ReverseIdentityRoles {
     pub fn includes(self, relation: AddressNameRelation) -> bool {
         match self {
-            Self::Owned => matches!(
-                relation,
-                AddressNameRelation::Registrant | AddressNameRelation::TokenHolder
-            ),
+            Self::Owned => matches!(relation, AddressNameRelation::TokenHolder),
             Self::Managed => matches!(relation, AddressNameRelation::EffectiveController),
-            // Reverse lookup serves the three ownership and control relations only.
+            // Reverse lookup serves the ownership and control relations only.
             Self::Both => !matches!(relation, AddressNameRelation::RoleHolder),
         }
     }

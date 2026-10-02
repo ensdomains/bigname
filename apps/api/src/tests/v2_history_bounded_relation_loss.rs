@@ -2,8 +2,9 @@
 // has no current row for the relation, so a read bound below the loss
 // can admit the name's older events only if the historical event matcher reproduces the relation
 // from the event that created it. The matcher knows three shapes: a `RegistrationGranted`
-// registrant and a `TokenControlTransferred` recipient on a token-backed resource, and an
-// `AuthorityTransferred` owner on a registry-only resource or an ENSv2 registry resource. Each
+// registrant and a `TokenControlTransferred` recipient on a token-backed resource, both read as
+// `owner`, and an `AuthorityTransferred` owner on a registry-only resource or an ENSv2 registry
+// resource. Each
 // test below loses one relation kind; the ignored ones are the known limitation listed under
 // "Known limitation" in the history anchor section of docs/api-v1-routes.md: kinds the matcher
 // does not reproduce, which stay on the current-row path bounded by the cited block.
@@ -115,23 +116,6 @@ const V1_DERIVATION: &str = "ens_v1_unwrapped_authority";
 const V2_DERIVATION: &str = "ens_v2_registry_resource_surface";
 
 #[tokio::test]
-async fn lost_registrant_from_a_grant_keeps_its_bounded_history() -> Result<()> {
-    let (held, lost) = lost_relation_history(
-        "lost-grant-registrant.eth",
-        0xb0a_6000,
-        Some(bigname_storage::AddressNameRelation::Registrant),
-        relation_event(
-            "RegistrationGranted",
-            json!({"authority_kind": "registrar", "registrant": BOUNDED_ADDRESS}),
-            V1_DERIVATION,
-        ),
-    )
-    .await?;
-    assert_relation_survives_loss(&held, &lost);
-    Ok(())
-}
-
-#[tokio::test]
 async fn lost_token_holder_from_a_transfer_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-transfer-holder.eth",
@@ -186,8 +170,6 @@ async fn lost_ens_v1_controller_of_a_token_backed_name_keeps_its_bounded_history
 }
 
 #[tokio::test]
-#[ignore = "docs/api-v1-routes.md history known limitation: a token holder whose only evidence \
-            is the grant is not reproduced"]
 async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-grant-holder.eth",
@@ -385,7 +367,7 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
 // A relation the address still holds, whose cited event moves above the bound without a change
 // of holder. A token transfer from the holder to itself (a registrar `Transfer(A, A)`) is a valid
 // upstream event that the adapters keep, and Project cites the latest registration event for the
-// registrant, token holder and fallback controller rows, so the current row published at 241
+// token holder and fallback controller rows, so the current row published at 241
 // cites a block above the bound. The holder at the bound is unchanged: a read bound at 240 must
 // admit the same rows, and a cursor issued at 240 continues after the self-transfer.
 #[tokio::test]

@@ -1286,7 +1286,6 @@ async fn zero_api_response(
 fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
     let mut keys = vec![
         "registration_id",
-        "registrant",
         "owner",
         "manager",
         "registered_at",
@@ -1319,8 +1318,8 @@ fn assert_zero_name_shape(record: &Value, namespace: &str, name: &str) {
         support::decimal_unix_seconds(&record[field])
             .expect("name timestamp must use Unix seconds");
     }
-    // An active registration serves its registry owner, here the registrant.
-    assert_eq!(record["owner"], record["registrant"]);
+    // An unwrapped lease serves its token holder as owner and its registry owner as manager,
+    // here the same account.
     assert_eq!(record["manager"], record["owner"]);
     assert_eq!(record["status"], "ok");
     assert_eq!(record["name"], name);

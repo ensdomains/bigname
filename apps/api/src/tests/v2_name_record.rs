@@ -44,16 +44,16 @@ async fn v2_get_name_returns_flat_name_record_envelope() -> Result<()> {
             "70564938991660933374592024341600875602376452319261984317470407481576058979585"
         ))
     );
+    // Unwrapped: the owner is the registrar token holder and the manager the registry owner.
     assert_eq!(
         data.get("owner"),
-        Some(&json!("0x00000000000000000000000000000000000000bb"))
-    );
-    // Unwrapped: the manager is the registry owner, not the registrar token holder.
-    assert_eq!(data.get("manager"), data.get("owner"));
-    assert_eq!(
-        data.get("registrant"),
         Some(&json!("0x00000000000000000000000000000000000000aa"))
     );
+    assert_eq!(
+        data.get("manager"),
+        Some(&json!("0x00000000000000000000000000000000000000bb"))
+    );
+    assert!(data.get("registrant").is_none());
     assert_eq!(data["registered_at"], json!("1704164645"));
     assert_eq!(data["created_at"], json!("1672628645"));
     assert_eq!(data["expires_at"], json!("1798859045"));
@@ -1218,7 +1218,7 @@ async fn v2_get_name_serves_an_untransferred_ens_v2_registration_with_its_owner(
 
     let data = &payload["data"];
     assert_eq!(
-        (&data["registration_status"], &data["owner"], &data["registrant"]),
+        (&data["registration_status"], &data["owner"], &data["manager"]),
         (&json!("registered"), &json!(owner), &json!(owner)),
         "{payload:#}"
     );
@@ -1320,7 +1320,7 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
     assert_eq!(
         data.get("lapsed_registration"),
         Some(&json!({
-            "registrant":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"1781049595","release_kind":"expired"
+            "owner":V2_PERMISSIONS_OTHER_SUBJECT,"held_through":"registrar","released_at":"1781049595","release_kind":"expired"
         }))
     );
     assert!(data.get("resolver").is_none(), "{payload}");
@@ -1331,9 +1331,9 @@ async fn v2_get_name_serves_a_lapsed_handed_off_lease_as_released() -> Result<()
 
 /// A live `.eth` lease under the registry-only binding a transfer without `reclaim` opened,
 /// after its token changed hands again without `reclaim`: Project serves the registry owner the
-/// handoff left behind as the name's control and the token's latest holder as its registrant,
-/// with the lease's own identity and dates. The API then serves owner and registrant as two
-/// different addresses, with the registry-only shape's `registered` status.
+/// handoff left behind as the name's control and the token's latest holder as its owner, with the
+/// lease's own identity and dates. The API then serves owner and manager as two different
+/// addresses, with the registry-only shape's `registered` status.
 #[tokio::test]
 async fn v2_get_name_serves_a_transferred_lease_under_the_registry_only_binding() -> Result<()> {
     const REGISTRY_OWNER: &str = V2_PERMISSIONS_SUBJECT;
@@ -1362,12 +1362,8 @@ async fn v2_get_name_serves_a_transferred_lease_under_the_registry_only_binding(
         Some(&json!("registered")),
         "{payload}"
     );
-    assert_eq!(data.get("owner"), Some(&json!(REGISTRY_OWNER)), "{payload}");
-    assert_eq!(
-        data.get("registrant"),
-        Some(&json!(LATER_HOLDER)),
-        "{payload}"
-    );
+    assert_eq!(data.get("owner"), Some(&json!(LATER_HOLDER)), "{payload}");
+    assert_eq!(data.get("manager"), Some(&json!(REGISTRY_OWNER)), "{payload}");
     assert_eq!(
         data.get("registered_at"),
         Some(&json!("1781049571")),
@@ -3348,10 +3344,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
         data[0]["owner"],
         json!("0x00000000000000000000000000000000000000aa")
     );
-    assert_eq!(
-        data[0]["registrant"],
-        json!("0x00000000000000000000000000000000000000aa")
-    );
+    assert!(data[0].get("registrant").is_none());
     assert_eq!(data[0]["registration_status"], json!("registered"));
     assert_eq!(data[0]["registered_at"], json!("1704164645"));
     assert_eq!(data[0]["created_at"], json!("1704164645"));

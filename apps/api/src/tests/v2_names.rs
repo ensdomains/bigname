@@ -293,13 +293,14 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     assert_eq!(payload["data"][0]["namespace"], json!("ens"));
     assert_eq!(payload["data"][0]["display_name"], json!("gamma.eth"));
     assert_eq!(
-        payload["data"][0]["registrant"],
+        payload["data"][0]["owner"],
         json!("0x00000000000000000000000000000000000000c2")
     );
     assert_eq!(
-        payload["data"][0]["owner"],
+        payload["data"][0]["manager"],
         json!("0x00000000000000000000000000000000000000c1")
     );
+    assert!(payload["data"][0].get("registrant").is_none());
     assert_eq!(
         payload["data"][0]["registered_at"],
         json!("1709337600")
@@ -400,7 +401,7 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
 
 // A released `.eth` name stays in the listing: the listing means "registrations whose expiry falls
 // in this window", whether the registration is live, in grace or released. The released row
-// carries its status and its old expiry and no current registrant or owner.
+// carries its status and its old expiry and no current owner or manager.
 #[tokio::test]
 async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
@@ -415,7 +416,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     assert!(
         sort["schema"].get("default").is_none(),
         "GET /v1/addresses/{{address}}/names sort default depends on relation; \
-         advertising name unconditionally breaks former_registrant requests"
+         advertising name unconditionally breaks former_owner requests"
     );
     let database = TestDatabase::new_migrated().await?;
     let released = seed_names_registration(
@@ -496,7 +497,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "grace_ends_at": "1707776000",
                 "ens_v1": {"expires_at": "1700000000"},
                 "lapsed_registration": {
-                    "registrant": HOLDER,
+                    "owner": HOLDER,
                     "held_through": "registrar",
                     "released_at": "1707776000",
                     "release_kind": "expired"
@@ -509,7 +510,6 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "namehash": "0xf5d57b8ccea9df92d48c79fec7260d742812b8f135ef7bf64d5b7b87ac11ea29",
                 "owner": HOLDER,
                 "manager": HOLDER,
-                "registrant": HOLDER,
                 "registration_status": "active",
                 "registered_at": "1706832000",
                 "created_at": "1706832000",
@@ -518,7 +518,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
                 "ens_v1": {"expires_at": "1900000000"}
             }
         ]),
-        "the released name keeps its place at its old expiry, with no registrant or owner, and \
+        "the released name keeps its place at its old expiry, with no owner or manager, and \
          names its last holder"
     );
 
@@ -534,32 +534,32 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     let detail =
         v2_name_record_payload_for_database(&database, "/v1/names/lapsed-listed.eth").await?;
     let lapsed = json!({
-        "registrant": HOLDER,
+        "owner": HOLDER,
         "held_through": "registrar",
         "released_at": "1707776000",
         "release_kind": "expired",
     });
     assert_eq!(detail["data"]["lapsed_registration"], lapsed);
 
-    // The last holder finds the released name under `former_registrant`, and only there.
+    // The last holder finds the released name under `former_owner`, and only there.
     let former = v2_names_payload(
         &database,
-        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant"),
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_owner"),
     )
     .await?;
     assert_eq!(v2_names_listed(&former), vec!["lapsed-listed.eth"], "{former}");
     let explicit_expiry = v2_names_payload(
         &database,
-        &format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&sort=expires_at"),
+        &format!("/v1/addresses/{HOLDER}/names?relation=former_owner&sort=expires_at"),
     )
     .await?;
     assert_eq!(explicit_expiry["data"], former["data"]);
     let row = &former["data"][0];
-    assert_eq!(row["relations"], json!(["former_registrant"]));
+    assert_eq!(row["relations"], json!(["former_owner"]));
     assert_eq!(row["registration_status"], json!("released"));
     assert_eq!(row["lapsed_registration"], lapsed);
     assert_eq!(row["expires_at"], json!("1700000000"));
-    assert!(row.get("owner").is_none() && row.get("registrant").is_none(), "{row}");
+    assert!(row.get("owner").is_none() && row.get("manager").is_none(), "{row}");
     let current = v2_names_payload(&database, &format!("/v1/addresses/{HOLDER}/names")).await?;
     assert_eq!(v2_names_listed(&current), vec!["live-listed.eth"], "{current}");
 
@@ -567,7 +567,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     let windowed = v2_names_payload(
         &database,
         &format!(
-            "/v1/addresses/{HOLDER}/names?relation=former_registrant\
+            "/v1/addresses/{HOLDER}/names?relation=former_owner\
              &expires_after=2023-11-14T22:13:21Z&sort=expires_at&order=desc"
         ),
     )
@@ -576,16 +576,16 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
 
     for (uri, message) in [
         (
-            format!("/v1/addresses/{HOLDER}/names?relation=former_registrant,owner"),
-            "relation=former_registrant cannot be combined with another relation or any",
+            format!("/v1/addresses/{HOLDER}/names?relation=former_owner,owner"),
+            "relation=former_owner cannot be combined with another relation or any",
         ),
         (
             format!("/v1/addresses/{HOLDER}/names?expires_after=2023-01-01T00:00:00Z"),
-            "expires_after and expires_before require relation=former_registrant",
+            "expires_after and expires_before require relation=former_owner",
         ),
         (
-            format!("/v1/addresses/{HOLDER}/names?relation=former_registrant&sort=name"),
-            "relation=former_registrant sorts by expires_at only",
+            format!("/v1/addresses/{HOLDER}/names?relation=former_owner&sort=name"),
+            "relation=former_owner sorts by expires_at only",
         ),
     ] {
         let response = v2_names_response(&database, &uri).await?;

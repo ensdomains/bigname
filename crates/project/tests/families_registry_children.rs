@@ -36,10 +36,15 @@ async fn indexed(fixture: &Fixture, logical_name_id: &str) -> Result<Vec<Value>>
     Ok(rows)
 }
 
+/// The index rows of a child's controllers: a name with no token lineage is owned by its
+/// controller, so each is indexed under both relations.
 fn controllers(addresses: &[&str]) -> Vec<Value> {
     let mut rows: Vec<Value> = addresses
         .iter()
-        .map(|address| json!({"address": address, "relation": "effective_controller"}))
+        .flat_map(|address| {
+            ["token_holder", "effective_controller"]
+                .map(|relation| json!({"address": address, "relation": relation}))
+        })
         .collect();
     rows.sort_by_key(Value::to_string);
     rows
@@ -145,12 +150,10 @@ async fn a_surface_less_registry_child_indexes_its_registry_owner() -> Result<()
         )
         .await?;
     fixture.apply(13, FamilyMode::Normal).await?;
-    let mut expected = controllers(&[ALICE, CAROL]);
-    for relation in ["registrant", "token_holder"] {
-        expected.push(json!({"address": CAROL, "relation": relation}));
-    }
-    expected.sort_by_key(Value::to_string);
-    assert_eq!(indexed(&fixture, &child).await?, expected);
+    assert_eq!(
+        indexed(&fixture, &child).await?,
+        controllers(&[ALICE, CAROL])
+    );
     fixture.assert_undo_restores(13).await?;
     fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await

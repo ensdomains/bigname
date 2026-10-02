@@ -42,7 +42,7 @@ async fn v2_routes_reject_known_but_inapplicable_query_params() -> Result<()> {
             "unknown query parameter: match",
         ),
         (
-            "/v1/diagnostics/events?relation=registrant",
+            "/v1/diagnostics/events?relation=owner",
             "unknown query parameter: relation",
         ),
         (

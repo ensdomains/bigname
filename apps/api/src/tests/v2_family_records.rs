@@ -53,7 +53,6 @@ async fn v2_address_names_from_families() -> Result<()> {
         "page_size=1&sort=expires_at",
         "page_size=1&sort=registered_at&order=desc",
         "page_size=1&dedupe=registration",
-        "page_size=1&relation=registrant",
         "page_size=1&relation=owner",
         "page_size=1&relation=manager",
         "page_size=1&relation=owner,manager",

@@ -345,15 +345,8 @@ pub(super) async fn get_address_resolves_to(
                 permission_resource_id: entry
                     .resource_id
                     .map(|id| super::permission_resource_handle(name_row, id)),
-                manager: name_row.and_then(|row| {
-                    crate::v2::name_record::served_manager(
-                        &row.declared_summary,
-                        registration.owner.as_ref(),
-                        registration.registrant.as_ref(),
-                    )
-                }),
                 owner: registration.owner,
-                registrant: registration.registrant,
+                manager: registration.manager,
                 registration_status: registration.registration_status,
                 registered_at: registration.registered_at,
                 created_at: registration.created_at,

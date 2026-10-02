@@ -100,19 +100,14 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
         data[0]["namehash"],
         json!(bigname_lookup::ens_namehash_hex("alpha.eth")?)
     );
-    assert_eq!(
-        data[0]["owner"],
-        json!(V2_PERMISSION_SUBJECT)
-    );
-    assert_eq!(
-        data[0]["registrant"],
-        json!(V2_ADDRESS)
-    );
+    assert_eq!(data[0]["owner"], json!(V2_ADDRESS));
+    assert_eq!(data[0]["manager"], json!(V2_PERMISSION_SUBJECT));
+    assert!(data[0].get("registrant").is_none());
     assert_eq!(data[0]["registration_status"], json!("active"));
     assert_eq!(data[0]["registered_at"], json!("1704153600"));
     assert_eq!(data[0]["created_at"], json!("1672617600"));
     assert_eq!(data[0]["expires_at"], json!("1798848000"));
-    assert_eq!(data[0]["relations"], json!(["registrant", "owner"]));
+    assert_eq!(data[0]["relations"], json!(["owner"]));
     assert_eq!(data[0]["is_primary"], json!(true));
     assert_eq!(data[1]["relations"], json!(["manager"]));
     assert_eq!(data[1]["is_primary"], json!(false));
@@ -269,7 +264,7 @@ async fn v2_get_address_names_rejects_invalid_q_dot_shapes() -> Result<()> {
 #[tokio::test]
 async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
     let (database, set_payload) = v2_address_names_payload(&format!(
-        "/v1/addresses/{V2_ADDRESS}/names?relation=registrant,manager"
+        "/v1/addresses/{V2_ADDRESS}/names?relation=owner,manager"
     ))
     .await?;
     let any_payload = v2_address_names_payload_for_database(
@@ -282,7 +277,7 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
         .as_array()
         .expect("relation set data must be an array");
     assert_eq!(names(set_rows), vec!["alpha.eth", "beta.eth", "gamma.eth", "shared-one.eth", "shared-two.eth"]);
-    assert_eq!(set_rows[0]["relations"], json!(["registrant"]));
+    assert_eq!(set_rows[0]["relations"], json!(["owner"]));
     assert_eq!(set_rows[1]["relations"], json!(["manager"]));
 
     let any_rows = any_payload["data"]
@@ -298,7 +293,19 @@ async fn v2_get_address_names_filters_relation_sets_and_any() -> Result<()> {
             "shared-two.eth"
         ]
     );
-    assert_eq!(any_rows[0]["relations"], json!(["registrant", "owner"]));
+    assert_eq!(any_rows[0]["relations"], json!(["owner"]));
+
+    // `owner` is the token holder, so the separate `registrant` relation is gone.
+    for relation in ["registrant", "former_registrant"] {
+        let response = v2_address_names_response_for_database(
+            &database,
+            &format!("/v1/addresses/{V2_ADDRESS}/names?relation={relation}"),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{relation}");
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "invalid_input", "{relation}");
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -1492,10 +1499,7 @@ fn v2_address_name_specs() -> Vec<V2AddressNameSpec> {
             registered_at: "2024-01-02T00:00:00Z",
             created_at: "2023-01-02T00:00:00Z",
             expires_at: "2027-01-02T00:00:00Z",
-            relations: &[
-                bigname_storage::AddressNameRelation::TokenHolder,
-                bigname_storage::AddressNameRelation::Registrant,
-            ],
+            relations: &[bigname_storage::AddressNameRelation::TokenHolder],
         },
         V2AddressNameSpec {
             logical_name_id: "ens:beta.eth",
@@ -1768,7 +1772,7 @@ async fn wrap_address_name(
             json!({"source_event":"NameWrapped", "node":node, "authority_kind":"wrapper",
                 "owner":holder})),
         wrapped("holder", "TokenControlTransferred", 2,
-            json!({"source_event":"NameWrapped", "node":node, "owner":holder, "to_address":holder})),
+            json!({"source_event":"NameWrapped", "node":node, "owner":holder, "to":holder})),
         wrapped("grant", "PermissionChanged", 3,
             json!({"subject":holder, "scope":{"kind":"resource"},
                 "effective_powers":["resource_control"], "grant_source":{"kind":"raw_log",
@@ -1940,8 +1944,8 @@ async fn v2_address_name_totals_match_filtered_deduplicated_pages() -> Result<()
     seed_v2_address_names_fixture(&database).await?;
     for filter in [
         "relation=owner",
-        "relation=registrant&dedupe=registration",
-        "relation=owner,registrant",
+        "relation=owner&dedupe=registration",
+        "relation=owner,manager",
         "dedupe=registration",
         "q=shared",
         "q=missing",
@@ -1981,24 +1985,35 @@ async fn v2_address_name_totals_match_filtered_deduplicated_pages() -> Result<()
     database.cleanup().await
 }
 
-/// TYR-134: `manager` is the owner of an unwrapped name and the token holder of a wrapped one in
-/// any state, on every row that serves the name.
+/// `owner` is the token holder and `manager` the registry owner of an unwrapped lease; a wrapped
+/// one is owned and managed by its token holder in every wrapper state, and has no `manager` in
+/// registrar grace, on every row that serves the name and in the address relations.
 #[tokio::test]
-async fn v2_manager_follows_the_wrapper_state_on_every_name_row() -> Result<()> {
-    for (wrap, field) in [
-        (None, "owner"),
-        (Some(("wrapped", 0, 1_900_000_000)), "registrant"),
-        (Some(("emancipated", 65_536, 1_900_000_000)), "registrant"),
+async fn v2_owner_and_manager_follow_the_wrapper_state_on_every_name_row() -> Result<()> {
+    const HOLDER: &str = "0x00000000000000000000000000000000000000b2";
+    const DOT_ETH: i64 = 65_536 | 131_072;
+    for (wrap, owner, manager) in [
+        (None, HOLDER, Some(V2_ADDRESS)),
+        (Some(("emancipated", DOT_ETH, None)), V2_ADDRESS, Some(V2_ADDRESS)),
+        (Some(("locked", DOT_ETH | 1, None)), V2_ADDRESS, Some(V2_ADDRESS)),
+        (Some(("emancipated", DOT_ETH, Some(30))), V2_ADDRESS, None),
     ] {
         let database = TestDatabase::new_migrated().await?;
         seed_v2_address_names_fixture(&database).await?;
-        if let Some(state) = wrap {
-            wrap_address_name(&database, "beta.eth", 0xb300, Some(state)).await?;
+        if let Some((state, fuses, grace_days)) = wrap {
+            let clock: i64 = sqlx::query_scalar(
+                "SELECT extract(epoch FROM block_timestamp)::bigint FROM chain_lineage
+                 WHERE chain_id = 'ethereum-mainnet' ORDER BY block_number DESC LIMIT 1",
+            )
+            .fetch_one(&database.pool)
+            .await?;
+            let expiry = grace_days.map_or(1_900_000_000, |days| clock + days * 86_400);
+            wrap_address_name(&database, "beta.eth", 0xb300, Some((state, fuses, expiry))).await?;
         }
         let detail = assert_lookup_detail_matches_name_detail(&database, "beta.eth").await?;
-        let expected = Some(detail[field].clone());
-        assert!(detail[field].is_string(), "{wrap:?}: {detail}");
-        assert_eq!(detail.get("manager"), expected.as_ref(), "{wrap:?}: {detail}");
+        assert_eq!(detail["owner"], json!(owner), "{wrap:?}: {detail}");
+        assert_eq!(detail.get("manager"), manager.map(|manager| json!(manager)).as_ref(), "{wrap:?}: {detail}");
+        assert!(detail.get("registrant").is_none(), "{wrap:?}: {detail}");
 
         let rows = |payload: &Value| {
             payload["data"]
@@ -2009,15 +2024,25 @@ async fn v2_manager_follows_the_wrapper_state_on_every_name_row() -> Result<()> 
                 .cloned()
         };
         for uri in [
-            format!("/v1/addresses/{V2_ADDRESS}/names?q=beta"),
+            format!("/v1/addresses/{owner}/names?q=beta"),
             "/v1/names?namespace=ens&expires_after=0".to_owned(),
             "/v1/search?q=beta".to_owned(),
         ] {
             let (status, payload) = read_family_response(&database, &uri).await?;
             assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
             let row = rows(&payload).with_context(|| format!("{wrap:?} {uri}: no beta.eth row {payload}"))?;
-            assert_eq!(row.get("manager"), expected.as_ref(), "{wrap:?} {uri}: {row}");
+            assert_eq!(row.get("manager"), detail.get("manager"), "{wrap:?} {uri}: {row}");
             assert_eq!(row.get("owner"), detail.get("owner"), "{wrap:?} {uri}: {row}");
+            assert!(row.get("registrant").is_none(), "{wrap:?} {uri}: {row}");
+        }
+        for (relation, address, listed) in [
+            ("owner", owner, true),
+            ("manager", manager.unwrap_or(V2_ADDRESS), manager.is_some()),
+        ] {
+            let uri = format!("/v1/addresses/{address}/names?relation={relation}");
+            let (status, payload) = read_family_response(&database, &uri).await?;
+            assert_eq!(status, StatusCode::OK, "{uri}: {payload}");
+            assert_eq!(rows(&payload).is_some(), listed, "{wrap:?} {uri}: {payload}");
         }
         database.cleanup().await?;
     }

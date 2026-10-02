@@ -538,9 +538,9 @@ async fn rebinding_above_the_bound_leaves_the_history_at_the_bound_unchanged() -
 
     let registrar_resource = rows_registered
         .iter()
-        .find(|row| row.0 == "registrant")
+        .find(|row| row.0 == "token_holder")
         .map(|row| row.1)
-        .context("the registration projects a registrant row")?;
+        .context("the registration projects a token holder row")?;
     assert!(
         rows_registered
             .iter()

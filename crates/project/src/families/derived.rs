@@ -178,17 +178,18 @@ const NAME_DELETE: &str = "/* project:families.derived.name_delete */
     DELETE FROM project_address_name_index
     WHERE chain_id = $1 AND logical_name_id = ANY($2::text[])";
 
-/// Every address a name's three relations (address_names.rs `relations`) can hold under some
-/// admission and mask, so a read only removes rows: the registrant falls back through the
+/// Every address a name's two relations (address_relations.rs `relations`) can hold under some
+/// admission and mask, so a read only removes rows: the token holder falls back through the
 /// retained F2a rows of the name (a grant's or reservation's registrant, a release's prior
-/// registrant, a transfer's recipient), the token holder through those and the fold's token
-/// holder, and the effective controller through every controller candidate's subject besides.
+/// registrant, a transfer's recipient) and the fold's token holder, and both relations through
+/// every controller candidate's subject besides, since a name with no token lineage is owned by
+/// its controller.
 ///
 /// A node an ENSv1 registry NewOwner created (an `ens_v1_registry_l1` SubregistryChanged, which
 /// also writes the node's child edge) is listed for its current registry owner even when no name
 /// surface carries it (crates/storage/src/families/records/registry_children.rs): its
-/// `<namespace>:<node>` id indexes, as `effective_controller`, the owner facts of the node's F2c
-/// row and the owner and getter every such NewOwner reported, which are the edge's.
+/// `<namespace>:<node>` id indexes, as both relations, the owner facts of the node's F2c row and
+/// the owner and getter every such NewOwner reported, which are the edge's.
 const NAME_INSERT: &str = "/* project:families.derived.name_insert */
     WITH registry_children AS (
         SELECT touched.logical_name_id, created.namespace, created.node,
@@ -212,27 +213,30 @@ const NAME_INSERT: &str = "/* project:families.derived.name_insert */
         FROM project_address_name_fold fold
         WHERE fold.chain_id = $1 AND fold.logical_name_id = ANY($2::text[])
     ),
-    relations AS (
-        SELECT holder.address, holder.logical_name_id, relation.relation
+    related AS (
+        SELECT holder.address, holder.logical_name_id
         FROM holders holder
-        CROSS JOIN (VALUES ('registrant'), ('token_holder'), ('effective_controller'))
-            relation (relation)
         UNION ALL
-        SELECT candidate.subject, candidate.logical_name_id, 'effective_controller'
+        SELECT candidate.subject, candidate.logical_name_id
         FROM project_address_controller_candidate candidate
         WHERE candidate.chain_id = $1 AND candidate.logical_name_id = ANY($2::text[])
           AND candidate.action = 'set'
         UNION ALL
-        SELECT address.address, child.logical_name_id, 'effective_controller'
+        SELECT address.address, child.logical_name_id
         FROM registry_children child
         CROSS JOIN LATERAL (VALUES (child.owner), (child.owner_getter)) address (address)
         UNION ALL
-        SELECT address.address, child.logical_name_id, 'effective_controller'
+        SELECT address.address, child.logical_name_id
         FROM (SELECT DISTINCT logical_name_id, namespace, node FROM registry_children) child
         JOIN project_registry_node_state state
           ON state.chain_id = $1 AND state.namespace = child.namespace AND state.node = child.node
         CROSS JOIN LATERAL (VALUES (state.registry_owner), (state.owner_getter), (state.owner))
             address (address)
+    ),
+    relations AS (
+        SELECT related.address, related.logical_name_id, relation.relation
+        FROM related
+        CROSS JOIN (VALUES ('token_holder'), ('effective_controller')) relation (relation)
     )
     INSERT INTO project_address_name_index (address, logical_name_id, relation, chain_id)
     SELECT DISTINCT lower(relation.address), relation.logical_name_id, relation.relation, $1

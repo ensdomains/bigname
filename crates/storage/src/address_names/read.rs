@@ -217,7 +217,6 @@ pub(crate) fn push_address_names_current_query<'a>(
             anc.raw_name ASC,
             anc.logical_name_id ASC,
             CASE anc.relation
-                WHEN 'registrant' THEN 0
                 WHEN 'token_holder' THEN 1
                 WHEN 'effective_controller' THEN 2
                 ELSE 99

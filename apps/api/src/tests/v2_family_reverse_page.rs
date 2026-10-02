@@ -22,7 +22,7 @@ async fn v2_family_reverse_pages_counts_and_follow_primary_order() -> Result<()>
     seed_family_reverse_page_fixture(&database).await?;
     let mut requests = Vec::new();
     for profile in ["feed", "detail"] {
-        for relation in [None, Some("owner,registrant"), Some("manager"), Some("owner"), Some("registrant"), Some("resolves_to")] {
+        for relation in [None, Some("manager"), Some("owner"), Some("resolves_to")] {
             let mut cursor = None;
             let mut names = Vec::new();
             for _ in 0..5 {
@@ -222,7 +222,7 @@ async fn v2_family_reverse_primary_manager_precedes_owned_names() -> Result<()> 
             json!({"authority_kind": "registry", "owner": FAMILY_ALICE, "owner_getter": FAMILY_ALICE, "node": gamma.strip_prefix("ens:").unwrap()})),
     ]).await?;
     publish_test_families(&database, 241).await?;
-    for relation in [None, Some("manager"), Some("owner,registrant")] {
+    for relation in [None, Some("manager"), Some("owner")] {
         let mut cursor = None;
         let mut names = Vec::new();
         for _ in 0..4 {
@@ -237,7 +237,7 @@ async fn v2_family_reverse_primary_manager_precedes_owned_names() -> Result<()> 
             cursor = family["data"][0]["page"]["next_cursor"].as_str().map(|v| json!(v));
             if cursor.is_none() { break; }
         }
-        let expected = if relation == Some("owner,registrant") { vec!["alpha.eth", "beta.eth"] } else { vec!["gamma.eth", "alpha.eth", "beta.eth"] };
+        let expected = if relation == Some("owner") { vec!["alpha.eth", "beta.eth"] } else { vec!["gamma.eth", "alpha.eth", "beta.eth"] };
         assert_eq!(names, expected, "{relation:?}");
     }
     database.cleanup().await

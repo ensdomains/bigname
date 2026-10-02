@@ -126,8 +126,8 @@ async fn v2_address_names_list_a_name_whose_registry_role_the_address_holds() ->
             "relation={relation}: {payload}"
         );
     }
-    // Holding a role does not make the address the manager, owner or registrant.
-    for relation in ["manager", "owner", "registrant", "owner,manager,registrant"] {
+    // Holding a role does not make the address the manager or owner.
+    for relation in ["manager", "owner", "owner,manager"] {
         let payload = role_holder_names(&database, relation).await?;
         assert_eq!(payload["data"], json!([]), "relation={relation}: {payload}");
     }
@@ -227,7 +227,7 @@ async fn v2_address_names_omit_registry_root_role_holders() -> Result<()> {
 async fn v2_address_names_add_role_holder_to_an_owner_that_holds_a_role() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!([])).await?;
-    // The registrant also holds a role: one row, with every relation it matched.
+    // The owner also holds a role: one row, with every relation it matched.
     let (block, hash) = address_fixture_head(&database).await?;
     let name = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
     let event = address_role_event(
@@ -250,7 +250,7 @@ async fn v2_address_names_add_role_holder_to_an_owner_that_holds_a_role() -> Res
         row_names_and_relations(&payload),
         vec![(
             "beta.eth".to_owned(),
-            json!(["registrant", "owner", "manager", "role_holder"])
+            json!(["owner", "manager", "role_holder"])
         )],
         "{payload}"
     );
@@ -258,7 +258,7 @@ async fn v2_address_names_add_role_holder_to_an_owner_that_holds_a_role() -> Res
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_keeps_its_three_relations() -> Result<()> {
+async fn v2_lookup_reverse_keeps_its_two_relations() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["set_resolver"])).await?;
     let payload = v2_lookup_json(
@@ -274,7 +274,7 @@ async fn v2_lookup_reverse_keeps_its_three_relations() -> Result<()> {
     }
     assert_eq!(
         payload["data"][1]["input"]["relation"],
-        json!("owner,manager,registrant")
+        json!("owner,manager")
     );
     let rejected = app_router(database.app_state())
         .oneshot(
@@ -370,7 +370,7 @@ async fn v2_address_names_list_one_holder_among_many_on_a_registration() -> Resu
         row_names_and_relations(&payload),
         vec![(
             "beta.eth".to_owned(),
-            json!(["registrant", "owner", "manager"])
+            json!(["owner", "manager"])
         )],
         "{payload}"
     );
@@ -388,7 +388,7 @@ async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> R
     // so the second address proves the grant load is skipped even when names are composed.
     for address in [ROLE_HOLDER, V2_ADDRESS] {
         for route in ["names", "history"] {
-            for relation in ["owner", "manager", "registrant", "owner,manager,registrant"] {
+            for relation in ["owner", "manager", "owner,manager"] {
                 let reads = Arc::new(Mutex::new(Vec::new()));
                 let payload = with_role_read_counter(
                     reads.clone(),

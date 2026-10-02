@@ -1464,7 +1464,7 @@ async fn family_record_fixture_inputs_reach_indexed_api_on_both_namespaces() -> 
             read_family_response(&database, &format!("/v1/names/{name}?source=indexed")).await?;
         assert_eq!(status, StatusCode::OK, "{namespace}: {body}");
         assert_eq!(body["data"]["name"], json!(name));
-        assert_eq!(body["data"]["registrant"], json!(address));
+        assert_eq!(body["data"]["owner"], json!(address));
         assert_eq!(
             body["data"]["resolver"]["address"],
             json!("0x1000000000000000000000000000000000000001")

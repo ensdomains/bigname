@@ -140,7 +140,7 @@ Project's families and publication marker; the normal rebuild repopulates them b
 | Read model | Published inputs | Read behavior |
 | --- | --- | --- |
 | Exact names | Name/binding, lifecycle, wrapper, registry and pointer families | Compose selected authority, control, registration, resolver and topology |
-| Address-to-names | Address candidate indexes and current name/permission families | Admit current `registrant`, `token_holder` and `effective_controller` relations |
+| Address-to-names | Address candidate indexes and current name/permission families | Admit current `token_holder` and `effective_controller` relations |
 | Address-to-records | Node/record-ID inverse indexes and current inventory | Admit `resolves_to` through the same indexed-record evaluator |
 | Children and labels | Child-edge candidates, parent subregistries and name summary | Filter current reachability, authority, expiry and readable display |
 | Permissions | Grants, resource admin aggregates and account approvals | Compose masked powers, operators, restrictions and coverage |
@@ -441,14 +441,14 @@ directly, is still live; that name is not released. In that state the NameWrappe
 owner for a name whose `PARENT_CANNOT_CONTROL` fuse is burned, which every wrapped `.eth`
 second-level name has, so `registration.registrant` and `control.registrant` are `null` from the
 first block whose timestamp is past the NameWrapper expiry, together with the already cleared
-`wrapper_state` and token-holder relation. The `registrant` address-to-name relation reads the
-same field and is dropped with it. A renewal through the NameWrapper moves its expiry and
+`wrapper_state` and token-holder relation, which the API serves as the `owner` address-to-name
+relation. A renewal through the NameWrapper moves its expiry and
 restores all of them.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
 
 A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
-`registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at,
+`registration.lapsed_registration = {owner, authority_kind, authority_key, released_at,
 release_kind: "expired"}`:
 the holder selected by the registrant fold at the release, and the authority the released
 lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
@@ -476,7 +476,7 @@ permissions, counts) sees the lapsed holder.
 
 An ENSv2 selected `RegistrationReleased` also carries `lapsed_registration` when its
 `source_event` is `RegistryPathExpired` or `LabelUnregistered`. Its exact shape is
-`{registrant, held_through: "registry", released_at, release_kind}`: the last registry
+`{owner, held_through: "registry", released_at, release_kind}`: the last registry
 token holder on the selected lifecycle key, from its grant, transfer or release.
 For `RegistryPathExpired`, `release_kind` is `expired`; the registration keeps its expiry
 and applicable grace, and `released_at` is the retained path-release time. For
@@ -494,7 +494,7 @@ the token. This is not a grant of renewal powers to the former holder.
 Other ENSv2 release causes, including a displaced registration released by the
 `TokenRegenerated` decoder, remain released without a `lapsed_registration` block. Bigname
 does not classify those releases as an explicit unregister or expose them through
-`relation=former_registrant`. No active row carries the block; a later registration removes
+`relation=former_owner`. No active row carries the block; a later registration removes
 it. The former relation reads this block only and does not restore any current authority
 relation or permission.
 
@@ -523,8 +523,12 @@ transport do not create alternate exact-name rows.[^bn-readme-l70][^v1-l2rev-bas
 
 Address-to-name collections start from the current family address indexes and
 compose each candidate's selected name, lifecycle and permission relations in
-the admitted publication snapshot. Relation vocabulary is `registrant`,
-`token_holder`, `effective_controller`, and `role_holder`. Surface is the default unit;
+the admitted publication snapshot. Relation vocabulary is `token_holder`,
+`effective_controller`, and `role_holder`; the API serves `token_holder` as `owner`,
+`effective_controller` as `manager`, and also serves a name with no token lineage under
+`owner` for its registry owner, so the `owner` field and relation agree. Project indexes every
+address under both `token_holder` and `effective_controller` and writes no `registrant`
+rows. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
 relations. For a node an ENSv1 registry `NewOwner` created, the address index
 also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
@@ -535,7 +539,7 @@ lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
 the node's registry-only resource, and with no surface binding.
 
-A fourth relation, `role_holder`, lists the holders of an ENSv2 registry role
+A third relation, `role_holder`, lists the holders of an ENSv2 registry role
 on a name's selected registration resource. `PermissionedRegistry` keeps
 per-account roles on each registration's token resource, and a holder can act
 on the name within them without owning the token, for example change its
@@ -903,10 +907,10 @@ token to the Graveyard makes it the holder of that still-selected binding, and i
 lists the Graveyard as the subname's `manager` in `GET /v1/addresses/{address}/names`, although
 the served owner stays null. Only the
 admitted Graveyard counts; the Graveyards of superseded Sepolia deployments are not declared
-and their records are served as the chain holds them. A registrant that sends a live `.eth`
+and their records are served as the chain holds them. A token holder that sends a live `.eth`
 token to the Graveyard keeps the lease running, since the name cannot be registered again
 before its expiry and grace period, so that registration is served as the chain holds it, the
-Graveyard as registrant, until it lapses.
+Graveyard as its `owner`, until it lapses.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L142-L172 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L347-L374 @ ens_v1@91c966f)
@@ -1663,7 +1667,8 @@ and registration times, and whether the latest registry Transfer attributed to
 the name names the zero owner, attributed by the child-read contract (by the name the Transfer carries, else the latest named registry event of
 any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node), and the owner the name row serves
-(`control.owner`, else `control.registry_owner`, lower-cased), which the
+(`control.owner`, the token holder, else the registry owner;
+else `control.registry_owner`, lower-cased), which the
 registry labels' `owner` and `exclude_owner` filters read. Every name with a
 surface has a row. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,

@@ -60,7 +60,6 @@ fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>>
         token_id: None,
         owner: None,
         manager: None,
-        registrant: None,
         registered_at: None,
         created_at: None,
         subregistry: None,

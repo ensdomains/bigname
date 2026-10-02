@@ -20,8 +20,9 @@
 //!   rule (its node's latest Transfer), so this field keeps the child list's own attribution:
 //!   the Transfers are the registry owner events (`project_registry_owner_event`), and the named
 //!   events that link a resource are read from the readable interpreted events;
-//! - `owner`: the owner the name row serves, `declared_summary.control.owner`, else
-//!   `control.registry_owner`, lower-cased, null when the first present one is blank or the name
+//! - `owner`: the owner the name row serves, `declared_summary.control.owner` (the token holder,
+//!   else the registry owner), else `control.registry_owner`,
+//!   lower-cased, null when the first present one is blank or the name
 //!   composes no row (apps/api/src/v2/name_record/declared.rs, `declared_owner`); the registry
 //!   labels' `owner` and `exclude_owner` filters read it;
 //! - `recompose_at`: the first second after the composition's block at which the composition

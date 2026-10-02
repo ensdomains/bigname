@@ -6,44 +6,37 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Relation {
     Owner,
     Manager,
-    Registrant,
     /// The address holds an ENSv2 registry role on the name; not exclusive, and not the manager.
     RoleHolder,
     /// The address is the value of the name's current `addr:<coin_type>` resolver record. A
     /// resolver-record relation, not an authority relation: it is coin-type scoped, never part
     /// of `any`, and never combined with the authority relations in one set.
     ResolvesTo,
-    /// The address was the last registrant of the name's registration when it ended: an ENSv1
-    /// lease that lapsed past grace, or an ENSv2 registration that expired or was unregistered
-    /// (`lapsed_registration.registrant`). Never current authority, never part of `any`, and never
+    /// The address was the owner of the name's registration when it ended: an ENSv1 lease that
+    /// lapsed past grace, or an ENSv2 registration that expired or was unregistered
+    /// (`lapsed_registration.owner`). Never current authority, never part of `any`, and never
     /// combined with another relation in one set.
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L341-L362 @ ens_v2_sepolia_20260916@366de741)
     /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
-    FormerRegistrant,
+    FormerOwner,
 }
 
 impl Relation {
     /// The authority relations `any` expands to. `resolves_to` is deliberately outside this set.
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Owner,
-        Self::Manager,
-        Self::Registrant,
-        Self::RoleHolder,
-    ];
+    pub(crate) const ALL: [Self; 3] = [Self::Owner, Self::Manager, Self::RoleHolder];
 
     /// The relations reverse lookup serves, and what `any` expands to there.
-    pub(crate) const LOOKUP: [Self; 3] = [Self::Owner, Self::Manager, Self::Registrant];
+    pub(crate) const LOOKUP: [Self; 2] = [Self::Owner, Self::Manager];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Owner => "owner",
             Self::Manager => "manager",
-            Self::Registrant => "registrant",
             Self::RoleHolder => "role_holder",
             Self::ResolvesTo => "resolves_to",
-            Self::FormerRegistrant => "former_registrant",
+            Self::FormerOwner => "former_owner",
         }
     }
 
@@ -51,10 +44,9 @@ impl Relation {
         match value {
             "owner" => Some(Self::Owner),
             "manager" => Some(Self::Manager),
-            "registrant" => Some(Self::Registrant),
             "role_holder" => Some(Self::RoleHolder),
             "resolves_to" => Some(Self::ResolvesTo),
-            "former_registrant" => Some(Self::FormerRegistrant),
+            "former_owner" => Some(Self::FormerOwner),
             _ => None,
         }
     }
@@ -76,7 +68,7 @@ impl RelationSet {
     /// with an authority relation has no canonical form and returns `None`.
     pub(crate) fn from_relations(relations: impl IntoIterator<Item = Relation>) -> Option<Self> {
         let requested = relations.into_iter().collect::<Vec<_>>();
-        for exclusive in [Relation::ResolvesTo, Relation::FormerRegistrant] {
+        for exclusive in [Relation::ResolvesTo, Relation::FormerOwner] {
             if requested.contains(&exclusive) {
                 return requested
                     .iter()
@@ -97,7 +89,7 @@ impl RelationSet {
         })
     }
 
-    /// The reverse lookup form of `any`: the three relations reverse lookup serves.
+    /// The reverse lookup form of `any`: the two relations reverse lookup serves.
     pub(crate) fn lookup_all() -> Self {
         Self {
             relations: Relation::LOOKUP.to_vec(),
@@ -128,12 +120,8 @@ impl RelationSet {
         self.relations == [Relation::ResolvesTo]
     }
 
-    pub(crate) fn is_former_registrant(&self) -> bool {
-        self.relations == [Relation::FormerRegistrant]
-    }
-
-    pub(crate) fn is_exact_owner_and_registrant(&self) -> bool {
-        self.relations == [Relation::Owner, Relation::Registrant]
+    pub(crate) fn is_former_owner(&self) -> bool {
+        self.relations == [Relation::FormerOwner]
     }
 }
 

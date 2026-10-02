@@ -149,9 +149,8 @@ fn relation_variants_use_exact_wire_spelling() {
     assert_wire(Relation::Owner, "owner");
     assert_wire(Relation::Manager, "manager");
     assert_wire(Relation::RoleHolder, "role_holder");
-    assert_wire(Relation::Registrant, "registrant");
     assert_wire(Relation::ResolvesTo, "resolves_to");
-    assert_wire(Relation::FormerRegistrant, "former_registrant");
+    assert_wire(Relation::FormerOwner, "former_owner");
 }
 
 #[test]

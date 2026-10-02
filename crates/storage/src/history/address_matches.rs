@@ -184,7 +184,7 @@ async fn load_historical_address_history_matches(
         .collect()
 }
 
-/// The names and resources an address held in history: registrant grants, token transfers
+/// The names and resources an address held in history: registration grants, token transfers
 /// and registry ownership transfers whose new holder is `address`. Each arm matches one partial
 /// expression index on `normalized_events` (`normalized_events_address_*_match_idx`).
 pub(super) fn push_historical_address_matches_query<'a>(
@@ -265,23 +265,19 @@ fn push_address_match_filter<'a>(
     address: &'a str,
     relations: Option<&'a [AddressNameRelation]>,
 ) {
-    let include_registrant =
-        relations.is_none_or(|relations| relations.contains(&AddressNameRelation::Registrant));
     let include_token_holder =
         relations.is_none_or(|relations| relations.contains(&AddressNameRelation::TokenHolder));
-    let include_registry_owner = relations
-        .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
+    // A name with no token lineage is owned by its registry owner, so `owner` also matches the
+    // registry ownership transfers `manager` does.
+    let include_registry_owner = include_token_holder
+        || relations
+            .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
 
     builder.push("(");
     let mut needs_or = false;
-    if include_registrant {
-        push_registrant_match_filter(builder, address);
-        needs_or = true;
-    }
     if include_token_holder {
-        if needs_or {
-            builder.push(" OR ");
-        }
+        push_registrant_match_filter(builder, address);
+        builder.push(" OR ");
         push_token_holder_match_filter(builder, address);
         needs_or = true;
     }

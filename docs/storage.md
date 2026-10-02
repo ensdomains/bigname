@@ -197,8 +197,12 @@ normalized-event identities, and unrelated phase rows remain in place for the
 mandatory full Interpret and Project redos.
 
 Reverse address lookup uses `project_address_name_index` to admit candidate name surfaces, seeks those
-keys in primary-first, role, and lexical order, and recomputes their current
-relations in batches of at most 64 names. The primary claims, relation masks,
+keys in primary-first, role, and lexical order (role order ranks names whose
+`owner` is the address before names it is only the `manager` of), and recomputes their current
+relations in batches of at most 64 names. Project writes that index with the
+`token_holder` and `effective_controller` relations only, every address under
+both, because a name with no token is owned by its registry owner; it writes no
+`registrant` rows. The primary claims, relation masks,
 exact count, and page inventories share one read-only repeatable-read snapshot.
 The count visits every candidate but retains only a page and its overflow row.
 The candidate SQL can inspect or sort more index entries than it returns, and
@@ -410,7 +414,7 @@ at or below the cited block is such a transfer too, with no ENSv2 `RegistrationR
 that range; an effective-controller row also needs no
 `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` row in that range. The range is read
 from `normalized_events_resource_history_idx`. Project cites the latest registration event for the
-registrant, token holder and fallback controller rows, so a transfer from the holder to itself
+token holder and fallback controller rows, so a transfer from the holder to itself
 moves the citation without changing the holder; the earliest transfer in the range names the
 address as its sender, which proves the address held the name at the bound. The three
 kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a

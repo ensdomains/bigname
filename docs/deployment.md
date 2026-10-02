@@ -2135,3 +2135,24 @@ rotate. It adds no schema-migration and needs no redo or historical ingest
 fetch. Verified answers that were `failed` with `resolver_call_reverted` for
 such names become `not_found`; indexed answers do not change. After it serves,
 run the Sepolia check in [Default reverse names](#default-reverse-names).
+
+### Owner as the token holder
+
+The build that serves `owner` as the token holder (TYR-191, see the
+[naming dictionary](api-v1.md#naming-dictionary) and [Manager](api-v1.md#manager))
+changes the composition in `crates/storage/src/families` and the address-name
+index in `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+Finish the full-history Interpret redo and the Project redo it installs before
+the matching API serves. In v0.3.0 it shares the release's one Interpret and
+Project redo pair with the other hash-rotating changes in the batch
+([read-only family queries outside the content hash](#read-only-family-queries-outside-the-content-hash),
+TYR-149, and the Sepolia ENSv2 redeploy admission, TYR-183): run one pair under
+a binary that holds all three. It needs no schema-migration, no manifest or
+environment change and no historical ingest fetch. The stored
+`project_name_summary.owner`, which the registry-label `owner` and
+`exclude_owner` filters read, now holds the token holder of wrapped names and
+unwrapped `.eth` second-level names, and the address index drops its
+`registrant` rows; the Project redo rebuilds both. The API change is breaking
+for clients of `owner`, `registrant`, `relation=registrant`,
+`relation=former_registrant` and `lapsed_registration.registrant`.

@@ -308,11 +308,13 @@ collection route carry neither header.
   `400 invalid_input`, because `profile=detail` records already list their
   record keys under `records`.
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
-  accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
-  is the normalized all-three set. Reverse rows match when any listed relation
+  accepts a comma-separated set of `owner` and `manager`; `any` is the
+  normalized set of both. Reverse rows match when any listed relation
   matches, with the same meaning as on `GET /v1/addresses/{address}/names`.
   The address-name relation `role_holder` is not served here: naming it
-  returns `400 invalid_input`, and `any` does not include it.
+  returns `400 invalid_input`, and `any` does not include it. `registrant`
+  was removed in v0.3.0 and is rejected as an unknown relation value
+  (`400 invalid_input`).
   `relation=resolves_to` stands alone and answers the names whose
   current `addr:<coin_type>` resolver record resolves to the input address for
   the input `coin_type`, with the same matching rule, ENSIP-19 default-address
@@ -334,7 +336,7 @@ collection route carry neither header.
   `resolution: {coin_type, record_key}`, and its `is_primary` and
   `primary_address` follow the input `coin_type`. Reverse `input.relation`
   echoes the normalized relation set; `any`
-  serializes as `owner,manager,registrant` and reordered sets use canonical
+  serializes as `owner,manager` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
@@ -395,8 +397,7 @@ collection route carry neither header.
   default `page_size` to 50 and use the common max of 200. A reverse cursor
   binds the deployment-derived public namespace set and is rejected if that
   set changes. Relation filters that cannot be satisfied by one storage role
-  (including exact `owner`, exact `registrant`, and partial relation sets such
-  as `owner,manager`) may require multiple broad candidate batches to assemble
+  (exact `owner`) may require multiple broad candidate batches to assemble
   one response page. The API retains the selected [projection
   generation](glossary.md#projection-generation) across those batches. Before
   issuing a second or later broad batch, it revalidates that generation and
@@ -645,7 +646,7 @@ collection route carry neither header.
   whole-second formatting does not round an RFC 3339 filter boundary.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
-  `owner`, `manager`, `registrant`, `registration_status`, `registered_at`,
+  `owner`, `manager`, `registration_status`, `registered_at`,
   `created_at`,
   `expires_at` and `grace_ends_at`, and the `ens_v1` object while the name's
   authority is `ens_v1` or `ens_v0` (see
@@ -692,12 +693,13 @@ collection route carry neither header.
   serves it as `released` with `expires_at: null`,
   `expires_at_reason: "released"` and `grace_ends_at: null`. A released row has
   `registration_status: released`, its old `expires_at`, and
-  no `owner` or `registrant`, and carries the
+  no `owner` or `manager`, and carries the
   [`lapsed_registration`](api-v1.md#lapsed-registration) block with the ended
-  registration's last holder, as `GET /v1/names/{name}` serves it. A client that
-  wants only held names filters rows on `registration_status`; one that wants
-  the names a given address last held asks
-  `GET /v1/addresses/{address}/names?relation=former_registrant`.
+  registration's last `owner`, as `GET /v1/names/{name}` serves it. A name in
+  grace has not lapsed: it keeps its current `owner` and carries no block. A
+  client that wants only held names filters rows on `registration_status`; one
+  that wants the names a given address last held asks
+  `GET /v1/addresses/{address}/names?relation=former_owner`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
   bound to namespace, both bounds, and order, and hold the last row's position;
@@ -777,7 +779,7 @@ collection route carry neither header.
   including verified unsupported records that retain registration fields;
   the same withholding applies to batch-lookup name-level records.
   The registration summary is not nested; it is represented by
-  `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
+  `registration_id`, `token_id`, `owner`, `manager`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
   the same object when backed, plus the `ens_v1` object while `authority` is
   `ens_v1` or `ens_v0`. For a `.eth` second-level name
@@ -785,11 +787,11 @@ collection route carry neither header.
   wrapped; see
   [registration identity of wrapped names](api-v1.md#registration-identity-of-wrapped-names).
   A released ENSv1 lease or a supported ENSv2 expiry/unregister release carries
-  `lapsed_registration: {registrant?, held_through?, released_at?, release_kind?}`
-  with its last holder and how it ended; see
+  `lapsed_registration: {owner?, held_through?, released_at?, release_kind?}`
+  with its last `owner` and how it ended; see
   [lapsed registration](api-v1.md#lapsed-registration) for the supported causes,
   pinned contract evidence, and expiry/grace field rules. It serves no current
-  `registrant`. The block is omitted for names that are not released and for other
+  `owner`. The block is omitted for names that are not released and for other
   release causes. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?}`:
   `expires_at` is the BaseRegistrar lease's own expiry, `null` without a
   lease, which after the Universal Resolver cutover can differ from the
@@ -834,10 +836,11 @@ collection route carry neither header.
   `manager` is served on name detail, resolver `bound_names`, `profile=detail`
   lookup records, `GET /v1/names` and search rows, subname rows and
   address-name rows by the rule in
-  [Manager](api-v1.md#manager): the `owner` of a name with no NameWrapper
-  state and the `registrant` (the NameWrapper token holder) of a wrapped name
-  in any `ens_v1.wrapper_state`. It is absent wherever
-  the address it copies is absent, and on `profile=feed` lookup records, which
+  [Manager](api-v1.md#manager): the registry owner of a name with no
+  NameWrapper state and the `owner` (the NameWrapper token holder) of a wrapped
+  name in any `ens_v1.wrapper_state`, except while a wrapped `.eth`
+  second-level name is in its registrar grace period. It is absent then,
+  wherever the address it copies is absent, and on `profile=feed` lookup records, which
   carry no registration fields. No null placeholder is emitted. `authority` names where the chain
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
@@ -904,7 +907,7 @@ collection route carry neither header.
   Universal Resolver discovery, and `resolver` stays absent from the response.
   Each requested key is one record call; a route that follows CCIP-Read can
   add continuation calls per key. The registration and identity summary
-  fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
+  fields (`registration_id`, `token_id`, `owner`, `manager`, dates,
   `registration_status`, `authority`, `ens_v1`,
   `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
   `resolver`, `primary_name`, `chain_id`, and `network`) remain indexed
@@ -1682,7 +1685,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   `expires_at`. Any other value returns `400 invalid_input`.
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
-  `owner`, `manager`, `registrant`, `registration_status`, `registered_at`,
+  `owner`, `manager`, `registration_status`, `registered_at`,
   `created_at`, `expires_at`, and `authority`, and the `ens_v1` object while the
   child's `authority` is `ens_v1` or `ens_v0`: a subname has no lease, so its
   `ens_v1.expires_at` is `null`, and a wrapped one carries its NameWrapper
@@ -1801,7 +1804,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   child, or adds a row-local unsupported shape.
   A V1 child with getter-visible owner zero is omitted unless a current
   event-linked nonzero resolver independently establishes read reachability.
-  Such a row has owner zero and no registrant or control registration; clearing
+  Such a row has owner zero and no token holder or control registration; clearing
   the resolver removes it.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
 
@@ -1891,7 +1894,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   `RegistrationReserved` on that resource lies in the range. For an effective controller, no
   `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` on that
   resource may lie in the range either. Project cites the latest registration
-  event for the registrant, token holder and fallback controller relations, so
+  event for the token holder and fallback controller relations, so
   a transfer from the holder to itself moves the cited event without changing
   the holder, and the earliest transfer in the range names the address as its
   sender, so the address held the name at the published block. The rule reads
@@ -1931,11 +1934,11 @@ A recognized namespace with no available publication returns retryable `409 stal
   second current input is the resolver's current classification row, which
   decides whether an ENSv2 resolver pointer attributes node-keyed writes on
   that resolver.
-- Known limitation: four relation kinds that ended after the published block
+- Known limitation: three relation kinds that ended after the published block
   are not reproduced, so the address's read loses that name's events: an ENSv1
   `.eth` registry controller from `AuthorityTransferred` on a token-backed
-  resource, a token holder whose only evidence is the grant, an effective
-  controller that fell back to the token holder, and an ENSv1 effective
+  resource, an effective controller that fell back to the token holder, and an
+  ENSv1 effective
   controller from a resource-scoped `PermissionChanged` grant (registrar
   registration, transfer or surface snapshot, registry owner, or NameWrapper
   holder). The controller is set only by a `PermissionChanged` whose scope is
@@ -2912,18 +2915,18 @@ introduces it rebuilds Project from full history before serving the option; see
 | --- | --- | --- | --- | --- | --- |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
 | `namespace` | query | string | no | none | Optional public namespace filter; omission spans active public namespaces. |
-| `relation` | query | array of enum `owner`, `manager`, `registrant`, `role_holder`, `any`, `resolves_to`, `former_registrant` | no | none | Authority relations default to all four. resolves_to and former_registrant each stand alone; neither is part of any. |
+| `relation` | query | array of enum `owner`, `manager`, `role_holder`, `any`, `resolves_to`, `former_owner` | no | none | Authority relations default to all three. resolves_to and former_owner each stand alone; neither is part of any. |
 | `coin_type` | query | string | no | none | Decimal coin type or evm, only with relation=resolves_to; omission defaults to 60 on that relation. evm matches all EVM coin types. |
-| `expires_after` | query | string | no | none | Inclusive expiry lower bound, only with relation=former_registrant. |
-| `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_registrant. |
-| `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_registrant. |
-| `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_registrant. |
-| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_registrant. |
+| `expires_after` | query | string | no | none | Inclusive expiry lower bound, only with relation=former_owner. |
+| `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_owner. |
+| `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_owner. |
+| `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_owner. |
+| `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_owner. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
-| `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_registrant. Former registrants accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
+| `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
-| `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_registrant accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
-| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. Nonempty include is not accepted with relation=former_registrant. |
+| `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_owner accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
+| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. Nonempty include is not accepted with relation=former_owner. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -2978,7 +2981,7 @@ introduces it rebuilds Project from full history before serving the option; see
   The ownership collection always returns an exact `page.total_count` before
   applying its cursor, with the same relations, `q` and `match` predicate,
   `authority` set, migration predicate and deduplication as the rows. For registration counts use
-  `relation=registrant&dedupe=registration`; a name count uses `dedupe=name`.
+  `relation=owner&dedupe=registration`; a name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
@@ -3026,10 +3029,25 @@ introduces it rebuilds Project from full history before serving the option; see
   names, break ties by name identity and then by the grouped resource, in both
   orders.
   `relation` accepts a comma-separated set of v2 vocabulary values
-  `owner`, `manager`, `registrant`, and `role_holder`; `any` normalizes to all
-  four values. Rows match when any listed relation matches. The storage
+  `owner`, `manager`, and `role_holder`; `any` normalizes to all
+  three values. Rows match when any listed relation matches. `owner` matches
+  the address the row serves as `owner`: the token holder of a name with a
+  token, while the token has a holder (an expired emancipated or locked wrapped
+  name has none), or the registry owner of a name with no token, such as an
+  unwrapped subname with only a registry record or a registry child with no
+  name row. A name with no token therefore lists under both `owner` and
+  `manager`, and a registry-child row carries `relations: ["owner",
+  "manager"]`. After a `.eth` lease's token is transferred without `reclaim`,
+  `owner` lists the name for the new holder and `manager` for the previous
+  registry owner until the holder calls `reclaim`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f). `manager` matches the address the row serves as `manager`, in
+  every wrapper state outside the registrar grace period of a wrapped `.eth`
+  second-level name ([Manager](api-v1.md#manager) lists the known cases where
+  the relation and the field differ). The storage
   relations map as token-holder -> `owner`, effective-controller -> `manager`,
-  registrant -> `registrant`, and role-holder -> `role_holder`. `role_holder`
+  and role-holder -> `role_holder`.
+  `registrant` and `former_registrant` were removed in v0.3.0 and return
+  `400 invalid_input` as unknown values. `role_holder`
   matches an address that holds an ENSv2 registry role on the name's current
   registration, as served by `GET /v1/permissions` with `grant_scope.kind`
   `registry`: bigname counts any served role, not only the ones that change
@@ -3047,17 +3065,19 @@ introduces it rebuilds Project from full history before serving the option; see
   it. `dedupe=name` groups by name surface and is the
   default; `dedupe=registration` groups by registration resource on the authority
   and `resolves_to` listings.
-  `relation=former_registrant` lists the released names whose ended
+  `relation=former_owner` lists the released names whose ended
   registration the path address last held, for renewal reminders: an ENSv1
   lease that lapsed past its grace, or an ENSv2 registration that expired or was
-  unregistered (the row's `lapsed_registration.registrant`; see
-  [lapsed registration](api-v1.md#lapsed-registration)). It stands alone like
-  `resolves_to`: combined with another relation or `any` it returns
-  `400 invalid_input`, `any` never includes it, and it never feeds `owner`,
-  `manager`, `registrant` or a permission. A re-registration of the name drops
-  it. Rows carry `relations: ["former_registrant"]`, `registration_status:
+  unregistered (the row's `lapsed_registration.owner`; see
+  [lapsed registration](api-v1.md#lapsed-registration)). Only those
+  registrations lapse; a subname with no registrar lease never lists here, and
+  a name still in its grace period has not lapsed and lists under `owner`. It
+  stands alone like `resolves_to`: combined with another relation or `any` it
+  returns `400 invalid_input`, `any` never includes it, and it never feeds
+  `owner`, `manager` or a permission. A re-registration of the name drops
+  it. Rows carry `relations: ["former_owner"]`, `registration_status:
   released`, the ended registration's `expires_at` and `grace_ends_at`, and the
-  `lapsed_registration` block, and no current `owner` or `registrant`. The read
+  `lapsed_registration` block, and no current `owner` or `manager`. The read
   takes `expires_after` (inclusive) and `expires_before` (exclusive) as decimal
   Unix-seconds or RFC 3339 bounds on `expires_at`, which only this relation
   accepts; a row without a finite expiry (an explicitly unregistered ENSv2 name serves null with
@@ -3085,7 +3105,7 @@ introduces it rebuilds Project from full history before serving the option; see
   current `addr:<coin_type>` resolver record resolves to the path address, read
   from the address-to-record family indexes rather than the authority
   relations. It stands alone: `resolves_to` combined with `owner`, `manager`, `role_holder`,
-  `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
+  or `any` returns `400 invalid_input`, and `any` never includes
   it, because it is coin-type scoped and its rows are not authority claims.
   `coin_type` is accepted only with `relation=resolves_to`; supplying it with
   any other relation returns `400 invalid_input`. It takes one of two forms.
@@ -3133,7 +3153,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
-  `display_name`, `namespace`, `namehash`, `owner`, `manager`, `registrant`,
+  `display_name`, `namespace`, `namehash`, `owner`, `manager`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows also return `permission_resource_id`, the handle
   `GET /v1/permissions?registration_id=` resolves to the permission authority
@@ -3150,8 +3170,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `relation=resolves_to` row whose name has only a retained serving resource,
   and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
-  subset of `owner`, `manager`, `registrant`, and `role_holder` that matched,
-  or `["resolves_to"]` / `["former_registrant"]` on the corresponding relation read.
+  subset of `owner`, `manager`, and `role_holder` that matched,
+  or `["resolves_to"]` / `["former_owner"]` on the corresponding relation read.
   A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
@@ -3299,13 +3319,13 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L83 @ ens_v1@91c966f).
   Such an ENSv1 registry child is listed for its current registry owner — the
   node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
-  `relations: ["manager"]`, exactly while its parent's
+  `relations: ["owner", "manager"]`, exactly while its parent's
   `GET /v1/names/{name}/subnames` lists it, and as that route serves it:
   `name` and `display_name` carry the proven, normalization-verified label
   preimage under the parent, else a [non-name form](glossary.md#non-name-form);
   `namehash` is the child node, `owner` the registry owner, and
   `permission_resource_id` the node's registry-only resource. The registry
-  records no lease for it, so `registrant`, `registered_at`, `created_at`,
+  records no lease for it, so `registered_at`, `created_at`,
   `expires_at`, and `migrated_at` are absent,
   `registration_status` is the value the subnames route serves for a child with
   no name row, and `is_primary` is `false`. `authority` is the registry
@@ -3321,9 +3341,9 @@ introduces it rebuilds Project from full history before serving the option; see
   fails ENSIP-15 normalization: its lease and NameWrapper state are projected
   without a name row, so, as the subnames route serves it, its `ens_v1` object
   carries no lifecycle fields, no `expires_at` and no wrapper fields, and the
-  row omits `manager` while still listing it with `relations: ["manager"]`
-  (see [Manager](api-v1.md#manager)).
-  `relation=owner` and `relation=registrant` never list it; `authority` matches
+  row omits `manager` while still listing it with `relations: ["owner",
+  "manager"]` (see [Manager](api-v1.md#manager)).
+  `relation=owner` and `relation=manager` each list it; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A
@@ -3655,7 +3675,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | --- | --- | --- | --- | --- | --- |
 | `address` | path | string | yes | none | EVM address in hexadecimal form. |
 | `namespace` | query | string | no | `ens` | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
-| `relation` | query | array of enum `owner`, `manager`, `registrant`, `role_holder`, `any` | no | none | Authority relations default to all four; resolves_to and former_registrant are invalid on history. |
+| `relation` | query | array of enum `owner`, `manager`, `role_holder`, `any` | no | none | Authority relations default to all three; resolves_to and former_owner are invalid on history. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `scope` | query | enum HistoryScope | no | `both` | Name events, registration events, or both. |
@@ -3695,9 +3715,15 @@ introduces it rebuilds Project from full history before serving the option; see
   and `include=raw` add the [history event
   payloads](#history-event-payloads-includedata-includeraw).
   `namespace` defaults to `ens` when omitted. `relation` accepts a
-  comma-separated set of `owner`, `manager`, `registrant`, and `role_holder`
+  comma-separated set of `owner`, `manager`, and `role_holder`
   with the meanings of `GET /v1/addresses/{address}/names`; `any` normalizes
-  to all four values. Rows match when any listed relation matches.
+  to all three values. Rows match when any listed relation matches.
+  `registrant` was removed in v0.3.0 and, like `resolves_to` and
+  `former_owner`, returns `400 invalid_input`. For a relation that has since
+  ended (see [history anchors](#history-collection-filters)), `owner` matches the `RegistrationGranted` that named the address and the
+  `TokenControlTransferred` that sent it the token, and also, on a resource
+  with no token, the registry `AuthorityTransferred` that made it the owner,
+  which matches `manager` too.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate
@@ -3782,7 +3808,7 @@ introduces it rebuilds Project from full history before serving the option; see
   collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary. Each result is built only from the selected current
-  registration: a migrated name uses its ENSv2 owner, registrant, status, and
+  registration: a migrated name uses its ENSv2 owner, manager, status, and
   expiry. A name that ENSv1 decides carries the `ens_v1` object, as on
   `GET /v1/names`. A name whose exact-name projection is unsupported is omitted from
   search results whatever the reason. Today that is a name with no selected

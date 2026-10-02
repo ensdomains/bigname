@@ -439,7 +439,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         registration.insert("registrant".into(), Value::Null);
         registration.insert(
             "lapsed_registration".into(),
-            json!({"registrant": registrant, "released_at": released_at,
+            json!({"owner": registrant, "released_at": released_at,
                    "release_kind": "expired"}),
         );
     } else if v2_release {
@@ -472,7 +472,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         if let Some(release_kind) = release_kind {
             registration.insert(
                 "lapsed_registration".into(),
-                json!({"registrant": registrant, "released_at": released_at,
+                json!({"owner": registrant, "released_at": released_at,
                        "held_through": "registry", "release_kind": release_kind}),
             );
         }

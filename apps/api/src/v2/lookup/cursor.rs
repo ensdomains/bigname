@@ -162,13 +162,10 @@ pub(super) fn reverse_identity_is_primary(record: &ReverseIdentityRecordRow) -> 
 }
 
 fn reverse_identity_role_rank(record: &ReverseIdentityRecordRow) -> u8 {
-    if record.relation_facets.iter().any(|relation| {
-        matches!(
-            relation,
-            bigname_storage::AddressNameRelation::TokenHolder
-                | bigname_storage::AddressNameRelation::Registrant
-        )
-    }) {
+    if record
+        .relation_facets
+        .contains(&bigname_storage::AddressNameRelation::TokenHolder)
+    {
         0
     } else {
         1

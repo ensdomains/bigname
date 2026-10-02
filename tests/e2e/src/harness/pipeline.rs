@@ -2304,7 +2304,7 @@ pub async fn prove_normal_sepolia_http(
         let body: Value = response.json().await?;
         anyhow::ensure!(status.is_success(), "indexed HTTP {name}: {status} {body}");
         anyhow::ensure!(
-            body["data"]["owner"] == *owner && body["data"]["registrant"] == *owner,
+            body["data"]["owner"] == *owner && body["data"].get("registrant").is_none(),
             "indexed HTTP ownership mismatch for {name}: {body}"
         );
         anyhow::ensure!(

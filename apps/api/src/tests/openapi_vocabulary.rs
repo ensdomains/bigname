@@ -338,7 +338,7 @@ fn every_named_openapi_enum_matches_its_complete_producer_vocabulary() {
     serde_enum!(AddressNamesDedupe: Name, Registration);
     serde_enum!(WrapperState: Wrapped, Emancipated, Locked);
     serde_enum!(Authority: EnsV0, EnsV1, EnsV2);
-    serde_enum!(Relation: Owner, Manager, Registrant, RoleHolder, ResolvesTo, FormerRegistrant);
+    serde_enum!(Relation: Owner, Manager, RoleHolder, ResolvesTo, FormerOwner);
     serde_enum!(AddressNamesSort: Name, ExpiresAt, RegisteredAt, CreatedAt);
     serde_enum!(UnlistedPermissionSurface:
         EnsV2RegistryOperators, RegistrarApprovals, ResolverApprovals, WrapperParentControl);

@@ -269,7 +269,7 @@ async fn v2_address_names_sort_by_created_at_is_first_observation_with_identity_
     // Filters narrow before the sort pages.
     let owned = walk_address_names(
         &database,
-        &format!("{base}?sort=created_at&order=desc&relation=registrant&page_size=1"),
+        &format!("{base}?sort=created_at&order=desc&relation=owner&page_size=1"),
         Some(4),
     )
     .await?;

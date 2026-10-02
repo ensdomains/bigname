@@ -8,7 +8,6 @@ pub(super) fn requires_relation_post_filter(relation: Option<&RelationSet>) -> b
     relation.is_some_and(|relation| {
         relation.as_slice() != Relation::LOOKUP
             && !relation.is_exact_manager()
-            && !relation.is_exact_owner_and_registrant()
             && !relation.is_resolves_to()
     })
 }
@@ -48,11 +47,10 @@ pub(super) fn relation_to_storage(
     match relation {
         Relation::Owner => Some(bigname_storage::AddressNameRelation::TokenHolder),
         Relation::Manager => Some(bigname_storage::AddressNameRelation::EffectiveController),
-        Relation::Registrant => Some(bigname_storage::AddressNameRelation::Registrant),
         // Rejected on lookup inputs (parse.rs); never a reverse lookup facet.
         Relation::RoleHolder => None,
         // Served from `address_records_current` by `resolves_to.rs`; never an authority facet.
-        // `former_registrant` is served only by `GET /v1/addresses/{address}/names`.
-        Relation::ResolvesTo | Relation::FormerRegistrant => None,
+        // `former_owner` is served only by `GET /v1/addresses/{address}/names`.
+        Relation::ResolvesTo | Relation::FormerOwner => None,
     }
 }

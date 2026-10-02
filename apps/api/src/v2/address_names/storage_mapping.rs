@@ -11,9 +11,8 @@ pub(crate) fn relation_to_storage(relation: Relation) -> Option<AddressNameRelat
     match relation {
         Relation::Owner => Some(AddressNameRelation::TokenHolder),
         Relation::Manager => Some(AddressNameRelation::EffectiveController),
-        Relation::Registrant => Some(AddressNameRelation::Registrant),
         Relation::RoleHolder => Some(AddressNameRelation::RoleHolder),
-        Relation::ResolvesTo | Relation::FormerRegistrant => None,
+        Relation::ResolvesTo | Relation::FormerOwner => None,
     }
 }
 
@@ -30,7 +29,6 @@ pub(crate) fn relation_from_storage(relation: AddressNameRelation) -> Relation {
     match relation {
         AddressNameRelation::TokenHolder => Relation::Owner,
         AddressNameRelation::EffectiveController => Relation::Manager,
-        AddressNameRelation::Registrant => Relation::Registrant,
         AddressNameRelation::RoleHolder => Relation::RoleHolder,
     }
 }

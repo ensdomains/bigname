@@ -225,7 +225,7 @@ pub const REGISTRATION_FIELDS: [&str; 11] = [
     "registered_at",
     "released_at",
     "latest_event_kind",
-    "lapsed_registration/registrant",
+    "lapsed_registration/owner",
     "lapsed_registration/released_at",
 ];
 

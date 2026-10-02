@@ -168,22 +168,19 @@ async fn transfer_without_reclaim_keeps_registry_owner_divergent() -> Result<()>
         Some(&json!(["effective_controller"]))
     );
 
-    for relation in ["registrant", "token_holder"] {
-        let alice_names = address_names(&run, &format!("{alice:#x}"), relation).await?;
-        assert!(
-            alice_names.is_empty(),
-            "registry-only binding must omit the old holder from relation={relation}: \
-             {alice_names:?}"
-        );
-    }
-    for relation in ["registrant", "token_holder"] {
-        let bob_names = address_names(&run, &format!("{bob:#x}"), relation).await?;
-        assert!(
-            bob_names.is_empty(),
-            "current registry-only binding omits the new token holder from relation={relation}: \
-             {bob_names:?}"
-        );
-    }
+    // The handoff's registry-only binding has no token lineage, but that no longer decides the
+    // owner: the token's new holder owns the name and the old holder keeps only control.
+    let alice_owned = address_names(&run, &format!("{alice:#x}"), "token_holder").await?;
+    assert!(
+        alice_owned.is_empty(),
+        "the old holder no longer owns the name: {alice_owned:?}"
+    );
+    let bob_owned = address_names(&run, &format!("{bob:#x}"), "token_holder").await?;
+    assert_eq!(bob_owned.len(), 1, "new token holder rows: {bob_owned:?}");
+    assert_eq!(
+        bob_owned[0].get("normalized_name"),
+        Some(&json!("divergent.eth"))
+    );
     let bob_controller = address_names(&run, &format!("{bob:#x}"), "effective_controller").await?;
     assert!(
         bob_controller.is_empty(),

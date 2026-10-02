@@ -155,13 +155,13 @@ fn include_expired_parses_booleans_and_rejects_other_values() {
 #[test]
 fn relation_sets_parse_any_and_canonicalize_duplicates() {
     let params = parse(RawQueryParams {
-        relation: Some("registrant,owner,owner".to_owned()),
+        relation: Some("role_holder,owner,owner".to_owned()),
         ..RawQueryParams::default()
     })
     .expect("relation set must parse");
     assert_eq!(
         params.relation.as_ref().map(RelationSet::canonical_value),
-        Some("owner,registrant".to_owned())
+        Some("owner,role_holder".to_owned())
     );
 
     let params = parse(RawQueryParams {
@@ -171,7 +171,7 @@ fn relation_sets_parse_any_and_canonicalize_duplicates() {
     .expect("relation any must parse");
     assert_eq!(
         params.relation.as_ref().map(RelationSet::canonical_value),
-        Some("owner,manager,registrant,role_holder".to_owned())
+        Some("owner,manager,role_holder".to_owned())
     );
 
     let error = parse(RawQueryParams {
@@ -179,6 +179,14 @@ fn relation_sets_parse_any_and_canonicalize_duplicates() {
         ..RawQueryParams::default()
     })
     .expect_err("invalid mixed relation set must fail");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+
+    // `owner` is the token holder, so the separate `registrant` relation is gone.
+    let error = parse(RawQueryParams {
+        relation: Some("registrant".to_owned()),
+        ..RawQueryParams::default()
+    })
+    .expect_err("registrant is not a relation");
     assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 

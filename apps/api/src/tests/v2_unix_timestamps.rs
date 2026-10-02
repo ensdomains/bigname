@@ -248,7 +248,7 @@ async fn v2_unix_timestamps_preserve_large_user_registry_grants_and_renewals() -
     .await?;
     assert_unix_expiry_record(&lookup["data"][0]["record"], name, u64::MAX);
     let address = unix_expiry_response(&database,
-        &format!("/v1/addresses/{UNIX_EXPIRY_HOLDER}/names?namespace=ens&relation=registrant&sort=expires_at&order=desc&page_size=1")).await?;
+        &format!("/v1/addresses/{UNIX_EXPIRY_HOLDER}/names?namespace=ens&relation=owner&sort=expires_at&order=desc&page_size=1")).await?;
     assert_unix_expiry_record(&address["data"][0], name, u64::MAX);
     let history =
         unix_expiry_response(&database, &format!("/v1/names/{name}/history?include=data")).await?;
