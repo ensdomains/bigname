@@ -1865,10 +1865,22 @@ reads those files whole without asking which code loads them. SQL that only
 tests load, such as fixtures and reference-oracle queries, therefore lives in
 `crates/project/testdata/sql/`, outside the hashed tree, and a content-hash
 test fails when SQL under `crates/project/src` is loaded only by test code.
-The storage families code (`crates/storage/src/families`) is covered as well:
-Project's family step stores the [name summaries](glossary.md#name-summary) that
-code composes, so a change there rotates the hash and forces a rebuild like a
-project change does. So are `crates/storage/src/address_names/query.rs` and its
+The part of the storage families code (`crates/storage/src/families`) that
+Project's family step calls is covered as well: the step stores the [name
+summaries](glossary.md#name-summary) that code composes and orders its rows by
+the family positions defined there, so a change to it rotates the hash and
+forces a rebuild like a project change does. That part is an explicit file list
+(`COMPOSITION_FILES` in `crates/content-hash/src/storage_families.rs`): the
+summary composition, the composed name-row loader it calls, the lifecycle
+evaluation and control rows that loader reads, and the position ordinals. The
+read-only queries beside it (search and bound-name listings, record, reverse,
+permission, children and topology readers) are listed as readers and stay
+outside, so an API-only change there needs no redo. Every production `.rs` file
+under that directory must be in exactly one of the two lists: a listed
+composition file that is missing, or an unlisted `.rs` file, fails the build, so
+a file cannot move into or out of the hashed set unreviewed. A file the
+composition embeds, such as SQL, must be listed as composition by hand. Also covered are
+`crates/storage/src/address_names/query.rs` and its
 `query/timestamps.rs` helper, whose expiry and registration timestamp reads the
 summaries store, plus `crates/storage/src/unix_seconds.rs` and `expiry.rs`, which
 decode exact expiry and classify the contract-specific absent-expiry values.

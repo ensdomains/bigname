@@ -11,7 +11,7 @@ use super::{
     FamilyPublication, NameHistory, compose::Surface, selection::MigrationProof,
     serving::PointerRow,
 };
-use crate::families::records::FamilyPosition;
+use crate::families::position::Position as FamilyPosition;
 
 pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<Vec<Surface>> {
     let rows = sqlx::query(

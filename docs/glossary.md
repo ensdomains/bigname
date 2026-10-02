@@ -1660,8 +1660,9 @@ hash, and a binary with a different value must re-walk the complete retained
 range before normal derived writes continue. It covers interpreter, projection,
 manifest, ABI, normalization, provider-response decoding, and selected
 dependency inputs as detailed under [interpretation
-replay](storage.md#interpretation-replay). It is not an Ethereum contract
-bytecode hash.
+replay](storage.md#interpretation-replay), including the storage code that
+composes the stored [name summaries](#name-summary) but not the read-only
+queries beside it. It is not an Ethereum contract bytecode hash.
 
 ## Interpreter session
 
