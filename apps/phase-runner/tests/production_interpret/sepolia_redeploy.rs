@@ -103,8 +103,8 @@ const REDEPLOYED: [(&str, &str, Option<u64>, Option<u64>); 15] = [
     (
         "0x115eb53f0c60696633855f90b138178fb40b2b2c",
         "0x14f09fd05d4585759e54844dc9b00147131cf243",
-        None,
-        None,
+        Some(11_820_406),
+        Some(11_709_070),
     ),
     (NEW_UNIVERSAL_RESOLVER, OLD_UNIVERSAL_RESOLVER, None, None),
 ];
@@ -398,8 +398,8 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
     assert!(!cut_over(pool).await?);
 
     // The checked-in profile syncs over that state: the old declarations retire at the head,
-    // derived phases need the attested redo, and the new implementation watch, compiled from
-    // block zero, stamps Ingest from the first ingest cursor through the head.
+    // derived phases need the attested redo, and the new registry's announcement rule stamps
+    // Ingest from the earliest retained `RegistryCreated` through the head.
     sync_schema_v2_repository(pool, &load_repository(checked_in_profile())?).await?;
     let markers: Vec<String> = sqlx::query_scalar(
         "SELECT input_content_hash FROM chain_phase_state
@@ -422,7 +422,7 @@ async fn the_sepolia_redeploy_replaces_the_dropped_set_through_the_attested_redo
     .bind(CHAIN)
     .fetch_one(pool)
     .await?;
-    assert_eq!(ingest_redo, (true, Some(0), Some(HEAD)));
+    assert_eq!(ingest_redo, (true, Some(11_709_066), Some(HEAD)));
     let old_registry: (Option<i64>, Option<bool>) = sqlx::query_as(
         "SELECT max(active_to_block_number), bool_and(deactivated_at IS NOT NULL)
          FROM contract_instance_addresses

@@ -301,6 +301,13 @@ pub struct ManifestContract {
 pub struct ResolverImplementation {
     pub role: String,
     pub address: String,
+    /// The implementation's creation block: the inclusive start of its announcement watch.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_start_block",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub start_block: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_features: Vec<ResolverReadFeature>,
 }

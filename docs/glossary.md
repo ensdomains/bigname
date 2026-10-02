@@ -88,7 +88,9 @@ rows — millions on Basenames alone — mark within-era anchor transitions.
 a [watch plan](#watch-plan--watched-tuple) entry compiled from one
 `resolver_implementations` address of an `ens_v2_resolver_l1` manifest that
 declares `Upgraded`: every emitter, the ERC-1967 `Upgraded` event, narrowed by
-the indexed `implementation` topic to that address, from block zero. It is how
+the indexed `implementation` topic to that address, from the entry's optional
+`start_block` (the implementation's creation block), or block zero without
+one. It is how
 bigname learns of an upgradeable resolver proxy before any registry points at
 it, without per-address historical lookback. Adding an implementation adds
 exactly one such entry and counts as watch-plan widening. Defined in
@@ -103,7 +105,8 @@ ERC-1967 `Upgraded(implementation)`, or a declared `verifiable_factory`'s
 `ProxyDeployed` naming it — rather than from a later registry pointer. The
 edge kind is `resolver` with `admission_basis`
 `declared_resolver_implementation`; the announcing implementation is the
-proxy's implementation observation for the support rule. It complements, and
+proxy's implementation observation for the support rule. An `Upgraded`
+announcement before the implementation entry's `start_block` admits nothing. It complements, and
 never closes, registry-pointer discovery. Defined in [`manifests.md` §
 Resolver admission by implementation
 announcement](manifests.md#resolver-admission-by-implementation-announcement).

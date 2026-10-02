@@ -109,8 +109,8 @@ const REDEPLOYED: [(&str, &str, Option<u64>, Option<u64>); 15] = [
     (
         "0x115eb53f0c60696633855f90b138178fb40b2b2c",
         "0x14f09fd05d4585759e54844dc9b00147131cf243",
-        None,
-        None,
+        Some(11_820_406),
+        Some(11_709_070),
     ),
     (NEW_UNIVERSAL_RESOLVER, OLD_UNIVERSAL_RESOLVER, None, None),
 ];
