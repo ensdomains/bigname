@@ -45,7 +45,8 @@ pub struct EnsPrimaryNameLookup {
     pub failure_reason: Option<String>,
 }
 
-/// Manifest-selected entrypoints and a newest-processed-block anchor for ENS primary-name lookup.
+/// Manifest-selected entrypoints and the captured family publication anchor for ENS primary-name
+/// lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EnsPrimaryNameRequest<'a> {
     pub normalized_address: &'a str,

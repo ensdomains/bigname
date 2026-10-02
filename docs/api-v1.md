@@ -830,14 +830,18 @@ typed `verification` shapes. Indexed answers read the reverse-claim families
 at their publication. The request's `source` parameter narrows the answer list.
 A successful stored raw claim is normalized for the indexed product name even when its raw
 spelling was not already normalized. The verified producer is a fresh ENS/60
-lookup at the current readable Ethereum position. It applies the raw-claim
+lookup whose reverse and forward calls execute at the block of the Ethereum
+[family publication](glossary.md#family-marker) it captures, which may trail
+the stored head by the
+[publication lag tolerance](glossary.md#publication-lag-tolerance); the
+`ens_execution` authority arms the forward gate admits are read from the
+manifest selected at that block. It applies the raw-claim
 normalization gate before forward resolution and persists neither a legacy
 execution outcome nor a divergence row. When `source` is omitted, the route
-returns the indexed and verified answers together only if the current Ethereum
-`chain_heads` position and exact selected family publication generation match
-that lookup before verified
-execution and remain unchanged after reading the indexed tuple from that
-source; otherwise the whole
+returns the indexed and verified answers together only if the selected family
+publication, its position and generation, matches that lookup's position before
+verified execution and remains unchanged after reading the indexed tuple from
+that source; otherwise the whole
 request returns `409 stale` instead of assigning answers from different
 positions to one `meta.as_of`. The indexed answer depends only on the projected
 tuple: a live reverse claim or live lookup failure changes only the verified
@@ -862,8 +866,8 @@ marker through its commit, so an overlapping redo cannot start between the
 check and the write. An unrelated phase-row update alone does not change the
 publication generation. Routes combining indexed and verified answers also
 require both answers to fit the reported `meta.as_of` position. Verified record
-calls on the publication's chain execute at the publication's block, which is the
-position `meta.as_of` reports, so a publication trailing the stored head within
+and primary-name calls on the publication's chain execute at the publication's
+block, which is the position `meta.as_of` reports, so a publication trailing the stored head within
 the publication lag tolerance serves both answers. A selection that is not the
 publication, such as an older `safe` or `finalized` position or an `at` before
 or after the publication's block, still reports the verified section `stale`.
@@ -1408,9 +1412,9 @@ validation without that redo check.
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
 attribution and shadow-diff correlation. For an ENS/60 verified answer, both
-metadata fields identify the current readable Ethereum position that pins the
-fresh lookup. An omitted-source ENS/60 response fences the indexed claim to
-that same schema-v2 position and project publication generation across the
+metadata fields identify the captured family publication's Ethereum position
+that pins the fresh lookup. An omitted-source ENS/60 response fences the
+indexed claim to that same schema-v2 position and project publication generation across the
 verified and indexed reads and returns `409 stale` if either changes.
 There is no persisted trace or verified-outcome cache. Indexed-only Basenames
 responses remain Base-scoped; Basenames verified primary-name lookup is

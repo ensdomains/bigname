@@ -76,6 +76,10 @@ pub(crate) struct EnsPrimaryNameAuthority {
     pub universal_resolver_address: String,
     /// The `default.reverse` registrar the ENS reverse manifest declares, when it declares one.
     pub default_reverse_registrar_address: Option<String>,
+    /// The stored head the publication was admitted against; the post-call guard requires it
+    /// unchanged.
+    pub head: LookupPosition,
+    /// The captured family publication, where the reverse and forward calls execute.
     pub position: LookupPosition,
     pub execution_authority: Value,
 }
@@ -378,12 +382,13 @@ pub(crate) async fn load_snapshot(
 
 /// The ENS [authority arms](../../../docs/glossary.md#authority-epoch) whose names the selected
 /// `ens_execution` entrypoint on `chain_id` may verify: the manifest's `verified_authority_arms`,
-/// defaulting to `["ens_v1"]`. Uses the active-or-shadow entrypoint selection at the readable head
-/// that primary-name lookup uses. Record lookup selects at its publication's block and refuses in
-/// band if that selection does not admit the name's arm.
+/// defaulting to `["ens_v1"]`. Uses the active-or-shadow entrypoint selection at the captured
+/// family publication's block that primary-name lookup uses. Record lookup selects at its own
+/// publication's block and refuses in band if that selection does not admit the name's arm.
 pub async fn admitted_verified_authority_arms(
     pool: &PgPool,
     chain_id: &str,
+    lag_tolerance_blocks: i64,
 ) -> Result<Vec<String>> {
     let chain = ens_l1_chain(chain_id).ok_or_else(|| {
         LookupError::unsupported(format!(
@@ -399,6 +404,8 @@ pub async fn admitted_verified_authority_arms(
         .await
         .map_err(database("set verified authority arm read isolation"))?;
     let head = load_head(&mut transaction, chain_id).await?;
+    let publication =
+        positions::ensure_project_at_head(&mut transaction, &head, lag_tolerance_blocks).await?;
     let entrypoint = routes::entrypoint_authority(Namespace::Ens, chain)?;
     let manifest = manifests::load_entrypoint(
         &mut transaction,
@@ -408,7 +415,7 @@ pub async fn admitted_verified_authority_arms(
             chain_id,
             role: entrypoint.role,
             allow_shadow: entrypoint.allow_shadow,
-            execution_block_number: head.block_number,
+            execution_block_number: publication.position.block_number,
             required_manifest_version: entrypoint.required_manifest_version,
             require_resolution_capability: true,
         },
@@ -421,8 +428,9 @@ pub async fn admitted_verified_authority_arms(
     Ok(manifest.verified_authority_arms)
 }
 
-/// Manifest entrypoints and the readable head for ENS primary-name lookup on `chain_id`, which
-/// must be the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
+/// Manifest entrypoints and the captured family publication for ENS primary-name lookup on
+/// `chain_id`, which must be the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
+/// The calls execute at the publication's block, the position the indexed claim is served at.
 pub(crate) async fn load_ens_primary_name_authority(
     pool: &PgPool,
     chain_id: &str,
@@ -452,7 +460,7 @@ pub(crate) async fn load_ens_primary_name_authority(
             chain_id,
             role: crate::ENS_REGISTRY_ROLE,
             allow_shadow: false,
-            execution_block_number: head.block_number,
+            execution_block_number: project_publication.position.block_number,
             required_manifest_version: None,
             require_resolution_capability: false,
         },
@@ -466,7 +474,7 @@ pub(crate) async fn load_ens_primary_name_authority(
             chain_id,
             role: ENS_UNIVERSAL_RESOLVER_ROLE,
             allow_shadow: true,
-            execution_block_number: head.block_number,
+            execution_block_number: project_publication.position.block_number,
             required_manifest_version: None,
             require_resolution_capability: true,
         },
@@ -480,7 +488,7 @@ pub(crate) async fn load_ens_primary_name_authority(
             chain_id,
             role: crate::ENS_DEFAULT_REVERSE_REGISTRAR_ROLE,
             allow_shadow: false,
-            execution_block_number: head.block_number,
+            execution_block_number: project_publication.position.block_number,
             required_manifest_version: None,
             require_resolution_capability: false,
         },
@@ -499,12 +507,13 @@ pub(crate) async fn load_ens_primary_name_authority(
         registry_address: authority_manifests[0].declared_address.to_ascii_lowercase(),
         universal_resolver_address: authority_manifests[1].declared_address.to_ascii_lowercase(),
         default_reverse_registrar_address,
-        position: LookupPosition {
+        head: LookupPosition {
             chain_id: head.chain_id,
             block_number: head.block_number,
             block_hash: head.block_hash,
             timestamp: head.timestamp,
         },
+        position: project_publication.position.clone(),
         execution_authority: execution_authority(&project_publication, None, &authority_manifests)?,
     })
 }

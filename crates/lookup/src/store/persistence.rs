@@ -74,7 +74,7 @@ pub(crate) async fn revalidate_primary_name_position(
     let mut transaction = revalidation_transaction(pool, lock_rows).await?;
     revalidate_lookup_state(
         &mut transaction,
-        &authority.position,
+        &authority.head,
         &observed_positions,
         &authority.execution_authority,
         None,

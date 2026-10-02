@@ -73,8 +73,9 @@ impl LookupEngine {
             .await
     }
 
-    /// Resolves and forward-verifies an ENS address primary name at the readable head of
-    /// `chain_id`, the Ethereum L1 the deployment profile projects (Mainnet or Sepolia).
+    /// Resolves and forward-verifies an ENS address primary name on `chain_id`, the Ethereum L1
+    /// the deployment profile projects (Mainnet or Sepolia), at the block of the family
+    /// publication it captures within the lag tolerance of the stored head.
     pub async fn lookup_ens_primary_name(
         &self,
         chain_id: &str,

@@ -41,10 +41,10 @@ publication may trail the stored head by the API's
 [publication lag tolerance](glossary.md#publication-lag-tolerance) (`BIGNAME_API_PUBLICATION_LAG_TOLERANCE_BLOCKS`, one
 block by default). The database guard requires the same head and the same
 publication the lookup captured, so the lag admitted at capture still holds
-when it checks. Same-chain record calls are pinned to the captured
-publication's block hash, the position the indexed comparison also uses; a
-Basenames record call runs on Ethereum at the position the projected name
-carries, and primary-name calls stay pinned to the stored head. The snapshot contains the full declared topology, including
+when it checks. Same-chain record and primary-name calls are pinned to the
+captured publication's block hash, the position the indexed comparison and the
+indexed primary-name claim also use; a Basenames record call runs on Ethereum
+at the position the projected name carries. The snapshot contains the full declared topology, including
 wildcards and any admitted cross-chain transport context.
 
 API revalidation begins a fresh `REPEATABLE READ, READ ONLY` transaction after
