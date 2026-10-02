@@ -15,9 +15,10 @@ pub(super) struct ManifestSource {
     pub chain_id: String,
     pub deployment_label: String,
     pub correlation_addresses: BTreeMap<String, String>,
-    /// Lowercase `resolver_implementations[].address` entries; the admission authority for
-    /// announcement-discovered resolvers.
-    pub resolver_implementations: Vec<String>,
+    /// Lowercase `resolver_implementations[].address` entries, each with its declared
+    /// `start_block` (zero when omitted); the admission authority for announcement-discovered
+    /// resolvers from that block on.
+    pub resolver_implementations: BTreeMap<String, i64>,
     /// Lowercase `universal_resolver_implementations` entries (`ens_execution` only).
     pub universal_resolver_implementations: Vec<String>,
     /// Lowercase addresses of the declared Universal Resolver proxies (`ens_execution` contracts
@@ -86,6 +87,8 @@ struct StoredContract {
 #[derive(Deserialize)]
 struct StoredImplementation {
     address: String,
+    #[serde(default)]
+    start_block: Option<i64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -132,7 +135,12 @@ pub(super) fn decode(input: ManifestInput) -> anyhow::Result<ManifestSource> {
         resolver_implementations: stored
             .resolver_implementations
             .into_iter()
-            .map(|implementation| implementation.address.to_ascii_lowercase())
+            .map(|implementation| {
+                (
+                    implementation.address.to_ascii_lowercase(),
+                    implementation.start_block.unwrap_or(0),
+                )
+            })
             .collect(),
         universal_resolver_implementations: stored
             .universal_resolver_implementations

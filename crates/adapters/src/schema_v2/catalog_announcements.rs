@@ -9,7 +9,8 @@ pub(in crate::schema_v2) const ANNOUNCEMENT_ADMISSION_BASIS: &str =
     "declared_resolver_implementation";
 
 /// The `Upgraded` selection scope is every emitter, narrowed by `topic1`: the log is selected
-/// only when the indexed implementation is declared by this manifest.
+/// only when the indexed implementation is declared by this manifest and the log is not before
+/// that declaration's start, which Ingest does not promise to have fetched.
 pub(super) fn announces_declared_implementation(
     source: &ManifestSource,
     event: &ManifestEvent,
@@ -21,7 +22,16 @@ pub(super) fn announces_declared_implementation(
             .topics
             .get(1)
             .and_then(|topic| topic_address(topic))
-            .is_some_and(|implementation| source.resolver_implementations.contains(&implementation))
+            .is_some_and(|implementation| declares(source, &implementation, Some(raw.block_number)))
+}
+
+/// An `Upgraded` announcement (`announced_at`) before the declaration's `start_block` admits
+/// nothing: Ingest does not promise to have fetched it, so it must not decide admission.
+fn declares(source: &ManifestSource, implementation: &str, announced_at: Option<i64>) -> bool {
+    source
+        .resolver_implementations
+        .get(implementation)
+        .is_some_and(|start| announced_at.is_none_or(|block| block >= *start))
 }
 
 fn topic_address(topic: &str) -> Option<String> {
@@ -32,11 +42,13 @@ fn topic_address(topic: &str) -> Option<String> {
 
 impl Catalog {
     /// The same-namespace, same-chain, same-deployment resolver manifest declaring
-    /// `implementation`; it is the admitting authority for an announced proxy.
+    /// `implementation`, for an `Upgraded` announcement at `announced_at` no earlier than the
+    /// declaration's start; it is the admitting authority for an announced proxy.
     pub(in crate::schema_v2) fn resolver_implementation_authority(
         &self,
         source: &ManifestSource,
         implementation: &str,
+        announced_at: Option<i64>,
     ) -> Option<&ManifestSource> {
         let implementation = implementation.to_ascii_lowercase();
         self.manifests.iter().find(|candidate| {
@@ -44,7 +56,7 @@ impl Catalog {
                 && candidate.namespace == source.namespace
                 && candidate.chain_id == source.chain_id
                 && candidate.deployment_label == source.deployment_label
-                && candidate.resolver_implementations.contains(&implementation)
+                && declares(candidate, &implementation, announced_at)
         })
     }
 

@@ -1026,6 +1026,69 @@ async fn checked_in_sepolia_resolver_admission_clamps_retained_redo_to_cursor_fl
 }
 
 #[tokio::test]
+async fn raising_a_covered_implementation_start_stamps_no_ingest_redo() -> Result<()> {
+    let scratch =
+        ScratchDatabase::create("production_manifest_sepolia_implementation_start_raise").await?;
+    let desired_root = checked_in_sepolia_root();
+    let baseline_root = copy_profile_with_v2_resolver(&desired_root, |manifest| {
+        manifest.replacen("start_block = 11709070, ", "", 1)
+    })?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&baseline_root)?).await?;
+    assert_eq!(
+        compiled_implementation_starts(scratch.pool()).await?,
+        vec![(SEPOLIA_PERMISSIONED_RESOLVER_IMPL.to_owned(), 0)]
+    );
+    seed_completed_ingest_range_through(&scratch, "ethereum-sepolia", 12_000_000).await?;
+
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&desired_root)?).await?;
+    assert_eq!(
+        compiled_implementation_starts(scratch.pool()).await?,
+        vec![(SEPOLIA_PERMISSIONED_RESOLVER_IMPL.to_owned(), 11_709_070)]
+    );
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+        None,
+        "ingest already covers the implementation from block zero"
+    );
+
+    fs::remove_dir_all(&baseline_root)?;
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn a_new_implementation_widens_from_its_declared_start() -> Result<()> {
+    const ADDED: &str = "0x00000000000000000000000000000000000000ee";
+    for (start, expected_from) in [(Some(11_900_000), 11_900_000), (None, 0)] {
+        let scratch =
+            ScratchDatabase::create("production_manifest_sepolia_implementation_widening").await?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(checked_in_sepolia_root())?)
+            .await?;
+        seed_completed_ingest_range_through(&scratch, "ethereum-sepolia", 12_000_000).await?;
+        let desired_root = copy_profile_with_v2_resolver(&checked_in_sepolia_root(), |manifest| {
+            let start = start.map_or_else(String::new, |start| format!(", start_block = {start}"));
+            manifest.replacen(
+                "resolver_implementations = [ ",
+                &format!(
+                    "resolver_implementations = [ {{ role = \"permissioned_resolver\", address = \"{ADDED}\"{start} }}, "
+                ),
+                1,
+            )
+        })?;
+
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&desired_root)?).await?;
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+            Some((expected_from, 12_000_000)),
+            "implementation start {start:?}"
+        );
+
+        fs::remove_dir_all(&desired_root)?;
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn widening_an_ingested_manifest_event_blocks_initial_derivation_until_reingest() -> Result<()>
 {
     let scratch = ScratchDatabase::create("production_manifest_sync_ingest_widening_gap").await?;
@@ -5131,22 +5194,61 @@ fn checked_in_sepolia_root() -> std::path::PathBuf {
         .join("manifests/sepolia")
 }
 
-fn copy_profile_without_resolver(source: &std::path::Path) -> Result<std::path::PathBuf> {
-    fn copy_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
-        fs::create_dir_all(target)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let source_path = entry.path();
-            let target_path = target.join(entry.file_name());
-            if source_path.is_dir() {
-                copy_dir(&source_path, &target_path)?;
-            } else {
-                fs::copy(source_path, target_path)?;
-            }
-        }
-        Ok(())
-    }
+const SEPOLIA_PERMISSIONED_RESOLVER_IMPL: &str = "0x14f09fd05d4585759e54844dc9b00147131cf243";
 
+fn copy_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir(&source_path, &target_path)?;
+        } else {
+            fs::copy(source_path, target_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_profile_with_v2_resolver(
+    source: &std::path::Path,
+    edit: impl FnOnce(String) -> String,
+) -> Result<std::path::PathBuf> {
+    let target = std::env::temp_dir().join(format!(
+        "bigname-sepolia-v2-resolver-edit-{}",
+        Uuid::new_v4()
+    ));
+    copy_dir(source, &target)?;
+    let path = target.join("ethereum/ens/ens_v2_resolver_l1/v1.toml");
+    let original = fs::read_to_string(&path)?;
+    let edited = edit(original.clone());
+    anyhow::ensure!(
+        edited != original,
+        "the resolver manifest edit matched nothing"
+    );
+    fs::write(path, edited)?;
+    Ok(target)
+}
+
+async fn compiled_implementation_starts(pool: &sqlx::PgPool) -> Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT lower(entry -> 'emitter' ->> 'implementation'), (entry ->> 'start')::bigint
+         FROM manifest_versions manifest
+         CROSS JOIN LATERAL jsonb_array_elements(
+             manifest.manifest_payload -> '_bigname_compiled_watch'
+         ) AS compiled(entry)
+         WHERE manifest.chain_id = 'ethereum-sepolia'
+           AND manifest.source_family = 'ens_v2_resolver_l1'
+           AND manifest.rollout_status = 'active'
+           AND entry -> 'emitter' ->> 'kind' = 'implementation'
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+fn copy_profile_without_resolver(source: &std::path::Path) -> Result<std::path::PathBuf> {
     let target = std::env::temp_dir().join(format!(
         "bigname-sepolia-without-v1-resolver-{}",
         Uuid::new_v4()

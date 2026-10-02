@@ -262,7 +262,11 @@ pub(super) fn materialize(
             } => {
                 let implementation = normalize_address(&implementation)?;
                 let Some(authority_source) = catalog
-                    .resolver_implementation_authority(&selected.source, &implementation)
+                    .resolver_implementation_authority(
+                        &selected.source,
+                        &implementation,
+                        (selected.event.name == "Upgraded").then_some(raw.block_number),
+                    )
                     .cloned()
                 else {
                     continue;
