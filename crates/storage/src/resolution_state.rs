@@ -166,5 +166,22 @@ mod tests {
             expect(Protocol::EnsV1, 20, "0xmanaged", "0xtop", false),
             "a cycle ends at its last hop"
         );
+        assert_eq!(
+            state(&[row("0xtop", "universal_resolver", "0xnew", "other", 30)]),
+            expect(Protocol::EnsV1, 30, "0xtop", "0xnew", true),
+            "the client-facing proxy itself can point at an unadmitted implementation"
+        );
+        // A retired declaration keeps its row with no role; Project classifies a hop to it as
+        // `other`, and the row itself never starts the chain.
+        let mut retired = managed("0xv2", "admitted_universal_resolver");
+        retired.proxy.proxy_role = None;
+        let top_to_retired = row("0xtop", "universal_resolver", "0xmanaged", "other", 10);
+        assert_eq!(
+            state(&[top_to_retired, retired]),
+            expect(Protocol::EnsV1, 10, "0xtop", "0xmanaged", true)
+        );
+        let mut retired = managed("0xv2", "admitted_universal_resolver");
+        retired.proxy.proxy_role = None;
+        assert_eq!(state(&[retired]), None);
     }
 }

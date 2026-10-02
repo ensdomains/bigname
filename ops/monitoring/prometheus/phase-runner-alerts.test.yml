@@ -69,9 +69,9 @@ tests:
               instance: phase-runner:9465
               job: bigname-phase-runner
               severity: page
-            exp_annotations:
-              threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head."
-              meaning: "Upstream repointed the named chain's Universal Resolver to an implementation bigname does not admit, so the chain reads as not cut over and every .eth name ENSv1 decides serves its ENSv1 expiry, grace and resolver again. Pin and admit the new implementation."
+            exp_annotations: &universal_resolver_annotations
+              threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head and no Project redo is running."
+              meaning: "The named chain's Universal Resolver ends at an implementation bigname does not admit, so the chain reads as not cut over and every .eth name ENSv1 decides serves its ENSv1 expiry, grace and resolver again. Either upstream repointed it or a manifest change dropped the implementation; the runner's warning names the implementation and the block of its Upgraded."
 
   - name: an unadmitted implementation in replayed history does not page
     interval: 1m
@@ -84,6 +84,77 @@ tests:
       - eval_time: 10m
         alertname: BignameUniversalResolverUnadmitted
         exp_alerts: []
+
+  - name: the unadmitted page holds up to 30 blocks of served lag
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="lag-30"}'
+        values: '1x10'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="lag-30"}'
+        values: '30x10'
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="lag-31"}'
+        values: '1x10'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="lag-31"}'
+        values: '31x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts:
+          - exp_labels:
+              chain: lag-30
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations: *universal_resolver_annotations
+
+  - name: the unadmitted hold starts when replayed history becomes current
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x15'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '5000x5 1x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-sepolia
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations: *universal_resolver_annotations
+
+  - name: a Project redo near the head does not page the unadmitted state it replays
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x15'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '20x15'
+      - series: 'phase_runner_redo_in_progress{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia",phase="project"}'
+        values: '1x8 0x7'
+      - series: 'phase_runner_redo_in_progress{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia",phase="interpret"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-sepolia
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations: *universal_resolver_annotations
 
   - name: inactive one-hot phase states do not page
     interval: 1m
