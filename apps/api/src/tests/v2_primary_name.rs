@@ -2006,7 +2006,7 @@ async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
 
 /// Under the Sepolia deployment profile the ENS projection publishes on `ethereum-sepolia`, and
 /// live ENS/60 verification executes against that chain's manifest-admitted registry and
-/// Universal Resolver at its readable head: same reverse leg, same gate, same forward call, same
+/// Universal Resolver at its family publication's block: same reverse leg, same gate, same forward call, same
 /// hash pinning as Mainnet. The provider is selected by that chain, so a Mainnet-only provider
 /// map is a configuration failure rather than a Mainnet call.
 #[tokio::test]
@@ -2102,7 +2102,7 @@ async fn v2_get_primary_name_verifies_against_sepolia_under_the_sepolia_profile(
         assert_eq!(
             request["params"][1]["blockHash"],
             json!("0xbinding"),
-            "sepolia calls stay pinned to the readable sepolia head: {request}"
+            "sepolia calls stay pinned to the sepolia publication: {request}"
         );
     }
 

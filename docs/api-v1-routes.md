@@ -3401,14 +3401,18 @@ introduces it rebuilds Project from full history before serving the option; see
   call without `declared_state`/`verified_state`. When a served head is
   available, `meta.as_of` and `meta.as_of_token` record the served positions
   for staleness attribution and shadow-diff correlation. ENS/60 verification
-  uses the schema-v2 lookup engine's current readable Ethereum position and
-  pins its reverse and optional forward calls to that block hash. It persists
+  runs at the block of the Ethereum
+  [family publication](glossary.md#family-marker) the lookup engine captures,
+  which may trail the stored head by the
+  [publication lag tolerance](glossary.md#publication-lag-tolerance), and pins
+  its reverse and optional forward calls to that block hash. It persists
   neither a legacy trace/outcome nor a divergence row. When `source` is omitted,
   the indexed claim is read from the family reverse claims and
-  returned beside the verified answer only when the current `chain_heads`
-  position and captured family publication match the
-  lookup before verified execution and remain unchanged after the indexed
-  read; otherwise the request returns `409 stale`. Live results never change
+  returned beside the verified answer only when the selected family
+  publication is the lookup's position before verified execution and remains
+  unchanged after the indexed read; otherwise the request returns `409 stale`.
+  The post-call guard separately requires the stored head that publication was
+  admitted against to be unchanged, and returns `409 stale` if it moved. Live results never change
   the indexed answer. Basenames verified primary-name lookup is unsupported;
   indexed Basenames responses remain Base-scoped.
 - ENSIP-19 default name: for ENS `coin_type=60`, both sources follow the read
@@ -3464,8 +3468,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
-  `meta.as_of` and `meta.as_of_token` for indexed state or the current readable
-  Ethereum L1 position used by fresh ENS/60 verification: chain `1` under the
+  `meta.as_of` and `meta.as_of_token` for indexed state or the family
+  publication's Ethereum L1 position used by fresh ENS/60 verification: chain `1` under the
   Mainnet deployment profile, chain `11155111` (token slot `ethereum-sepolia`)
   under the Sepolia profile. No metadata field
   implies cache reuse or a persisted execution identity. Provider transport
@@ -3505,7 +3509,8 @@ introduces it rebuilds Project from full history before serving the option; see
   ENSv2 registry, so there is no later arm to hide; or Sepolia, through the
   Sepolia profile's `ens_execution` Universal Resolver and `ens_v1_registry_l1`
   registry declarations, with the same reverse leg, the same pre-forward
-  authority gate, the same hash pinning to the readable Sepolia head, and the
+  authority gate, the same hash pinning to the Sepolia family publication's
+  block, and the
   same provider limits. The official Sepolia manifest admits both `ens_v1` and `ens_v2`
   through its Universal Resolver proxy; the [deployment inventory](sepolia-deployment.md)
   records the root binding and rollout verification. The

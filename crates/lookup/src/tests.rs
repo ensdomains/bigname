@@ -3252,6 +3252,29 @@ async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declara
     Ok(())
 }
 
+/// The arm read selects the entrypoint at the captured publication's block, where primary-name
+/// verification executes: a Universal Resolver declared from a block past the publication but at
+/// or before the head is not yet an entrypoint.
+#[tokio::test]
+async fn admitted_verified_authority_arms_select_at_the_publication() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE manifest_contract_instances SET start_block_number = 11
+         WHERE role = 'universal_resolver'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    advance_head_to(fixture.pool(), 12, ETHEREUM_FAR_HASH).await?;
+
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 3)
+        .await
+        .expect_err("no Universal Resolver is declared at the publication's block");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn primary_name_lookup_uses_manifest_entrypoints_and_readable_head() -> AnyResult<()> {
     let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
