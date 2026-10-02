@@ -113,9 +113,17 @@ manifest-drift observation job. Baseline
 materialization and handling of upgrade observations are the schema-v2
 consumers that keep `proxy_kind` in the manifest schema.
 
-`resolver_implementations` is a list of `{ role, address, read_features? }`
-entries with unique addresses; several implementation generations may share
-one role. `[[contracts]]` also accepts `read_features`. Each feature list is
+`resolver_implementations` is a list of
+`{ role, address, start_block?, read_features? }` entries with unique
+addresses; several implementation generations may share one role. The optional
+`start_block` is the implementation contract's creation block, cited from its
+deployment receipt like a contract's start. It bounds only the entry's
+[implementation-announcement
+watch](glossary.md#implementation-announcement-watch) (see [Resolver admission
+by implementation
+announcement](#resolver-admission-by-implementation-announcement)); omitted
+means block zero, and it must fit a signed 64-bit integer like every other
+`start_block`. `[[contracts]]` also accepts `read_features`. Each feature list is
 deduplicated and uses the closed vocabulary `ensip19_default_address`,
 `ensip10_extended_resolver` in this release. Unknown or duplicate values fail
 loading. Contract-level features are
@@ -209,7 +217,8 @@ declared implementation, without waiting for a registry pointer; see
 announcement](#resolver-admission-by-implementation-announcement). Each
 declared implementation compiles one watch-plan entry — the family's `Upgraded`
 topic across every emitter, narrowed by the indexed `implementation` topic to
-that address — so adding or removing an implementation is a [compiled watch
+that address, from its `start_block` or block zero — so adding or removing an
+implementation, or lowering its `start_block`, is a [compiled watch
 plan](glossary.md#compiled-watch-plan) change and follows the [mandatory
 historical fetch rule](#mandatory-historical-fetch-after-watch-plan-widening).
 
@@ -1370,8 +1379,12 @@ An implementation-announcement entry is covered only by the same
 `(family, implementation, topic)` entry or by an all-emitter entry for the
 same topic. Adding a `resolver_implementations` address to an
 `ens_v2_resolver_l1` manifest that declares `Upgraded` therefore widens the
-plan from block zero and stamps the required Ingest redo like any other
-widening; removing one narrows. The first binary that compiles these entries
+plan from that entry's `start_block` (block zero when omitted) and stamps the
+required Ingest redo like any other widening; removing one narrows. Setting or
+raising `start_block` on an entry the previous plan already compiled is a
+start-later change: the previous entry's earlier start covers it, so it stamps
+no Ingest redo. Lowering it, or removing it from an entry that had one, widens
+from the new start. The first binary that compiles these entries
 widens every existing deployment whose active `ens_v2_resolver_l1` manifest
 already declares implementations, because the stored compiled plan preceding
 it has no such entry: that deployment's next manifest synchronization stamps
@@ -1822,9 +1835,17 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 - An `ens_v2_resolver_l1` manifest that declares `Upgraded` compiles one
   [implementation-announcement watch](glossary.md#implementation-announcement-watch)
   per `resolver_implementations` entry: every emitter, the `Upgraded` topic,
-  `topic1` equal to that implementation, from block zero (clipped to the
-  chain's ingest start at runtime). It is not an all-emitter entry, so it does
-  not cover a discovered resolver's own address-scoped `Upgraded` watch.
+  `topic1` equal to that implementation, from the entry's `start_block`, or
+  block zero when it is omitted (clipped to the chain's ingest start at
+  runtime). It is not an all-emitter entry, so it does not cover a discovered
+  resolver's own address-scoped `Upgraded` watch. The start bounds the compiled
+  plan, and so the lower end of a required Ingest redo that a new
+  implementation stamps; runtime intake keeps the `topic1` filter over the
+  manifest's whole active range. The OpenZeppelin ERC-1967 upgrade reverts for
+  an implementation address without code before it emits `Upgraded`, so a
+  proxy built on it cannot announce an implementation before that contract's
+  creation block.
+  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 

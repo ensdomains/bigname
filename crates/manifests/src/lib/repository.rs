@@ -391,6 +391,12 @@ fn validate_manifest_metadata(
                 implementation.address
             );
         }
+        validate_start_block_fits_i64(
+            implementation.start_block,
+            "resolver implementation",
+            &implementation.role,
+            path,
+        )?;
         if !resolver_implementation_addresses.insert(normalize_address(&implementation.address)) {
             bail!(
                 "manifest {} duplicates resolver implementation address {}",

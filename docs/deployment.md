@@ -2135,3 +2135,21 @@ rotate. It adds no schema-migration and needs no redo or historical ingest
 fetch. Verified answers that were `failed` with `resolver_call_reverted` for
 such names become `not_found`; indexed answers do not change. After it serves,
 run the Sepolia check in [Default reverse names](#default-reverse-names).
+
+### Resolver implementation start blocks
+
+The build that lets a `resolver_implementations` entry carry an optional
+`start_block` (TYR-193, see [Resolver admission by implementation
+announcement](manifests.md#resolver-admission-by-implementation-announcement))
+changes `crates/manifests/src` and the Sepolia `ens_v2_resolver_l1` manifest, so
+it rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
+for every chain and changes Sepolia's manifest authority. It shares the one
+full-history Interpret redo and Project redo that the v0.3.0 release already
+runs for TYR-149, TYR-183 and TYR-191, so it adds no redo of its own. It sets
+the start of the admitted implementation
+`0x14f09fd05d4585759e54844dc9b00147131cf243` to its creation block `11709070`.
+The compiled watch plan already covers that implementation from block zero, so
+the later start stamps no historical ingest fetch. It adds no
+schema-migration. A later implementation declared with a `start_block` stamps
+its required Ingest redo from that block, clamped to the chain's ingest start,
+instead of from block zero.

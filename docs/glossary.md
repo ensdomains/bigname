@@ -88,7 +88,9 @@ rows — millions on Basenames alone — mark within-era anchor transitions.
 a [watch plan](#watch-plan--watched-tuple) entry compiled from one
 `resolver_implementations` address of an `ens_v2_resolver_l1` manifest that
 declares `Upgraded`: every emitter, the ERC-1967 `Upgraded` event, narrowed by
-the indexed `implementation` topic to that address, from block zero. It is how
+the indexed `implementation` topic to that address, from the entry's optional
+`start_block` (the implementation's creation block), or block zero without
+one. It is how
 bigname learns of an upgradeable resolver proxy before any registry points at
 it, without per-address historical lookback. Adding an implementation adds
 exactly one such entry and counts as watch-plan widening. Defined in
