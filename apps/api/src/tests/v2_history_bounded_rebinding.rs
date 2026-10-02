@@ -851,3 +851,183 @@ async fn the_registry_owner_of_a_tokenless_subname_owns_it_in_history() -> Resul
     assert_eq!(views[0], views[1]);
     Ok(())
 }
+
+const LAPSED_EXPIRY: u64 = 1_700_000_000 - 90 * 24 * 60 * 60 - 1_000;
+const NEW_HOLDER: &str = "0x00000000000000000000000000000000000000c1";
+
+/// A registration in the order the ENSv1 contracts emit it, for `owner` until `expires`; a
+/// re-registration of a lapsed token first burns it
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L131-L153 @ ens_v1@91c966f).
+fn registration_at(
+    block: i64,
+    owner: &str,
+    expires: u64,
+    burned: Option<&str>,
+) -> Vec<RawLogInput> {
+    let owner: Address = owner.parse().unwrap();
+    let label = keccak256(LABEL.as_bytes());
+    let mut logs = Vec::new();
+    if let Some(burned) = burned {
+        logs.push(
+            Transfer {
+                from: burned.parse().unwrap(),
+                to: Address::ZERO,
+                tokenId: token_id(),
+            }
+            .encode_log_data(),
+        );
+    }
+    logs.push(
+        Transfer {
+            from: Address::ZERO,
+            to: owner,
+            tokenId: token_id(),
+        }
+        .encode_log_data(),
+    );
+    let mut raws: Vec<RawLogInput> = logs
+        .into_iter()
+        .enumerate()
+        .map(|(index, data)| raw(data, block, index as i64, REGISTRAR))
+        .collect();
+    let next = raws.len() as i64;
+    raws.push(raw(
+        NewOwner {
+            node: eth_node(),
+            label,
+            owner,
+        }
+        .encode_log_data(),
+        block,
+        next,
+        REGISTRY,
+    ));
+    raws.push(raw(
+        registrar_lifecycle::NameRegistered {
+            id: token_id(),
+            owner,
+            expires: U256::from(expires),
+        }
+        .encode_log_data(),
+        block,
+        next + 1,
+        REGISTRAR,
+    ));
+    raws.push(raw(
+        legacy_controller::NameRegistered {
+            name: LABEL.to_owned(),
+            label,
+            owner,
+            cost: U256::from(7),
+            expires: U256::from(expires),
+        }
+        .encode_log_data(),
+        block,
+        next + 2,
+        CONTROLLER,
+    ));
+    raws
+}
+
+/// A lease that lapsed and was released leaves the name on its registry-only resource, owned by
+/// its registry owner: `OTHER`, to whom the old registrant handed the record. The name is then
+/// registered again and its new token moves without `reclaim`, which reopens the same
+/// registry-only resource as a handoff. That later handoff must not take `OTHER`'s earlier
+/// ownership out of its `owner` history, and the released registrant never owns the name.
+#[tokio::test]
+async fn a_later_handoff_keeps_an_earlier_registry_owner_in_owner_history() -> Result<()> {
+    const RELEASED: i64 = 131;
+    const REREGISTERED: i64 = 132;
+    const HANDED_OFF: i64 = 133;
+    let (lapsed, session) = interpret(
+        REGISTERED,
+        registration_at(REGISTERED, OWNER, LAPSED_EXPIRY, None),
+        None,
+    )?;
+    let (moved, session) = interpret(RELEASED, registry_set_owner(RELEASED, OTHER), Some(session))?;
+    let (reregistered, session) = interpret(
+        REREGISTERED,
+        registration_at(REREGISTERED, NEW_HOLDER, 4_102_444_800, Some(OWNER)),
+        Some(session),
+    )?;
+    let handoff = raw(
+        Transfer {
+            from: NEW_HOLDER.parse().unwrap(),
+            to: HOLDER.parse().unwrap(),
+            tokenId: token_id(),
+        }
+        .encode_log_data(),
+        HANDED_OFF,
+        0,
+        REGISTRAR,
+    );
+    let (handed_off, _) = interpret(HANDED_OFF, vec![handoff], Some(session))?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=HANDED_OFF).await?;
+    let pool = &database.pool;
+    let name = bigname_storage::logical_name_id_for_name("ens", &format!("{LABEL}.eth"));
+    let mut owners = Vec::new();
+    let mut other_rows = Vec::new();
+    for (block, output) in [
+        (REGISTERED, &lapsed),
+        (RELEASED, &moved),
+        (REREGISTERED, &reregistered),
+        (HANDED_OFF, &handed_off),
+    ] {
+        persist(pool, output).await?;
+        project_to(pool, block, None).await?;
+        let composed = bigname_storage::families::name::load_family_name(pool, &name)
+            .await?
+            .context("composed name")?;
+        owners.push(composed.declared_summary["control"]["owner"].clone());
+        let mut relations: Vec<String> =
+            bigname_storage::load_address_names_current(pool, OTHER, None, None)
+                .await?
+                .iter()
+                .map(|row| row.relation.as_str().to_owned())
+                .collect();
+        relations.sort();
+        other_rows.push(relations);
+    }
+    let owner = [bigname_storage::AddressNameRelation::TokenHolder];
+    let mut owned = Vec::new();
+    for bound in [RELEASED, HANDED_OFF] {
+        for canonical_only in [true, false] {
+            owned.push(history_for(pool, OTHER, bound, canonical_only, Some(&owner)).await?);
+        }
+    }
+    let registry_only_handoffs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.project_binding_candidate
+         WHERE registry_only AND lease_resource_id IS NOT NULL AND block_number = $1",
+    )
+    .bind(HANDED_OFF)
+    .fetch_one(pool)
+    .await?;
+    database.cleanup().await?;
+
+    assert_eq!(
+        owners,
+        [json!(OWNER), json!(OTHER), json!(NEW_HOLDER), json!(HOLDER)],
+        "the owner after the release is the registry owner, not the released registrant"
+    );
+    assert_eq!(
+        other_rows,
+        [
+            Vec::<String>::new(),
+            vec!["effective_controller".to_owned(), "token_holder".to_owned()],
+            Vec::new(),
+            Vec::new(),
+        ]
+    );
+    // Anti-vacuity: the handoff reopened the registry-only resource for the new lease.
+    assert_eq!(registry_only_handoffs, 1);
+    for view in &owned {
+        assert!(
+            view.iter()
+                .any(|row| row.starts_with("AuthorityTransferred:")
+                    && row.ends_with(&format!("@{RELEASED}"))),
+            "the registry owner's tokenless ownership stays in its owner history: {owned:?}"
+        );
+    }
+    Ok(())
+}

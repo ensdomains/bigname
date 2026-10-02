@@ -99,10 +99,14 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         .pointer("/control/owner")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
+    let supported = AuthoritySelection::from_provenance(&row.provenance)
+        .unsupported_reason
+        .is_none();
     let mut out = Vec::new();
-    if !lineage
-        || modifier.is_none()
-        || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked"))
+    if lineage
+        && (modifier.is_none()
+            || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked")))
+        || !lineage && supported
     {
         out.push((owner, TOKEN_HOLDER));
     }
@@ -279,7 +283,10 @@ pub(super) fn relation_position(
                 .declared_summary
                 .pointer("/registration/registrant")
                 .is_none_or(Value::is_null);
-    if controlled && let Some((_, position)) = controller(input, mask_open(input)) {
+    if controlled
+        && let Some((controller, position)) = controller(input, mask_open(input))
+        && (relation == EFFECTIVE_CONTROLLER || controller.eq_ignore_ascii_case(address))
+    {
         return Some(position);
     }
     if relation == ROLE_HOLDER {
