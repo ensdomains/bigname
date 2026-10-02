@@ -53,7 +53,7 @@ pub(super) fn compile_watch_scope(manifest: &SourceManifest) -> Result<Vec<Compi
                     implementation: normalize_address(&implementation.address),
                 },
                 &topic0,
-                0,
+                implementation.start_block.unwrap_or(0),
             );
         }
     }

@@ -8,11 +8,13 @@ deployment_epoch = "ens_v2_sepolia_20260915"
 rollout_status = "active"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741)
+# `start_block` is the implementation's creation block from its deployment receipt.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2250 @ ens_v2_sepolia_20260916@366de741)
 # `ensip19_default_address`: PermissionedResolver inherits AbstractRecordResolver, whose address
 # getter returns the default EVM coin-type entry when the requested EVM coin type is empty.
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L80-L83 @ ens_v2_sepolia_20260916@366de741)
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractRecordResolver.sol:L169-L178 @ ens_v2_sepolia_20260916@366de741)
-resolver_implementations = [ { role = "permissioned_resolver", address = "0x14f09fd05d4585759e54844dc9b00147131cf243", read_features = [ "ensip19_default_address" ] } ]
+resolver_implementations = [ { role = "permissioned_resolver", address = "0x14f09fd05d4585759e54844dc9b00147131cf243", start_block = 11709070, read_features = [ "ensip19_default_address" ] } ]
 roots = []
 discovery_rules = []
 

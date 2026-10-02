@@ -113,9 +113,18 @@ manifest-drift observation job. Baseline
 materialization and handling of upgrade observations are the schema-v2
 consumers that keep `proxy_kind` in the manifest schema.
 
-`resolver_implementations` is a list of `{ role, address, read_features? }`
-entries with unique addresses; several implementation generations may share
-one role. `[[contracts]]` also accepts `read_features`. Each feature list is
+`resolver_implementations` is a list of
+`{ role, address, start_block?, read_features? }` entries with unique
+addresses; several implementation generations may share one role. The optional
+`start_block` is the implementation contract's creation block, cited from its
+deployment receipt like a contract's start. It bounds the entry's
+[implementation-announcement
+watch](glossary.md#implementation-announcement-watch), and an `Upgraded`
+announcement naming the implementation before that block admits nothing (see
+[Resolver admission by implementation
+announcement](#resolver-admission-by-implementation-announcement)); an entry
+without `start_block` admits from block zero. It must fit a signed 64-bit
+integer like every other `start_block`. `[[contracts]]` also accepts `read_features`. Each feature list is
 deduplicated and uses the closed vocabulary `ensip19_default_address`,
 `ensip10_extended_resolver` in this release. Unknown or duplicate values fail
 loading. Contract-level features are
@@ -209,7 +218,8 @@ declared implementation, without waiting for a registry pointer; see
 announcement](#resolver-admission-by-implementation-announcement). Each
 declared implementation compiles one watch-plan entry — the family's `Upgraded`
 topic across every emitter, narrowed by the indexed `implementation` topic to
-that address — so adding or removing an implementation is a [compiled watch
+that address, from its `start_block` or block zero — so adding or removing an
+implementation, or lowering its `start_block`, is a [compiled watch
 plan](glossary.md#compiled-watch-plan) change and follows the [mandatory
 historical fetch rule](#mandatory-historical-fetch-after-watch-plan-widening).
 
@@ -1370,12 +1380,17 @@ An implementation-announcement entry is covered only by the same
 `(family, implementation, topic)` entry or by an all-emitter entry for the
 same topic. Adding a `resolver_implementations` address to an
 `ens_v2_resolver_l1` manifest that declares `Upgraded` therefore widens the
-plan from block zero and stamps the required Ingest redo like any other
-widening; removing one narrows. The first binary that compiles these entries
+plan from that entry's `start_block` (block zero when omitted) and stamps the
+required Ingest redo like any other widening; removing one narrows. Setting or
+raising `start_block` on an entry the previous plan already compiled is a
+start-later change: the previous entry's earlier start covers it, so it stamps
+no Ingest redo. Lowering it, or removing it from an entry that had one, widens
+from the new start. The first binary that compiles these entries
 widens every existing deployment whose active `ens_v2_resolver_l1` manifest
 already declares implementations, because the stored compiled plan preceding
 it has no such entry: that deployment's next manifest synchronization stamps
-the required Ingest redo from its ingest start and mints a manifest-authority
+the required Ingest redo from the earliest entry's start (block zero when
+omitted), clamped to its ingest start, and mints a manifest-authority
 marker, so its Interpret redo must be run as the attested full-range redo
 described below.
 
@@ -1752,7 +1767,17 @@ factory, announces a declared implementation:
 - `Upgraded(address indexed implementation)` from any emitter whose indexed
   `implementation` is in the same-namespace, same-deployment
   `ens_v2_resolver_l1` manifest's `resolver_implementations` admits the emitter
-  as an `ens_v2_resolver_l1` instance from that block. The event is selected
+  as an `ens_v2_resolver_l1` instance from that block, unless the block is
+  before that entry's `start_block`. Before that start the announcement
+  neither selects an otherwise unadmitted emitter nor authorizes an
+  announcement admission, so a database whose Ingest redo started at the
+  declared start and one that fetched the earlier log write the same identity,
+  discovery and normalized-event rows; the fetched log can add only an
+  [operator diagnostic](storage.md#table-ownership) row in
+  `interpret_decode_skips`. An emitter admitted
+  some other way, for example by `ResolverCreated`, keeps its own earlier
+  `Upgraded` history, which its address-scoped watch fetches in every
+  database. The event is selected
   across every emitter — the precedent is the ENSv1 resolver family's match-all
   signature set — but narrowed by `topic1` to the declared implementation
   addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
@@ -1822,9 +1847,19 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 - An `ens_v2_resolver_l1` manifest that declares `Upgraded` compiles one
   [implementation-announcement watch](glossary.md#implementation-announcement-watch)
   per `resolver_implementations` entry: every emitter, the `Upgraded` topic,
-  `topic1` equal to that implementation, from block zero (clipped to the
-  chain's ingest start at runtime). It is not an all-emitter entry, so it does
-  not cover a discovered resolver's own address-scoped `Upgraded` watch.
+  `topic1` equal to that implementation, from the entry's `start_block`, or
+  block zero when it is omitted (clipped to the chain's ingest start at
+  runtime). It is not an all-emitter entry, so it does not cover a discovered
+  resolver's own address-scoped `Upgraded` watch. The start bounds the compiled
+  plan, and so the lower end of a required Ingest redo that a new
+  implementation stamps; runtime intake keeps the `topic1` filter over the
+  manifest's whole active range, and Interpret does not let an announcement
+  it fetched before the start select an otherwise unadmitted emitter or admit
+  one. An announcement emitted through the OpenZeppelin ERC-1967 upgrade path cannot precede the implementation's creation block,
+  because that path reverts for an implementation address without code before
+  it emits `Upgraded`; another emitter can log one earlier, which is why
+  Interpret applies the start.
+  (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.
 
@@ -1890,6 +1925,7 @@ above does not change that provenance rule.
 | ENSv2 RootRegistry (official Sepolia) | `11708988` | [^v2-deploy-root] |
 | ENSv2 ETHRegistry (official Sepolia) | `11709066` | [^v2-deploy-ethreg] |
 | ENSv2 ETHRegistrar (official Sepolia) | `11709083` | [^v2-deploy-ethrc] |
+| ENSv2 PermissionedResolver implementation (official Sepolia) | `11709070` | [^v2-deploy-pres-impl] |
 
 ---
 
@@ -1958,6 +1994,7 @@ above does not change that provenance rule.
 [^v2-deploy-root]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2995 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L1427 @ ens_v2_sepolia_20260916@366de741)
+[^v2-deploy-pres-impl]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2250 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
 [^v2-pres-uups]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2_sepolia_20260629@ccaeb58)
 [^v2-pres-upgraded]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L637 @ ens_v2@a971bd64)

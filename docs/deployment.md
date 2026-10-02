@@ -2152,6 +2152,36 @@ deployment whose manifests do not admit the implementation a chain's Universal
 Resolver currently points at, the rule pages once the publication is current;
 that page is the re-admission to do, not a fault of the build.
 
+### Resolver implementation start blocks
+
+The build that lets a `resolver_implementations` entry carry an optional
+`start_block` (TYR-193, see [Resolver admission by implementation
+announcement](manifests.md#resolver-admission-by-implementation-announcement))
+changes `crates/manifests/src` and the Sepolia `ens_v2_resolver_l1` manifest, so
+it rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
+for every chain. It also changes the Sepolia manifest payload, so manifest
+synchronization records a [manifest-authority
+marker](glossary.md#manifest-authority-marker) for Sepolia and its
+full-history Interpret redo runs with `--attest-watch-set-coverage`, attesting
+that no watch-plan range widened. A release batch that rotates the hash for
+another change, such as [read-only family queries outside the content
+hash](#read-only-family-queries-outside-the-content-hash) (TYR-149),
+discharges both with that one Interpret and Project redo pair; v0.3.0 runs it
+for TYR-149, TYR-183 and TYR-191, so this adds no redo of its own. It sets
+the start of the admitted implementation
+`0x14f09fd05d4585759e54844dc9b00147131cf243` to its creation block `11709070`.
+The compiled watch plan already covers that implementation from block zero, so
+the later start stamps no historical ingest fetch. It adds no
+schema-migration. A later implementation declared with a `start_block` stamps
+its required Ingest redo from that block, clamped to the chain's ingest start,
+instead of from block zero. The build also changes `crates/adapters/src`:
+Interpret no longer admits a resolver from an `Upgraded` announcement before
+its implementation's `start_block`, so a database that never fetched such a log
+writes the same interpreted rows as one that did (the fetched log can add only
+an operator diagnostic in `interpret_decode_skips`). On Sepolia this changes interpreted output only
+if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
+Interpret redo applies the rule either way.
+
 ### Authority and filters on the names-by-expiry listing
 
 The build that adds `authority` to [`GET /v1/names`](api-v1-routes.md#get-v1names)
