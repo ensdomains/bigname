@@ -525,19 +525,24 @@ Address-to-name collections start from the current family address indexes and
 compose each candidate's selected name, lifecycle and permission relations in
 the admitted publication snapshot. Relation vocabulary is `token_holder`,
 `effective_controller`, and `role_holder`; the API serves `token_holder` as `owner`,
-`effective_controller` as `manager`, and also serves a name with no token lineage under
-`owner` for its registry owner, so the `owner` field and relation agree. Project indexes every
-address under both `token_holder` and `effective_controller` and writes no `registrant`
-rows. Surface is the default unit;
+`effective_controller` as `manager`. The `token_holder` relation is the name's composed
+`control.owner`, the owner its row serves, so the `owner` field and relation agree: the token
+holder, else, for a name with no token (an unwrapped subname), its registry owner. A name whose
+selected binding has no token lineage is not always tokenless: after a `.eth` token transfer
+without `reclaim` its owner is the token's new holder and its registry owner is only its
+`manager` ([registry-only handoff](glossary.md#registry-only-handoff)). Project indexes every
+candidate address under both `token_holder` and `effective_controller`, a superset the read
+narrows, and writes no `registrant` rows. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current
 relations. For a node an ENSv1 registry `NewOwner` created, the address index
-also holds, as `effective_controller` under the node's `<namespace>:<node>` id,
+also holds, as `token_holder` and `effective_controller` under the node's `<namespace>:<node>` id,
 the node's registry owner facts and the owner each such `NewOwner` reported,
 whether or not a surface names the node. A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
-the node's registry-only resource, and with no surface binding.
+the node's registry-only resource, and with no surface binding, under both
+`owner` and `manager`.
 
 A third relation, `role_holder`, lists the holders of an ENSv2 registry role
 on a name's selected registration resource. `PermissionedRegistry` keeps

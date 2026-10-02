@@ -267,20 +267,9 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         parts.serving,
     );
     let coverage_block = declared_coverage(parts);
-    // The owner is the token holder, else the registry owner; a lease transferred without
-    // `reclaim` is owned by its new holder under the registry-only binding the handoff opened.
-    let mut control = shadow.control.clone();
-    if let Some(registry_owner) = control.get("registry_owner").cloned() {
-        let owner = control
-            .get("registrant")
-            .filter(|registrant| !registrant.is_null())
-            .cloned()
-            .unwrap_or(registry_owner);
-        control.insert("owner".into(), owner);
-    }
     let mut summary = Map::new();
     summary.insert("registration".into(), Value::Object(registration));
-    summary.insert("control".into(), Value::Object(control));
+    summary.insert("control".into(), Value::Object(shadow.control.clone()));
     summary.insert("resolver".into(), resolver);
     if parts.unresolvable {
         summary.insert(

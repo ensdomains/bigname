@@ -1435,19 +1435,6 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             .iter()
             .all(|row| { row.4 == format!("{alice:#x}") && row.5 == format!("{carol:#x}") })
     );
-    let (status, buyer_names) = run
-        .api
-        .get_json(&format!(
-            "/v1/addresses/{bob:#x}/names?namespace=ens&relation=registrant"
-        ))
-        .await?;
-    assert_eq!(status, 200, "buyer registrant lookup failed: {buyer_names}");
-    assert!(
-        buyer_names["data"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
-        "the buyer registrant collection must contain sale.eth: {buyer_names}"
-    );
     let (status, buyer_holder_names) = run
         .api
         .get_json(&format!(
@@ -1463,22 +1450,6 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             .as_array()
             .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
         "the buyer token-holder collection must contain sale.eth: {buyer_holder_names}"
-    );
-    let (status, seller_names) = run
-        .api
-        .get_json(&format!(
-            "/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant"
-        ))
-        .await?;
-    assert_eq!(
-        status, 200,
-        "seller registrant lookup failed: {seller_names}"
-    );
-    assert!(
-        seller_names["data"]
-            .as_array()
-            .is_none_or(|rows| rows.iter().all(|row| row["normalized_name"] != "sale.eth")),
-        "the seller registrant collection must not retain sale.eth: {seller_names}"
     );
     let (status, seller_holder_names) = run
         .api

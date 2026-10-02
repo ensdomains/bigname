@@ -548,6 +548,24 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 opt_text(owner.as_deref())
             },
         );
+        // The owner is the token holder, else the registry owner; a lease transferred without
+        // `reclaim` is owned by its new holder under the registry-only binding the handoff
+        // opened. A record the admitted Graveyard holds has no owner, even while a NameWrapper
+        // token of the cleared subname survives (docs/upstream.md).
+        let graveyard_held = !is_v2
+            && facts
+                .registry_node
+                .as_ref()
+                .and_then(|node| node.latest_transfer())
+                .is_some_and(|write| write.graveyard_held());
+        control.insert(
+            "owner".into(),
+            if owner_lapsed || graveyard_held {
+                Value::Null
+            } else {
+                opt_text(registrant.as_deref().or(owner.as_deref()))
+            },
+        );
         control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control
     };

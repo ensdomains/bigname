@@ -309,7 +309,13 @@ async fn a_live_grant_sent_to_the_graveyard_is_served_as_the_chain_holds_it() ->
         "{lapsed:#}"
     );
     assert_eq!(
-        lapsed["registration"]["lapsed_registration"]["registrant"], GRAVEYARD,
+        lapsed["registration"]["lapsed_registration"]["owner"], GRAVEYARD,
+        "{lapsed:#}"
+    );
+    assert!(
+        lapsed["registration"]["lapsed_registration"]
+            .get("registrant")
+            .is_none(),
         "{lapsed:#}"
     );
 
@@ -341,6 +347,11 @@ async fn a_wrapped_subname_the_graveyard_cleared_serves_no_owner_after_wrapper_t
     let wrapped = summary(pool, &fixture.sub_id).await?;
     assert_eq!(
         wrapped["control"]["registry_owner"],
+        Value::String(SUB_OWNER.to_owned()),
+        "{wrapped:#}"
+    );
+    assert_eq!(
+        wrapped["control"]["owner"],
         Value::String(SUB_OWNER.to_owned()),
         "{wrapped:#}"
     );
@@ -396,6 +407,15 @@ async fn a_wrapped_subname_the_graveyard_cleared_serves_no_owner_after_wrapper_t
                 Value::Null,
                 "{run}: {served:#}"
             );
+            // The surviving NameWrapper token's holder is not the owner of a burned record.
+            assert_eq!(served["control"]["owner"], Value::Null, "{run}: {served:#}");
+            for holder in [SUB_OWNER, CAROL, DAVE] {
+                let relations = address_relations(pool, holder, &fixture.sub_id).await?;
+                assert!(
+                    !relations.contains(&bigname_storage::AddressNameRelation::TokenHolder),
+                    "{run}: {holder} owns a burned record: {relations:?}"
+                );
+            }
         }
     }
 

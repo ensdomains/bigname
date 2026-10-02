@@ -267,11 +267,8 @@ fn push_address_match_filter<'a>(
 ) {
     let include_token_holder =
         relations.is_none_or(|relations| relations.contains(&AddressNameRelation::TokenHolder));
-    // A name with no token lineage is owned by its registry owner, so `owner` also matches the
-    // registry ownership transfers `manager` does.
-    let include_registry_owner = include_token_holder
-        || relations
-            .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
+    let include_controller = relations
+        .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
 
     builder.push("(");
     let mut needs_or = false;
@@ -281,11 +278,14 @@ fn push_address_match_filter<'a>(
         push_token_holder_match_filter(builder, address);
         needs_or = true;
     }
-    if include_registry_owner {
+    // A name with no token lineage is owned by its registry owner, so `owner` also matches the
+    // registry ownership transfers `manager` does, except under the registry-only binding a
+    // BaseRegistrar token transfer without `reclaim` opens, which the token's holder owns.
+    if include_token_holder || include_controller {
         if needs_or {
             builder.push(" OR ");
         }
-        push_registry_owner_match_filter(builder, address);
+        push_registry_owner_match_filter(builder, address, !include_controller);
         needs_or = true;
     }
     if !needs_or {
@@ -359,6 +359,7 @@ fn push_token_holder_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, 
 fn push_registry_owner_match_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
+    skip_lease_handoffs: bool,
 ) {
     builder.push(
         r#"
@@ -378,6 +379,22 @@ fn push_registry_owner_match_filter<'a>(
         "#,
     );
     builder.push_bind(address);
+    if skip_lease_handoffs {
+        builder.push(
+            r#"
+            AND NOT EXISTS (
+                SELECT 1
+                FROM bigname_phase.project_binding_candidate handoff
+                JOIN normalized_events lease
+                  ON lease.resource_id = handoff.lease_resource_id
+                 AND lease.source_family = 'ens_v1_registrar_l1'
+                WHERE handoff.chain_id = ne.chain_id
+                  AND handoff.resource_id = ne.resource_id
+                  AND handoff.registry_only
+            )
+            "#,
+        );
+    }
     builder.push(")");
 }
 

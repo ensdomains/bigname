@@ -513,7 +513,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     // backing resources.
     let (status, ens_names) = body(
         &composed,
-        &format!("/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant"),
+        &format!("/v1/addresses/{alice:#x}/names?namespace=ens&relation=token_holder"),
     )
     .await?;
     assert_eq!(status, 200, "ens address names failed: {ens_names}");
@@ -522,7 +522,7 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     assert_eq!(ens_entries[0]["normalized_name"], "alice.eth");
     let (status, base_names) = body(
         &composed,
-        &format!("/v1/addresses/{alice:#x}/names?namespace=basenames&relation=registrant"),
+        &format!("/v1/addresses/{alice:#x}/names?namespace=basenames&relation=token_holder"),
     )
     .await?;
     assert_eq!(status, 200, "basenames address names failed: {base_names}");

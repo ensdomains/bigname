@@ -3723,7 +3723,10 @@ introduces it rebuilds Project from full history before serving the option; see
   ended (see [history anchors](#history-collection-filters)), `owner` matches the `RegistrationGranted` that named the address and the
   `TokenControlTransferred` that sent it the token, and also, on a resource
   with no token, the registry `AuthorityTransferred` that made it the owner,
-  which matches `manager` too.
+  which matches `manager` too. Under a
+  [registry-only handoff](glossary.md#registry-only-handoff) (a `.eth` token
+  transfer without `reclaim`) the registry owner is only the `manager`, so
+  that `AuthorityTransferred` matches `manager` and not `owner`.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate

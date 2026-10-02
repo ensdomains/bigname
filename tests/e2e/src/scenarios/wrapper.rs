@@ -298,8 +298,11 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         locked_holder_rows >= 1,
         "locked.eth must remain in the wrapper holder's address names"
     );
-    // Every address Project indexes as a possible controller of locked.eth serves none.
-    let mut locked_controller_rows = 0;
+    // Outside grace a locked name is managed by its holder, as NameWrapper's `canModifyName` has
+    // no wrapper-state condition
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f);
+    // no other address Project indexes as a possible controller of locked.eth serves one.
+    let mut locked_controllers = Vec::new();
     for address in families::indexed_addresses(
         &wrapped.db.pool,
         "ens:0x669e8ea725c56427a7bca9ffaed126a8922a2b2baf4ed71a3fe74d871d0dd25b",
@@ -307,19 +310,21 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     )
     .await?
     {
-        locked_controller_rows += families::address_names(&wrapped.db.pool, &address, None)
+        let controls = families::address_names(&wrapped.db.pool, &address, None)
             .await?
             .iter()
-            .filter(|entry| {
+            .any(|entry| {
                 entry.normalized_name == "locked.eth"
                     && entry.resource_id == locked_wrapper_resource
                     && entry
                         .relations
                         .contains(&bigname_storage::AddressNameRelation::EffectiveController)
-            })
-            .count();
+            });
+        if controls {
+            locked_controllers.push(address);
+        }
     }
-    assert_eq!(locked_controller_rows, 0);
+    assert_eq!(locked_controllers, [format!("{bob:#x}")]);
 
     let kid_body = exact_name(&wrapped.api, "ens", "kid.locked.eth").await?;
     assert_eq!(

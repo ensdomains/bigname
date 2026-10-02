@@ -182,8 +182,8 @@ const NAME_DELETE: &str = "/* project:families.derived.name_delete */
 /// admission and mask, so a read only removes rows: the token holder falls back through the
 /// retained F2a rows of the name (a grant's or reservation's registrant, a release's prior
 /// registrant, a transfer's recipient) and the fold's token holder, and both relations through
-/// every controller candidate's subject besides, since a name with no token lineage is owned by
-/// its controller.
+/// every controller candidate's subject besides, since a name with no token is owned by its
+/// registry owner. The read keeps only the relations each address holds.
 ///
 /// A node an ENSv1 registry NewOwner created (an `ens_v1_registry_l1` SubregistryChanged, which
 /// also writes the node's child edge) is listed for its current registry owner even when no name

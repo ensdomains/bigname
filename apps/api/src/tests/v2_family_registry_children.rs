@@ -264,7 +264,7 @@ async fn v2_registry_children_are_listed_for_their_registry_owner() -> Result<()
             json!(resource.to_string()),
             "{row:#}"
         );
-        assert_eq!(row["relations"], json!(["manager"]), "{row:#}");
+        assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
         assert_eq!(row["is_primary"], json!(false), "{row:#}");
         assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
         assert_eq!(row["authority"], json!("ens_v1"), "{row:#}");
@@ -335,6 +335,7 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
     };
 
     for query in [
+        "relation=owner",
         "relation=manager",
         "dedupe=registration",
         "is_migrated=false",
@@ -351,7 +352,7 @@ async fn v2_registry_children_follow_the_address_names_filters() -> Result<()> {
         assert!(listed(&rows, &unknown_name), "{query}: {rows:#?}");
     }
     for query in [
-        "relation=owner",
+        "relation=role_holder",
         "authority=ens_v0",
         "authority=ens_v2",
         "is_migrated=true",
@@ -446,7 +447,7 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
             .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
         assert_eq!(row["authority"], json!(authority), "{row:#}");
         assert_eq!(row["registration_status"], json!("unregistered"), "{row:#}");
-        assert_eq!(row["relations"], json!(["manager"]), "{row:#}");
+        assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
         let subname = subnames
             .iter()
             .find(|row| row["namehash"] == json!(node))
@@ -681,7 +682,7 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
             assert_eq!(served["owner"], json!(RC_OWNER), "{served:#}");
             assert_eq!(served.get("manager"), manager.as_ref(), "{served:#}");
         }
-        assert_eq!(row["relations"], json!(["manager"]), "{row:#}");
+        assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
     }
 
     database.cleanup().await

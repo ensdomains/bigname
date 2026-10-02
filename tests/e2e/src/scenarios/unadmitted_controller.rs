@@ -128,7 +128,7 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
         let (status, body) = run
             .api
             .get_json(&format!(
-                "/v1/addresses/{registrant:#x}/names?namespace=ens&relation=registrant"
+                "/v1/addresses/{registrant:#x}/names?namespace=ens&relation=token_holder"
             ))
             .await?;
         assert_eq!(status, 200, "registrant collection failed: {body}");

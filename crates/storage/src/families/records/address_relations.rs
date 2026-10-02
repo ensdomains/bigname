@@ -9,13 +9,13 @@
 //!   AuthorityTransferred or state-derived SurfaceBound sets the controller; a PermissionChanged
 //!   acts only on the name's resource, sets it when its powers hold `resource_control` and the
 //!   NameWrapper mask allows, and otherwise revokes it from its subject only.
-//! - The token holder (served as `owner`) is the composed `registration.registrant`, where the
-//!   NameWrapper mask allows. A transfer supplies the registrant's recipient before an owner
-//!   lapse. The lapse also removes wrapper_state, so both readers then withhold the token-holder
-//!   relation under the same modifier mask. A name with no token lineage and no registrant (a
-//!   registry-only subname) is owned by its controller, as its composed `control.owner` is its
-//!   registry owner; one with a registrant (a lease transferred without `reclaim`, under the
-//!   registry-only binding that handoff opened) by its registrant.
+//! - The token holder (served as `owner`) is the composed `control.owner`, the owner the row
+//!   serves, where the NameWrapper mask allows: the registrant, else the registry owner, and no
+//!   one once the owner lapsed or the admitted Graveyard holds the record. A name with no token
+//!   lineage is owned by its registry owner (a registry-only subname), or by its registrant (a
+//!   lease transferred without `reclaim`, under the registry-only binding that handoff opened).
+//!   The lapse also removes wrapper_state, so both readers then withhold the token-holder
+//!   relation under the same modifier mask.
 //! - The effective controller is the controller, else (with a token lineage) the token holder,
 //!   where the mask allows: no NameWrapper modifier, or a wrapper state outside the `.eth` grace
 //!   period, since NameWrapper's `canModifyName` has no wrapper-state condition
@@ -95,15 +95,16 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
     let open = mask_open(input);
     let controller = controller(input, open).map(|(address, _)| address);
 
+    let owner = summary
+        .pointer("/control/owner")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
     let mut out = Vec::new();
-    if lineage
-        && (modifier.is_none()
-            || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked")))
+    if !lineage
+        || modifier.is_none()
+        || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked"))
     {
-        out.push((registrant.clone(), TOKEN_HOLDER));
-    }
-    if !lineage {
-        out.push((registrant.clone().or(controller.clone()), TOKEN_HOLDER));
+        out.push((owner, TOKEN_HOLDER));
     }
     if !lineage || open {
         let effective = if lineage {

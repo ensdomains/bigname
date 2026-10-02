@@ -470,9 +470,20 @@ async fn owner_history_for(
     canonical_only: bool,
     relations: Option<&[bigname_storage::AddressNameRelation]>,
 ) -> Result<Vec<String>> {
+    history_for(pool, OWNER, block, canonical_only, relations).await
+}
+
+/// The history of `address` at `block`, optionally narrowed to some relations.
+async fn history_for(
+    pool: &PgPool,
+    address: &str,
+    block: i64,
+    canonical_only: bool,
+    relations: Option<&[bigname_storage::AddressNameRelation]>,
+) -> Result<Vec<String>> {
     let page = bigname_storage::load_address_history_page_for_relations(
         pool,
-        OWNER,
+        address,
         None,
         relations,
         bigname_storage::HistoryScope::Both,
@@ -679,5 +690,164 @@ async fn a_restored_registry_owner_keeps_the_holder_at_the_bound() -> Result<()>
         restored, held,
         "the restore above the bound changed the holder's history at the bound"
     );
+    Ok(())
+}
+
+mod registry_events {
+    alloy_sol_types::sol! {
+        event Transfer(bytes32 indexed node, address owner);
+    }
+}
+
+const REGISTRY_MOVED: i64 = 132;
+
+/// The registry owner left behind by a token transfer without `reclaim` hands the registry
+/// record to a third address with `setOwner`
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
+fn registry_set_owner(block: i64, owner: &str) -> Vec<RawLogInput> {
+    let node = keccak256(
+        [
+            eth_node().as_slice(),
+            keccak256(LABEL.as_bytes()).as_slice(),
+        ]
+        .concat(),
+    );
+    vec![raw(
+        registry_events::Transfer {
+            node,
+            owner: owner.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRY,
+    )]
+}
+
+/// A registry owner that never held the token is the name's manager and not its owner, whether
+/// the registry record moved after a token transfer without `reclaim` (the registry-only binding
+/// that handoff opens) or while the token holder kept the token: it gains the name's history
+/// under `manager` and not under `owner`.
+#[tokio::test]
+async fn a_registry_owner_without_the_token_is_the_manager_in_history_not_the_owner() -> Result<()>
+{
+    for (case, token_holder, handed_off) in
+        [("divergence", OWNER, false), ("handoff", HOLDER, true)]
+    {
+        let (registered_output, session) = interpret(REGISTERED, registration(), None)?;
+        let (rebound_output, session) = if handed_off {
+            interpret(REBOUND, handoff(), Some(session))?
+        } else {
+            interpret(REBOUND, Vec::new(), Some(session))?
+        };
+        let (moved_output, _) = interpret(
+            REGISTRY_MOVED,
+            registry_set_owner(REGISTRY_MOVED, OTHER),
+            Some(session),
+        )?;
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_history_blocks(&database, REGISTERED..=REGISTRY_MOVED).await?;
+        for output in [&registered_output, &rebound_output, &moved_output] {
+            persist(&database.pool, output).await?;
+        }
+        project_to(&database.pool, REGISTRY_MOVED, None).await?;
+        let pool = &database.pool;
+        let owner = [bigname_storage::AddressNameRelation::TokenHolder];
+        let manager = [bigname_storage::AddressNameRelation::EffectiveController];
+        let mut views = Vec::new();
+        for canonical_only in [true, false] {
+            views.push((
+                history_for(pool, OTHER, REGISTRY_MOVED, canonical_only, Some(&owner)).await?,
+                history_for(pool, OTHER, REGISTRY_MOVED, canonical_only, Some(&manager)).await?,
+            ));
+        }
+        let holder_rows =
+            bigname_storage::load_address_names_current(pool, token_holder, None, None).await?;
+        let other_rows =
+            bigname_storage::load_address_names_current(pool, OTHER, None, None).await?;
+        database.cleanup().await?;
+
+        // Anti-vacuity: the token holder owns the name and the new registry owner manages it.
+        assert!(
+            holder_rows
+                .iter()
+                .any(|row| row.relation.as_str() == "token_holder"),
+            "{case}: {holder_rows:?}"
+        );
+        assert_eq!(
+            other_rows
+                .iter()
+                .map(|row| row.relation.as_str())
+                .collect::<Vec<_>>(),
+            ["effective_controller"],
+            "{case}"
+        );
+        for (owned, managed) in &views {
+            assert!(
+                managed
+                    .iter()
+                    .any(|row| row.starts_with("AuthorityTransferred:")),
+                "{case}: the registry owner's manager history holds the transfer: {managed:?}"
+            );
+            assert!(
+                owned.is_empty(),
+                "{case}: the registry owner is not the owner: {owned:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The registry owner of a subname with no token owns it, so the `NewOwner` that created the
+/// subname for it is in its history under `owner` as well as `manager`
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+#[tokio::test]
+async fn the_registry_owner_of_a_tokenless_subname_owns_it_in_history() -> Result<()> {
+    let parent = keccak256(
+        [
+            eth_node().as_slice(),
+            keccak256(LABEL.as_bytes()).as_slice(),
+        ]
+        .concat(),
+    );
+    let (registered_output, session) = interpret(REGISTERED, registration(), None)?;
+    let (subname_output, _) = interpret(
+        REBOUND,
+        vec![raw(
+            NewOwner {
+                node: parent,
+                label: keccak256(b"sub"),
+                owner: OTHER.parse().unwrap(),
+            }
+            .encode_log_data(),
+            REBOUND,
+            0,
+            REGISTRY,
+        )],
+        Some(session),
+    )?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=REBOUND).await?;
+    persist(&database.pool, &registered_output).await?;
+    persist(&database.pool, &subname_output).await?;
+    project_to(&database.pool, REBOUND, None).await?;
+    let pool = &database.pool;
+    let mut views = Vec::new();
+    for relation in [
+        bigname_storage::AddressNameRelation::TokenHolder,
+        bigname_storage::AddressNameRelation::EffectiveController,
+    ] {
+        views.push(history_for(pool, OTHER, REBOUND, true, Some(&[relation])).await?);
+    }
+    database.cleanup().await?;
+
+    for view in &views {
+        assert!(
+            view.iter()
+                .any(|row| row.starts_with("AuthorityTransferred:")),
+            "{views:?}"
+        );
+    }
+    assert_eq!(views[0], views[1]);
     Ok(())
 }

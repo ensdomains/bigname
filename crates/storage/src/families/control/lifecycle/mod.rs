@@ -213,22 +213,6 @@ pub struct ShadowName {
     pub trace: Map<String, Value>,
 }
 
-/// The registration fields the shadow reproduces, compared against the served row. `created_at`
-/// is a whole-history minimum no family stores, so it is not listed.
-pub const REGISTRATION_FIELDS: [&str; 11] = [
-    "status",
-    "authority_kind",
-    "authority_key",
-    "resource_id",
-    "registrant",
-    "expiry",
-    "registered_at",
-    "released_at",
-    "latest_event_kind",
-    "lapsed_registration/owner",
-    "lapsed_registration/released_at",
-];
-
 /// The control fields the shadow reproduces.
 pub const CONTROL_FIELDS: [&str; 6] = [
     "status",
