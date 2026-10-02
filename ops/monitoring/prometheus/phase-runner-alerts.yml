@@ -21,6 +21,22 @@ groups:
           threshold: "An RPC endpoint reports a mismatched chain on any scrape within 10 minutes."
           meaning: "The named source's RPC endpoint now serves a different chain than configured; that chain stopped, and a restart refuses to start until the endpoint is fixed. A single-chain runner usually exits before a scrape sees this; BignamePhaseRunnerDown and the refusal log catch it."
 
+      - alert: BignameUniversalResolverUnadmitted
+        expr: |
+          phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner"} == 1
+          and on (job, instance, chain)
+          phase_runner_served_lag_blocks{job="bigname-phase-runner"} >= 0
+          and on (job, instance, chain)
+          phase_runner_served_lag_blocks{job="bigname-phase-runner"} <= 30
+          unless on (job, instance, chain)
+          phase_runner_redo_in_progress{job="bigname-phase-runner",phase="project"} == 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head and no Project redo is running."
+          meaning: "The named chain's Universal Resolver ends at an implementation bigname does not admit, so the chain reads as not cut over and names ENSv1 decides are served with the pre-cutover expiry, grace and resolvability rules again. Either upstream repointed it or a manifest change dropped the implementation; the runner's warning names the implementation and the block of its Upgraded."
+
       - alert: BignamePhaseRunnerDown
         expr: |
           up{job="bigname-phase-runner"} == 0

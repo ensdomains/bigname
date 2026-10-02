@@ -231,8 +231,8 @@ pub(super) fn served_lag(observed_head: Option<i64>, publication: Option<i64>) -
 ///   head must still exist and must not be below the publication;
 /// - it ignores the requested-position gate, which for a per-chain gauge would only
 ///   compare the publication with itself;
-/// - it ignores the Interpret-redo gate: the redo gauges already show that state,
-///   and this gauge measures publication eligibility only.
+/// - it ignores the gate on an overlapping Interpret or Project redo: the redo gauges
+///   already show that state, and this gauge measures publication eligibility only.
 ///
 /// The publication is the family marker while it is `live` with this
 /// build's interpreter hash; a rebuild (`bootstrap_pending`) or a missing marker reports -1,
