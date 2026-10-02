@@ -1031,7 +1031,7 @@ async fn raising_a_covered_implementation_start_stamps_no_ingest_redo() -> Resul
         ScratchDatabase::create("production_manifest_sepolia_implementation_start_raise").await?;
     let desired_root = checked_in_sepolia_root();
     let baseline_root = copy_profile_with_v2_resolver(&desired_root, |manifest| {
-        manifest.replacen("start_block = 11709070, ", "", 1)
+        manifest.replacen("start_block = 11820406, ", "", 1)
     })?;
     sync_schema_v2_repository(scratch.pool(), &load_repository(&baseline_root)?).await?;
     assert_eq!(
@@ -1043,7 +1043,7 @@ async fn raising_a_covered_implementation_start_stamps_no_ingest_redo() -> Resul
     sync_schema_v2_repository(scratch.pool(), &load_repository(&desired_root)?).await?;
     assert_eq!(
         compiled_implementation_starts(scratch.pool()).await?,
-        vec![(SEPOLIA_PERMISSIONED_RESOLVER_IMPL.to_owned(), 11_709_070)]
+        vec![(SEPOLIA_PERMISSIONED_RESOLVER_IMPL.to_owned(), 11_820_406)]
     );
     assert_eq!(
         required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
@@ -5194,7 +5194,7 @@ fn checked_in_sepolia_root() -> std::path::PathBuf {
         .join("manifests/sepolia")
 }
 
-const SEPOLIA_PERMISSIONED_RESOLVER_IMPL: &str = "0x14f09fd05d4585759e54844dc9b00147131cf243";
+const SEPOLIA_PERMISSIONED_RESOLVER_IMPL: &str = "0x115eb53f0c60696633855f90b138178fb40b2b2c";
 
 fn copy_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
     fs::create_dir_all(target)?;
@@ -5220,7 +5220,7 @@ fn copy_profile_with_v2_resolver(
         Uuid::new_v4()
     ));
     copy_dir(source, &target)?;
-    let path = target.join("ethereum/ens/ens_v2_resolver_l1/v1.toml");
+    let path = target.join("ethereum/ens/ens_v2_resolver_l1/v2.toml");
     let original = fs::read_to_string(&path)?;
     let edited = edit(original.clone());
     anyhow::ensure!(
@@ -5681,8 +5681,8 @@ fn probe_assert_retired(
     );
 }
 
-/// Variant A — deprecating a manifest version (the ens_v2_sepolia_dev precedent,
-/// manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v1.toml): the old version file stays
+/// Variant A — deprecating a manifest version (the ens_v2_sepolia_dev precedent): the old
+/// version file stays
 /// in the repository with rollout_status = "deprecated" while a later deployment becomes
 /// active.
 #[tokio::test]
@@ -5953,10 +5953,10 @@ async fn official_sepolia_mirror_and_direct_resolver_sync_idempotently() -> Resu
     assert_eq!(
         mirrors,
         vec![(
-            "ensv1_mirror_resolver@0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
+            "ensv1_mirror_resolver@0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0".into(),
             "ensv1_mirror_resolver".into(),
-            "0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
-            Some(11_708_986)
+            "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0".into(),
+            Some(11_820_288)
         )]
     );
     // Singleton roles keep the role as their declaration name.

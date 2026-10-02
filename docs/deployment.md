@@ -1314,7 +1314,7 @@ routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
 `verified_records` and `verified_primary_name` as `unsupported` with
 `unsupported_reason=execution_provider_not_configured` for chain `11155111`;
 with it, both report `full`. The Sepolia entrypoint is the checked-in active
-`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+`manifests/sepolia/ethereum/ens/ens_execution/v2.toml`, which the normal
 manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections. A current-state
@@ -2180,7 +2180,67 @@ its implementation's `start_block`, so a database that never fetched such a log
 writes the same interpreted rows as one that did (the fetched log can add only
 an operator diagnostic in `interpret_decode_skips`). On Sepolia this changes interpreted output only
 if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
-Interpret redo applies the rule either way.
+Interpret redo applies the rule either way. The same release replaces that
+implementation with the 2026-10-01 redeploy's `0x115eb53f…` from block
+`11820406` ([Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)).
+
+### Sepolia ENSv2 redeploy of 2026-10-01
+
+The build that admits the 2026-10-01 Sepolia ENSv2 redeploy (TYR-183, see the
+[deployment inventory](sepolia-deployment.md)) replaces the six Sepolia ENSv2
+families (root, registry, registrar, resolver, migration and `ens_execution`)
+with version 2 under `deployment_epoch = "ens_v2_sepolia_20261001"` and deletes
+version 1. The 2026-09-15 deployment's contracts are dropped, not kept as
+retired history. Both Universal Resolver proxies keep their addresses and start blocks;
+`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`,
+which the managed proxy moved to at block `11821680`, so that block is the
+Sepolia [Universal Resolver cutover](glossary.md#universal-resolver-cutover).
+The redeploy ships as a new version file because synchronization upserts a
+manifest on its namespace, family, chain, epoch and version while the stored
+file path must stay unique, so a new epoch written into the same `v1.toml`
+would stop the runner at startup.
+
+The manifest change rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration. On first start, manifest synchronization
+deprecates the six version-1 rows, retires the dropped addresses at the
+published head, records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on Sepolia's
+Interpret and Project rows and stamps a required Ingest redo from the earliest
+retained `RegistryCreated` log (block `10893181` on Sepolia), clamped to the
+chain's first ingest cursor, to the published head, not from the redeploy's
+blocks: the new ETHRegistry's announcement rule reaches back to that log. The
+redeploy's `PermissionedResolverImpl` watch starts at its creation block
+`11820406` ([resolver implementation start
+blocks](#resolver-implementation-start-blocks)), so it widens nothing earlier. Synchronization refuses
+to retire an address before its start, so start the build only once the
+recorded Sepolia head is at or past `11709095`, the latest start among the
+dropped declarations (the 2026-09-15 `MigrationHelper`,
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20260916@366de741)),
+and keep the previous release until then. Size the refetch from the stamped
+range before the release. Complete that Ingest redo, then the
+full-history Interpret redo with `--attest-watch-set-coverage`, then the
+Project redo it installs, before the matching API serves. A release that also
+rotates the hash for another change, such as "Read-only family queries outside
+the content hash", runs that Interpret and Project pair once for both.
+
+After the redo, Sepolia's ENSv2 history starts with the redeploy. The replayed
+proxy history classifies every block before `11821680` as not cut over,
+including `11710193` to `11821679`, when the dropped deployment answered
+resolution, so Project derives that range with ENSv1 expiry, grace and
+resolvers for every `.eth` name. Name reads still serve only the current
+family publication: an `at=` below it answers `stale`, as before. The dropped registries
+announced themselves with `RegistryCreated`, so like any self-announced registry
+they stay on the registry routes, but nothing admitted reaches them and their
+entries name no `.eth` name: check that no normalized event from the dropped
+ETHRegistry `0x657ea849…` carries a logical name. An upgraded database ignores
+a dropped registry's writes after the synchronization head, because the retired
+declaration caps its re-announced admission there; a fresh corpus derives them
+unnamed. Nothing is named on either path (TYR-195 tracks converging the two). The redeploy re-ran premigration: `nick.eth` is
+reserved on the new ETHRegistry at block `11821474` with expiry `1803965433`,
+so the "ENSv1 lease date on name rows" check stands as written. Also check that
+an ENSv1-only `.eth` name with no entry on the new ETHRegistry serves
+`unresolvable_reason` `no_live_ens_v2_entry`.
 
 ### Owner as the token holder
 
@@ -2193,7 +2253,8 @@ Finish the full-history Interpret redo and the Project redo it installs before
 the matching API serves. In v0.3.0 it shares the release's one Interpret and
 Project redo pair with the other hash-rotating changes in the batch
 ([read-only family queries outside the content hash](#read-only-family-queries-outside-the-content-hash),
-TYR-149, the Sepolia ENSv2 redeploy admission, TYR-183, and
+TYR-149, the [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01),
+TYR-183, and
 [resolver implementation start blocks](#resolver-implementation-start-blocks),
 TYR-193): run one pair under a binary that holds all of them. It needs no schema-migration, no manifest or
 environment change and no historical ingest fetch. The stored

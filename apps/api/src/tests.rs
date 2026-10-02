@@ -502,6 +502,8 @@ mod lookup_redo;
 mod read_only_lookup;
 #[path = "tests/v2_family_lookup_release.rs"]
 mod v2_family_lookup_release;
+#[path = "tests/v2_sepolia_redeploy.rs"]
+mod v2_sepolia_redeploy;
 include!("tests/v2_family_permissions.rs");
 include!("tests/v2_family_history_publication.rs");
 include!("tests/v2_family_records_review.rs");

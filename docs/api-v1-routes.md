@@ -673,9 +673,9 @@ collection route carry neither header.
   A negative or malformed stored expiry is not a no-expiry sentinel.
   The Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05).
   Such contract-specific no-expiry registrations serve `expires_at: null`,
   `expires_at_reason: "no_expiry"` and `grace_ends_at: null` across detail,
   lookup and collections. Null expiry never matches a window; collections with

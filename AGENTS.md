@@ -59,7 +59,8 @@ The canonical ENSv1, ENSv2, and Basenames codebases are pinned under `.refs/`. A
 - `.refs/ens_v1_sepolia_ac32490/` — historical deployment ABI evidence for the admitted `0x8FADE66…` Sepolia PublicResolver generation only
 - `.refs/ens_v1_lll/` — historical evidence for the 2017 LLL registry only
 - `.refs/ens_v2/` — pinned protocol source and historical June/July deployment evidence; current Sepolia deployment authority is the separate pin below.
-- `.refs/ens_v2_sepolia_20260916/` — official 2026-09-15 Sepolia deployment artifacts, receipts, compiler inputs and matching source at `366de741`; current manifest authority (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20260916@366de741)
+- `.refs/ens_v2_sepolia_20261001/` — official 2026-10-01 Sepolia redeploy artifacts, receipts, compiler inputs and matching source at `07e55a05`; current manifest authority (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20261001@07e55a05)
+- `.refs/ens_v2_sepolia_20260916/` — the superseded 2026-09-15 Sepolia deployment at `366de741`, which the manifests drop; ENSv2 Solidity source evidence only where the cited lines are unchanged at the 2026-10-01 pin, and evidence of the dropped deployment's own history; never deployment authority
 - `.refs/ens_v2_sepolia_20260629/` — historical Solidity evidence for the admitted 2026-06-29 old-model Sepolia deployment only; it is not authority for future deployments or current-model admission
 - `.refs/ens_v2_sepolia_dev/` — historical evidence for deprecated pre-audit `sepolia-dev` manifest versions only
 - `.refs/basenames/` — canonical Basenames Solidity

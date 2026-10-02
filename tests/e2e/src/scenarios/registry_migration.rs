@@ -49,9 +49,9 @@ async fn connected_ens_v1_v2_migration_paths_emit_expected_facts() -> Result<()>
     .await?;
     assert!(
         run.manifests_root
-            .join("ethereum/ens/ens_v2_migration_l1/v1.toml")
+            .join("ethereum/ens/ens_v2_migration_l1/v2.toml")
             .is_file(),
-        "generated Sepolia profile is missing ens_v2_migration_l1/v1.toml"
+        "generated Sepolia profile is missing ens_v2_migration_l1/v2.toml"
     );
 
     let unlocked_boundary = migration_boundary(&run, "unlock-migration.eth").await?;

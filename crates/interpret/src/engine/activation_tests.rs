@@ -19,18 +19,18 @@ use super::*;
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const CHAIN: &str = "ethereum-sepolia";
-const SETUP_BLOCK: i64 = 11_709_100;
+const SETUP_BLOCK: i64 = 11_820_500;
 const PREDECESSOR_BLOCK: i64 = SETUP_BLOCK + 1;
 const MIGRATION_BLOCK: i64 = SETUP_BLOCK + 2;
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const NAME_WRAPPER: &str = "0x0635513f179d50a207757e05759cbd106d7dfce8";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
-const UNLOCKED_CONTROLLER: &str = "0x7ed171bb143a905f56105e4ea146543ecb122f55";
-const LOCKED_CONTROLLER: &str = "0xab1b57c6ee5e91e6090595c0af14cb9b8bc7773f";
-const GRAVEYARD: &str = "0x950b93885b33ce4c7e8571be2c88a1aa93d82f49";
-const ETH_REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
-const VERIFIABLE_FACTORY: &str = "0x9e726eb570beb6bceb495ab8cda7df517d4e841c";
-const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0x2741543c3b14640b97bc70a233318032f7e35bac";
+const UNLOCKED_CONTROLLER: &str = "0x2a35b94df22cc7354570be2284655e2cdc0e64a2";
+const LOCKED_CONTROLLER: &str = "0x6029a063d69b09d23c52a754a90e4fe43adac3a8";
+const GRAVEYARD: &str = "0xb58a90a39d13cce1d0e192b5da5c47640855b04d";
+const ETH_REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+const VERIFIABLE_FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
+const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880";
 const MIGRATION_REGISTRY: &str = "0x0000000000000000000000000000000000000771";
 const OWNER: &str = "0x0000000000000000000000000000000000000051";
 /// The BaseRegistrar transfer to the Graveyard in `seed_migration_facts`.
@@ -310,7 +310,7 @@ async fn faithful_unwrapped_migration_retires_all_v1_bindings() -> TestResult {
 async fn cold_restore_retains_zero_clear_beside_later_state_tail() -> TestResult {
     let database = database("interpret_zero_clear_retention").await?;
     sync_schema_v2_repository(database.pool(), &load_repository(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"))?).await?;
-    let resume_block = 11_709_200_i64;
+    let resume_block = 11_820_600_i64;
     let token_id = format!("{:#066x}", U256::from(1));
     let state_key = format!("{ETH_REGISTRY}:-:{token_id}:-:SubregistryUpdated");
     sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) SELECT $1, 'zero-clear-' || n, n, to_timestamp(n), 'canonical' FROM generate_series($2 - 3, $2) n").bind(CHAIN).bind(resume_block).execute(database.pool()).await?;
