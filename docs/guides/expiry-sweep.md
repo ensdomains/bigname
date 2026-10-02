@@ -174,9 +174,10 @@ later block is not on that page.
   decide each row's phase against `T`, never against your wall clock.
 - Send a notice that says a date has passed ("expired", "in grace", "grace
   ended") only once `T` has reached the phase the table in section 3 gives
-  for it; for a row outside that table, such as a subname or a Basenames
-  name, once `expires_at <= T`. A row not yet in that phase at `T` waits for
-  a page from a later publication.
+  for it. For a row outside that table, such as a subname or a Basenames
+  name, send "expired" once `expires_at <= T` and "grace ended" only once
+  `T` is past `grace_ends_at`, which for a subname is its `expires_at`. A row
+  not yet in that phase at `T` waits for a page from a later publication.
 - If `meta.as_of` lists more than one chain, use the smallest timestamp.
 - `T` tells you how fresh a page is. It does not tell you that a walk saw
   every name; section 6 covers that.
@@ -248,25 +249,33 @@ live (section 1). On every run:
   reservation's expiry can sit well after `T`:
 
   ```text
-  rescan floor = (smallest T of the previous run) - G
+  rescan floor = (smallest T of the previous completed run) - G
   ```
 
-  On the first run, use that run's `T` instead of the previous one. Every row
-  whose grace ended since the previous run then sits in a rescanned window,
-  so rows due a later notice such as "grace ended" are seen again, as are
-  rows skipped or moved within that range.
+  A run that did not complete does not move the floor. On the first run,
+  use your clock's current time minus `G`: any floor at or before `T - G`
+  works, and an earlier one only costs extra rows. Every row whose grace
+  ended since the previous completed run then sits in a rescanned window, so
+  rows due a later notice such as "grace ended" are seen again. A completed
+  walk returns every row that sorts after its cursor, so it skips only rows
+  whose `expires_at` changed while it ran
+  ([current-state list cursors](../api-v1.md#current-state-list-cursors));
+  the rescan sees those again too while they stay above the floor.
 - A row that moves back further is not re-seen by the rescan: a reserved
   name whose reservation was extended well past its lease returns to its
-  lease date when the reservation stops being live. Remember each row whose
-  `ens_v1.expires_at` differs from its `expires_at`, and once that lease date
-  passes, read the name again by itself with
-  [`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname).
+  lease date when the reservation stops being live. Keep each row whose
+  `ens_v1.expires_at` differs from its `expires_at` on a list, and once that
+  lease date passes, read the name by itself with
+  [`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname) on every run
+  until it is released or its `expires_at` equals `ens_v1.expires_at`; then
+  apply the section 3 table to that read.
 
 Make every notification idempotent so that rescans and repeated rows send
 nothing twice. Which key to use is your policy; a natural one is
 `(namespace, name, expires_at, kind, recipient)`, where `kind` is your
-notification type and `recipient` the address you notify. With it, a name
-transferred without a renewal still notifies the new holder. The same key
+notification type and `recipient` the address you notify. With it, a later
+page that shows a different `owner` with the same `expires_at` gives that
+address its own notice. The same key
 recurs, and you decide whether to notify again, in two cases:
 
 - an ENSv2 registration is unregistered and the name registered again with
