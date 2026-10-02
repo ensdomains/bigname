@@ -26,9 +26,9 @@ fn declared_resolver_implementations_compile_topic1_narrowed_upgraded_watches() 
     }
     assert_eq!(
         resolver.resolver_implementations[0].start_block,
-        Some(11_709_070)
+        Some(11_820_406)
     );
-    assert_eq!(implementations[0].start, 11_709_070);
+    assert_eq!(implementations[0].start, 11_820_406);
     assert!(matches!(
         &implementations[0].emitter,
         WatchEmitter::Implementation { family, implementation }
@@ -65,12 +65,12 @@ fn declared_resolver_implementations_compile_topic1_narrowed_upgraded_watches() 
     previous.insert(key.clone(), 0);
     assert!(watch_is_covered(Some(&previous), &key, 0));
     assert!(
-        watch_is_covered(Some(&previous), &key, 11_709_070),
+        watch_is_covered(Some(&previous), &key, 11_820_406),
         "raising an implementation's start is covered by its earlier entry"
     );
-    previous.insert(key.clone(), 11_709_070);
+    previous.insert(key.clone(), 11_820_406);
     assert!(
-        !watch_is_covered(Some(&previous), &key, 11_709_069),
+        !watch_is_covered(Some(&previous), &key, 11_820_405),
         "lowering an implementation's start widens"
     );
     let all_only = BTreeMap::from([(
