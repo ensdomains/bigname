@@ -3428,7 +3428,10 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
   Upstream's first source, a standalone `addr.reverse` registrar, has no
-  declared deployment in either profile and is not read.
+  declared deployment in either profile and is not read. The Universal
+  Resolver's own ENSIP-19 `reverse` does not fall back past an empty name on
+  the reverse node's own resolver
+  ([divergence](upstream.md#default-reverse-fallback-past-a-reverse-node-resolver)).
   The indexed source applies this to the projected claims
   ([projections](projections.md#primary-names)): an `addr.reverse` claim whose
   projected or hydrated name has no bytes, or whose reverse node has no nonzero
