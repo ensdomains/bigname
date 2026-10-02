@@ -258,9 +258,8 @@ keys.
 [authority arms](glossary.md#authority-epoch) — `ens_v1`, `ens_v2`, or both —
 whose names the declared `universal_resolver` entrypoint may answer for. The
 lookup engine reads the list from the active-or-shadow `ens_execution`
-manifest selected at the block it executes at (the captured family
-publication's block for record reads, the readable head for primary names)
-and refuses a verified record, name-detail,
+manifest selected at the block it executes at, the captured family
+publication's block, and refuses a verified record, name-detail,
 batch-lookup, diagnostics, or forward primary-name read for a name whose
 selected `authority_arm` is not listed; the API reports that refusal in band
 (`docs/api-v1-routes.md`, `docs/execution.md`). A `verified_authority_arms`

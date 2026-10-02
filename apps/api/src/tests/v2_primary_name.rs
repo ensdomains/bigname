@@ -279,6 +279,98 @@ async fn v2_get_primary_name_returns_mixed_answers_at_one_position() -> Result<(
     Ok(())
 }
 
+/// Live-follow stores a head before Project publishes for it. While the publication trails the
+/// head within the lag tolerance, the reverse and forward calls execute at the publication's block,
+/// the position the indexed claim is read at and `meta.as_of` reports.
+#[tokio::test]
+async fn v2_get_primary_name_verifies_at_a_publication_behind_the_head() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database.initialize_lookup_schema().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let lookup_pool = database.lookup_pool().await?;
+    seed_schema_v2_ens_primary_name_authority(
+        &lookup_pool,
+        21_000_004,
+        "0xprimary-publication",
+        "2026-04-17T00:00:04Z",
+    )
+    .await?;
+    publish_primary_claim(
+        &lookup_pool,
+        "ens",
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        b"taytems.eth",
+    )
+    .await?;
+    seed_schema_v2_ens_lookup_head(
+        &lookup_pool,
+        21_000_005,
+        "0xprimary-head",
+        "2026-04-17T00:00:05Z",
+    )
+    .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database
+        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
+        .await?;
+
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed primary-name request behind the head failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload}");
+    assert_eq!(
+        payload["data"]["answers"],
+        json!([
+            {
+                "source": "indexed",
+                "status": "ok",
+                "name": "taytems.eth"
+            },
+            {
+                "source": "verified",
+                "status": "ok",
+                "name": "taytems.eth"
+            }
+        ])
+    );
+    assert_eq!(payload["meta"]["as_of"]["1"]["block_number"], json!(21_000_004));
+    assert_eq!(
+        payload["meta"]["as_of"]["1"]["block_hash"],
+        json!("0xprimary-publication")
+    );
+    let requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        assert_eq!(
+            request["params"][1]["blockHash"],
+            json!("0xprimary-publication")
+        );
+    }
+
+    lookup_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_primary_name_normalizes_schema_v2_successful_claim() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -1914,7 +2006,7 @@ async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
 
 /// Under the Sepolia deployment profile the ENS projection publishes on `ethereum-sepolia`, and
 /// live ENS/60 verification executes against that chain's manifest-admitted registry and
-/// Universal Resolver at its readable head: same reverse leg, same gate, same forward call, same
+/// Universal Resolver at its family publication's block: same reverse leg, same gate, same forward call, same
 /// hash pinning as Mainnet. The provider is selected by that chain, so a Mainnet-only provider
 /// map is a configuration failure rather than a Mainnet call.
 #[tokio::test]
@@ -2010,7 +2102,7 @@ async fn v2_get_primary_name_verifies_against_sepolia_under_the_sepolia_profile(
         assert_eq!(
             request["params"][1]["blockHash"],
             json!("0xbinding"),
-            "sepolia calls stay pinned to the readable sepolia head: {request}"
+            "sepolia calls stay pinned to the sepolia publication: {request}"
         );
     }
 

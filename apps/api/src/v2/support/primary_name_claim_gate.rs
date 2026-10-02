@@ -141,18 +141,23 @@ pub(super) async fn unverifiable_name_authority(
         ));
     };
     let lookup_chain_id = ens_primary_name_lookup_chain(pool, namespace).await?;
-    let admitted_arms =
-        match bigname_lookup::admitted_verified_authority_arms(pool, &lookup_chain_id).await {
-            Ok(arms) => arms,
-            // No declared entrypoint at all: nothing is verifiable, and the live lookup would
-            // report the same in its own vocabulary, so decline in band before dispatching.
-            Err(error) if error.kind() == bigname_lookup::ErrorKind::Unsupported => {
-                return Ok(ForwardGateDecision::Refuse(
-                    CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned(),
-                ));
-            }
-            Err(error) => return Err(admitted_arms_error(namespace, error)),
-        };
+    let admitted_arms = match bigname_lookup::admitted_verified_authority_arms(
+        pool,
+        &lookup_chain_id,
+        crate::state::publication_lag_tolerance_blocks(),
+    )
+    .await
+    {
+        Ok(arms) => arms,
+        // No declared entrypoint at all: nothing is verifiable, and the live lookup would
+        // report the same in its own vocabulary, so decline in band before dispatching.
+        Err(error) if error.kind() == bigname_lookup::ErrorKind::Unsupported => {
+            return Ok(ForwardGateDecision::Refuse(
+                CLAIM_AUTHORITY_NOT_VERIFIABLE.to_owned(),
+            ));
+        }
+        Err(error) => return Err(admitted_arms_error(namespace, error)),
+    };
     Ok(if admitted_arms.iter().any(|arm| arm == authority_arm) {
         ForwardGateDecision::Admit
     } else {

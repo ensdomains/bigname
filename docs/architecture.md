@@ -1622,11 +1622,11 @@ Default verified entrypoints:
 - ENS: `ens_execution` at the official Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe`.[^ens-docs-univ][^v1-aur-l90][^v1-aur-l106]
 - Basenames: active `basenames_execution` v2 at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` supports only the exact-surface transport-assisted direct path; other Basenames verified path classes stay `unsupported`.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 
-The v2 lookup engine executes same-chain record verification afresh at the block
-of the family publication it captures, which may trail the stored head by the
+The v2 lookup engine executes same-chain record and primary-name verification
+afresh at the block of the family publication it captures, which may trail the
+stored head by the
 [publication lag tolerance](glossary.md#publication-lag-tolerance). A Basenames
-record lookup calls Ethereum at the position the projected name carries, and
-primary-name verification still executes at the stored head. It has no trace or cache identity. API record and primary-name verification use
+record lookup calls Ethereum at the position the projected name carries. It has no trace or cache identity. API record and primary-name verification use
 a fresh read-only snapshot after provider execution to revalidate the captured
 family publication, canonical positions and manifest versions. The lookup
 library retains its guarded diagnostic writer for non-API callers.

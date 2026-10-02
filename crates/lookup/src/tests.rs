@@ -3214,7 +3214,7 @@ async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declara
 -> AnyResult<()> {
     let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
     assert_eq!(
-        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 1).await?,
         ["ens_v1"],
         "an execution manifest without the declaration admits only the ENSv1 arm"
     );
@@ -3228,11 +3228,11 @@ async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declara
     .execute(fixture.pool())
     .await?;
     assert_eq!(
-        admitted_verified_authority_arms(fixture.pool(), ETHEREUM).await?,
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 1).await?,
         ["ens_v1", "ens_v2"]
     );
 
-    let error = admitted_verified_authority_arms(fixture.pool(), BASE)
+    let error = admitted_verified_authority_arms(fixture.pool(), BASE, 1)
         .await
         .expect_err("Base is not an ENS execution chain");
     assert_eq!(error.kind(), ErrorKind::Unsupported);
@@ -3244,9 +3244,32 @@ async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declara
     )
     .execute(fixture.pool())
     .await?;
-    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM)
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 1)
         .await
         .expect_err("a manifest without the resolution capability declares no entrypoint");
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+
+    fixture.cleanup().await?;
+    Ok(())
+}
+
+/// The arm read selects the entrypoint at the captured publication's block, where primary-name
+/// verification executes: a Universal Resolver declared from a block past the publication but at
+/// or before the head is not yet an entrypoint.
+#[tokio::test]
+async fn admitted_verified_authority_arms_select_at_the_publication() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE manifest_contract_instances SET start_block_number = 11
+         WHERE role = 'universal_resolver'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    advance_head_to(fixture.pool(), 12, ETHEREUM_FAR_HASH).await?;
+
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 3)
+        .await
+        .expect_err("no Universal Resolver is declared at the publication's block");
     assert_eq!(error.kind(), ErrorKind::Unsupported);
 
     fixture.cleanup().await?;
@@ -3576,8 +3599,96 @@ async fn primary_name_completes_with_a_running_lagging_publication() -> AnyResul
         .lookup_ens_primary_name(ETHEREUM, target)
         .await?;
     assert_eq!(result.forward_address.as_deref(), Some(target));
+    assert_eq!(result.position.block_number, 10);
+    assert_eq!(result.position.block_hash, ETHEREUM_HASH);
     fixture.cleanup().await?;
-    assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_LATER_HASH);
+    assert_hash_pinned(&join_rpc(rpc_handle).await?, ETHEREUM_HASH);
+    Ok(())
+}
+
+/// The reverse and forward calls run at the captured publication's block, the position the
+/// indexed claim is read at, while the post-call guard still pins the stored head.
+#[tokio::test]
+async fn primary_name_executes_at_a_publication_within_a_configured_lag_tolerance() -> AnyResult<()>
+{
+    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
+        RpcResponse::Result(Value::String(hex_string(
+            &Address::from_str(reverse_resolver)?.abi_encode(),
+        ))),
+        RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
+        RpcResponse::Result(encoded_address_result(target)?),
+    ])
+    .await?;
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_registry_l1",
+        "registry",
+        ENS_REGISTRY,
+        "00000000-0000-0000-0000-000000000104",
+    )
+    .await?;
+    // A Universal Resolver declaration that starts after the publication is not yet selected.
+    let manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_execution'",
+    )
+    .fetch_one(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO contract_instances
+            (contract_instance_id, chain_id, contract_kind)
+         VALUES ('00000000-0000-0000-0000-000000000105'::uuid, $1, 'contract')",
+    )
+    .bind(ETHEREUM)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_contract_instances
+            (manifest_id, chain_id, declaration_kind, declaration_name,
+             contract_instance_id, declared_address, role, proxy_kind,
+             start_block_number)
+         VALUES ($1, $2, 'contract', 'replacement_universal_resolver',
+                 '00000000-0000-0000-0000-000000000105'::uuid, $3,
+                 'universal_resolver', 'none', 11)",
+    )
+    .bind(manifest_id)
+    .bind(ETHEREUM)
+    .bind(REPLACEMENT_UNIVERSAL_RESOLVER)
+    .execute(fixture.pool())
+    .await?;
+    advance_head_to(fixture.pool(), 12, ETHEREUM_FAR_HASH).await?;
+    let result = lookup_engine(fixture.pool(), &rpc_url)?
+        .with_publication_lag_tolerance_blocks(3)
+        .lookup_ens_primary_name(ETHEREUM, target)
+        .await?;
+    assert_eq!(result.status, EnsPrimaryNameStatus::Success);
+    assert_eq!(result.forward_address.as_deref(), Some(target));
+    assert_eq!(result.position.block_number, 10);
+    assert_eq!(result.position.block_hash, ETHEREUM_HASH);
+    let requests = join_rpc(rpc_handle).await?;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2]["params"][0]["to"], UNIVERSAL_RESOLVER);
+    assert_hash_pinned(&requests, ETHEREUM_HASH);
+    assert_eq!(
+        admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 3).await?,
+        ["ens_v1"]
+    );
+
+    advance_head_to(fixture.pool(), 14, ETHEREUM_FARTHER_HASH).await?;
+    let error = lookup_engine(fixture.pool(), "http://127.0.0.1:1")?
+        .with_publication_lag_tolerance_blocks(3)
+        .lookup_ens_primary_name(ETHEREUM, target)
+        .await
+        .expect_err("four blocks behind is beyond a three-block tolerance");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    let error = admitted_verified_authority_arms(fixture.pool(), ETHEREUM, 3)
+        .await
+        .expect_err("the arm read selects at the same publication");
+    assert_eq!(error.kind(), ErrorKind::Stale);
+    fixture.cleanup().await?;
     Ok(())
 }
 
