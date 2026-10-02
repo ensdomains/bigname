@@ -202,7 +202,6 @@ pub(super) fn decode_name_current_list_row(row: PgRow) -> Result<NameCurrentList
     let labelhash = crate::sql_row::get(&row, "labelhash")?;
     let token_id = crate::sql_row::get(&row, "token_id")?;
     let owner = crate::sql_row::get(&row, "owner")?;
-    let registrant = crate::sql_row::get(&row, "registrant")?;
     let created_at = crate::sql_row::get(&row, "created_at")?;
     let registration_date = crate::sql_row::get(&row, "registration_date")?;
     let expiry_date = crate::sql_row::get(&row, "expiry_date")?;
@@ -214,7 +213,6 @@ pub(super) fn decode_name_current_list_row(row: PgRow) -> Result<NameCurrentList
         labelhash,
         token_id,
         owner,
-        registrant,
         created_at,
         registration_date,
         expiry_date,

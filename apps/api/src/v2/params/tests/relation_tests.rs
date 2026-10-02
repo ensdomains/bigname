@@ -19,7 +19,7 @@ fn resolves_to_relation_parses_alone_and_rejects_mixing() {
     for mixed in [
         "resolves_to,owner",
         "any,resolves_to",
-        "registrant,resolves_to",
+        "manager,resolves_to",
     ] {
         let error = parse(RawQueryParams {
             relation: Some(mixed.to_owned()),

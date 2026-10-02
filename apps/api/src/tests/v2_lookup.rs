@@ -629,7 +629,7 @@ async fn released_name_serves_its_lapsed_holder_only_in_the_lapsed_block() -> Re
     )
     .await?;
     let expected_lapsed = json!({
-        "registrant": HOLDER,
+        "owner": HOLDER,
         "held_through": "registrar",
         "released_at": "1707776000",
         "release_kind": "expired",
@@ -1342,10 +1342,9 @@ async fn v2_lookup_serves_reverse_pagination_after_unrelated_head_advance() -> R
     );
     assert_eq!(first_page["data"][0]["records"][0]["name"], json!("alice.eth"));
     assert_eq!(first_page["data"][0]["records"][0]["is_primary"], json!(true));
-    // The holder of an unwrapped lease is also its registrant.
     assert_eq!(
         first_page["data"][0]["records"][0]["relations"],
-        json!(["owner", "registrant"])
+        json!(["owner"])
     );
     assert_eq!(first_page["data"][0]["page"]["cursor"], Value::Null);
     assert_eq!(first_page["data"][0]["page"]["page_size"], json!(1));
@@ -2521,7 +2520,7 @@ async fn v2_lookup_reverse_relation_sets_and_any_match_any_listed_relation() -> 
             "id": "any",
             "address": address,
             "coin_type": 60,
-            "relation": "owner,manager,registrant"
+            "relation": "owner,manager"
         })
     );
     let any_record_names = payload["data"][1]["records"]
@@ -2587,14 +2586,13 @@ async fn v2_lookup_reverse_feed_uses_detail_pagination_semantics() -> Result<()>
 }
 
 #[tokio::test]
-async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Result<()> {
+async fn v2_lookup_reverse_relation_filters_owner_exactly() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (_count_guard, count_calls) =
         crate::v2::support::identity_facade_count_test_hooks::install(&database.pool).await?;
     let address = "0x0000000000000000000000000000000000000abc";
-    // The address holds holder.eth's lease, so it is that name's owner and registrant: an
-    // unwrapped lease's token holder is its registrant. It only controls managed.eth through the
-    // registry, which neither filter may list.
+    // The address holds holder.eth's lease, so it is that name's owner. It only controls
+    // managed.eth through the registry, which the filter may not list.
     seed_relation_name(
         &database,
         "holder.eth",
@@ -2635,29 +2633,19 @@ async fn v2_lookup_reverse_relation_filters_owner_and_registrant_exactly() -> Re
     assert_eq!(lookup_record_names(&owner), vec!["holder.eth"]);
     assert_eq!(owner["data"][0]["records"][0]["relations"], json!(["owner"]));
     assert_eq!(owner["data"][0]["page"]["total_count"], Value::Null);
-
-    let registrant = v2_lookup_json(
-        &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "address": address,
-                "relation": "registrant"
-            }]
-        }),
-    )
-    .await?;
-    assert_eq!(lookup_record_names(&registrant), vec!["holder.eth"]);
-    assert_eq!(
-        registrant["data"][0]["records"][0]["relations"],
-        json!(["registrant"])
-    );
-    assert_eq!(registrant["data"][0]["page"]["total_count"], Value::Null);
     assert_eq!(
         count_calls.count(),
         0,
-        "post-filtered reverse lookups must not execute a discarded live count"
+        "a post-filtered reverse lookup must not execute a discarded live count"
     );
+
+    let registrant = v2_lookup_response_for_database(
+        &database,
+        "/v1/lookup",
+        json!({"inputs": [{"address": address, "relation": "registrant"}]}),
+    )
+    .await?;
+    assert_eq!(registrant.status(), StatusCode::BAD_REQUEST);
 
     database.cleanup().await?;
     Ok(())
@@ -3131,15 +3119,11 @@ async fn assert_reverse_family_pages(
             let row = &entry.name_record.row;
             assert!(namespaces.contains(&row.namespace));
             let facets = match row.normalized_name.as_str() {
-                "birch.eth" => vec![
-                    Relation::Registrant,
-                    Relation::TokenHolder,
-                    Relation::EffectiveController,
-                ],
+                "birch.eth" => vec![Relation::TokenHolder, Relation::EffectiveController],
                 "bob.eth" | "cedar.eth" | "elm.base.eth" => {
                     vec![Relation::EffectiveController]
                 }
-                _ => vec![Relation::Registrant, Relation::TokenHolder],
+                _ => vec![Relation::TokenHolder],
             };
             let mut facets = facets
                 .into_iter()
@@ -3166,7 +3150,7 @@ async fn assert_reverse_family_pages(
             role_rank: if last
                 .relation_facets
                 .iter()
-                .any(|r| matches!(r, Relation::Registrant | Relation::TokenHolder))
+                .any(|r| matches!(r, Relation::TokenHolder))
             {
                 0
             } else {

@@ -34,7 +34,7 @@ pub(crate) use self::cursor::{
 };
 
 mod cursor;
-mod former_registrant;
+mod former_owner;
 mod record_counts;
 mod resolves_to;
 mod resolves_to_evm;
@@ -94,8 +94,6 @@ pub(crate) struct AddressName {
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registrant: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
@@ -123,7 +121,7 @@ pub(crate) struct AddressName {
     /// stored record matched, ascending, with the record key that matched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolutions: Option<Vec<AddressNameResolution>>,
-    /// Present only on `relation=former_registrant` rows: the ended registration's last holder,
+    /// Present only on `relation=former_owner` rows: the ended registration's last holder,
     /// as name detail serves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lapsed_registration: Option<crate::v2::name_record::LapsedRegistration>,
@@ -168,10 +166,10 @@ pub(crate) async fn get_address_names(
         && !params
             .relation
             .as_ref()
-            .is_some_and(RelationSet::is_former_registrant)
+            .is_some_and(RelationSet::is_former_owner)
     {
         return Err(V2Error::invalid_input(
-            "expires_after and expires_before require relation=former_registrant",
+            "expires_after and expires_before require relation=former_owner",
         ));
     }
     if params
@@ -184,14 +182,9 @@ pub(crate) async fn get_address_names(
     if params
         .relation
         .as_ref()
-        .is_some_and(RelationSet::is_former_registrant)
+        .is_some_and(RelationSet::is_former_owner)
     {
-        return former_registrant::get_address_former_registrants(
-            &state,
-            &normalized_address,
-            &params,
-        )
-        .await;
+        return former_owner::get_address_former_owners(&state, &normalized_address, &params).await;
     }
     if params.coin_type.is_some() {
         return Err(V2Error::invalid_input(

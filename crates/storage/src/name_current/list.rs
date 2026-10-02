@@ -109,7 +109,6 @@ pub struct NameCurrentListRow {
     pub labelhash: Option<String>,
     pub token_id: Option<String>,
     pub owner: Option<String>,
-    pub registrant: Option<String>,
     pub created_at: Option<OffsetDateTime>,
     pub registration_date: Option<OffsetDateTime>,
     pub expiry_date: Option<UnixSeconds>,
@@ -149,7 +148,6 @@ pub(super) const NAME_CURRENT_LIST_SELECT: &str = r#"
             labelhash,
             token_id,
             owner,
-            registrant,
             created_at,
             registration_date,
             expiry_date,
@@ -273,14 +271,7 @@ pub(super) fn push_filtered_name_list_cte<'a>(
                     nc.declared_summary #>> '{registration,upstream_resource}',
                     nc.declared_summary #>> '{control,token_id}'
                 ), '') AS token_id,
-                NULLIF(LOWER(COALESCE(
-                    nc.declared_summary #>> '{control,registry_owner}',
-                    nc.declared_summary #>> '{control,owner}'
-                )), '') AS owner,
-                NULLIF(LOWER(COALESCE(
-                    nc.declared_summary #>> '{control,registrant}',
-                    nc.declared_summary #>> '{registration,registrant}'
-                )), '') AS registrant,
+                NULLIF(LOWER(nc.declared_summary #>> '{control,owner}'), '') AS owner,
                 COALESCE(
                     "#,
     );

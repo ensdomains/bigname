@@ -2,7 +2,8 @@
 //! `ens_v1_registry_l1` NewOwner created (`setSubnodeOwner` or `setSubnodeRecord`) and no
 //! registrar, NameWrapper or other label-bearing event ever named. No name row composes for such a
 //! node, so the ordinary read (`address_names.rs`) lists nothing for it; this read lists it for
-//! its current registry owner as `effective_controller`, as its parent's subnames route serves it
+//! its current registry owner as `token_holder` and `effective_controller` (it has no token, so
+//! its registry owner is its owner and its manager), as its parent's subnames route serves it
 //! (`families::topology::load_owned_registry_children`): the same served name, a non-name form
 //! when the label is unproven (docs/glossary.md#non-name-form), and the same owner.
 //!
@@ -82,31 +83,34 @@ pub(super) async fn compose_registry_child_rows(
         let publication = servable_publication(conn, &chain_id).await?;
         let (provenance, chain_positions, canonicality_summary) = publication_stamps(&publication);
         let last_recomputed_at = crate::time::format_timestamp(publication.block_timestamp);
-        rows.extend(children.into_iter().map(|child: RegistryChildRow| {
-            json!({
-                "address": child.owner,
-                "logical_name_id": child.logical_name_id,
-                "relation": "effective_controller",
-                "namespace": child.namespace,
-                "raw_name": child.display_name,
-                "normalized_name": child.display_name,
-                "namehash": child.namehash,
-                "surface_binding_id": null,
-                "resource_id": child.resource_id,
-                "token_lineage_id": null,
-                "binding_kind": null,
-                "support_status": "supported",
-                "unsupported_reason": null,
-                "provenance": provenance,
-                "chain_positions": chain_positions,
-                "canonicality_summary": canonicality_summary,
-                // Composed name rows carry manifest version 1 (families::name::compose).
-                "manifest_version": 1,
-                "last_recomputed_at": last_recomputed_at,
-                "registry_child": true,
-                "served_owner": child.owner,
-                "served_authority": child.authority,
-                "served_lifecycle_shadow": child.lifecycle_shadow,
+        // A child has no token, so its registry owner is both its owner and its manager.
+        rows.extend(children.iter().flat_map(|child: &RegistryChildRow| {
+            ["token_holder", "effective_controller"].map(|relation| {
+                json!({
+                    "address": child.owner,
+                    "logical_name_id": child.logical_name_id,
+                    "relation": relation,
+                    "namespace": child.namespace,
+                    "raw_name": child.display_name,
+                    "normalized_name": child.display_name,
+                    "namehash": child.namehash,
+                    "surface_binding_id": null,
+                    "resource_id": child.resource_id,
+                    "token_lineage_id": null,
+                    "binding_kind": null,
+                    "support_status": "supported",
+                    "unsupported_reason": null,
+                    "provenance": provenance,
+                    "chain_positions": chain_positions,
+                    "canonicality_summary": canonicality_summary,
+                    // Composed name rows carry manifest version 1 (families::name::compose).
+                    "manifest_version": 1,
+                    "last_recomputed_at": last_recomputed_at,
+                    "registry_child": true,
+                    "served_owner": child.owner,
+                    "served_authority": child.authority,
+                    "served_lifecycle_shadow": child.lifecycle_shadow,
+                })
             })
         }));
     }

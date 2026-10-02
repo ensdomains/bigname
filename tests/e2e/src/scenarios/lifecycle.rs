@@ -355,9 +355,9 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
         "RegistrationReleased"
     );
     assert_eq!(
-        pointer("/declared_state/registration/registrant"),
+        pointer("/declared_state/registration/lapsed_registration/owner"),
         format!("{alice:#x}"),
-        "released summary should retain the last registrant"
+        "released summary should name the last registrant as the lapsed owner"
     );
     let expiry = support::decimal_unix_seconds(&pointer("/declared_state/registration/expiry"))?;
     let released_at = pointer("/declared_state/registration/released_at")
@@ -379,7 +379,8 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
         "released_at {released_at} should be at or after expiry {expiry} plus grace"
     );
 
-    let address_path = format!("/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant");
+    let address_path =
+        format!("/v1/addresses/{alice:#x}/names?namespace=ens&relation=token_holder");
     let (status, address_names) = run.api.get_json(&address_path).await?;
     assert_eq!(status, 200, "address names lookup failed: {address_names}");
     let address_entries = address_names

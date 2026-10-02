@@ -412,7 +412,7 @@ async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Re
 
     let set_payload = v2_conformance_get_json(
         &database,
-        &format!("/v1/addresses/{V2_ADDRESS}/history?relation=registrant,manager&page_size=20"),
+        &format!("/v1/addresses/{V2_ADDRESS}/history?relation=owner,manager&page_size=20"),
     )
     .await?;
     let set_rows = set_payload["data"]
@@ -426,7 +426,7 @@ async fn v2_address_history_filters_relation_sets_and_defaults_namespace() -> Re
         set_rows
             .iter()
             .any(|row| row["transaction_hash"] == json!("0xv2addrhist02")),
-        "registrant half of the relation set must match alpha resource history"
+        "owner half of the relation set must match alpha resource history"
     );
     assert!(
         set_rows
@@ -640,9 +640,8 @@ async fn v2_flat_record_shape_matches_profile_lookup_and_family_rows() -> Result
     )
     .await?;
     assert_eq!(lookup["data"][0]["record"], profile["data"]);
-    assert_eq!(profile["data"]["owner"], address);
-    assert_eq!(profile["data"]["registrant"], token_holder_address);
-    assert_ne!(profile["data"]["owner"], token_holder_address);
+    assert_eq!(profile["data"]["owner"], token_holder_address);
+    assert!(profile["data"].get("registrant").is_none());
     assert_eq!(
         lookup["data"][0]["record"]["manager"], address,
         "an unwrapped name's manager is its registry owner, not the token holder"
@@ -1305,7 +1304,7 @@ const SHARED_LIST_RECORD_FIELDS: &[&str] = &[
     "namespace",
     "namehash",
     "owner",
-    "registrant",
+    "manager",
     "registration_status",
     "registered_at",
     "created_at",

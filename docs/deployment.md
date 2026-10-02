@@ -2180,8 +2180,6 @@ its implementation's `start_block`, so a database that never fetched such a log
 writes the same interpreted rows as one that did (the fetched log can add only
 an operator diagnostic in `interpret_decode_skips`). On Sepolia this changes interpreted output only
 if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
-Interpret redo applies the rule either way.
-
 Interpret redo applies the rule either way. The same release replaces that
 implementation with the 2026-10-01 redeploy's `0x115eb53f…` from block
 `11820406` ([Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)).
@@ -2257,3 +2255,31 @@ so the hash does not rotate. It adds no schema-migration and needs no redo or hi
 ingest fetch. Rows gain one field; cursors issued before it continue unchanged,
 and a cursor issued with `authority` or `parent` must be continued with the
 same filters.
+
+### Owner as the token holder
+
+The build that serves `owner` as the token holder (TYR-191, see the
+[naming dictionary](api-v1.md#naming-dictionary) and [Manager](api-v1.md#manager))
+changes the composition in `crates/storage/src/families` and the address-name
+index in `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+Finish the full-history Interpret redo and the Project redo it installs before
+the matching API serves. In v0.3.0 it shares the release's one Interpret and
+Project redo pair with the other hash-rotating changes in the batch
+([read-only family queries outside the content hash](#read-only-family-queries-outside-the-content-hash),
+TYR-149, the [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01),
+TYR-183, and
+[resolver implementation start blocks](#resolver-implementation-start-blocks),
+TYR-193): run one pair under a binary that holds all of them. It needs no schema-migration, no manifest or
+environment change and no historical ingest fetch. The stored
+`project_name_summary.owner`, which the registry-label `owner` and
+`exclude_owner` filters read, now holds the token holder of wrapped names and
+unwrapped `.eth` second-level names, and the address index drops its
+`registrant` rows; the Project redo rebuilds both. It also recomposes every
+released name: none keeps an owner or manager (except a surface-less released `.eth`
+child without a label preimage, which still lists its registry owner as both, TYR-196), and
+an ENSv1 lease that lapsed with
+its registry record left in place now carries `lapsed_registration`, so it lists
+under `relation=former_owner`. The API change is breaking
+for clients of `owner`, `registrant`, `relation=registrant`,
+`relation=former_registrant` and `lapsed_registration.registrant`.

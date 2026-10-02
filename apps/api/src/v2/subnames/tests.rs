@@ -238,3 +238,41 @@ fn subname_cursor_ignores_legacy_snapshot_component() {
         name_cursor()
     );
 }
+
+/// A child with no name row serves its registry owner, or an ENSv2 child its token holder, as
+/// both `owner` and `manager`: such a name has no NameWrapper state. A shadow child serves no
+/// manager.
+#[test]
+fn a_child_without_a_name_row_is_managed_by_its_owner() {
+    let holder = "0x00000000000000000000000000000000000000cd".to_owned();
+    let child = |owner: Option<&str>, registrant: Option<&str>, lifecycle_shadow| {
+        bigname_storage::ChildrenCurrentRow {
+            parent_logical_name_id: "ens:parent".into(),
+            child_logical_name_id: "ens:child".into(),
+            surface_class: "registry_child".into(),
+            namespace: "ens".into(),
+            canonical_display_name: "child.parent.eth".into(),
+            normalized_name: "child.parent.eth".into(),
+            namehash: "0x01".into(),
+            labelhash: None,
+            owner: owner.map(str::to_owned),
+            registrant: registrant.map(str::to_owned),
+            registry_authority: None,
+            lifecycle_shadow,
+            provenance: serde_json::json!({}),
+            chain_positions: serde_json::json!({}),
+            canonicality_summary: serde_json::json!({}),
+            manifest_version: 1,
+            last_recomputed_at: time::OffsetDateTime::UNIX_EPOCH,
+        }
+    };
+    for (row, manager) in [
+        (child(None, Some(&holder), false), Some(&holder)),
+        (child(Some(&holder), None, false), Some(&holder)),
+        (child(Some(&holder), None, true), None),
+    ] {
+        let subname = build_subname(&row, None, None, false).expect("subname");
+        assert_eq!(subname.owner.as_ref(), Some(&holder));
+        assert_eq!(subname.manager.as_ref(), manager);
+    }
+}

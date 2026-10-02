@@ -59,7 +59,6 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
                 anc.served_authority,
                 anc.served_lifecycle_shadow,
                 CASE anc.relation
-                    WHEN 'registrant' THEN 0
                     WHEN 'token_holder' THEN 1
                     WHEN 'effective_controller' THEN 2
                     WHEN 'role_holder' THEN 3

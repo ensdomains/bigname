@@ -107,8 +107,6 @@ pub(crate) struct LookupRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registrant: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) created_at: Option<String>,

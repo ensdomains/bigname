@@ -95,7 +95,7 @@ async fn seed_former_cursor_names(database: &TestDatabase, dated: bool) -> Resul
         release.source_family = FAMILY.into();
         release.before_state = json!({});
         // These are the existing token_state_event/append_resource_expiration producer shapes,
-        // also exercised by crates/project/tests/families_former_registrant.rs.
+        // also exercised by crates/project/tests/families_former_owner.rs.
         release.after_state = if undated {
             json!({"source_event":"LabelUnregistered", "registry_contract_instance_id":registry,
                 "token_id":token, "sender":FORMER_CURSOR_HOLDER})
@@ -117,11 +117,11 @@ async fn seed_former_cursor_names(database: &TestDatabase, dated: bool) -> Resul
 }
 
 fn former_cursor_route() -> String {
-    format!("/v1/addresses/{FORMER_CURSOR_HOLDER}/names?relation=former_registrant&namespace=ens")
+    format!("/v1/addresses/{FORMER_CURSOR_HOLDER}/names?relation=former_owner&namespace=ens")
 }
 
 #[tokio::test]
-async fn v2_former_registrant_cursor_walks_explicit_unregisters_and_mixed_expiries() -> Result<()> {
+async fn v2_former_owner_cursor_walks_explicit_unregisters_and_mixed_expiries() -> Result<()> {
     for dated in [false, true] {
         let database = TestDatabase::new_migrated().await?;
         seed_former_cursor_names(&database, dated).await?;
@@ -146,7 +146,7 @@ async fn v2_former_registrant_cursor_walks_explicit_unregisters_and_mixed_expiri
             assert_eq!(v2_names_listed(&baseline), expected);
             for row in baseline["data"].as_array().context("rows")? {
                 assert_eq!(
-                    row["lapsed_registration"]["registrant"],
+                    row["lapsed_registration"]["owner"],
                     FORMER_CURSOR_HOLDER
                 );
                 if row["name"]
@@ -242,17 +242,17 @@ async fn former_cursor_binds_fractional_bound(field: &str, second: &str) -> Resu
 }
 
 #[tokio::test]
-async fn v2_former_registrant_cursor_binds_fractional_lower_bound() -> Result<()> {
+async fn v2_former_owner_cursor_binds_fractional_lower_bound() -> Result<()> {
     former_cursor_binds_fractional_bound("expires_after", "00").await
 }
 
 #[tokio::test]
-async fn v2_former_registrant_cursor_binds_fractional_upper_bound() -> Result<()> {
+async fn v2_former_owner_cursor_binds_fractional_upper_bound() -> Result<()> {
     former_cursor_binds_fractional_bound("expires_before", "02").await
 }
 
 #[tokio::test]
-async fn v2_former_registrant_rejects_registration_dedupe() -> Result<()> {
+async fn v2_former_owner_rejects_registration_dedupe() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_former_cursor_names(&database, true).await?;
     let base = former_cursor_route();
@@ -269,14 +269,14 @@ async fn v2_former_registrant_rejects_registration_dedupe() -> Result<()> {
         let body: Value = read_json(response).await?;
         assert_eq!(
             body["error"]["message"],
-            "dedupe=registration is not supported with relation=former_registrant"
+            "dedupe=registration is not supported with relation=former_owner"
         );
     }
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn v2_former_registrant_expiry_bounds_are_rejected_on_other_relations() -> Result<()> {
+async fn v2_former_owner_expiry_bounds_are_rejected_on_other_relations() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_former_cursor_names(&database, true).await?;
     for relation in ["resolves_to", "owner", "any"] {
@@ -292,7 +292,7 @@ async fn v2_former_registrant_expiry_bounds_are_rejected_on_other_relations() ->
             let body: Value = read_json(response).await?;
             assert_eq!(
                 body["error"]["message"],
-                "expires_after and expires_before require relation=former_registrant"
+                "expires_after and expires_before require relation=former_owner"
             );
         }
     }

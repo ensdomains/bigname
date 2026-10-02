@@ -148,7 +148,7 @@ async fn an_expired_ens_v2_registration_names_its_last_holder_until_it_is_regist
     let released = registration(&fixture, &name).await?;
     ensure!(released["status"] == json!("released"), "{released}");
     ensure!(
-        released["lapsed_registration"]["registrant"] == json!(BOB)
+        released["lapsed_registration"]["owner"] == json!(BOB)
             && released["lapsed_registration"]["held_through"] == json!("registry")
             && released["lapsed_registration"]["release_kind"] == json!("expired"),
         "{released}"
@@ -210,7 +210,7 @@ async fn an_unregistered_ens_v2_registration_names_its_last_holder_without_an_ex
         "{released}"
     );
     ensure!(
-        released["lapsed_registration"]["registrant"] == json!(BOB)
+        released["lapsed_registration"]["owner"] == json!(BOB)
             && released["lapsed_registration"]["release_kind"] == json!("unregistered")
             && released["lapsed_registration"]["released_at"] == json!(1_800_000_048),
         "{released}"

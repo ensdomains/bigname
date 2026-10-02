@@ -78,8 +78,6 @@ pub(crate) struct Subname {
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registrant: Option<String>,
     pub(crate) registration_status: RegistrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
@@ -305,25 +303,33 @@ pub(crate) fn build_subname(
         Some(_) => ens_v1_of_row(name_row)?,
         None => ens_v1_of_registry_child(authority, row.lifecycle_shadow)?,
     };
-    let (owner, registrant) = if name_row.is_some() {
-        (
-            registration.owner.or_else(|| {
-                name_row
-                    .filter(|name| {
-                        name.resource_id.is_none()
-                            && name.serving_resource_id.is_some()
-                            && name
-                                .declared_summary
-                                .pointer("/coverage/enumeration_basis")
-                                .and_then(serde_json::Value::as_str)
-                                == Some("event_linked_registry_resolver")
-                    })
-                    .and_then(|_| row.owner.clone())
-            }),
-            registration.registrant,
-        )
-    } else {
-        (row.owner.clone(), row.registrant.clone())
+    // A child with no name row serves its registry owner, or an ENSv2 child its token holder.
+    let (owner, manager) = match name_row {
+        Some(name) => {
+            let linked = registration
+                .owner
+                .is_none()
+                .then(|| {
+                    (name.resource_id.is_none()
+                        && name.serving_resource_id.is_some()
+                        && name
+                            .declared_summary
+                            .pointer("/coverage/enumeration_basis")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("event_linked_registry_resolver"))
+                    .then(|| row.owner.clone())
+                    .flatten()
+                })
+                .flatten();
+            let manager = registration.manager.or_else(|| {
+                served_manager(&name.declared_summary, linked.as_ref(), linked.as_ref())
+            });
+            (registration.owner.or(linked), manager)
+        }
+        None => {
+            let owner = row.owner.clone().or_else(|| row.registrant.clone());
+            (owner.clone(), owner.filter(|_| !row.lifecycle_shadow))
+        }
     };
 
     Ok(Subname {
@@ -332,12 +338,8 @@ pub(crate) fn build_subname(
         namespace: row.namespace.clone(),
         namehash: row.namehash.clone(),
         labelhash: row.labelhash.clone(),
-        manager: name_row.map_or_else(
-            || owner.clone().filter(|_| !row.lifecycle_shadow),
-            |name| served_manager(&name.declared_summary, owner.as_ref(), registrant.as_ref()),
-        ),
         owner,
-        registrant,
+        manager,
         registration_status: registration.registration_status,
         registered_at: registration.registered_at,
         created_at: registration.created_at,

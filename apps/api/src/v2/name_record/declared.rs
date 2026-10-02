@@ -8,12 +8,12 @@ use super::values::{json_address_at_paths, json_timestamp_at_paths, object_field
 
 /// The holder and contract of an ended registration. Project writes this historical block
 /// for released ENSv1 leases and supported ENSv2 expiry/unregister releases. It supplies the
-/// `former_registrant` relation, never current authority relations or permissions.
+/// `former_owner` relation, never current authority relations or permissions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LapsedRegistration {
     /// The lapsed lease's last holder.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registrant: Option<String>,
+    pub(crate) owner: Option<String>,
     /// What held the lapsed lease. Not named `authority`: the record's top-level `authority`
     /// is the protocol arm (`ens_v1` / `ens_v2`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,7 +73,7 @@ impl LapsedHeldThrough {
 pub(crate) fn lapsed_registration(summary: &Value) -> Option<LapsedRegistration> {
     let lapsed = object_field(declared_registration(summary)?, "lapsed_registration")?;
     Some(LapsedRegistration {
-        registrant: json_address_at_paths(lapsed, &[&["registrant"]]),
+        owner: json_address_at_paths(lapsed, &[&["owner"]]),
         held_through: match string_field(lapsed.get("held_through")).as_deref() {
             Some("registry") => Some(LapsedHeldThrough::Registry),
             _ => string_field(lapsed.get("authority_kind"))
@@ -111,17 +111,11 @@ pub(super) fn declared_registration(summary: &Value) -> Option<&Value> {
 }
 
 pub(super) fn declared_owner(summary: &Value) -> Option<String> {
-    json_address_at_paths(
-        summary,
-        &[&["control", "owner"], &["control", "registry_owner"]],
-    )
+    json_address_at_paths(summary, &[&["control", "owner"]])
 }
 
-pub(super) fn declared_registrant(summary: &Value) -> Option<String> {
-    json_address_at_paths(
-        summary,
-        &[&["registration", "registrant"], &["control", "registrant"]],
-    )
+pub(super) fn declared_registry_owner(summary: &Value) -> Option<String> {
+    json_address_at_paths(summary, &[&["control", "registry_owner"]])
 }
 
 pub(super) fn declared_registered_at(summary: &Value) -> Option<String> {

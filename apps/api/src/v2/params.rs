@@ -371,17 +371,17 @@ pub(crate) fn parse_relation_set_param(value: Option<&str>) -> V2Result<Option<R
                 .any(|relation| *relation != Relation::ResolvesTo));
     if mixes_resolves_to {
         return Err(V2Error::invalid_input(
-            "relation=resolves_to cannot be combined with owner, manager, registrant, role_holder, or any",
+            "relation=resolves_to cannot be combined with owner, manager, role_holder, or any",
         ));
     }
-    let mixes_former_registrant = relations.contains(&Relation::FormerRegistrant)
+    let mixes_former_owner = relations.contains(&Relation::FormerOwner)
         && (has_any
             || relations
                 .iter()
-                .any(|relation| *relation != Relation::FormerRegistrant));
-    if mixes_former_registrant {
+                .any(|relation| *relation != Relation::FormerOwner));
+    if mixes_former_owner {
         return Err(V2Error::invalid_input(
-            "relation=former_registrant cannot be combined with another relation or any",
+            "relation=former_owner cannot be combined with another relation or any",
         ));
     }
     if has_any {

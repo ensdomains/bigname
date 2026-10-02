@@ -25,7 +25,7 @@ fn fixture_label(label: &str, owner: Option<&'static str>, expiry: i64) -> Fixtu
 
 /// alpha.eth (ENSv1, bound at 200) points at the ENSv2 subregistry `b1`, which registers each
 /// label at block 205; a label with an owner has its token transferred to it in the same
-/// transaction, before the registration, as the registry emits them. Published at 240.
+/// transaction as the registration, which names the same owner. Published at 240.
 async fn seed_label_owner_fixture(database: &TestDatabase, labels: &[FixtureLabel]) -> Result<()> {
     seed_bounded_membership_blocks(database, 240).await?;
     let (alpha, alpha_resource) =
@@ -123,7 +123,7 @@ async fn seed_label_owner_fixture(database: &TestDatabase, labels: &[FixtureLabe
             CHILD_ALPHA_REGISTRY,
             json!({"source_event": "LabelRegistered", "authority_kind": "ens_v2_registry",
                    "registry_contract_instance_id": alpha_registry.to_string(),
-                   "status": "registered", "registrant": CHILD_OWNER,
+                   "status": "registered", "registrant": label.owner,
                    "expiry": label.expiry}),
         );
         registration.resource_id = Some(resource);

@@ -384,11 +384,10 @@ pub(crate) async fn name_relations_on(
                 .into_iter()
                 .map(|(address, relation)| {
                     let relation = match relation {
-                        "registrant" => AddressNameRelation::Registrant,
                         "token_holder" => AddressNameRelation::TokenHolder,
                         "effective_controller" => AddressNameRelation::EffectiveController,
                         "role_holder" => AddressNameRelation::RoleHolder,
-                        _ => unreachable!("family relations have four defined kinds"),
+                        _ => unreachable!("family relations have three defined kinds"),
                     };
                     crate::IdentityAddressRelationRow {
                         address,

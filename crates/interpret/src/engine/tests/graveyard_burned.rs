@@ -309,7 +309,13 @@ async fn a_live_grant_sent_to_the_graveyard_is_served_as_the_chain_holds_it() ->
         "{lapsed:#}"
     );
     assert_eq!(
-        lapsed["registration"]["lapsed_registration"]["registrant"], GRAVEYARD,
+        lapsed["registration"]["lapsed_registration"]["owner"], GRAVEYARD,
+        "{lapsed:#}"
+    );
+    assert!(
+        lapsed["registration"]["lapsed_registration"]
+            .get("registrant")
+            .is_none(),
         "{lapsed:#}"
     );
 
@@ -341,6 +347,11 @@ async fn a_wrapped_subname_the_graveyard_cleared_serves_no_owner_after_wrapper_t
     let wrapped = summary(pool, &fixture.sub_id).await?;
     assert_eq!(
         wrapped["control"]["registry_owner"],
+        Value::String(SUB_OWNER.to_owned()),
+        "{wrapped:#}"
+    );
+    assert_eq!(
+        wrapped["control"]["owner"],
         Value::String(SUB_OWNER.to_owned()),
         "{wrapped:#}"
     );
@@ -396,6 +407,15 @@ async fn a_wrapped_subname_the_graveyard_cleared_serves_no_owner_after_wrapper_t
                 Value::Null,
                 "{run}: {served:#}"
             );
+            // The surviving NameWrapper token's holder is not the owner of a burned record.
+            assert_eq!(served["control"]["owner"], Value::Null, "{run}: {served:#}");
+            for holder in [SUB_OWNER, CAROL, DAVE] {
+                let relations = address_relations(pool, holder, &fixture.sub_id).await?;
+                assert!(
+                    !relations.contains(&bigname_storage::AddressNameRelation::TokenHolder),
+                    "{run}: {holder} owns a burned record: {relations:?}"
+                );
+            }
         }
     }
 
@@ -502,9 +522,60 @@ async fn a_surfaced_subname_the_graveyard_cleared_is_not_listed_under_the_gravey
             "{run}"
         );
     }
+    // The Graveyard's registry write names no owner, so it is no owner-history anchor, while
+    // CAROL's earlier tokenless ownership is.
+    assert!(
+        owner_history(pool, GRAVEYARD, LATER_BLOCK + 2)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        owner_history(pool, CAROL, LATER_BLOCK + 2)
+            .await?
+            .iter()
+            .any(|row| row == &format!("AuthorityTransferred@{}", LATER_BLOCK + 1))
+    );
 
     database.cleanup().await?;
     Ok(())
+}
+
+pub(super) async fn owner_history(
+    pool: &PgPool,
+    address: &str,
+    block: i64,
+) -> TestResult<Vec<String>> {
+    let page = bigname_storage::load_address_history_page_for_relations(
+        pool,
+        address,
+        None,
+        Some(&[bigname_storage::AddressNameRelation::TokenHolder]),
+        bigname_storage::HistoryScope::Both,
+        false,
+        None,
+        50,
+        bigname_storage::HistorySummaryMode::None,
+        &bigname_storage::HistoryPageOptions {
+            publication_block_bounds: Some(std::collections::BTreeMap::from([(
+                CHAIN.to_owned(),
+                block,
+            )])),
+            ..bigname_storage::HistoryPageOptions::default()
+        },
+        false,
+    )
+    .await?;
+    Ok(page
+        .rows
+        .into_iter()
+        .map(|row| {
+            format!(
+                "{}@{}",
+                row.event_kind,
+                row.block_number.unwrap_or_default()
+            )
+        })
+        .collect())
 }
 
 /// Known gap, deferred to TYR-100 (a registry write away from the NameWrapper keeps the wrapper

@@ -1,12 +1,12 @@
 // Current-data positions continue through completed rebuilds, vanished anchors and read races.
 #[tokio::test]
-async fn v2_collection_cursor_address_position_outlives_removed_registrant() -> Result<()> {
+async fn v2_collection_cursor_address_position_outlives_removed_owner() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_names_fixture(&database).await?;
-    let base = format!("/v1/addresses/{FAMILY_ALICE}/names?relation=registrant&namespace=ens&page_size=1");
+    let base = format!("/v1/addresses/{FAMILY_ALICE}/names?relation=owner&namespace=ens&page_size=1");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     assert_eq!(first["data"][0]["name"], "alpha.eth");
-    let cursor = collection_next_cursor(&first).context("second registrant")?;
+    let cursor = collection_next_cursor(&first).context("second owned name")?;
     let alpha = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
     // Model a reorg removing alpha's registration, then run the actual family publisher.
     sqlx::query("UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE logical_name_id = $1")

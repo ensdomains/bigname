@@ -2259,7 +2259,7 @@ The lease that lapsed while wrapped is the ordinary case: the NameWrapper's
 registry custody expired with the lease, so nothing current owns the node. The
 tombstone selects the released lease binding, serves the registration as
 `released` with its identity, timestamps and the lapsed lease's expiry, and
-serves no current registrant, authority, owner, control, resolver or records.
+serves no current owner, manager, authority, control, resolver or records.
 The holder the lease had when it lapsed, and whether it was held through the
 registrar or the NameWrapper (`held_through`), are kept apart in a
 `lapsed_registration` block that no current-state read uses. It is positive

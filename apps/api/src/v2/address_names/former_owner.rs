@@ -1,10 +1,10 @@
-//! `relation=former_registrant` on `GET /v1/addresses/{address}/names` (TYR-63): the released
+//! `relation=former_owner` on `GET /v1/addresses/{address}/names` (TYR-63): the released
 //! names whose ended registration the address last held, for renewal reminders.
 //!
-//! The rows are the composed names whose `lapsed_registration.registrant` is the address
-//! (`bigname_storage::families::records::former_registrants`). Like `resolves_to` the relation
+//! The rows are the composed names whose `lapsed_registration.owner` is the address
+//! (`bigname_storage::families::records::former_owners`). Like `resolves_to` the relation
 //! is served on its own: `any` does not include it, it never combines with another relation,
-//! and it is not an authority relation, so the rows carry no `owner` or `registrant`. It is
+//! and it is not an authority relation, so the rows carry no `owner`. It is
 //! windowed by `expires_after` and `expires_before` and sorted by `expires_at` only; an app
 //! still checks `grace_ends_at` and the contract's renewal rules before offering a renewal.
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use axum::Json;
 use bigname_storage::UnixSeconds;
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
-    families::records::{FormerRegistrantFilter, load_family_former_registrant_page},
+    families::records::{FormerOwnerFilter, load_family_former_owner_page},
 };
 
 use crate::AppState;
@@ -30,7 +30,7 @@ use crate::v2::{
 
 use super::{AddressName, load_primary_names_by_namespace, name_registration_fields};
 
-const SORT: &str = "former_registrant:expires_at";
+const SORT: &str = "former_owner:expires_at";
 const ADDRESS_FILTER_KEY: &str = "address";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const EXPIRES_AFTER_FILTER_KEY: &str = "expires_after";
@@ -48,7 +48,7 @@ const POSITION_KEYS: [&str; 4] = [
     NAMEHASH_CURSOR_KEY,
 ];
 
-pub(super) async fn get_address_former_registrants(
+pub(super) async fn get_address_former_owners(
     state: &AppState,
     normalized_address: &str,
     params: &QueryParams,
@@ -87,13 +87,13 @@ pub(super) async fn get_address_former_registrants(
         .transpose()?;
     let mut snapshot =
         CollectionSnapshot::capture_for_namespace(state, None, params.namespace.as_deref()).await?;
-    let filter = FormerRegistrantFilter {
+    let filter = FormerOwnerFilter {
         address: normalized_address,
         namespace: params.namespace.as_deref(),
         expires_after: params.expires_after,
         expires_before: params.expires_before,
     };
-    let page = load_family_former_registrant_page(
+    let page = load_family_former_owner_page(
         snapshot.conn().await?,
         &filter,
         match order {
@@ -159,7 +159,7 @@ pub(super) async fn get_address_former_registrants(
 fn reject_unsupported(params: &QueryParams) -> V2Result<()> {
     if params.dedupe == AddressNamesDedupe::Registration {
         return Err(V2Error::invalid_input(
-            "dedupe=registration is not supported with relation=former_registrant",
+            "dedupe=registration is not supported with relation=former_owner",
         ));
     }
     let unsupported = [
@@ -171,12 +171,12 @@ fn reject_unsupported(params: &QueryParams) -> V2Result<()> {
     ];
     if let Some((name, _)) = unsupported.iter().find(|(_, present)| *present) {
         return Err(V2Error::invalid_input(format!(
-            "{name} is not supported with relation=former_registrant"
+            "{name} is not supported with relation=former_owner"
         )));
     }
     if params.sort_wire.is_some() && params.sort != AddressNamesSort::ExpiresAt {
         return Err(V2Error::invalid_input(
-            "relation=former_registrant sorts by expires_at only",
+            "relation=former_owner sorts by expires_at only",
         ));
     }
     Ok(())
@@ -196,15 +196,10 @@ fn former_row(
         permission_resource_id: row
             .resource_id
             .map(|resource| super::permission_resource_handle(Some(row), resource)),
-        // A released name has no current owner or registrant; the former holder is in
+        // A released name has no current owner; the former holder is in
         // `lapsed_registration`.
-        manager: crate::v2::name_record::served_manager(
-            &row.declared_summary,
-            registration.owner.as_ref(),
-            registration.registrant.as_ref(),
-        ),
         owner: registration.owner,
-        registrant: registration.registrant,
+        manager: registration.manager,
         registration_status: registration.registration_status,
         registered_at: registration.registered_at,
         created_at: registration.created_at,
@@ -214,7 +209,7 @@ fn former_row(
         authority: Authority::from_provenance(&row.provenance),
         ens_v1: ens_v1_of_row(Some(row))?,
         migrated_at,
-        relations: vec![Relation::FormerRegistrant],
+        relations: vec![Relation::FormerOwner],
         is_primary: primary_name == Some(row.normalized_name.as_str()),
         resolution: None,
         resolutions: None,

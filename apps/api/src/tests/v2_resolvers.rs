@@ -118,8 +118,8 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         json!(bigname_lookup::ens_namehash_hex("alpha.eth")?)
     );
     let alpha = &v2_address_name_specs()[0];
-    assert_eq!(bound_names["data"][0]["owner"], json!(alpha.owner));
-    assert_eq!(bound_names["data"][0]["registrant"], json!(alpha.registrant));
+    assert_eq!(bound_names["data"][0]["owner"], json!(alpha.registrant));
+    assert_eq!(bound_names["data"][0]["manager"], json!(alpha.owner));
     assert_eq!(
         bound_names["data"][0]["registered_at"],
         json!("1704153600")
@@ -581,10 +581,8 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
             .map_err(|error| anyhow::anyhow!("{error:?}"))?,
     )?;
     assert_eq!(record["owner"], json!(DIVERGENT_CONTROL_OWNER));
-    assert_eq!(
-        record["registrant"],
-        json!(DIVERGENT_REGISTRATION_REGISTRANT)
-    );
+    assert_eq!(record["manager"], json!(DIVERGENT_CONTROL_OWNER));
+    assert!(record.get("registrant").is_none(), "{record}");
     assert_eq!(record["registration_status"], json!("active"));
     assert_eq!(record["authority"], json!("ens_v1"));
     assert_eq!(

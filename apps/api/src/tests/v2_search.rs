@@ -62,12 +62,13 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
     );
     assert_eq!(
         data[0]["owner"],
-        json!("0x00000000000000000000000000000000000000a1")
-    );
-    assert_eq!(
-        data[0]["registrant"],
         json!("0x00000000000000000000000000000000000000a2")
     );
+    assert_eq!(
+        data[0]["manager"],
+        json!("0x00000000000000000000000000000000000000a1")
+    );
+    assert!(data[0].get("registrant").is_none());
     assert_eq!(data[0]["registration_status"], json!("active"));
     assert_eq!(data[0]["registered_at"], json!("1704153600"));
     assert_eq!(data[0]["created_at"], json!("1672617600"));
@@ -82,18 +83,15 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_search_serves_the_registry_owner_and_distinct_registrant() -> Result<()> {
+async fn v2_search_serves_the_registrant_as_owner_and_the_registry_owner_as_manager() -> Result<()> {
     let (database, payload) = v2_search_payload("/v1/search?q=precedence&namespace=ens").await?;
 
     let data = payload["data"]
         .as_array()
         .expect("search data must be an array");
     assert_eq!(v2_search_names(data), vec!["precedence.eth"]);
-    assert_eq!(data[0]["owner"], json!(V2_SEARCH_REGISTRY_OWNER));
-    assert_eq!(
-        data[0]["registrant"],
-        json!(V2_SEARCH_REGISTRATION_REGISTRANT)
-    );
+    assert_eq!(data[0]["owner"], json!(V2_SEARCH_REGISTRATION_REGISTRANT));
+    assert_eq!(data[0]["manager"], json!(V2_SEARCH_REGISTRY_OWNER));
     assert_eq!(data[0]["registration_status"], json!("active"));
 
     database.cleanup().await

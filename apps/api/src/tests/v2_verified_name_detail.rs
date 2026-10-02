@@ -194,7 +194,7 @@ async fn verified_name_detail_executes_the_chain_neutral_inventory_keys_on_sepol
     // Registration facts stay indexed.
     assert_eq!(data["registration_status"], json!("active"));
     assert_eq!(
-        data["registrant"],
+        data["owner"],
         json!("0x0000000000000000000000000000000000000def")
     );
 

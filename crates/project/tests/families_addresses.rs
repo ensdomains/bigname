@@ -116,12 +116,9 @@ async fn names_fold_their_controller_and_index_every_relation() -> Result<()> {
         &["address", "relation"],
     );
     relations.sort_by_key(Value::to_string);
-    let mut expected = vec![
-        json!({"address": ALICE.to_lowercase(), "relation": "effective_controller"}),
-        json!({"address": BOB, "relation": "effective_controller"}),
-    ];
-    for address in [CAROL, DAVE] {
-        for relation in ["registrant", "token_holder", "effective_controller"] {
+    let mut expected = Vec::new();
+    for address in [ALICE.to_lowercase().as_str(), BOB, CAROL, DAVE] {
+        for relation in ["token_holder", "effective_controller"] {
             expected.push(json!({"address": address, "relation": relation}));
         }
     }
@@ -129,7 +126,8 @@ async fn names_fold_their_controller_and_index_every_relation() -> Result<()> {
     assert_eq!(
         relations, expected,
         "the index holds every address a relation can take; the read-time fold and masks \
-         narrow it (the registrant and the transfer recipient come from F2a)"
+         narrow it (the registrant and the transfer recipient come from F2a, and a controller \
+         owns a name with no token lineage)"
     );
 
     fixture.assert_undo_restores(12).await?;
@@ -185,7 +183,10 @@ async fn a_masked_owner_word_clears_the_controller() -> Result<()> {
             &fixture.rows("project_address_name_index").await?,
             &["address", "relation"]
         ),
-        vec![json!({"address": ALICE.to_lowercase(), "relation": "effective_controller"})],
+        vec![
+            json!({"address": ALICE.to_lowercase(), "relation": "effective_controller"}),
+            json!({"address": ALICE.to_lowercase(), "relation": "token_holder"}),
+        ],
         "the earlier transfer stays a candidate; the masked owner word never indexes an address"
     );
     fixture.assert_undo_restores(11).await?;
@@ -466,7 +467,7 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
         &["address", "logical_name_id", "relation"],
     );
     rows.sort_by_key(Value::to_string);
-    let mut expected: Vec<Value> = ["registrant", "token_holder", "effective_controller"]
+    let mut expected: Vec<Value> = ["token_holder", "effective_controller"]
         .into_iter()
         .map(|relation| json!({"address": CAROL, "logical_name_id": name(4), "relation": relation}))
         .collect();

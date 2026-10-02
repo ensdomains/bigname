@@ -84,7 +84,7 @@ async fn v2_name_detail_from_families() -> Result<()> {
     let (status, alpha) = read_family_response(&database, "/v1/names/alpha.eth").await?;
     assert_eq!(status, StatusCode::OK, "{alpha:#}");
     assert_eq!(
-        alpha["data"]["registrant"],
+        alpha["data"]["owner"],
         json!(FAMILY_ALICE),
         "{alpha:#}"
     );

@@ -170,7 +170,8 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
     );
     assert_eq!(rows[0]["is_primary"], json!(true));
     assert_eq!(rows[1]["is_primary"], json!(false));
-    assert_eq!(rows[0]["owner"], json!(V2_PERMISSION_SUBJECT));
+    assert_eq!(rows[0]["owner"], json!(V2_ADDRESS));
+    assert_eq!(rows[0]["manager"], json!(V2_PERMISSION_SUBJECT));
     assert_eq!(rows[0]["registration_status"], json!("active"));
     assert_eq!(rows[0]["expires_at"], json!("1798848000"));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -454,7 +455,7 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
             .all(|record| record.get("resolution").is_none())
     );
     // The reverse fixture gives the address alice.eth's lease; another account controls it.
-    assert_eq!(any_records[0]["relations"], json!(["owner", "registrant"]));
+    assert_eq!(any_records[0]["relations"], json!(["owner"]));
     assert!(payload["meta"]["as_of"].is_object());
 
     // Feed profile keeps the relation and resolution on the reduced record.

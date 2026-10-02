@@ -246,12 +246,7 @@ async fn group_on(
                     if facets.is_empty() {
                         continue;
                     }
-                    let actual_rank = if facets.iter().any(|relation| {
-                        matches!(
-                            relation,
-                            AddressNameRelation::Registrant | AddressNameRelation::TokenHolder
-                        )
-                    }) {
+                    let actual_rank = if facets.contains(&AddressNameRelation::TokenHolder) {
                         0
                     } else {
                         1
@@ -334,7 +329,7 @@ async fn candidates_on(
     limit: i64,
 ) -> Result<Vec<Candidate>> {
     let relations = if rank == 0 {
-        vec!["registrant", "token_holder"]
+        vec!["token_holder"]
     } else {
         vec!["effective_controller"]
     };

@@ -163,11 +163,17 @@ fn wrapper_fields(summary: &mut Map<String, Value>, row: Option<&WrapperRow>, cl
         return;
     };
     let Some(state) = effective.wrapper_state else {
+        // A NameWrapper whose state is unknown or lapsed: the manager is withheld, as the
+        // `manager` relation's mask withholds it.
+        if row.is_some_and(|row| row.has_modifier) {
+            summary.insert("wrapper_masked".into(), json!(true));
+        }
         return;
     };
     let fuses = effective.fuses.unwrap_or_default();
     let bit = |mask: i64| fuses & mask != 0;
     summary.insert("wrapper_state".into(), json!(state));
+    summary.insert("wrapper_in_grace".into(), json!(effective.in_grace));
     summary.insert(
         "wrapper_fuses".into(),
         json!({
@@ -231,7 +237,7 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
 
     let mut registration = shadow.registration.clone();
     registration.insert("created_at".into(), created_at(parts));
-    if selection.released_tombstone
+    if !selection.is_v2()
         && let Some(Value::Object(lapsed)) = registration.get_mut("lapsed_registration")
     {
         let (kind, key) = lapsed_authority(parts);

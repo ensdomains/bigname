@@ -439,7 +439,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         registration.insert("registrant".into(), Value::Null);
         registration.insert(
             "lapsed_registration".into(),
-            json!({"registrant": registrant, "released_at": released_at,
+            json!({"owner": registrant, "released_at": released_at,
                    "release_kind": "expired"}),
         );
     } else if v2_release {
@@ -472,10 +472,21 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         if let Some(release_kind) = release_kind {
             registration.insert(
                 "lapsed_registration".into(),
-                json!({"registrant": registrant, "released_at": released_at,
+                json!({"owner": registrant, "released_at": released_at,
                        "held_through": "registry", "release_kind": release_kind}),
             );
         }
+    } else if selection.unsupported_reason.is_none()
+        && selected.event.is_some_and(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.source_family == "ens_v1_registrar_l1"
+        })
+    {
+        // A plain lapse revives the registry custody the lease left behind (state_expiry.rs).
+        registration.insert(
+            "lapsed_registration".into(),
+            json!({"owner": registrant, "released_at": released_at, "release_kind": "expired"}),
+        );
     }
 
     classify_expiry(
@@ -547,6 +558,23 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
             } else {
                 opt_text(owner.as_deref())
             },
+        );
+        // The owner is the token holder, else the registry owner; a lease transferred without
+        // `reclaim` is owned by its new holder under the registry-only binding the handoff
+        // opened. A record the admitted Graveyard holds has no owner, even while a NameWrapper
+        // token of the cleared subname survives (docs/upstream.md).
+        let graveyard_held = !is_v2
+            && facts
+                .registry_node
+                .as_ref()
+                .and_then(|node| node.latest_transfer())
+                .is_some_and(|write| write.graveyard_held());
+        // A released registration has neither an owner nor a manager.
+        let released = registration.get("status") == Some(&json!("released"));
+        let served = registrant.as_deref().or(owner.as_deref());
+        control.insert(
+            "owner".into(),
+            opt_text(served.filter(|_| !owner_lapsed && !graveyard_held && !released)),
         );
         control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control

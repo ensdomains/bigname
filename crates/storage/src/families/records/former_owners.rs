@@ -1,14 +1,14 @@
-//! `relation=former_registrant` on `GET /v1/addresses/{address}/names` (TYR-63): the released
-//! names whose last registrant was the address, for reminders and grace renewal.
+//! `relation=former_owner` on `GET /v1/addresses/{address}/names` (TYR-63): the released
+//! names whose last owner was the address, for reminders and grace renewal.
 //!
-//! A former registrant is the holder a registration had when it ended, which the composed row
-//! serves as `registration.lapsed_registration.registrant`: the holder of an ENSv1 lease that
+//! A former owner is the holder a registration had when it ended, which the composed row
+//! serves as `registration.lapsed_registration.owner`: the holder of an ENSv1 lease that
 //! lapsed past its grace, or of an ENSv2 registration that expired or was unregistered
 //! (`control::lifecycle::served`). It exists only while the name is released, so a
 //! re-registration drops it. The address index (`project_address_name_index`) already lists
-//! every address a name's retained registration events named, the last registrant included, so
-//! the read composes the address's indexed names and keeps those whose lapsed registrant is the
-//! address. It never feeds `owner`, `manager` or `registrant`.
+//! every address a name's retained registration events named, the last holder included, so the
+//! read composes the address's indexed names and keeps those whose lapsed owner is the address.
+//! It never feeds `owner` or `manager`.
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L341-L362 @ ens_v2_sepolia_20260916@366de741)
@@ -28,9 +28,9 @@ use crate::{
     families::name::{CoverageShape, load_composed, servable_publication},
 };
 
-/// What a former-registrant page selects besides its order and position.
+/// What a former-owner page selects besides its order and position.
 #[derive(Clone, Copy, Debug)]
-pub struct FormerRegistrantFilter<'a> {
+pub struct FormerOwnerFilter<'a> {
     pub address: &'a str,
     pub namespace: Option<&'a str>,
     /// Inclusive lower bound on the served expiry.
@@ -39,9 +39,9 @@ pub struct FormerRegistrantFilter<'a> {
     pub expires_before: Option<UnixSeconds>,
 }
 
-/// One page of former-registrant rows and the position after its last row, when more follow.
+/// One page of former-owner rows and the position after its last row, when more follow.
 #[derive(Clone, Debug)]
-pub struct FormerRegistrantPage {
+pub struct FormerOwnerPage {
     pub rows: Vec<NameCurrentRow>,
     pub next_cursor: Option<NameCurrentListCursor>,
 }
@@ -69,7 +69,7 @@ impl Held {
 
 fn cursor_key(cursor: &NameCurrentListCursor) -> Result<Key> {
     let NameCurrentListCursorValue::Timestamp(expiry) = cursor.sort_value else {
-        anyhow::bail!("a former-registrant cursor must carry an expiry position");
+        anyhow::bail!("a former-owner cursor must carry an expiry position");
     };
     Ok((
         expiry,
@@ -79,10 +79,10 @@ fn cursor_key(cursor: &NameCurrentListCursor) -> Result<Key> {
     ))
 }
 
-/// The lapsed registrant of a composed row, lower-cased.
-pub fn lapsed_registrant(row: &NameCurrentRow) -> Option<String> {
+/// The lapsed owner of a composed row, lower-cased.
+pub fn lapsed_owner(row: &NameCurrentRow) -> Option<String> {
     row.declared_summary
-        .pointer("/registration/lapsed_registration/registrant")
+        .pointer("/registration/lapsed_registration/owner")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase)
 }
@@ -95,18 +95,18 @@ fn served_expiry(row: &NameCurrentRow) -> Option<UnixSeconds> {
 }
 
 /// The page of names `filter.address` formerly held.
-pub async fn load_family_former_registrant_page(
+pub async fn load_family_former_owner_page(
     db: impl Into<crate::ReadDb<'_>>,
-    filter: &FormerRegistrantFilter<'_>,
+    filter: &FormerOwnerFilter<'_>,
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
-) -> Result<FormerRegistrantPage> {
+) -> Result<FormerOwnerPage> {
     let after = cursor.map(cursor_key).transpose()?;
     let address = filter.address.to_ascii_lowercase();
     let mut snapshot = db.into().snapshot().await?;
     let indexed: Vec<(String, String)> = sqlx::query_as(
-        "/* storage:families.records.former_registrant_index */
+        "/* storage:families.records.former_owner_index */
          SELECT DISTINCT indexed.chain_id, indexed.logical_name_id
          FROM bigname_phase.project_address_name_index indexed
          WHERE indexed.address = $1
@@ -132,7 +132,7 @@ pub async fn load_family_former_registrant_page(
         held.extend(
             composed
                 .into_values()
-                .filter(|row| lapsed_registrant(row).as_deref() == Some(address.as_str()))
+                .filter(|row| lapsed_owner(row).as_deref() == Some(address.as_str()))
                 .map(|row| Held {
                     expiry: served_expiry(&row),
                     row,
@@ -180,7 +180,7 @@ pub async fn load_family_former_registrant_page(
             normalized_name: last.row.normalized_name.clone(),
             namehash: last.row.namehash.clone(),
         });
-    Ok(FormerRegistrantPage {
+    Ok(FormerOwnerPage {
         rows: held.into_iter().map(|held| held.row).collect(),
         next_cursor,
     })

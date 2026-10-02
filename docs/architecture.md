@@ -1523,7 +1523,7 @@ For Basenames, exact-name declared truth comes from the Base authority split (`b
 
 ### Address → names
 
-Returns surfaces, not backing resources. Each item carries `logical_name_id`, surface identity, `resource_id`, relation facets (`registrant`, `token_holder`, `effective_controller`), binding kind, provenance, coverage.
+Returns surfaces, not backing resources. Each item carries `logical_name_id`, surface identity, `resource_id`, relation facets (`token_holder`, `effective_controller`, `role_holder`), binding kind, provenance, coverage.
 
 `dedupe_by=resource` is grouping-only. Default sort is `display_name_asc`. Exhaustiveness is authoritative only for source classes with enumerable ownership/assignment surfaces; wildcard- and offchain-derived names are never silently treated as exhaustive.
 

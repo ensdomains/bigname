@@ -75,7 +75,7 @@ pub async fn route_snapshots(
 
     for address in &subjects.addresses {
         let path = format!(
-            "/v1/addresses/{}/names?namespace=ens&relation=registrant&include=role_summary&page_size=50",
+            "/v1/addresses/{}/names?namespace=ens&relation=token_holder&include=role_summary&page_size=50",
             address.to_ascii_lowercase()
         );
         snapshots.insert(

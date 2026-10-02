@@ -9,12 +9,17 @@
 //!   AuthorityTransferred or state-derived SurfaceBound sets the controller; a PermissionChanged
 //!   acts only on the name's resource, sets it when its powers hold `resource_control` and the
 //!   NameWrapper mask allows, and otherwise revokes it from its subject only.
-//! - The registrant is the composed `registration.registrant`, for a name with a token lineage.
-//! - The token holder is the registrant, where the NameWrapper mask allows. A transfer supplies the
-//!   registrant's recipient before an owner lapse. The lapse also removes wrapper_state, so both
-//!   readers then withhold the token-holder relation under the same modifier mask.
-//! - The effective controller is the controller, else (with a token lineage) the token holder or
-//!   registrant, where the mask allows.
+//! - The token holder (served as `owner`) is the composed `control.owner`, the owner the row
+//!   serves: the registrant, else the registry owner, and no one on a released registration,
+//!   once the owner lapsed, or while the admitted Graveyard holds the record. A name with no
+//!   token lineage is owned by its registry owner (a registry-only subname), or by its
+//!   registrant (a lease transferred without `reclaim`, under the registry-only binding that
+//!   handoff opened).
+//! - The effective controller is the controller, else (with a token lineage) the token holder,
+//!   where the mask allows: no NameWrapper modifier, or a wrapper state outside the `.eth` grace
+//!   period, since NameWrapper's `canModifyName` has no wrapper-state condition
+//!   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
+//!   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f).
 //! - The role holders are the holders of an ENSv2 registry role on the name's selected resource
 //!   (`address_roles.rs`). Holding a role does not make an address the effective controller.
 //!
@@ -64,7 +69,6 @@ pub(super) struct NameRelationsInput<'a> {
 }
 
 /// The relation names, in the served relation rank order.
-pub(super) const REGISTRANT: &str = "registrant";
 pub(super) const TOKEN_HOLDER: &str = "token_holder";
 pub(super) const EFFECTIVE_CONTROLLER: &str = "effective_controller";
 pub(super) const ROLE_HOLDER: &str = "role_holder";
@@ -81,29 +85,29 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         return Vec::new();
     }
     let lineage = row.token_lineage_id.is_some();
-    let modifier = input.wrapper.filter(|wrapper| wrapper.has_modifier);
-    let wrapper_state = summary.get("wrapper_state").and_then(Value::as_str);
-    let in_grace = modifier.and_then(|wrapper| in_grace(wrapper, input.clock_seconds));
-    let wrapped_out_of_grace =
-        matches!(wrapper_state, Some("wrapped" | "emancipated")) && in_grace == Some(false);
     let registrant = summary
         .pointer("/registration/registrant")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
-    let controller =
-        controller(input, modifier.is_none() || wrapped_out_of_grace).map(|(address, _)| address);
+    let open = mask_open(input);
+    let controller = controller(input, open).map(|(address, _)| address);
 
+    let owner = summary
+        .pointer("/control/owner")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    let supported = AuthoritySelection::from_provenance(&row.provenance)
+        .unsupported_reason
+        .is_none();
     let mut out = Vec::new();
-    if lineage {
-        out.push((registrant.clone(), REGISTRANT));
+    if lineage || supported {
+        out.push((owner, TOKEN_HOLDER));
     }
-    if lineage
-        && (modifier.is_none()
-            || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked")))
-    {
-        out.push((registrant.clone(), TOKEN_HOLDER));
-    }
-    if !lineage || modifier.is_none() || wrapped_out_of_grace {
+    let released = summary
+        .pointer("/registration/status")
+        .and_then(Value::as_str)
+        == Some("released");
+    if (!lineage || open) && !released {
         let effective = if lineage {
             controller.or(registrant)
         } else {
@@ -120,6 +124,22 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
             (address != ZERO).then_some((address, relation))
         })
         .collect()
+}
+
+/// Whether the NameWrapper lets the name's token holder change its registry record: no
+/// modifier, or a wrapper state outside the `.eth` grace period. The mask also decides whether a
+/// `resource_control` PermissionChanged sets rather than revokes.
+fn mask_open(input: &NameRelationsInput<'_>) -> bool {
+    let Some(modifier) = input.wrapper.filter(|wrapper| wrapper.has_modifier) else {
+        return true;
+    };
+    input
+        .row
+        .declared_summary
+        .get("wrapper_state")
+        .and_then(Value::as_str)
+        .is_some()
+        && in_grace(modifier, input.clock_seconds) == Some(false)
 }
 
 /// The served `scope_modifiers.in_grace`: unknown when the fuses or the expiry is.
@@ -252,20 +272,19 @@ pub(super) fn relation_position(
     address: &str,
     relation: &str,
 ) -> Option<FamilyPosition> {
-    if relation == EFFECTIVE_CONTROLLER {
-        let modifier = input.wrapper.filter(|wrapper| wrapper.has_modifier);
-        let wrapper_state = input
-            .row
-            .declared_summary
-            .get("wrapper_state")
-            .and_then(Value::as_str);
-        let in_grace = modifier.and_then(|wrapper| in_grace(wrapper, input.clock_seconds));
-        let open = modifier.is_none()
-            || (matches!(wrapper_state, Some("wrapped" | "emancipated"))
-                && in_grace == Some(false));
-        if let Some((_, position)) = controller(input, open) {
-            return Some(position);
-        }
+    let controlled = relation == EFFECTIVE_CONTROLLER
+        || relation == TOKEN_HOLDER
+            && input.row.token_lineage_id.is_none()
+            && input
+                .row
+                .declared_summary
+                .pointer("/registration/registrant")
+                .is_none_or(Value::is_null);
+    if controlled
+        && let Some((controller, position)) = controller(input, mask_open(input))
+        && (relation == EFFECTIVE_CONTROLLER || controller.eq_ignore_ascii_case(address))
+    {
+        return Some(position);
     }
     if relation == ROLE_HOLDER {
         return input

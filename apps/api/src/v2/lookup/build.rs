@@ -43,7 +43,6 @@ pub(super) fn build_forward_feed_record(
         token_id: None,
         owner: None,
         manager: None,
-        registrant: None,
         registered_at: None,
         created_at: None,
         expires_at: None,
@@ -107,7 +106,6 @@ pub(super) fn build_reverse_feed_record(
         token_id: None,
         owner: None,
         manager: None,
-        registrant: None,
         registered_at: None,
         created_at: None,
         expires_at: None,
@@ -202,13 +200,8 @@ fn build_detail_record(
             })
             .flatten(),
         token_id,
-        manager: name_record::served_manager(
-            &record.row.declared_summary,
-            registration.owner.as_ref(),
-            registration.registrant.as_ref(),
-        ),
         owner: registration.owner,
-        registrant: registration.registrant,
+        manager: registration.manager,
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
@@ -273,7 +266,6 @@ fn authority_unsupported_record(
         token_id: None,
         owner: None,
         manager: None,
-        registrant: None,
         registered_at: None,
         created_at: None,
         expires_at: None,
@@ -363,12 +355,10 @@ pub(super) fn lookup_relations(
     let has_owner = relations.contains(&bigname_storage::AddressNameRelation::TokenHolder);
     let has_manager =
         relations.contains(&bigname_storage::AddressNameRelation::EffectiveController);
-    let has_registrant = relations.contains(&bigname_storage::AddressNameRelation::Registrant);
 
     [
         (has_owner, Relation::Owner),
         (has_manager, Relation::Manager),
-        (has_registrant, Relation::Registrant),
     ]
     .into_iter()
     .filter_map(|(present, relation)| present.then_some(relation))

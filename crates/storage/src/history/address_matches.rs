@@ -184,7 +184,7 @@ async fn load_historical_address_history_matches(
         .collect()
 }
 
-/// The names and resources an address held in history: registrant grants, token transfers
+/// The names and resources an address held in history: registration grants, token transfers
 /// and registry ownership transfers whose new holder is `address`. Each arm matches one partial
 /// expression index on `normalized_events` (`normalized_events_address_*_match_idx`).
 pub(super) fn push_historical_address_matches_query<'a>(
@@ -265,31 +265,29 @@ fn push_address_match_filter<'a>(
     address: &'a str,
     relations: Option<&'a [AddressNameRelation]>,
 ) {
-    let include_registrant =
-        relations.is_none_or(|relations| relations.contains(&AddressNameRelation::Registrant));
     let include_token_holder =
         relations.is_none_or(|relations| relations.contains(&AddressNameRelation::TokenHolder));
-    let include_registry_owner = relations
+    let include_controller = relations
         .is_none_or(|relations| relations.contains(&AddressNameRelation::EffectiveController));
 
     builder.push("(");
     let mut needs_or = false;
-    if include_registrant {
-        push_registrant_match_filter(builder, address);
-        needs_or = true;
-    }
     if include_token_holder {
-        if needs_or {
-            builder.push(" OR ");
-        }
+        push_registrant_match_filter(builder, address);
+        builder.push(" OR ");
         push_token_holder_match_filter(builder, address);
         needs_or = true;
     }
-    if include_registry_owner {
+    // A name with no token is owned by its registry owner, so `owner` also matches the registry
+    // ownership transfers `manager` does, except from the position a registry-only binding that
+    // stands for a BaseRegistrar lease opens: the lease's holder owns the name after a transfer
+    // without `reclaim`, and a released lease has no owner. The registry-only resource is one
+    // per node, so an earlier tokenless owner of it keeps its history.
+    if include_token_holder || include_controller {
         if needs_or {
             builder.push(" OR ");
         }
-        push_registry_owner_match_filter(builder, address);
+        push_registry_owner_match_filter(builder, address, !include_controller);
         needs_or = true;
     }
     if !needs_or {
@@ -320,8 +318,36 @@ fn push_registrant_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, ad
         "#,
     );
     builder.push_bind(address);
+    // A BaseRegistrar lease registered straight into the NameWrapper names it as registrant, but
+    // the wrapped token's holder owns the name; `registerAndWrapETH2LD` wraps it in the same
+    // transaction. A receiver that unwraps in its mint callback leaves that wrap with no registrar
+    // link, so the wrap's node also identifies it. Grants of other families are not this custody.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L265 @ ens_v1@91c966f)
     builder.push(
         r#"
+                    AND NOT EXISTS (
+                        SELECT 1 FROM normalized_events wrap
+                        WHERE ne.source_family = 'ens_v1_registrar_l1'
+                          AND wrap.chain_id = ne.chain_id
+                          AND wrap.block_number = ne.block_number
+                          AND wrap.transaction_index IS NOT DISTINCT FROM ne.transaction_index
+                          AND wrap.source_family = 'ens_v1_wrapper_l1'
+                          AND (
+                              wrap.after_state ->> 'wrapped_registrar_resource_id'
+                                  = ne.resource_id::text
+                              OR (
+                                  wrap.after_state ->> 'source_event' = 'NameWrapped'
+                                  AND LOWER(wrap.after_state ->> 'node')
+                                      = LOWER(ne.after_state ->> 'namehash')
+                              )
+                          )
+                          AND LOWER(wrap.raw_fact_ref ->> 'emitting_address')
+                              = LOWER(ne.after_state ->> 'registrant')
+                          AND wrap.canonicality_state
+                              <> 'orphaned'::bigname_phase.canonicality_state
+                    )
                 )
             )
         )
@@ -363,6 +389,7 @@ fn push_token_holder_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, 
 fn push_registry_owner_match_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
+    owner_only: bool,
 ) {
     builder.push(
         r#"
@@ -382,6 +409,34 @@ fn push_registry_owner_match_filter<'a>(
         "#,
     );
     builder.push_bind(address);
+    if owner_only {
+        // As the served owner: a write the admitted Graveyard holds, or one the registry getter
+        // reports as zero, names no owner.
+        builder.push(
+            r#"
+            AND (ne.after_state ->> 'owner_getter_reason') IS DISTINCT FROM 'graveyard'
+            AND LOWER(COALESCE(ne.after_state ->> 'owner_getter', ''))
+                <> '0x0000000000000000000000000000000000000000'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM bigname_phase.project_binding_candidate handoff
+                WHERE handoff.chain_id = ne.chain_id
+                  AND handoff.resource_id = ne.resource_id
+                  AND handoff.registry_only
+                  AND ROW(handoff.block_number, COALESCE(handoff.transaction_index, -1),
+                          COALESCE(handoff.log_index, -1))
+                      <= ROW(ne.block_number, COALESCE(ne.transaction_index, -1),
+                             COALESCE(ne.log_index, -1))
+                  AND EXISTS (
+                      SELECT 1 FROM normalized_events lease
+                      WHERE lease.resource_id = handoff.lease_resource_id
+                        AND lease.source_family = 'ens_v1_registrar_l1'
+                        AND lease.canonicality_state <> 'orphaned'::bigname_phase.canonicality_state
+                  )
+            )
+            "#,
+        );
+    }
     builder.push(")");
 }
 

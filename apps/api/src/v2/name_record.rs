@@ -43,7 +43,7 @@ mod wrapper;
 pub(crate) use declared::{LapsedRegistration, lapsed_registration, registration_id};
 use declared::{
     chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
-    declared_owner, declared_registered_at, declared_registrant, declared_registration,
+    declared_owner, declared_registered_at, declared_registration, declared_registry_owner,
 };
 pub(crate) use ens_v1::{EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row};
 use inventory::load_name_record_inventory;
@@ -74,8 +74,6 @@ pub(crate) struct NameRecord {
     pub(crate) owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manager: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) registrant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registered_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,13 +332,8 @@ pub(crate) fn build_name_record(
         } else {
             None
         },
-        manager: served_manager(
-            &row.declared_summary,
-            registration.owner.as_ref(),
-            registration.registrant.as_ref(),
-        ),
-        owner: registration.owner.clone(),
-        registrant: registration.registrant,
+        owner: registration.owner,
+        manager: registration.manager,
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,
@@ -387,7 +380,7 @@ pub(crate) fn build_name_record(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct NameRegistrationFields {
     pub(super) owner: Option<String>,
-    pub(super) registrant: Option<String>,
+    pub(super) manager: Option<String>,
     pub(super) registered_at: Option<String>,
     pub(super) created_at: Option<String>,
     pub(super) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
@@ -431,7 +424,7 @@ pub(super) fn identity_name_registration_fields(
 fn empty_registration_fields(namespace: &str) -> NameRegistrationFields {
     NameRegistrationFields {
         owner: None,
-        registrant: None,
+        manager: None,
         registered_at: None,
         created_at: None,
         expires_at: None,
@@ -451,7 +444,11 @@ fn registration_fields_from_parts(
     let owner = declared_owner(declared_summary);
 
     NameRegistrationFields {
-        registrant: declared_registrant(declared_summary),
+        manager: served_manager(
+            declared_summary,
+            owner.as_ref(),
+            declared_registry_owner(declared_summary).as_ref(),
+        ),
         registered_at: declared_registered_at(declared_summary),
         created_at: declared_created_at(declared_summary)
             .or_else(|| chain_positions_created_at(chain_positions)),

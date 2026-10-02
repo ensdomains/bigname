@@ -594,7 +594,6 @@ async fn assert_moved_over_http(
     let leaf = get("/v1/names/leaf.trusted.eth").await?;
     for (field, value) in [
         ("owner", &expected.leaf_owner),
-        ("registrant", &expected.leaf_owner),
         ("registration_id", &expected.leaf_registration_id),
         ("expires_at", &expected.leaf_expires_at),
     ] {
@@ -639,7 +638,7 @@ async fn assert_moved_over_http(
         orphan["data"]["expires_at_reason"], "released",
         "{path}: {orphan}"
     );
-    for field in ["owner", "registrant", "resolver"] {
+    for field in ["owner", "resolver"] {
         assert_eq!(
             orphan["data"].get(field),
             None,
@@ -1436,19 +1435,6 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             .iter()
             .all(|row| { row.4 == format!("{alice:#x}") && row.5 == format!("{carol:#x}") })
     );
-    let (status, buyer_names) = run
-        .api
-        .get_json(&format!(
-            "/v1/addresses/{bob:#x}/names?namespace=ens&relation=registrant"
-        ))
-        .await?;
-    assert_eq!(status, 200, "buyer registrant lookup failed: {buyer_names}");
-    assert!(
-        buyer_names["data"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
-        "the buyer registrant collection must contain sale.eth: {buyer_names}"
-    );
     let (status, buyer_holder_names) = run
         .api
         .get_json(&format!(
@@ -1464,22 +1450,6 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             .as_array()
             .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
         "the buyer token-holder collection must contain sale.eth: {buyer_holder_names}"
-    );
-    let (status, seller_names) = run
-        .api
-        .get_json(&format!(
-            "/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant"
-        ))
-        .await?;
-    assert_eq!(
-        status, 200,
-        "seller registrant lookup failed: {seller_names}"
-    );
-    assert!(
-        seller_names["data"]
-            .as_array()
-            .is_none_or(|rows| rows.iter().all(|row| row["normalized_name"] != "sale.eth")),
-        "the seller registrant collection must not retain sale.eth: {seller_names}"
     );
     let (status, seller_holder_names) = run
         .api
@@ -1498,46 +1468,45 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         "the seller token-holder collection must not retain sale.eth: {seller_holder_names}"
     );
 
-    for relation in ["registrant", "token_holder"] {
-        let (status, recipient_names) = run
-            .api
-            .get_json(&format!(
-                "/v1/addresses/{carol:#x}/names?namespace=ens&relation={relation}"
-            ))
-            .await?;
-        assert_eq!(
-            status, 200,
-            "batch recipient lookup failed: {recipient_names}"
+    let relation = "token_holder";
+    let (status, recipient_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{carol:#x}/names?namespace=ens&relation={relation}"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "batch recipient lookup failed: {recipient_names}"
+    );
+    let rows = recipient_names["data"]
+        .as_array()
+        .context("batch recipient collection data must be an array")?;
+    for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
+        assert!(
+            rows.iter().any(|row| row["normalized_name"] == name),
+            "batch recipient {relation} collection must contain {name}: {recipient_names}"
         );
-        let rows = recipient_names["data"]
-            .as_array()
-            .context("batch recipient collection data must be an array")?;
-        for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
-            assert!(
-                rows.iter().any(|row| row["normalized_name"] == name),
-                "batch recipient {relation} collection must contain {name}: {recipient_names}"
-            );
-        }
+    }
 
-        let (status, prior_holder_names) = run
-            .api
-            .get_json(&format!(
-                "/v1/addresses/{alice:#x}/names?namespace=ens&relation={relation}"
-            ))
-            .await?;
-        assert_eq!(
-            status, 200,
-            "batch seller lookup failed: {prior_holder_names}"
+    let (status, prior_holder_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{alice:#x}/names?namespace=ens&relation={relation}"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "batch seller lookup failed: {prior_holder_names}"
+    );
+    let prior_rows = prior_holder_names["data"]
+        .as_array()
+        .context("batch seller collection data must be an array")?;
+    for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
+        assert!(
+            prior_rows.iter().all(|row| row["normalized_name"] != name),
+            "batch seller {relation} collection must not retain {name}: {prior_holder_names}"
         );
-        let prior_rows = prior_holder_names["data"]
-            .as_array()
-            .context("batch seller collection data must be an array")?;
-        for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
-            assert!(
-                prior_rows.iter().all(|row| row["normalized_name"] != name),
-                "batch seller {relation} collection must not retain {name}: {prior_holder_names}"
-            );
-        }
     }
     let sale_summary = families::required_name(
         &run.db.pool,

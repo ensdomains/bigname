@@ -111,12 +111,9 @@ pub(super) fn parse_address_input(
         .parse::<u64>()
         .map_err(|_| V2Error::invalid_input("coin_type must fit in an unsigned 64-bit integer"))?;
     let relation = lookup_relation_set(input.relation.as_deref())?;
-    if relation
-        .as_ref()
-        .is_some_and(RelationSet::is_former_registrant)
-    {
+    if relation.as_ref().is_some_and(RelationSet::is_former_owner) {
         return Err(V2Error::invalid_input(
-            "relation=former_registrant is served by GET /v1/addresses/{address}/names only",
+            "relation=former_owner is served by GET /v1/addresses/{address}/names only",
         ));
     }
     let roles = relation_to_storage_roles(relation.as_ref());
@@ -295,12 +292,7 @@ fn relation_to_storage_roles(
         Some(relation) if relation.is_exact_manager() => {
             bigname_storage::ReverseIdentityRoles::Managed
         }
-        Some(relation)
-            if relation
-                .as_slice()
-                .iter()
-                .all(|relation| matches!(relation, Relation::Owner | Relation::Registrant)) =>
-        {
+        Some(relation) if relation.as_slice() == [Relation::Owner] => {
             bigname_storage::ReverseIdentityRoles::Owned
         }
         None => bigname_storage::ReverseIdentityRoles::Both,
@@ -365,10 +357,6 @@ mod tests {
     fn lookup_relation_maps_to_existing_storage_roles() {
         assert_eq!(
             relation_to_storage_roles(Some(&RelationSet::from(Relation::Owner))),
-            bigname_storage::ReverseIdentityRoles::Owned
-        );
-        assert_eq!(
-            relation_to_storage_roles(Some(&RelationSet::from(Relation::Registrant))),
             bigname_storage::ReverseIdentityRoles::Owned
         );
         assert_eq!(
