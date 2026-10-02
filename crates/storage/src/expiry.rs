@@ -3,8 +3,8 @@ use crate::UnixSeconds;
 /// Bigname's no-expiry presentation for a known contract and retained value. Other values,
 /// including every generic user-registry uint64 word, are finite.
 /// Root eth/reverse use MAX_EXPIRY in their deployment:
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36 @ ens_v2_sepolia_20260916@366de741)
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30 @ ens_v2_sepolia_20261001@07e55a05)
 /// Wrapper root/eth max and parent-capped child expiry:
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978 @ ens_v1@91c966f)

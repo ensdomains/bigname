@@ -1314,7 +1314,7 @@ routes fail closed with `409 stale` and `GET /v1/namespaces/ens` reports
 `verified_records` and `verified_primary_name` as `unsupported` with
 `unsupported_reason=execution_provider_not_configured` for chain `11155111`;
 with it, both report `full`. The Sepolia entrypoint is the checked-in active
-`manifests/sepolia/ethereum/ens/ens_execution/v1.toml`, which the normal
+`manifests/sepolia/ethereum/ens/ens_execution/v2.toml`, which the normal
 manifest sync installs. The request pool uses `BIGNAME_DATABASE_MAX_CONNECTIONS`; together
 with the reserved readiness connection, one API process can open at most
 `BIGNAME_DATABASE_MAX_CONNECTIONS + 1` PostgreSQL connections. A current-state
@@ -2122,3 +2122,52 @@ another change discharges both with one redo pair. It needs no schema-migration,
 no manifest change and no historical ingest fetch. After it, a change to a
 read-only family query (search, bound names, record, reverse, permission,
 children or topology readers) no longer rotates the hash or forces a redo.
+
+### Sepolia ENSv2 redeploy of 2026-10-01
+
+The build that admits the 2026-10-01 Sepolia ENSv2 redeploy (TYR-183, see the
+[deployment inventory](sepolia-deployment.md)) replaces the six Sepolia ENSv2
+families (root, registry, registrar, resolver, migration and `ens_execution`)
+with version 2 under `deployment_epoch = "ens_v2_sepolia_20261001"` and deletes
+version 1. The 2026-09-15 deployment's contracts are dropped, not kept as
+retired history. Both Universal Resolver proxies keep their addresses and start blocks;
+`ens_execution` lists only the redeploy's UniversalResolverV2 `0x24e1d8e0…`,
+which the managed proxy moved to at block `11821680`, so that block is the
+Sepolia [Universal Resolver cutover](glossary.md#universal-resolver-cutover).
+The redeploy ships as a new version file because synchronization upserts a
+manifest on its namespace, family, chain, epoch and version while the stored
+file path must stay unique, so a new epoch written into the same `v1.toml`
+would stop the runner at startup.
+
+The manifest change rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration. On first start, manifest synchronization
+deprecates the six version-1 rows, retires the dropped addresses at the
+published head, records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) on Sepolia's
+Interpret and Project rows and stamps a required Ingest redo over the range
+from the chain's first ingest cursor (the lowest `ingest_cursors` start, block
+`0` on a database that started Sepolia intake there) to the published head, not
+from the redeploy's blocks: the redeploy's
+`PermissionedResolverImpl` adds a watch for `Upgraded` naming it from any
+emitter, which is compiled from block zero, and the new ETHRegistry's
+announcement rule alone would already reach back to the earliest retained
+`RegistryCreated` log (block `10893181` on Sepolia). Size the refetch from the
+stamped range before the release. Complete that Ingest redo, then the
+full-history Interpret redo with `--attest-watch-set-coverage`, then the
+Project redo it installs, before the matching API serves. A release that also
+rotates the hash for another change, such as "Read-only family queries outside
+the content hash", runs that Interpret and Project pair once for both.
+
+After the redo, Sepolia's ENSv2 history starts with the redeploy. Every block
+before `11821680` reads as not cut over, including `11710193` to `11821679`,
+when the dropped deployment answered resolution, so `at=` reads there serve
+ENSv1 expiry, grace and resolvers for every `.eth` name. The dropped registries
+announced themselves with `RegistryCreated`, so like any self-announced registry
+they stay on the registry routes, but nothing admitted reaches them and their
+entries name no `.eth` name: check that no normalized event from the dropped
+ETHRegistry `0x657ea849…` carries a logical name. The redeploy re-ran premigration: `nick.eth` is
+reserved on the new ETHRegistry at block `11821474` with expiry `1803965433`,
+so the "ENSv1 lease date on name rows" check stands as written. Also check that
+an ENSv1-only `.eth` name with no entry on the new ETHRegistry serves
+`unresolvable_reason` `no_live_ens_v2_entry`.

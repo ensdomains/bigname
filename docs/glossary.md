@@ -404,7 +404,7 @@ never merged; `mode`/`source` selects which a route returns.
 
 the manifest label naming which
 protocol deployment generation a source family belongs to (for example
-`ens_v2_sepolia_20260915`), so facts from different deployments of the same
+`ens_v2_sepolia_20261001`), so facts from different deployments of the same
 protocol never mix silently.
 
 ## Deployment profile
@@ -2450,7 +2450,8 @@ rollback to an unlisted implementation ends it. Past the cutover a `.eth` name
 with a live ENSv2 entry serves that entry's expiry and the ENSv2 grace, and a
 `.eth` name ENSv1 decides without one resolves to nothing
 ([Expiry and grace](api-v1.md#expiry-and-grace)). Sepolia cut over at block
-`11710193`; Mainnet has not.
+`11821680`, when the managed proxy moved to the 2026-10-01 redeploy's
+implementation; Mainnet has not.
 
 ## Verified lookup
 

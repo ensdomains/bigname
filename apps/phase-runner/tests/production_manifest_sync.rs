@@ -5579,8 +5579,8 @@ fn probe_assert_retired(
     );
 }
 
-/// Variant A — deprecating a manifest version (the ens_v2_sepolia_dev precedent,
-/// manifests/sepolia/ethereum/ens/ens_v2_registry_l1/v1.toml): the old version file stays
+/// Variant A — deprecating a manifest version (the ens_v2_sepolia_dev precedent): the old
+/// version file stays
 /// in the repository with rollout_status = "deprecated" while a later deployment becomes
 /// active.
 #[tokio::test]
@@ -5851,10 +5851,10 @@ async fn official_sepolia_mirror_and_direct_resolver_sync_idempotently() -> Resu
     assert_eq!(
         mirrors,
         vec![(
-            "ensv1_mirror_resolver@0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
+            "ensv1_mirror_resolver@0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0".into(),
             "ensv1_mirror_resolver".into(),
-            "0xb2bf4a9a86d29661ea93223582b9945943931e42".into(),
-            Some(11_708_986)
+            "0x322b7581ca210a69c6d0e0d7c88a7688d2789cb0".into(),
+            Some(11_820_288)
         )]
     );
     // Singleton roles keep the role as their declaration name.

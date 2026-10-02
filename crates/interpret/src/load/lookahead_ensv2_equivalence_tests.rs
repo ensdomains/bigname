@@ -22,14 +22,14 @@ const CHAIN: &str = "ethereum-sepolia";
 const ENS_REGISTRY: &str = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
 const BASE_REGISTRAR: &str = "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85";
 const WRAPPED_CONTROLLER: &str = "0xfed6a969aaa60e4961fcd3ebf1a2e8913ac65b72";
-const ETH_REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
-const PUBLIC_RESOLVER: &str = "0xd7e590ad0e92a6ac1d81f4483a9b951d3585a50f";
-const UNLOCKED_CONTROLLER: &str = "0x7ed171bb143a905f56105e4ea146543ecb122f55";
-const LOCKED_CONTROLLER: &str = "0xab1b57c6ee5e91e6090595c0af14cb9b8bc7773f";
-const GRAVEYARD: &str = "0x950b93885b33ce4c7e8571be2c88a1aa93d82f49";
-const VERIFIABLE_FACTORY: &str = "0x9e726eb570beb6bceb495ab8cda7df517d4e841c";
-const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0x2741543c3b14640b97bc70a233318032f7e35bac";
-const ROOT_REGISTRY: &str = "0x9703dbd26dab89504490994138cf2c575251a9ce";
+const ETH_REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+const PUBLIC_RESOLVER: &str = "0xdc4a563d00f5c3012b699794eb9e13a561be386f";
+const UNLOCKED_CONTROLLER: &str = "0x2a35b94df22cc7354570be2284655e2cdc0e64a2";
+const LOCKED_CONTROLLER: &str = "0x6029a063d69b09d23c52a754a90e4fe43adac3a8";
+const GRAVEYARD: &str = "0xb58a90a39d13cce1d0e192b5da5c47640855b04d";
+const VERIFIABLE_FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
+const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880";
+const ROOT_REGISTRY: &str = "0xb458d6a3a77919449d03e7a6903c26827c1ec43f";
 const MIGRATION_REGISTRY: &str = "0x0000000000000000000000000000000000000771";
 /// The role bitmap the unlocked controller grants a migrated name's owner.
 const MIGRATED_ROLES: &str = "97409655027181761882228017414928043062435250176";
@@ -238,7 +238,7 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
 
     seed.block(FIRST_BLOCK).await?;
     // The deployment points the ETH registry at the root registry
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L54-64 @ ens_v2_sepolia_20260916@366de741).
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L59-L69 @ ens_v2_sepolia_20261001@07e55a05).
     let parent = v2::ParentUpdated {
         parent: ROOT_REGISTRY.parse()?,
         label: "eth".to_owned(),

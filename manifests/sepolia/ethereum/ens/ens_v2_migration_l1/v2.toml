@@ -1,0 +1,121 @@
+# Official 2026-10-01 Sepolia redeploy; replaces the 2026-09-15 deployment, which is not retained.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20261001@07e55a05)
+manifest_version = 2
+namespace = "ens"
+source_family = "ens_v2_migration_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_20261001"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+# Constructor argument 1 (`nameWrapper`) of both declared migration controllers, and argument 7 of
+# the official ETHRenewerV1, fix the ENSv1 NameWrapper whose events are correlated. It is the
+# Sepolia ENSv1 NameWrapper deployment. This is correlation metadata, not a watched contract.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L56-L67 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UnlockedMigrationController.json:L624 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/LockedMigrationController.json:L744 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRenewerV1.json:L949 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L2 @ ens_v1@91c966f)
+# The unlocked controller and the Graveyard read their BaseRegistrar from
+# `nameWrapper.registrar()`, which the Sepolia NameWrapper fixed at construction (constructor
+# argument 2) to the ENSv1 BaseRegistrar deployment.
+# BaseRegistrar logs are attributed by ens_v1_registrar_l1; this value does not widen the watch plan.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L66 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/Graveyard.sol:L78 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L59-L65 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/NameWrapper.json:L1517-L1521 @ ens_v1@91c966f)
+# (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
+[correlation_addresses]
+ens_v1_name_wrapper = "0x0635513f179D50A207757E05759CbD106d7dFcE8"
+ens_v1_base_registrar = "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85"
+
+[capability_flags]
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UnlockedMigrationController.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UnlockedMigrationController.json:L632 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "unlocked_migration_controller"
+address = "0x2a35b94df22cc7354570be2284655e2cdc0e64a2"
+proxy_kind = "none"
+start_block = 11820436
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/LockedMigrationController.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/LockedMigrationController.json:L752 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "locked_migration_controller"
+address = "0x6029a063d69b09d23c52a754a90e4fe43adac3a8"
+proxy_kind = "none"
+start_block = 11820452
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/Graveyard.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/Graveyard.json:L439 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "graveyard"
+address = "0xb58a90a39d13cce1d0e192b5da5c47640855b04d"
+proxy_kind = "none"
+start_block = 11820435
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRenewerV1.json:L957 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "ens_v1_renewal_bridge"
+address = "0xf2ece44980778966b8a0fccb3a9e339440f6e045"
+proxy_kind = "none"
+start_block = 11820442
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L230 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "verifiable_factory"
+address = "0xda70306c98e97ece36f997a21368e53298572991"
+proxy_kind = "none"
+start_block = 11820318
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "migration_helper"
+address = "0xa8f86ee5cdd28703bd876f3a8c10b1de70f36899"
+proxy_kind = "none"
+start_block = 11820455
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L3936 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "wrapper_registry_implementation"
+address = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880"
+proxy_kind = "none"
+start_block = 11820449
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/BatchRegistrar.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/BatchRegistrar.json:L280 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "batch_registrar"
+address = "0x4a4c8b7cdab6b19dc2cdb417cdb53a2ccbaf5322"
+proxy_kind = "none"
+start_block = 11820450
+
+# ABI layout:
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20261001@07e55a05)
+# Meaning the interpreter relies on: `sender` is the contract that called the factory and `salt` is
+# the migrated name's namehash. The receiver passes `uint256(node)` as the salt after checking the
+# node is the name's namehash, and the factory emits `ProxyDeployed(msg.sender, proxy, salt, ...)`
+# (the build-info line holds the factory's whole source from this deployment's compiler input).
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L117-L121 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/LockedWrapperReceiver.sol:L149-L153 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L156 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_sepolia_20261001@07e55a05)
+[[abi.events]]
+name = "ProxyDeployed"
+fragment = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)"
+emitter_roles = ["verifiable_factory"]
+normalized_events = ["ContractDiscovered"]
+
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRenewerV1.json:L156 @ ens_v2_sepolia_20261001@07e55a05)
+[[abi.events]]
+name = "NameRenewed"
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+emitter_roles = ["ens_v1_renewal_bridge"]
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]

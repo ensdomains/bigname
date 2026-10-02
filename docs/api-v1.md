@@ -1733,7 +1733,7 @@ While ENSv1 decides the name, the lease's own date stays readable as
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L43 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L233 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/script/deploy-constants.ts:L187 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 
 `registration_status` stays the state at the indexed head: a name past
@@ -1755,7 +1755,7 @@ applies the same withholding. A live reservation still resolves, through `ENSV1R
 ENSv1 registry. Before the cutover, and on Mainnet, which has none, this rule
 does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-entry)).
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 
 ### Lapsed registration

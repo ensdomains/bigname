@@ -76,7 +76,15 @@ authoritative_for = [
 [refs.ens_v2_sepolia_20260916]
 repo = "https://github.com/ensdomains/contracts-v2"
 commit = "366de741187e38686c904242753c532b7de70d47"
-purpose = "Official 2026-09-15 Sepolia deployment artifacts, receipts, compiler inputs and matching ENSv2 source."
+purpose = "Official 2026-09-15 Sepolia deployment artifacts and matching ENSv2 source; superseded by the 2026-10-01 redeploy and no longer manifest authority."
+authoritative_for = [
+  "ENSv2 Solidity semantics cited by docs and code comments where the cited lines are unchanged in the 2026-10-01 redeploy",
+]
+
+[refs.ens_v2_sepolia_20261001]
+repo = "https://github.com/ensdomains/contracts-v2"
+commit = "07e55a056f5b6a9c90119f501bdd05714e67dddd"
+purpose = "Official 2026-10-01 Sepolia redeploy artifacts, receipts, compiler inputs and matching ENSv2 source; current Sepolia manifest authority."
 authoritative_for = [
   "Official Sepolia addresses, deployment starts, proxy wiring, event ABI and contract implementation evidence",
 ]

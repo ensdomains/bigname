@@ -164,24 +164,24 @@ pub const ENS_V1_SEPOLIA: World = World {
 pub const ENS_V2_SEPOLIA: World = World {
     label: "ens_v2_sepolia",
     manifest_root: "sepolia",
-    deployment_epoch: "ens_v2_sepolia_20260915",
+    deployment_epoch: "ens_v2_sepolia_20261001",
     address_base: 0x0005_0000,
     sources: &[
         SourceSlot {
             family: "ens_v2_root_l1",
-            version_file: "v1.toml",
+            version_file: "v2.toml",
         },
         SourceSlot {
             family: "ens_v2_registry_l1",
-            version_file: "v1.toml",
+            version_file: "v2.toml",
         },
         SourceSlot {
             family: "ens_v2_registrar_l1",
-            version_file: "v1.toml",
+            version_file: "v2.toml",
         },
         SourceSlot {
             family: "ens_v2_resolver_l1",
-            version_file: "v1.toml",
+            version_file: "v2.toml",
         },
     ],
     roles: &[

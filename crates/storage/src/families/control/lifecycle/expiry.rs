@@ -29,8 +29,8 @@ pub(crate) const ENS_V1_GRACE_PERIOD_SECONDS: i64 = 7_776_000;
 /// time since expiry is below it.
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L43 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L275-L292 @ ens_v2_sepolia_20260916@366de741)
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L233 @ ens_v2_sepolia_20260916@366de741)
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L1419 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/script/deploy-constants.ts:L187 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistrar.json:L1419 @ ens_v2_sepolia_20261001@07e55a05)
 pub(crate) const ENS_V2_GRACE_PERIOD_SECONDS: i64 = 2_419_200;
 /// The Basenames registrar grace period.
 /// (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
@@ -155,8 +155,8 @@ pub(super) fn grace_ends_at(expiry: Option<&Value>, grace: Grace) -> Value {
 /// Apply Bigname's public no-expiry classification only to a contract context that defines it.
 /// A user-registry word remains a finite expiry, including values above the calendar range.
 /// Root eth/reverse registrations use MAX_EXPIRY in the pinned deployment:
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36 @ ens_v2_sepolia_20260916@366de741)
-/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30 @ ens_v2_sepolia_20261001@07e55a05)
 /// Wrapper expiry is parent-capped, with maximum root/eth expiry:
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978 @ ens_v1@91c966f)

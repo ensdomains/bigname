@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::{ResolverReadFeature, load_repository, normalize_address};
 
-const ARTIFACTS: &str = ".refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia";
-const EPOCH: &str = "ens_v2_sepolia_20260915";
+const ARTIFACTS: &str = ".refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia";
+const EPOCH: &str = "ens_v2_sepolia_20261001";
 
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
