@@ -1761,12 +1761,8 @@ The build also moves `wrapper_state` and `wrapper_fuses` off the top level of
 name-shaped rows into `ens_v1`, a breaking response change that the app
 integration takes in the same release. Once the redo publishes, check on Sepolia
 that `GET /v1/names/nick.eth` serves `ens_v1.expires_at` as the BaseRegistrar
-lease date (`"1798608633"` at the time of writing), with
-`ens_v1.wrapper_state` `"emancipated"`. The top-level `expires_at` follows
-[Expiry and grace](api-v1.md#expiry-and-grace): it equals the lease date
-before the [Universal Resolver cutover](glossary.md#universal-resolver-cutover)
-(as it did on Sepolia on 2026-10-02) and is the live ENSv2 entry's expiry from
-it.
+lease date (`"1798608633"` at the time of writing) beside the top-level ENSv2
+`expires_at` (`"1803965433"`), with `ens_v1.wrapper_state` `"emancipated"`.
 
 ### Registration time kept through the ENSv1→ENSv2 migration
 

@@ -3480,9 +3480,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth` on the
   indexed source, and both answer `not_found` on the verified source. On
   2026-10-01 both reverse nodes had a zero registry resolver and those names
-  were stored on `default.reverse`. On 2026-10-02 the Universal Resolver found
-  no resolver for either name, and the forward call reverted with
-  `ResolverNotFound` carrying each name.
+  were stored on `default.reverse`.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry

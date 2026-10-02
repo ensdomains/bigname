@@ -3697,6 +3697,8 @@ async fn primary_name_missing_forward_address_is_not_found() -> AnyResult<()> {
 
 // TYR-178. A `default.reverse` name with no resolver cannot forward-verify: the Universal
 // Resolver reverts `ResolverNotFound` with the name's own DNS encoding.
+// (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L85 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L405-L417 @ ens_v2_sepolia_20260916@366de741)
 async fn primary_name_with_forward_revert(revert_name: &[u8]) -> AnyResult<EnsPrimaryNameLookup> {
     const DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
