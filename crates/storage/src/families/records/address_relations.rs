@@ -10,12 +10,11 @@
 //!   acts only on the name's resource, sets it when its powers hold `resource_control` and the
 //!   NameWrapper mask allows, and otherwise revokes it from its subject only.
 //! - The token holder (served as `owner`) is the composed `control.owner`, the owner the row
-//!   serves, where the NameWrapper mask allows: the registrant, else the registry owner, and no
-//!   one once the owner lapsed or the admitted Graveyard holds the record. A name with no token
-//!   lineage is owned by its registry owner (a registry-only subname), or by its registrant (a
-//!   lease transferred without `reclaim`, under the registry-only binding that handoff opened).
-//!   The lapse also removes wrapper_state, so both readers then withhold the token-holder
-//!   relation under the same modifier mask.
+//!   serves: the registrant, else the registry owner, and no one on a released registration,
+//!   once the owner lapsed, or while the admitted Graveyard holds the record. A name with no
+//!   token lineage is owned by its registry owner (a registry-only subname), or by its
+//!   registrant (a lease transferred without `reclaim`, under the registry-only binding that
+//!   handoff opened).
 //! - The effective controller is the controller, else (with a token lineage) the token holder,
 //!   where the mask allows: no NameWrapper modifier, or a wrapper state outside the `.eth` grace
 //!   period, since NameWrapper's `canModifyName` has no wrapper-state condition
@@ -86,8 +85,6 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         return Vec::new();
     }
     let lineage = row.token_lineage_id.is_some();
-    let modifier = input.wrapper.filter(|wrapper| wrapper.has_modifier);
-    let wrapper_state = summary.get("wrapper_state").and_then(Value::as_str);
     let registrant = summary
         .pointer("/registration/registrant")
         .and_then(Value::as_str)
@@ -103,11 +100,7 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         .unsupported_reason
         .is_none();
     let mut out = Vec::new();
-    if lineage
-        && (modifier.is_none()
-            || matches!(wrapper_state, Some("wrapped" | "emancipated" | "locked")))
-        || !lineage && supported
-    {
+    if lineage || supported {
         out.push((owner, TOKEN_HOLDER));
     }
     let released = summary

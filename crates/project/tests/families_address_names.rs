@@ -125,6 +125,29 @@ async fn a_locked_name_is_managed_by_its_holder_and_a_lineageless_name_by_its_co
     fixture.cleanup().await
 }
 
+/// A wrapped name whose wrapper expiry is unknown serves no wrapper state, so neither its grace
+/// nor its manager is known, but it still has its token holder as `owner`: the relation lists it
+/// as the field serves it.
+#[tokio::test]
+async fn an_unknown_wrapper_mask_keeps_the_token_holder() -> Result<()> {
+    let fixture = Fixture::new("families_address_names_unknown_mask", 20).await?;
+    let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL | IS_DOT_ETH, timestamp(14)).await?;
+    with_token_lineage(&fixture, &resource).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET after_state = after_state - 'expiry'
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&resource)
+    .execute(&fixture.pool)
+    .await?;
+    assert_eq!(
+        publish_and_compare_addresses(&fixture, 14).await?,
+        ["token_holder"]
+    );
+    assert_eq!(composed(&fixture).await?, (Some(HOLDER.to_owned()), false));
+    fixture.cleanup().await
+}
+
 /// The composed `control.owner` and `wrapper_in_grace` of the wrapped name; the stored
 /// `project_name_summary.owner` the registry-label filters read must be the same owner.
 async fn composed(fixture: &Fixture) -> Result<(Option<String>, bool)> {

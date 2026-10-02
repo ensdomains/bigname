@@ -359,11 +359,12 @@ That lease's token can be transferred again, still without `reclaim`. Such a
 `TokenControlTransferred` row of the `ens_v1_registrar_l1` family on exactly that lease's
 resource, positioned after the binding opened, reaches the registrant and nothing else: the
 registration's `registrant`, the repeated `control.registrant` and
-`provenance.registrant_event_id` follow the token to its new holder, while the registry owner,
-the owner served, the selected binding, its `registry_only` authority kind, the resolver,
-`latest_event_kind` and the lease's `resource_id`, `registered_at` and expiry stay as they were.
-The transfer is read into the registrant-naming rows only; it never enters the event stream the
-control folds read, so a registrar token transfer cannot decide control while the registry-only
+`provenance.registrant_event_id` follow the token to its new holder, and so does the served
+owner, `control.owner`, which is composed from the registrant. The registry owner, the selected
+binding, its `registry_only` authority kind, the resolver, `latest_event_kind` and the lease's
+`resource_id`, `registered_at` and expiry stay as they were. The transfer is read into the
+registrant-naming rows only; it never enters the event stream the control folds read, so a
+registrar token transfer moves the owner but cannot decide the manager while the registry-only
 binding is the authority. A later renewal and the lease's release then behave as they do without
 the transfer.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
@@ -824,7 +825,7 @@ Missing, zero, inconsistent or unmasked owner evidence contributes no value;
 a selected wrapper or registrar authority does not qualify. Project consumes
 this value through its existing owner fold without changing resource selection.
 A later registrar token transfer that leaves the registry-only authority selected
-emits no new epoch, so the retained `registry_owner` stays the served owner; that
+emits no new epoch, so the retained `registry_owner` stays the served registry owner; that
 transfer can update the registrar holder while leaving registry control unchanged. The Basenames registrar behaves
 the same way: its token transfer is the inherited ERC-721 ownership write, and it
 writes the registry owner only from `reclaim` and registration.
@@ -855,7 +856,7 @@ registry owner the registrar adapter read from retained registry state (`owner_g
 fold reads that bound owner for every admitted, non-state-derived registrar binding of the
 selected resource. So a registry `Transfer` that opened a registry-only binding, whose
 `AuthorityTransferred` sits on the registry-only resource and is no longer admitted once a
-registrar token transfer binds the lease again, still decides the owner served.
+registrar token transfer binds the lease again, still decides the registry owner served.
 
 For an ENSv1 or Basenames name whose selected binding is not a NameWrapper authority, one rule
 decides the served registry owner: the node's newest registry `NewOwner` or `Transfer` in
@@ -926,7 +927,7 @@ An `active` ENSv1 or Basenames registration whose authority is its registrar lea
 registry record always serves a registry owner, because the registry answers `owner(node)` for
 every node. The test is the registration's status and authority kind; it does not look at a
 wrapper, so a wrapped name whose registration authority is the registrar is included. When the fold finds no owner fact, or its latest fact cleared the owner, the
-served owner is the node's latest registry `AuthorityTransferred` kept in
+served registry owner is the node's latest registry `AuthorityTransferred` kept in
 `project_registry_owner_event` (none when its owner word is unmasked or the admitted Graveyard
 holds the record), or the zero address when
 the registry holds no record of the node. A node with a registry record but no owner the
