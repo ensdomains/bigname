@@ -476,12 +476,13 @@ source-boundary and reorg checks still run, regardless of window size.
 
 Some hosted providers answer `null` for a receipt or transaction they hold when
 many batches run at once. Ingest asks for each selected receipt or transaction
-that came back `null` again, on its own, up to three times with a 250 ms, 500 ms
-and 1 s pause, before it fails the window as a transient error. A result still
-`null` after that is treated as the transaction leaving the chain, as before.
-`phase_runner_ingest_provider_null_results_total` counts every `null` answer
-([monitoring runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic)); if it
-keeps climbing, lower the batch size or the in-flight limit.
+that came back `null` again, without the rest of the window, up to three times
+with a 250 ms, 500 ms and 1 s pause, before it fails the window as a transient
+error. A result still `null` after that is treated as the transaction leaving
+the chain, as before. `phase_runner_ingest_provider_null_results_total` counts
+every `null` answer ([monitoring
+runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic)); if it keeps
+climbing, lower the batch size or the in-flight limit.
 
 For a first historical-ingest comparison, set these in the server Compose env
 file, or export them when launching `phase-runner` directly:

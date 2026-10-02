@@ -2147,7 +2147,7 @@ async fn a_settled_batch_resets_the_restart_backoff() -> Result<()> {
     assert_eq!(calls.len(), 8);
     assert!(calls[5] - calls[4] >= Duration::from_millis(320));
     assert!(
-        calls[7] - calls[6] < Duration::from_millis(500),
+        calls[7] - calls[6] < calls[5] - calls[4],
         "the failure after a settled batch waited {:?}, not the initial delay",
         calls[7] - calls[6]
     );

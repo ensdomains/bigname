@@ -168,9 +168,9 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 ## Ingest RPC traffic
 
 Three counters cover the JSON-RPC traffic the shared Ingest and Live engine
-sends to each configured RPC source, including RPC chain check probes and
-Coinbase's companion RPC. Verify's reference provider and API lookups are not
-counted.
+sends to each configured RPC source, including its periodic RPC chain
+rechecks and Coinbase's companion RPC. The startup RPC chain check, Verify's
+reference provider and API lookups are not counted.
 
 | Counter | What it counts |
 | --- | --- |
