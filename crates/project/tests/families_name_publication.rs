@@ -73,6 +73,8 @@ fn expiring_from(seconds: i64) -> Result<NameCurrentExpiringFilter> {
         namespace: "ens".to_owned(),
         expires_after: Some(OffsetDateTime::from_unix_timestamp(seconds)?.into()),
         expires_before: None,
+        authorities: None,
+        parent: None,
     })
 }
 

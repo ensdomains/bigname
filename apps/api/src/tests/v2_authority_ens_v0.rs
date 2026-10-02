@@ -199,3 +199,25 @@ async fn v2_name_detail_and_lookup_serve_ens_v0_and_omit_ownerless_authority() -
     }
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_search_rows_serve_the_authority_of_name_detail() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_authority_shape_names(&database, V2_ADDRESS).await?;
+
+    for name in AUTHORITY_SHAPE_NAMES {
+        let search = v2_get_json(&database, &format!("/v1/search?q={name}&namespace=ens")).await?;
+        let row = search["data"]
+            .as_array()
+            .expect("search data")
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("search must list {name}: {search}"));
+        assert_eq!(
+            row.get("authority").and_then(Value::as_str),
+            expected_authority(name),
+            "{name}: {row}"
+        );
+    }
+    database.cleanup().await
+}
