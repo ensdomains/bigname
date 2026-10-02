@@ -601,6 +601,8 @@ collection route carry neither header.
 | `namespace` | query | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
+| `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -627,10 +629,12 @@ collection route carry neither header.
   names in the dictionary shape `GET /v1/search` serves, each carrying its
   selected current registration, and because no route addresses a registration
   as a resource of its own: registrations appear only as `registration_id` on
-  history and permission rows.
+  history and permission rows. The listing mixes registrar leases, ENSv2
+  registrations and subnames; `parent=eth` keeps only the `.eth` second-level
+  names, and `authority` tells ENSv1 leases from ENSv2 registrations.
 - Request parameters: query `namespace` (required), `expires_after`,
-  `expires_before`, `sort=expires_at`, `order=asc|desc`, `cursor`,
-  `page_size`, and optional `finality=latest`. `at` and historical `finality`
+  `expires_before`, `authority`, `parent`, `sort=expires_at`,
+  `order=asc|desc`, `cursor`, `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
   `namespace` is required: the listing is one namespace's index scan, and a
   missing namespace returns `400 invalid_input`; an unsupported one returns
@@ -644,12 +648,39 @@ collection route carry neither header.
   bound, or an equal or inverted pair returns `400 invalid_input`. Finite
   expiry bounds are exact numeric seconds, including beyond year 9999; public
   whole-second formatting does not round an RFC 3339 filter boundary.
+  `authority` keeps only rows whose served `authority` is a listed value, with
+  the grammar of
+  [`GET /v1/addresses/{address}/names`](#get-v1addressesaddressnames): an
+  unordered comma-separated set of `ens_v0`, `ens_v1` and `ens_v2` whose blank
+  segments are skipped and repeats collapse; a whitespace-only value is treated
+  as absent. `authority=ens_v1` does not match a name served as `ens_v0`, and
+  `authority=ens_v0,ens_v1` matches both. Rows that serve no `authority`
+  (Basenames rows and ownerless registry rows) match no set.
+  `parent` keeps only names exactly one label below the given name, compared
+  by normalized name spelling after the ENSIP-15 normalization name routes
+  apply to a path name, not by node or registry topology: a bracketed labelhash
+  label matches only names stored with that bracketed spelling, never a name
+  that spells the label as text, except the labelhashes of `eth` and `base`,
+  which that normalization spells as text. `parent=eth` selects the `.eth`
+  second-level names before and after the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
+  BaseRegistrar leases
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f)
+  and ENSv2 `eth` registry registrations
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741)
+  alike, and no subname, wrapped or ENSv2; adding `authority=ens_v0,ens_v1`
+  keeps the ENSv1 leases and `authority=ens_v2` the ENSv2 registrations.
+  `parent=base.eth` with `namespace=basenames` selects the Basenames
+  second-level names. Both filters apply before paging. A value that names no
+  authority (`authority=,`), an unknown authority, an empty `parent`, a
+  `parent` that is not a valid name, or a repeated parameter returns
+  `400 invalid_input`.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
   `owner`, `manager`, `registration_status`, `registered_at`,
   `created_at`,
-  `expires_at` and `grace_ends_at`, and the `ens_v1` object while the name's
-  authority is `ens_v1` or `ens_v0` (see
+  `expires_at`, `grace_ends_at`, `authority` as `GET /v1/names/{name}` serves
+  it, and the `ens_v1` object while that `authority` is `ens_v1` or `ens_v0` (see
   [the naming dictionary](api-v1.md#naming-dictionary)). Every row has an
   `expires_at` inside the window. `expires_at` is the served expiry of
   [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
@@ -659,7 +690,8 @@ collection route carry neither header.
   a listing row carries no `unsupported_reason`.
 - Coverage: the listing serves [composed name rows](glossary.md#composed-name-row)
   whose registration has a finite numeric expiry in Unix seconds, including
-  registrar leases, ENSv2 registrations, and wrapped subnames. The public
+  registrar leases, ENSv2 registrations, and wrapped subnames; `parent=eth`
+  narrows it to the `.eth` second-level names. The public
   `expires_at` is a decimal string; the index and comparisons use exact numeric
   seconds, never floating point or lexicographic string order. It finds them by
   walking the retained lifecycle events
@@ -667,7 +699,13 @@ collection route carry neither header.
   `project_lifecycle_event_inexact_expiry_idx` and
   `project_wrapper_state_expiry_idx`. These indexes were introduced by
   `20260928140000_project_families_expiry_indexes.sql`; their current expiry
-  keys use exact numeric storage. A row with no finite registration expiry is outside this
+  keys use exact numeric storage. With `authority` set the indexed walk
+  composes only names whose stored [name summary](glossary.md#name-summary)
+  selects an arm that can serve a listed value (`ens_v1` for `ens_v0` and
+  `ens_v1`, `ens_v2` for `ens_v2`), and with `parent` set only names one label
+  below it. Names whose retained expiry is a JSON number that is not an
+  integral second, which the walk cannot place, are composed without that
+  pruning. Either way the composed row decides each row. A row with no finite registration expiry is outside this
   listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
   remain eligible and keep every digit through filtering, sorting and paging.
   A negative or malformed stored expiry is not a no-expiry sentinel.
@@ -702,7 +740,8 @@ collection route carry neither header.
   `GET /v1/addresses/{address}/names?relation=former_owner`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
-  bound to namespace, both bounds, and order, and hold the last row's position;
+  bound to namespace, both bounds, `authority`, `parent`, and order, and hold
+  the last row's position;
   see [current-state list cursors](api-v1.md#current-state-list-cursors).
   `page.total_count` is `null`.
 - Snapshot behavior: each page is read on one database snapshot of the
@@ -3813,7 +3852,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary. Each result is built only from the selected current
   registration: a migrated name uses its ENSv2 owner, manager, status, and
-  expiry. A name that ENSv1 decides carries the `ens_v1` object, as on
+  expiry. Each result carries the `authority` its name detail serves, and a
+  name that ENSv1 decides carries the `ens_v1` object, as on
   `GET /v1/names`. A name whose exact-name projection is unsupported is omitted from
   search results whatever the reason. Today that is a name with no selected
   current binding (`current_authority_not_projected`, for example when both

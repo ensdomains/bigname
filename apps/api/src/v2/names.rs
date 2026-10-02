@@ -21,7 +21,8 @@ use crate::AppState;
 use super::cursor::invalid_cursor_error;
 use super::list_cursor::{ListCursor, ListPosition};
 use super::search::{SearchName, build_search_name};
-use super::support::ensure_public_namespace;
+use super::support::{ensure_public_namespace, normalize_inferred_route_name};
+use super::vocab::AuthoritySet;
 use super::{
     Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2, validate_latest_collection_selectors,
@@ -32,6 +33,8 @@ const NAMESPACE_FILTER_KEY: &str = "namespace";
 const EXPIRES_AFTER_FILTER_KEY: &str = "expires_after";
 const EXPIRES_BEFORE_FILTER_KEY: &str = "expires_before";
 const ORDER_FILTER_KEY: &str = "order";
+const AUTHORITY_FILTER_KEY: &str = "authority";
+const PARENT_FILTER_KEY: &str = "parent";
 const EXPIRES_AT_CURSOR_KEY: &str = "expires_at";
 const NAME_CURSOR_KEY: &str = "name";
 const NAMEHASH_CURSOR_KEY: &str = "namehash";
@@ -50,6 +53,8 @@ impl QueryParamAllowlist for NamesQueryParams {
         "namespace",
         "expires_after",
         "expires_before",
+        "authority",
+        "parent",
         "sort",
         "order",
         "at",
@@ -67,6 +72,8 @@ pub(crate) struct NamesCursorBinding<'a> {
     pub(crate) namespace: &'a str,
     pub(crate) expires_after: Option<UnixSeconds>,
     pub(crate) expires_before: Option<UnixSeconds>,
+    pub(crate) authority: Option<&'a AuthoritySet>,
+    pub(crate) parent: Option<&'a str>,
     pub(crate) order: SortOrder,
 }
 
@@ -101,11 +108,15 @@ pub(crate) async fn get_names(
         ));
     }
 
+    let parent = params.parent.as_deref().map(normalize_parent).transpose()?;
+
     let order = params.order.unwrap_or(SortOrder::Asc);
     let binding = NamesCursorBinding {
         namespace: &namespace,
         expires_after: params.expires_after,
         expires_before: params.expires_before,
+        authority: params.authority.as_ref(),
+        parent: parent.as_deref(),
         order,
     };
     // The cursor holds the window, order and position only; a continuation reads what is
@@ -123,6 +134,11 @@ pub(crate) async fn get_names(
         namespace: namespace.clone(),
         expires_after: params.expires_after,
         expires_before: params.expires_before,
+        authorities: params
+            .authority
+            .as_ref()
+            .map(|set| set.wire_values().into_iter().map(str::to_owned).collect()),
+        parent: parent.clone(),
     };
     // The rows are composed from the owned key families.
     let storage_page = {
@@ -182,8 +198,23 @@ fn order_to_storage(order: SortOrder) -> NameCurrentListOrder {
     }
 }
 
+/// A name in its normalized form, as name routes normalize a path name; blank or invalid is
+/// refused.
+fn normalize_parent(value: &str) -> V2Result<String> {
+    normalize_inferred_route_name(value)
+        .map(|name| name.normalized_name)
+        .map_err(|error| {
+            V2Error::invalid_input(format!(
+                "parent must be a valid ENSIP-15 name: {}",
+                error.message
+            ))
+        })
+}
+
+/// `authority` and `parent` add a key only when sent, so an unfiltered cursor keeps the shape it
+/// had before the filters existed.
 fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut filters = BTreeMap::from([
         (
             NAMESPACE_FILTER_KEY.to_owned(),
             binding.namespace.to_owned(),
@@ -200,7 +231,14 @@ fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> 
             ORDER_FILTER_KEY.to_owned(),
             binding.order.as_str().to_owned(),
         ),
-    ])
+    ]);
+    if let Some(authority) = binding.authority {
+        filters.insert(AUTHORITY_FILTER_KEY.to_owned(), authority.canonical_value());
+    }
+    if let Some(parent) = binding.parent {
+        filters.insert(PARENT_FILTER_KEY.to_owned(), parent.to_owned());
+    }
+    filters
 }
 
 fn option_timestamp_filter(value: Option<UnixSeconds>) -> String {
@@ -253,6 +291,8 @@ mod tests {
             namespace: "ens",
             expires_after: Some(timestamp("2026-09-01T00:00:00Z")),
             expires_before: None,
+            authority: None,
+            parent: None,
             order: SortOrder::Asc,
         }
     }
@@ -323,6 +363,62 @@ mod tests {
         let mut wrong_sort = payload.clone();
         wrong_sort.sort = "name".to_owned();
         assert!(read(&binding, &crate::v2::encode(&wrong_sort)).is_err());
+    }
+
+    #[test]
+    fn names_cursor_binds_authority_and_parent_only_when_sent() {
+        let ens_v1 = AuthoritySet::from(super::super::vocab::Authority::EnsV1);
+        let both = AuthoritySet::from_authorities([
+            super::super::vocab::Authority::EnsV1,
+            super::super::vocab::Authority::EnsV0,
+        ])
+        .expect("non-empty set");
+        let filtered = NamesCursorBinding {
+            authority: Some(&both),
+            parent: Some("eth"),
+            ..binding()
+        };
+        let cursor_text = names_list_cursor(&filtered)
+            .next(names_position(&cursor()).expect("position must build"));
+        let filters = crate::v2::decode(&cursor_text)
+            .expect("cursor must decode")
+            .filters;
+        assert_eq!(filters["authority"], "ens_v0,ens_v1");
+        assert_eq!(filters["parent"], "eth");
+        assert_eq!(
+            read(&filtered, &cursor_text).expect("cursor must decode"),
+            cursor()
+        );
+        for other in [
+            binding(),
+            NamesCursorBinding {
+                authority: Some(&ens_v1),
+                ..filtered
+            },
+            NamesCursorBinding {
+                parent: None,
+                ..filtered
+            },
+            NamesCursorBinding {
+                parent: Some("base.eth"),
+                ..filtered
+            },
+        ] {
+            assert!(
+                read(&other, &cursor_text).is_err(),
+                "{other:?} must reject a cursor bound to {filtered:?}"
+            );
+        }
+        assert!(
+            !crate::v2::decode(
+                &names_list_cursor(&binding())
+                    .next(names_position(&cursor()).expect("position must build"))
+            )
+            .expect("cursor must decode")
+            .filters
+            .keys()
+            .any(|key| key == "authority" || key == "parent")
+        );
     }
 
     #[test]

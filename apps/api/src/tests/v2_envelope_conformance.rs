@@ -1309,6 +1309,7 @@ const SHARED_LIST_RECORD_FIELDS: &[&str] = &[
     "registered_at",
     "created_at",
     "expires_at",
+    "authority",
 ];
 
 fn data_row_named<'a>(payload: &'a Value, name: &str, label: &str) -> &'a Value {

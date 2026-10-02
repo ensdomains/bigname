@@ -71,7 +71,10 @@ pub(crate) struct SearchName {
     pub(crate) expires_at_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
-    /// Present while the name's authority is `ens_v1` or `ens_v0`.
+    /// The `authority` the name's detail serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) authority: Option<crate::v2::vocab::Authority>,
+    /// Present while `authority` is `ens_v1` or `ens_v0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ens_v1: Option<crate::v2::name_record::EnsV1>,
     /// On `GET /v1/names` rows only: the last holder of a released registration
@@ -289,6 +292,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName
         expires_at: registration.expires_at,
         expires_at_reason: registration.expires_at_reason,
         grace_ends_at: registration.grace_ends_at,
+        authority: crate::v2::vocab::Authority::from_provenance(&row.row.provenance),
         ens_v1,
         lapsed_registration: None,
     })

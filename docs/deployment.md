@@ -2180,6 +2180,8 @@ its implementation's `start_block`, so a database that never fetched such a log
 writes the same interpreted rows as one that did (the fetched log can add only
 an operator diagnostic in `interpret_decode_skips`). On Sepolia this changes interpreted output only
 if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
+Interpret redo applies the rule either way.
+
 Interpret redo applies the rule either way. The same release replaces that
 implementation with the 2026-10-01 redeploy's `0x115eb53f…` from block
 `11820406` ([Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)).
@@ -2241,6 +2243,20 @@ reserved on the new ETHRegistry at block `11821474` with expiry `1803965433`,
 so the "ENSv1 lease date on name rows" check stands as written. Also check that
 an ENSv1-only `.eth` name with no entry on the new ETHRegistry serves
 `unresolvable_reason` `no_live_ens_v2_entry`.
+
+### Authority and filters on the names-by-expiry listing
+
+The build that adds `authority` to [`GET /v1/names`](api-v1-routes.md#get-v1names)
+and [`GET /v1/search`](api-v1-routes.md#get-v1search) rows and the `authority`
+and `parent` filters to `GET /v1/names` changes only API and family read paths.
+The storage files it edits, `crates/storage/src/families/name/list.rs`,
+`crates/storage/src/name_current/expiring.rs` and
+`crates/storage/src/name_current/public_authority.rs`, are read-only queries
+outside the [interpreter content hash](glossary.md#interpreter-content-hash),
+so the hash does not rotate. It adds no schema-migration and needs no redo or historical
+ingest fetch. Rows gain one field; cursors issued before it continue unchanged,
+and a cursor issued with `authority` or `parent` must be continued with the
+same filters.
 
 ### Owner as the token holder
 

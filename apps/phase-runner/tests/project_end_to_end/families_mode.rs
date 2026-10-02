@@ -54,6 +54,8 @@ pub async fn measure_walks(
         namespace: namespace.to_owned(),
         expires_after: Some(OffsetDateTime::UNIX_EPOCH.into()),
         expires_before: None,
+        authorities: None,
+        parent: None,
     };
     let expiring = walk(max_pages, |cursor| {
         let filter = expiring_filter.clone();
