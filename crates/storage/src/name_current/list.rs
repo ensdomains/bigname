@@ -271,10 +271,7 @@ pub(super) fn push_filtered_name_list_cte<'a>(
                     nc.declared_summary #>> '{registration,upstream_resource}',
                     nc.declared_summary #>> '{control,token_id}'
                 ), '') AS token_id,
-                NULLIF(LOWER(COALESCE(
-                    nc.declared_summary #>> '{control,owner}',
-                    nc.declared_summary #>> '{control,registry_owner}'
-                )), '') AS owner,
+                NULLIF(LOWER(nc.declared_summary #>> '{control,owner}'), '') AS owner,
                 COALESCE(
                     "#,
     );

@@ -530,7 +530,8 @@ the admitted publication snapshot. Relation vocabulary is `token_holder`,
 holder, else, for a name with no token (an unwrapped subname), its registry owner. A name whose
 selected binding has no token lineage is not always tokenless: after a `.eth` token transfer
 without `reclaim` its owner is the token's new holder and its registry owner is only its
-`manager` ([registry-only handoff](glossary.md#registry-only-handoff)). Project indexes every
+`manager` ([registry-only handoff](glossary.md#registry-only-handoff)). A released name has
+neither relation, as it serves neither field. Project indexes every
 candidate address under both `token_holder` and `effective_controller`, a superset the read
 narrows, and writes no `registrant` rows. Surface is the default unit;
 resource deduplication is explicit. These ordinary listings describe current

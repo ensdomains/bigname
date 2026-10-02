@@ -111,10 +111,7 @@ pub(super) fn declared_registration(summary: &Value) -> Option<&Value> {
 }
 
 pub(super) fn declared_owner(summary: &Value) -> Option<String> {
-    json_address_at_paths(
-        summary,
-        &[&["control", "owner"], &["control", "registry_owner"]],
-    )
+    json_address_at_paths(summary, &[&["control", "owner"]])
 }
 
 pub(super) fn declared_registry_owner(summary: &Value) -> Option<String> {

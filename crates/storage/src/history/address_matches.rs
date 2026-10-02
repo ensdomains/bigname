@@ -278,10 +278,11 @@ fn push_address_match_filter<'a>(
         push_token_holder_match_filter(builder, address);
         needs_or = true;
     }
-    // A name with no token lineage is owned by its registry owner, so `owner` also matches the
-    // registry ownership transfers `manager` does, except while the registry-only binding a
-    // BaseRegistrar token transfer without `reclaim` opens stands for a live lease, which the
-    // token's holder owns. The registry-only resource is one per node, so the test is per block.
+    // A name with no token is owned by its registry owner, so `owner` also matches the registry
+    // ownership transfers `manager` does, except from the block a registry-only binding that
+    // stands for a BaseRegistrar lease opens: the lease's holder owns the name after a transfer
+    // without `reclaim`, and a released lease has no owner. The registry-only resource is one
+    // per node, so an earlier tokenless owner of it keeps its history.
     if include_token_holder || include_controller {
         if needs_or {
             builder.push(" OR ");
@@ -394,17 +395,7 @@ fn push_registry_owner_match_filter<'a>(
                       SELECT 1 FROM normalized_events lease
                       WHERE lease.resource_id = handoff.lease_resource_id
                         AND lease.source_family = 'ens_v1_registrar_l1'
-                        AND lease.event_kind = 'RegistrationGranted'
-                        AND lease.block_number <= ne.block_number
                         AND lease.canonicality_state <> 'orphaned'::bigname_phase.canonicality_state
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM normalized_events released
-                      WHERE released.resource_id = handoff.lease_resource_id
-                        AND released.source_family = 'ens_v1_registrar_l1'
-                        AND released.event_kind = 'RegistrationReleased'
-                        AND released.block_number <= ne.block_number
-                        AND released.canonicality_state <> 'orphaned'::bigname_phase.canonicality_state
                   )
             )
             "#,

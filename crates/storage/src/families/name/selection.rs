@@ -165,8 +165,9 @@ fn released_v1_binding<'a>(
             && (candidate.resource_id == lease || wrapper_stands_for(facts, candidate, lease))
             && bound(candidate) <= at
     }));
-    // The registry-only binding a transfer without `reclaim` opened, when it is the name's only
-    // open binding and its lease lapsed after it opened.
+    // The registry-only binding standing for the lease, when it is the name's only open binding:
+    // the one a transfer without `reclaim` opened, or the one the release itself opens on the
+    // surviving registry record.
     let handoff = match open {
         [only] if only.registry_only && only.authority_arm == "ens_v1" => Some(*only),
         _ => None,
@@ -175,7 +176,6 @@ fn released_v1_binding<'a>(
         handoff.lease_resource_id.as_deref() == Some(lease)
             && lifecycle.source_family == "ens_v1_registrar_l1"
             && lifecycle.authority_kind == "registrar"
-            && bound(handoff) < at
     });
     handoff.or(binding.filter(|_| open.is_empty()))
 }

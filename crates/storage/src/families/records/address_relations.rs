@@ -110,7 +110,11 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
     {
         out.push((owner, TOKEN_HOLDER));
     }
-    if !lineage || open {
+    let released = summary
+        .pointer("/registration/status")
+        .and_then(Value::as_str)
+        == Some("released");
+    if (!lineage || open) && !released {
         let effective = if lineage {
             controller.or(registrant)
         } else {

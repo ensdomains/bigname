@@ -352,13 +352,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         is_v2,
         selected_key.as_deref(),
     );
-    // A released registration's last registrant holds no token, so it owns nothing.
-    let registrant_released = registrant.as_ref().is_some_and(|(_, position)| {
-        tagged.iter().any(|tagged| {
-            tagged.event.event_kind == "RegistrationReleased"
-                && tagged.event.position.event_identity == position.event_identity
-        })
-    });
     let (registrant, registrant_position) = match registrant {
         Some((registrant, position)) => (
             Some(registrant),
@@ -565,11 +558,13 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 .as_ref()
                 .and_then(|node| node.latest_transfer())
                 .is_some_and(|write| write.graveyard_held());
-        let held_token = registrant.as_deref().filter(|_| !registrant_released);
-        let served = held_token.or(owner.as_deref());
+        // A released registration has no token holder, and its surviving registry record
+        // makes the registry owner only the manager.
+        let released = registration.get("status") == Some(&json!("released"));
+        let served = registrant.as_deref().or(owner.as_deref());
         control.insert(
             "owner".into(),
-            opt_text(served.filter(|_| !owner_lapsed && !graveyard_held)),
+            opt_text(served.filter(|_| !owner_lapsed && !graveyard_held && !released)),
         );
         control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control

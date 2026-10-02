@@ -929,13 +929,12 @@ fn registration_at(
     raws
 }
 
-/// A lease that lapsed and was released leaves the name on its registry-only resource, owned by
-/// its registry owner: `OTHER`, to whom the old registrant handed the record. The name is then
-/// registered again and its new token moves without `reclaim`, which reopens the same
-/// registry-only resource as a handoff. That later handoff must not take `OTHER`'s earlier
-/// ownership out of its `owner` history, and the released registrant never owns the name.
+/// A lease that lapsed and was released leaves the name on its registry-only resource with no
+/// owner and no manager, though its registry owner, `OTHER`, to whom the old registrant handed
+/// the record, gains its `manager` history and none under `owner`. The name is then registered again and its new token moves
+/// without `reclaim`, which reopens the same registry-only resource as a handoff.
 #[tokio::test]
-async fn a_later_handoff_keeps_an_earlier_registry_owner_in_owner_history() -> Result<()> {
+async fn a_released_name_has_no_owner_or_manager() -> Result<()> {
     const RELEASED: i64 = 131;
     const REREGISTERED: i64 = 132;
     const HANDED_OFF: i64 = 133;
@@ -950,24 +949,13 @@ async fn a_later_handoff_keeps_an_earlier_registry_owner_in_owner_history() -> R
         registration_at(REREGISTERED, NEW_HOLDER, 4_102_444_800, Some(OWNER)),
         Some(session),
     )?;
-    let handoff = raw(
-        Transfer {
-            from: NEW_HOLDER.parse().unwrap(),
-            to: HOLDER.parse().unwrap(),
-            tokenId: token_id(),
-        }
-        .encode_log_data(),
-        HANDED_OFF,
-        0,
-        REGISTRAR,
-    );
-    let (handed_off, _) = interpret(HANDED_OFF, vec![handoff], Some(session))?;
+    let (handed_off, _) = interpret(HANDED_OFF, token_moved(HANDED_OFF), Some(session))?;
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_blocks(&database, REGISTERED..=HANDED_OFF).await?;
     let pool = &database.pool;
-    let name = bigname_storage::logical_name_id_for_name("ens", &format!("{LABEL}.eth"));
     let mut owners = Vec::new();
     let mut other_rows = Vec::new();
+    let mut released_detail = Value::Null;
     for (block, output) in [
         (REGISTERED, &lapsed),
         (RELEASED, &moved),
@@ -976,25 +964,151 @@ async fn a_later_handoff_keeps_an_earlier_registry_owner_in_owner_history() -> R
     ] {
         persist(pool, output).await?;
         project_to(pool, block, None).await?;
-        let composed = bigname_storage::families::name::load_family_name(pool, &name)
-            .await?
-            .context("composed name")?;
-        owners.push(composed.declared_summary["control"]["owner"].clone());
-        let mut relations: Vec<String> =
-            bigname_storage::load_address_names_current(pool, OTHER, None, None)
-                .await?
+        owners.push(composed_owner(pool).await?);
+        other_rows.push(relations_of(pool, OTHER).await?);
+        if block == RELEASED {
+            released_detail = released_detail_at(&database, RELEASED).await?;
+        }
+    }
+    let mut views = Vec::new();
+    for bound in [RELEASED, HANDED_OFF] {
+        for canonical_only in [true, false] {
+            for relation in [
+                bigname_storage::AddressNameRelation::TokenHolder,
+                bigname_storage::AddressNameRelation::EffectiveController,
+            ] {
+                views.push(
+                    history_for(pool, OTHER, bound, canonical_only, Some(&[relation])).await?,
+                );
+            }
+        }
+    }
+    database.cleanup().await?;
+
+    assert_eq!(
+        owners,
+        [json!(OWNER), Value::Null, json!(NEW_HOLDER), json!(HOLDER)]
+    );
+    assert_eq!(
+        other_rows,
+        [Vec::<String>::new(), Vec::new(), Vec::new(), Vec::new()]
+    );
+    assert_eq!(released_detail["registration_status"], "released");
+    assert!(released_detail.get("owner").is_none(), "{released_detail}");
+    assert!(
+        released_detail.get("manager").is_none(),
+        "{released_detail}"
+    );
+    for pair in views.chunks(2) {
+        assert!(pair[0].is_empty(), "{views:?}");
+        assert!(
+            pair[1]
                 .iter()
-                .map(|row| row.relation.as_str().to_owned())
-                .collect();
-        relations.sort();
-        other_rows.push(relations);
+                .any(|row| row.starts_with("AuthorityTransferred:")
+                    && row.ends_with(&format!("@{RELEASED}"))),
+            "{views:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A lease that lapsed past its grace with no later activity on its registry record has no owner
+/// and no manager, though its registrant is still the record's registry owner; the registrant
+/// lists it under `former_owner` only.
+#[tokio::test]
+async fn a_lapsed_name_lists_its_registrant_under_former_owner_only() -> Result<()> {
+    const RELEASED: i64 = 131;
+    let (lapsed, session) = interpret(
+        REGISTERED,
+        registration_at(REGISTERED, OWNER, LAPSED_EXPIRY, None),
+        None,
+    )?;
+    let (released, _) = interpret(RELEASED, Vec::new(), Some(session))?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=RELEASED).await?;
+    let pool = &database.pool;
+    persist(pool, &lapsed).await?;
+    persist(pool, &released).await?;
+    project_to(pool, RELEASED, None).await?;
+    let detail = released_detail_at(&database, RELEASED).await?;
+    let relations = relations_of(pool, OWNER).await?;
+    let (status, former) = read_family_response(
+        &database,
+        &format!("/v1/addresses/{OWNER}/names?relation=former_owner&namespace=ens"),
+    )
+    .await?;
+    database.cleanup().await?;
+
+    assert_eq!(detail["registration_status"], "released", "{detail}");
+    for field in ["owner", "manager", "resolver", "records"] {
+        assert!(detail.get(field).is_none(), "{field}: {detail}");
+    }
+    assert_eq!(
+        detail["lapsed_registration"],
+        json!({"owner": OWNER, "held_through": "registrar", "released_at": "1700000131",
+               "release_kind": "expired"}),
+        "{detail}"
+    );
+    assert!(relations.is_empty(), "{relations:?}");
+    assert_eq!(status, StatusCode::OK, "{former}");
+    assert_eq!(v2_names_listed(&former), [format!("{LABEL}.eth")]);
+    Ok(())
+}
+
+async fn released_detail_at(database: &TestDatabase, block: i64) -> Result<Value> {
+    database
+        .seed_snapshot_selector_chain_positions(&json!({CHAIN: {
+            "chain_id": CHAIN, "block_number": block,
+            "block_hash": format!("0xhistory{block}"),
+            "timestamp": "2023-11-14T22:15:31Z"
+        }}))
+        .await?;
+    publish_test_families_on(&database.pool, CHAIN, block).await?;
+    Ok(v2_names_payload(database, &format!("/v1/names/{LABEL}.eth")).await?["data"].clone())
+}
+
+/// A `.eth` name whose registry record `OTHER` held with no token owns it there, so a later
+/// registration whose token moves without `reclaim`, which reopens the same registry-only
+/// resource as a handoff, leaves `OTHER`'s earlier ownership in its `owner` history.
+#[tokio::test]
+async fn a_later_handoff_keeps_an_earlier_tokenless_owner_in_owner_history() -> Result<()> {
+    const REGISTERED_LATER: i64 = 131;
+    const HANDED_OFF: i64 = 132;
+    let tokenless = raw(
+        NewOwner {
+            node: eth_node(),
+            label: keccak256(LABEL.as_bytes()),
+            owner: OTHER.parse().unwrap(),
+        }
+        .encode_log_data(),
+        REGISTERED,
+        0,
+        REGISTRY,
+    );
+    let (held, session) = interpret(REGISTERED, vec![tokenless], None)?;
+    let (registered, session) = interpret(
+        REGISTERED_LATER,
+        registration_at(REGISTERED_LATER, NEW_HOLDER, 4_102_444_800, None),
+        Some(session),
+    )?;
+    let (handed_off, _) = interpret(HANDED_OFF, token_moved(HANDED_OFF), Some(session))?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=HANDED_OFF).await?;
+    let pool = &database.pool;
+    let mut owners = Vec::new();
+    for (block, output) in [
+        (REGISTERED, &held),
+        (REGISTERED_LATER, &registered),
+        (HANDED_OFF, &handed_off),
+    ] {
+        persist(pool, output).await?;
+        project_to(pool, block, None).await?;
+        owners.push(composed_owner(pool).await.ok());
     }
     let owner = [bigname_storage::AddressNameRelation::TokenHolder];
     let mut owned = Vec::new();
-    for bound in [RELEASED, HANDED_OFF] {
-        for canonical_only in [true, false] {
-            owned.push(history_for(pool, OTHER, bound, canonical_only, Some(&owner)).await?);
-        }
+    for canonical_only in [true, false] {
+        owned.push(history_for(pool, OTHER, HANDED_OFF, canonical_only, Some(&owner)).await?);
     }
     let registry_only_handoffs: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bigname_phase.project_binding_candidate
@@ -1005,29 +1119,50 @@ async fn a_later_handoff_keeps_an_earlier_registry_owner_in_owner_history() -> R
     .await?;
     database.cleanup().await?;
 
-    assert_eq!(
-        owners,
-        [json!(OWNER), json!(OTHER), json!(NEW_HOLDER), json!(HOLDER)],
-        "the owner after the release is the registry owner, not the released registrant"
-    );
-    assert_eq!(
-        other_rows,
-        [
-            Vec::<String>::new(),
-            vec!["effective_controller".to_owned(), "token_holder".to_owned()],
-            Vec::new(),
-            Vec::new(),
-        ]
-    );
-    // Anti-vacuity: the handoff reopened the registry-only resource for the new lease.
+    assert_eq!(owners, [None, Some(json!(NEW_HOLDER)), Some(json!(HOLDER))]);
+    // Anti-vacuity: the handoff reopened the registry-only resource for the lease.
     assert_eq!(registry_only_handoffs, 1);
     for view in &owned {
         assert!(
             view.iter()
                 .any(|row| row.starts_with("AuthorityTransferred:")
-                    && row.ends_with(&format!("@{RELEASED}"))),
-            "the registry owner's tokenless ownership stays in its owner history: {owned:?}"
+                    && row.ends_with(&format!("@{REGISTERED}"))),
+            "{owned:?}"
         );
     }
     Ok(())
+}
+
+/// `NEW_HOLDER` moves the token to `HOLDER` without `reclaim`.
+fn token_moved(block: i64) -> Vec<RawLogInput> {
+    vec![raw(
+        Transfer {
+            from: NEW_HOLDER.parse().unwrap(),
+            to: HOLDER.parse().unwrap(),
+            tokenId: token_id(),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRAR,
+    )]
+}
+
+async fn composed_owner(pool: &sqlx::PgPool) -> Result<Value> {
+    let name = bigname_storage::logical_name_id_for_name("ens", &format!("{LABEL}.eth"));
+    let composed = bigname_storage::families::name::load_family_name(pool, &name)
+        .await?
+        .context("composed name")?;
+    Ok(composed.declared_summary["control"]["owner"].clone())
+}
+
+async fn relations_of(pool: &sqlx::PgPool, address: &str) -> Result<Vec<String>> {
+    let mut relations: Vec<String> =
+        bigname_storage::load_address_names_current(pool, address, None, None)
+            .await?
+            .iter()
+            .map(|row| row.relation.as_str().to_owned())
+            .collect();
+    relations.sort();
+    Ok(relations)
 }
