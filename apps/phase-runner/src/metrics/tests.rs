@@ -581,6 +581,13 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         "phase_runner_universal_resolver_unadmitted",
         "ethereum-sepolia"
     )?);
+    assert!(
+        !read(
+            "phase_runner_universal_resolver_cut_over",
+            "ethereum-sepolia"
+        )?,
+        "nor cut over"
+    );
     assert!(gauges.apply(&admitted).is_empty());
     assert_eq!(gauges.apply(&repointed), ["ethereum-sepolia"]);
 

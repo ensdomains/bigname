@@ -71,7 +71,7 @@ tests:
               severity: page
             exp_annotations: &universal_resolver_annotations
               threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head and no Project redo is running."
-              meaning: "The named chain's Universal Resolver ends at an implementation bigname does not admit, so the chain reads as not cut over and every .eth name ENSv1 decides serves its ENSv1 expiry, grace and resolver again. Either upstream repointed it or a manifest change dropped the implementation; the runner's warning names the implementation and the block of its Upgraded."
+              meaning: "The named chain's Universal Resolver ends at an implementation bigname does not admit, so the chain reads as not cut over and names ENSv1 decides are served with the pre-cutover expiry, grace and resolvability rules again. Either upstream repointed it or a manifest change dropped the implementation; the runner's warning names the implementation and the block of its Upgraded."
 
   - name: an unadmitted implementation in replayed history does not page
     interval: 1m
@@ -81,6 +81,9 @@ tests:
       - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
         values: '-1x5 110000-1000x5'
     alert_rule_test:
+      - eval_time: 5m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
       - eval_time: 10m
         alertname: BignameUniversalResolverUnadmitted
         exp_alerts: []

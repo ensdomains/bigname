@@ -289,8 +289,9 @@ Two gauges report, per chain, the
 [Universal Resolver cutover](../glossary.md#universal-resolver-cutover) that the
 names read through: whether the chain resolves `.eth` names through ENSv2.
 Project derives it from the `Upgraded` events of the `ens_execution` proxies,
-and the name reads take it from the same rows, so the gauges show what the API
-serves at the family publication.
+and the name reads take it from the same rows, so the gauges show the state at
+the family publication, which is what the API serves while that publication is
+eligible (no overlapping redo, within the publication lag tolerance).
 
 - `phase_runner_universal_resolver_cut_over{chain}` is `1` while the
   client-facing Universal Resolver proxy, followed through the declared proxies
@@ -298,8 +299,8 @@ serves at the family publication.
   manifest's `universal_resolver_implementations`.
 - `phase_runner_universal_resolver_unadmitted{chain}` is `1` while that chain of
   proxies ends at an implementation the manifest neither lists nor declares as
-  a proxy. The chain then reads as not cut over: every `.eth` name ENSv1 decides
-  serves its ENSv1 expiry, grace and resolver
+  a proxy. The chain then reads as not cut over: names ENSv1 decides are served
+  with the pre-cutover expiry, grace and resolvability rules
   ([Expiry and grace](../api-v1.md#expiry-and-grace)).
 
 A chain with no proxy `Upgraded` at all, such as Mainnet, reads `0` on both and
@@ -318,8 +319,11 @@ for the publication to be current (`phase_runner_served_lag_blocks` between 0
 and 30) and for no Project redo to be running
 (`phase_runner_redo_in_progress{phase="project"}` at `0`): a redo undoes block
 by block while its publication stays readable, so a shallow one can replay a
-state the head no longer has. The warning has no such gate: a warning whose block is far behind the
-head comes from replayed history.
+state the head no longer has. The warning has no such gate. Its block is the
+terminal proxy's latest `Upgraded`, not the block being served, so it can be old
+for a long-standing state, for example on the first refresh after a restart. Tell
+a warning from replayed history by `phase_runner_redo_in_progress` and
+`phase_runner_served_lag_blocks` at the time it was logged.
 
 ## Project family work
 

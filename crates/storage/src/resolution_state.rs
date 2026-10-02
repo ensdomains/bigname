@@ -183,5 +183,26 @@ mod tests {
         let mut retired = managed("0xv2", "admitted_universal_resolver");
         retired.proxy.proxy_role = None;
         assert_eq!(state(&[retired]), None);
+        assert_eq!(
+            state(&[row(
+                "0xtop",
+                "universal_resolver",
+                "0xv2",
+                "admitted_universal_resolver",
+                30
+            )]),
+            expect(Protocol::EnsV2, 30, "0xtop", "0xv2", false)
+        );
+        assert_eq!(
+            state(&[row(
+                "0xtop",
+                "universal_resolver",
+                "0xtop",
+                "universal_resolver_proxy",
+                30
+            )]),
+            expect(Protocol::EnsV1, 30, "0xtop", "0xtop", false),
+            "a proxy pointing at itself ends the walk"
+        );
     }
 }
