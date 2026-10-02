@@ -606,6 +606,14 @@ fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
         "fn test_only_baseline() {}\n",
     );
     let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+    assert_eq!(
+        excluded_source_reason(
+            tree.path(),
+            &tree.path().join("crates/storage/src/families/tests.rs")
+        )
+        .expect("source exclusion must be inspectable"),
+        Some("cfg(test)-gated external module")
+    );
 
     tree.write(
         "crates/storage/src/families/tests.rs",
@@ -1204,6 +1212,10 @@ fn discover_cfg_test_module_sources(workspace_root: &Path) -> BTreeSet<String> {
     );
     collect_rust_files(
         &workspace_root.join("crates/interpret/src"),
+        &mut source_files,
+    );
+    collect_rust_files(
+        &workspace_root.join("crates/storage/src/families"),
         &mut source_files,
     );
     let mut gated_sources = BTreeSet::new();

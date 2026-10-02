@@ -1875,10 +1875,12 @@ summary composition, the composed name-row loader it calls, the lifecycle
 evaluation and control rows that loader reads, and the position ordinals. The
 read-only queries beside it (search and bound-name listings, record, reverse,
 permission, children and topology readers) are listed as readers and stay
-outside, so an API-only change there needs no redo. Every production source
+outside, so an API-only change there needs no redo. Every production `.rs` file
 under that directory must be in exactly one of the two lists: a listed
-composition file that is missing, or an unlisted source, fails the build, so a
-file cannot move into or out of the hashed set unreviewed. So are `crates/storage/src/address_names/query.rs` and its
+composition file that is missing, or an unlisted `.rs` file, fails the build, so
+a file cannot move into or out of the hashed set unreviewed. A file the
+composition embeds, such as SQL, must be listed as composition by hand. Also covered are
+`crates/storage/src/address_names/query.rs` and its
 `query/timestamps.rs` helper, whose expiry and registration timestamp reads the
 summaries store, plus `crates/storage/src/unix_seconds.rs` and `expiry.rs`, which
 decode exact expiry and classify the contract-specific absent-expiry values.

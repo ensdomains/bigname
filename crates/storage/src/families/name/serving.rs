@@ -13,7 +13,7 @@
 //! resource does not displace it.
 use serde_json::Value;
 
-use crate::families::records::FamilyPosition;
+use crate::families::position::Position as FamilyPosition;
 
 pub(super) const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const REGISTRY_FAMILIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
