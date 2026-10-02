@@ -25,8 +25,8 @@
       samples: {
         name: 'cognify.eth',
         address: '0x5a0f5acccdc09d1e8eb567c40391cc410c0fd695',
-        resolver: { chain_id: '11155111', address: '0x27f229b925a5edbec1e6f697ed309eedef61f7a5' },
-        registry: { chain_id: '11155111', address: '0x657ea849311d3d5823348dded7c2aaafb3ede09e' },
+        resolver: { chain_id: '11155111', address: '0x8fade66b79cc9f707ab26799354482eb93a5b7dd' },
+        registry: { chain_id: '11155111', address: '0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4' },
       },
     },
     { id: 'mainnet', label: 'mainnet', api: 'https://api.bigname.sh', coming: true },

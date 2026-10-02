@@ -29,13 +29,13 @@ use tokio::net::TcpListener;
 use support::{ScratchDatabase, chain_double};
 
 const CHAIN: &str = "ethereum-sepolia";
-const ANNOUNCEMENT_BLOCK: i64 = 11_709_100;
+const ANNOUNCEMENT_BLOCK: i64 = 11_820_500;
 const LATER_BLOCK: i64 = ANNOUNCEMENT_BLOCK + 1;
 const ORPHANED_ANNOUNCEMENT_HASH: &str =
     "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff42";
 const ORPHANED_EVENT_IDENTITY: &str = "migration-restart:orphaned-event";
-const FACTORY: &str = "0x9e726eb570beb6bceb495ab8cda7df517d4e841c";
-const LOCKED_CONTROLLER: &str = "0xab1b57c6ee5e91e6090595c0af14cb9b8bc7773f";
+const FACTORY: &str = "0xda70306c98e97ece36f997a21368e53298572991";
+const LOCKED_CONTROLLER: &str = "0x6029a063d69b09d23c52a754a90e4fe43adac3a8";
 const PROXY: &str = "0x0000000000000000000000000000000000000045";
 const PARENT: &str = "0x544d3e88f4ab566e7a3f9229daab5caad98e233a";
 

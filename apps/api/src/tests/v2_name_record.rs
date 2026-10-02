@@ -4728,7 +4728,7 @@ async fn v2_name_payload_without_inventory(uri: &str) -> Result<Value> {
 
 
 // Sepolia's root registry registers `reverse` and points it at the ENSv1 mirror resolver
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
+// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05).
 const REVERSE_MIRROR: &str = "0x0000000000000000000000000000000000000f10";
 
 #[derive(Clone, Copy)]
