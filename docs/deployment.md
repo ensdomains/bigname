@@ -2178,6 +2178,6 @@ instead of from block zero. The build also changes `crates/adapters/src`:
 Interpret no longer admits a resolver from an `Upgraded` announcement before
 its implementation's `start_block`, so a database that never fetched such a log
 writes the same interpreted rows as one that did (the fetched log can add only
-an operator diagnostic). On Sepolia this changes interpreted output only
+an operator diagnostic in `interpret_decode_skips`). On Sepolia this changes interpreted output only
 if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
 Interpret redo applies the rule either way.

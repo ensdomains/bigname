@@ -406,6 +406,7 @@ fn an_admitted_resolver_keeps_its_pre_start_upgraded_history() -> anyhow::Result
             .any(|edge| edge.edge_kind == "proxy_implementation")
     );
     assert!(resolver_edges(&output).is_empty());
+    assert!(output.decode_skips.is_empty());
     Ok(())
 }
 

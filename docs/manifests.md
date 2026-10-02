@@ -1773,7 +1773,8 @@ factory, announces a declared implementation:
   announcement admission, so a database whose Ingest redo started at the
   declared start and one that fetched the earlier log write the same identity,
   discovery and normalized-event rows; the fetched log can add only an
-  [operator diagnostic](storage.md#table-ownership) row. An emitter admitted
+  [operator diagnostic](storage.md#table-ownership) row in
+  `interpret_decode_skips`. An emitter admitted
   some other way, for example by `ResolverCreated`, keeps its own earlier
   `Upgraded` history, which its address-scoped watch fetches in every
   database. The event is selected
@@ -1853,8 +1854,8 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   plan, and so the lower end of a required Ingest redo that a new
   implementation stamps; runtime intake keeps the `topic1` filter over the
   manifest's whole active range, and Interpret does not let an announcement
-  it fetched before the start select or admit an emitter. An announcement emitted through the OpenZeppelin
-  ERC-1967 upgrade path cannot precede the implementation's creation block,
+  it fetched before the start select an otherwise unadmitted emitter or admit
+  one. An announcement emitted through the OpenZeppelin ERC-1967 upgrade path cannot precede the implementation's creation block,
   because that path reverts for an implementation address without code before
   it emits `Upgraded`; another emitter can log one earlier, which is why
   Interpret applies the start.
