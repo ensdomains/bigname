@@ -2158,4 +2158,9 @@ The compiled watch plan already covers that implementation from block zero, so
 the later start stamps no historical ingest fetch. It adds no
 schema-migration. A later implementation declared with a `start_block` stamps
 its required Ingest redo from that block, clamped to the chain's ingest start,
-instead of from block zero.
+instead of from block zero. The build also changes `crates/adapters/src`:
+Interpret no longer admits a resolver from an `Upgraded` announcement before
+its implementation's `start_block`, so a database that never fetched such a log
+interprets like one that did. On Sepolia this changes interpreted output only
+if a log before block `11709070` names `0x14f09fd0…`; the shared full-history
+Interpret redo applies the rule either way.

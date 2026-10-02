@@ -110,7 +110,7 @@ mod tests {
             chain_id: "ethereum-sepolia".to_owned(),
             deployment_label: "unit-test".to_owned(),
             correlation_addresses: BTreeMap::new(),
-            resolver_implementations: Vec::new(),
+            resolver_implementations: BTreeMap::new(),
             universal_resolver_implementations: vec![ADMITTED.to_owned()],
             universal_resolver_proxies: vec![TOP.to_owned(), MANAGED.to_owned()],
             events: vec![event.clone()],

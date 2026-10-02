@@ -117,13 +117,14 @@ consumers that keep `proxy_kind` in the manifest schema.
 `{ role, address, start_block?, read_features? }` entries with unique
 addresses; several implementation generations may share one role. The optional
 `start_block` is the implementation contract's creation block, cited from its
-deployment receipt like a contract's start. It bounds only the entry's
+deployment receipt like a contract's start. It bounds the entry's
 [implementation-announcement
-watch](glossary.md#implementation-announcement-watch) (see [Resolver admission
-by implementation
-announcement](#resolver-admission-by-implementation-announcement)); omitted
-means block zero, and it must fit a signed 64-bit integer like every other
-`start_block`. `[[contracts]]` also accepts `read_features`. Each feature list is
+watch](glossary.md#implementation-announcement-watch), and an `Upgraded`
+announcement naming the implementation before that block admits nothing (see
+[Resolver admission by implementation
+announcement](#resolver-admission-by-implementation-announcement)); an entry
+without `start_block` admits from block zero. It must fit a signed 64-bit
+integer like every other `start_block`. `[[contracts]]` also accepts `read_features`. Each feature list is
 deduplicated and uses the closed vocabulary `ensip19_default_address`,
 `ensip10_extended_resolver` in this release. Unknown or duplicate values fail
 loading. Contract-level features are
@@ -1766,7 +1767,10 @@ factory, announces a declared implementation:
 - `Upgraded(address indexed implementation)` from any emitter whose indexed
   `implementation` is in the same-namespace, same-deployment
   `ens_v2_resolver_l1` manifest's `resolver_implementations` admits the emitter
-  as an `ens_v2_resolver_l1` instance from that block. The event is selected
+  as an `ens_v2_resolver_l1` instance from that block, unless the block is
+  before that entry's `start_block`: such an announcement is neither selected
+  nor admitting, so a database whose Ingest redo started at the declared start
+  and one that fetched the earlier log interpret alike. The event is selected
   across every emitter — the precedent is the ENSv1 resolver family's match-all
   signature set — but narrowed by `topic1` to the declared implementation
   addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
@@ -1842,10 +1846,12 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   resolver's own address-scoped `Upgraded` watch. The start bounds the compiled
   plan, and so the lower end of a required Ingest redo that a new
   implementation stamps; runtime intake keeps the `topic1` filter over the
-  manifest's whole active range. The OpenZeppelin ERC-1967 upgrade reverts for
-  an implementation address without code before it emits `Upgraded`, so a
-  proxy built on it cannot announce an implementation before that contract's
-  creation block.
+  manifest's whole active range, and Interpret ignores an announcement it
+  fetched before the start. An announcement emitted through the OpenZeppelin
+  ERC-1967 upgrade path cannot precede the implementation's creation block,
+  because that path reverts for an implementation address without code before
+  it emits `Upgraded`; another emitter can log one earlier, which is why
+  Interpret applies the start.
   (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol:L69-L86 @ basenames@1809bbc)
 - Legacy watch rows may denormalize address and code-hash state, but their durable explanation path is `manifest root → discovery edge(s) → contract_instance_id`; schema-v2 resolver classification does not read that denormalization.
 - Address-only watch state is rebuildable from manifests, instance attributes, and active discovery edges.

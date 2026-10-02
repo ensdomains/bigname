@@ -105,7 +105,8 @@ ERC-1967 `Upgraded(implementation)`, or a declared `verifiable_factory`'s
 `ProxyDeployed` naming it — rather than from a later registry pointer. The
 edge kind is `resolver` with `admission_basis`
 `declared_resolver_implementation`; the announcing implementation is the
-proxy's implementation observation for the support rule. It complements, and
+proxy's implementation observation for the support rule. An `Upgraded`
+announcement before the implementation entry's `start_block` admits nothing. It complements, and
 never closes, registry-pointer discovery. Defined in [`manifests.md` §
 Resolver admission by implementation
 announcement](manifests.md#resolver-admission-by-implementation-announcement).
