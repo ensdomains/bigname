@@ -659,7 +659,8 @@ collection route carry neither header.
   by normalized name spelling after the ENSIP-15 normalization name routes
   apply to a path name, not by node or registry topology: a bracketed labelhash
   label matches only names stored with that bracketed spelling, never a name
-  that spells the label as text. `parent=eth` selects the `.eth`
+  that spells the label as text, except the labelhashes of `eth` and `base`,
+  which that normalization spells as text. `parent=eth` selects the `.eth`
   second-level names before and after the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
   BaseRegistrar leases
