@@ -1577,7 +1577,7 @@
             "name": "parent",
             "in": "query",
             "required": false,
-            "description": "A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth selects the .eth second-level names on both sides of the Universal Resolver cutover and no subname.",
+            "description": "A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname.",
             "schema": {
               "type": "string"
             }

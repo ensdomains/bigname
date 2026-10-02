@@ -2141,10 +2141,11 @@ run the Sepolia check in [Default reverse names](#default-reverse-names).
 The build that adds `authority` to [`GET /v1/names`](api-v1-routes.md#get-v1names)
 and [`GET /v1/search`](api-v1-routes.md#get-v1search) rows and the `authority`
 and `parent` filters to `GET /v1/names` changes only API and family read paths.
-The family file it edits, `crates/storage/src/families/name/list.rs`, is a
-read-only query outside the
-[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
-does not rotate. It adds no schema-migration and needs no redo or historical
+The storage files it edits, `crates/storage/src/families/name/list.rs`,
+`crates/storage/src/name_current/expiring.rs` and
+`crates/storage/src/name_current/public_authority.rs`, are read-only queries
+outside the [interpreter content hash](glossary.md#interpreter-content-hash),
+so the hash does not rotate. It adds no schema-migration and needs no redo or historical
 ingest fetch. Rows gain one field; cursors issued before it continue unchanged,
 and a cursor issued with `authority` or `parent` must be continued with the
 same filters.

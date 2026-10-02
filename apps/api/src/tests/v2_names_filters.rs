@@ -242,3 +242,90 @@ async fn v2_get_names_rejects_invalid_authority_and_parent() -> Result<()> {
     assert_eq!(v2_names_listed(&blank).len(), 4, "{blank:#}");
     database.cleanup().await
 }
+
+// The `authority` walk prune reads the stored name summary's arm, not the composed row: a name
+// whose summary arm cannot serve the requested authority is never composed, so it is not listed
+// even though its composed row would match. The family step keeps the two equal at every
+// publication; this pins that the listing relies on it.
+#[tokio::test]
+async fn v2_get_names_authority_walk_skips_a_name_by_its_summary_arm() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_filter_fixture(&database).await?;
+    let ens_v2 = v2_names_filter_uri("&authority=ens_v2");
+    assert_eq!(
+        v2_names_listed(&v2_names_payload(&database, &ens_v2).await?),
+        ["fresh.eth", "kid.fresh.eth"]
+    );
+
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_name_summary SET authority_arm = 'ens_v1'
+         WHERE logical_name_id = $1",
+    )
+    .bind(bigname_storage::logical_name_id_for_name("ens", "fresh.eth"))
+    .execute(&database.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+
+    assert_eq!(
+        v2_names_listed(&v2_names_payload(&database, &ens_v2).await?),
+        ["kid.fresh.eth"]
+    );
+    let all = v2_names_payload(&database, &v2_names_filter_uri("")).await?;
+    assert!(v2_names_listed(&all).contains(&"fresh.eth".to_owned()), "{all:#}");
+    database.cleanup().await
+}
+
+/// Every page of `uri` at `page_size=1`, following `next_cursor`.
+async fn v2_names_filter_pages(database: &TestDatabase, uri: &str) -> Result<Vec<String>> {
+    let mut listed = Vec::new();
+    let mut next = format!("{uri}&page_size=1");
+    loop {
+        let page = v2_names_payload(database, &next).await?;
+        listed.extend(v2_names_listed(&page));
+        match page["page"]["next_cursor"].as_str() {
+            Some(cursor) => next = format!("{uri}&page_size=1&cursor={cursor}"),
+            None => return Ok(listed),
+        }
+    }
+}
+
+// With the walk's internal batch cut to one or two candidates, every filtered listing still
+// settles on exactly the rows the unfiltered listing holds for that filter, in both orders.
+#[tokio::test]
+async fn v2_get_names_filters_settle_across_walk_batches() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_filter_fixture(&database).await?;
+    let all = v2_names_payload(&database, &v2_names_filter_uri("")).await?;
+    let rows = all["data"].as_array().expect("names data").clone();
+    for (filters, keep) in [
+        ("&authority=ens_v2", &(|row: &Value| row["authority"] == "ens_v2") as &dyn Fn(&Value) -> bool),
+        ("&authority=ens_v0,ens_v1", &|row: &Value| row["authority"] == "ens_v1"),
+        ("&parent=eth", &|row: &Value| row["name"].as_str().is_some_and(|name| name.matches('.').count() == 1)),
+        ("&parent=eth&authority=ens_v1", &|row: &Value| {
+            row["authority"] == "ens_v1" && row["name"].as_str().is_some_and(|name| name.matches('.').count() == 1)
+        }),
+    ] {
+        let mut expected = rows
+            .iter()
+            .filter(|row| keep(row))
+            .map(|row| row["name"].as_str().expect("row name").to_owned())
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty(), "{filters}");
+        for order in ["asc", "desc"] {
+            if order == "desc" {
+                expected.reverse();
+            }
+            let uri = v2_names_filter_uri(&format!("{filters}&order={order}"));
+            for batch in [1, 2] {
+                let listed = bigname_storage::families::name::seams::with_batch_size(
+                    batch,
+                    v2_names_filter_pages(&database, &uri),
+                )
+                .await?;
+                assert_eq!(listed, expected, "{uri} at batch {batch}");
+            }
+        }
+    }
+    database.cleanup().await
+}

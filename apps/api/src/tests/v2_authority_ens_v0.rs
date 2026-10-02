@@ -213,11 +213,10 @@ async fn v2_search_rows_serve_the_authority_of_name_detail() -> Result<()> {
             .iter()
             .find(|row| row["name"] == name)
             .unwrap_or_else(|| panic!("search must list {name}: {search}"));
-        assert_eq!(
-            row.get("authority").and_then(Value::as_str),
-            expected_authority(name),
-            "{name}: {row}"
-        );
+        match expected_authority(name) {
+            Some(authority) => assert_eq!(row["authority"], authority, "{name}: {row}"),
+            None => assert!(row.get("authority").is_none(), "{name}: {row}"),
+        }
     }
     database.cleanup().await
 }

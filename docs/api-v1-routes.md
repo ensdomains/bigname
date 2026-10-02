@@ -601,7 +601,7 @@ collection route carry neither header.
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth selects the .eth second-level names on both sides of the Universal Resolver cutover and no subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -697,11 +697,13 @@ collection route carry neither header.
   `project_lifecycle_event_inexact_expiry_idx` and
   `project_wrapper_state_expiry_idx`. These indexes were introduced by
   `20260928140000_project_families_expiry_indexes.sql`; their current expiry
-  keys use exact numeric storage. With `authority` set the walk composes only
-  names whose stored name summary selects an arm that can serve a listed value
-  (`ens_v1` for `ens_v0` and `ens_v1`, `ens_v2` for `ens_v2`), and with
-  `parent` set only names one label below it; the composed row still decides
-  each row. A row with no finite registration expiry is outside this
+  keys use exact numeric storage. With `authority` set the indexed walk
+  composes only names whose stored [name summary](glossary.md#name-summary)
+  selects an arm that can serve a listed value (`ens_v1` for `ens_v0` and
+  `ens_v1`, `ens_v2` for `ens_v2`), and with `parent` set only names one label
+  below it. Names whose retained expiry is a JSON number that is not an
+  integral second, which the walk cannot place, are composed without that
+  pruning. Either way the composed row decides each row. A row with no finite registration expiry is outside this
   listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
   remain eligible and keep every digit through filtering, sorting and paging.
   A negative or malformed stored expiry is not a no-expiry sentinel.
