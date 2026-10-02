@@ -3773,6 +3773,9 @@ introduces it rebuilds Project from full history before serving the option; see
   identifies; the wrapped token's holder owns the name, so that grant matches
   no `owner`. A grant from a controller's `NameRegistered` names the wrapped
   holder and matches it.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate

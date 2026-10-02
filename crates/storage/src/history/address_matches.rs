@@ -322,6 +322,9 @@ fn push_registrant_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, ad
     // token's holder owns the name; `registerAndWrapETH2LD` wraps it in the same transaction. A
     // receiver that unwraps in its mint callback leaves that wrap with no registrar link, so the
     // wrap's node also identifies it.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L265 @ ens_v1@91c966f)
     builder.push(
         r#"
                     AND NOT EXISTS (
