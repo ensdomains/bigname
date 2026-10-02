@@ -601,7 +601,7 @@ collection route carry neither header.
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
-| `parent` | query | string | no | none | A name; only names exactly one label below it are listed. parent=eth selects the .eth second-level names on both sides of the Universal Resolver cutover and no subname. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth selects the .eth second-level names on both sides of the Universal Resolver cutover and no subname. |
 | `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -656,9 +656,10 @@ collection route carry neither header.
   `authority=ens_v0,ens_v1` matches both. Rows that serve no `authority`
   (Basenames rows and ownerless registry rows) match no set.
   `parent` keeps only names exactly one label below the given name, compared
-  by name after the ENSIP-15 normalization name routes apply to a path name,
-  not by registry topology: it is the expiry-window counterpart of
-  `GET /v1/names/{name}/subnames`. `parent=eth` selects the `.eth`
+  by normalized name spelling after the ENSIP-15 normalization name routes
+  apply to a path name, not by node or registry topology: a bracketed labelhash
+  label matches only names stored with that bracketed spelling, never a name
+  that spells the label as text. `parent=eth` selects the `.eth`
   second-level names before and after the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
   BaseRegistrar leases
