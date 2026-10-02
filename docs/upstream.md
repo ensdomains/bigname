@@ -300,7 +300,7 @@ to the applicable entries below.
 > § `GET /v1/addresses/{address}/primary-name`. The verified source follows the
 > upstream order with live calls and gives `name()` the same gas. It skips the
 > standalone registrar, which the Mainnet and Sepolia profiles do not declare,
-> and a failed `name()` call ends it with `execution_failed` instead of an
+> and a failed `name()` call ends it with `failed` instead of an
 > empty name; neither reads the default.
 > **Why**: the projection holds names only from admitted resolver events and
 > hydration, and unlisted emitters are unsupported; the verified source reads
@@ -340,7 +340,9 @@ to the applicable entries below.
 > **`default.reverse` fallback past an empty name on the reverse node's own
 > resolver**: when `<address>.addr.reverse` has its own nonzero registry
 > resolver whose `name` returns an empty string, both bigname sources follow
-> ETHReverseResolver's order and serve the address's `default.reverse` name.
+> ETHReverseResolver's order and take the address's `default.reverse` name as
+> its reverse claim. The verified answer for that claim still depends on
+> normalization, authority admission and the forward check.
 > The Universal Resolver's ENSIP-19 `reverse` answers no primary name there: it
 > uses the reverse node's own resolver, sees the empty name and stops. On
 > Sepolia on 2026-10-02, near block `11826770`, an `eth_call` to
@@ -362,14 +364,14 @@ to the applicable entries below.
 > returns an empty name as no primary name
 > `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L200-L225 @ ens_v1@91c966f)`.
 > The ENSv2 Universal Resolver does the same
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L377-L399 @ ens_v2_sepolia_20260916@366de74)`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L240-L249 @ ens_v2_sepolia_20260916@366de74)`;
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L377-L399 @ ens_v2_sepolia_20260916@366de741)`
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L240-L249 @ ens_v2_sepolia_20260916@366de741)`;
 > its deployment gives `reverse` the `ENSV1Resolver`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L26-L37 @ ens_v2_sepolia_20260916@366de74)`,
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L26-L37 @ ens_v2_sepolia_20260916@366de741)`,
 > which finds the reverse node's ENSv1 resolver and passes `name` to it with no
 > `default.reverse` read
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de74)`
-> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20260916@366de74)`.
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)`
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20260916@366de741)`.
 > **Our rule**: `docs/api-v1-routes.md` § `GET /v1/addresses/{address}/primary-name`
 > (ENSIP-19 default name).
 > **Why**: bigname adopted ETHReverseResolver's order for `default.reverse`

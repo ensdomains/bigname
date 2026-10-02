@@ -3732,7 +3732,15 @@ async fn primary_name_with_forward_revert(revert_name: &[u8]) -> AnyResult<EnsPr
         .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await?;
     fixture.cleanup().await?;
-    join_rpc(rpc_handle).await?;
+    let requests = join_rpc(rpc_handle).await?;
+    let targets: Vec<_> = requests
+        .iter()
+        .map(|request| request["params"][0]["to"].clone())
+        .collect();
+    assert_eq!(
+        targets,
+        [ENS_REGISTRY, DEFAULT_REVERSE_REGISTRAR, UNIVERSAL_RESOLVER]
+    );
     Ok(result)
 }
 
