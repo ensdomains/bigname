@@ -432,7 +432,7 @@ fn address_name_routes() -> Vec<String> {
     [SENDER, OLD_REGISTRY, NEW_REGISTRY]
         .into_iter()
         .flat_map(|address| {
-            ["any", "role_holder", "former_registrant", "resolves_to"].map(|relation| {
+            ["any", "role_holder", "former_owner", "resolves_to"].map(|relation| {
                 format!("/v1/addresses/{address}/names?namespace=ens&relation={relation}")
             })
         })
