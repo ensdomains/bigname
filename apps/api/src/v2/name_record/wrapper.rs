@@ -66,13 +66,16 @@ pub(crate) const fn wrapper_lifecycle_matches_fuses(
 /// wrapper-state condition, except while a wrapped `.eth` name is in registrar grace, when no one
 /// can (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L202-L222 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f).
-/// Burned fuses can still forbid a particular change. A released name has no manager.
+/// Burned fuses can still forbid a particular change. A released name, and a wrapped name whose
+/// NameWrapper state is unknown or lapsed (`wrapper_masked`), has no manager.
 pub(crate) fn served_manager(
     declared_summary: &Value,
     owner: Option<&String>,
     registry_owner: Option<&String>,
 ) -> Option<String> {
-    if declared_summary.pointer("/registration/status") == Some(&Value::from("released")) {
+    if declared_summary.pointer("/registration/status") == Some(&Value::from("released"))
+        || declared_summary.get("wrapper_masked") == Some(&Value::Bool(true))
+    {
         None
     } else if declared_summary.get("wrapper_state").is_none() {
         registry_owner.cloned()
@@ -120,6 +123,15 @@ mod tests {
         }
         assert_eq!(
             served_manager(&json!({"wrapper_state": "locked"}), None, Some(&registry)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_wrapper_with_an_unknown_state_has_no_manager() {
+        let registry = "0xregistry".to_owned();
+        assert_eq!(
+            served_manager(&json!({"wrapper_masked": true}), None, Some(&registry)),
             None
         );
     }

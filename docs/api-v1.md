@@ -1150,7 +1150,9 @@ name and again when the grace period starts, so reads need no clock; the grace
 state itself is not served, and clients can place the window with `expires_at`
 and `grace_ends_at`.
 `manager` is omitted wherever the address it copies is omitted, such as on a
-released name. A registry child with no name row serves its registry owner,
+released name, and on a wrapped name whose NameWrapper state is unknown (its
+fuses or expiry were never observed) or lapsed, where the `manager` relation
+does not list it either. A registry child with no name row serves its registry owner,
 except a child that a NameWrapper or registrar event named only under a label
 failing ENSIP-15 normalization: bigname cannot tell whether NameWrapper holds
 it for a token holder, so, as with its `ens_v1` lifecycle fields, it omits

@@ -383,8 +383,10 @@ qualifying grant is the name's lease, so a further release and `registerOnly` mo
 and that lease's grant, renewals, expiry changes and release reach the registration the same
 way the retained lease's did. The registration takes the successor
 lease's `resource_id`, `registered_at`, expiry and registrant, and is `active` again with no
-`released_at`; the selected binding, its `registry_only` authority kind, the registry owner and
-every other `control` field stay as they were. Rows of any other kind or source family, and
+`released_at` and no `lapsed_registration`. The repeated `control.registrant` and expiry follow
+it, and so does `control.owner`, composed from the registrant: the successor's holder owns the
+name. The selected binding, its `registry_only` authority kind and the registry owner stay as
+they were. Rows of any other kind or source family, and
 lease rows on any other resource even when they carry the name (an earlier lease of the same
 name, granted before the binding opened; a grant observed before the lease the binding stands
 for was released; or a resource the name was never bound to), stay outside the window. A grant by
@@ -469,6 +471,11 @@ values `registrar` and `wrapper`, and does not serve `authority_key`.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L127 @ ens_v1@91c966f) `registration.registrant`, `authority_kind` and
 `authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
 permissions, counts) sees the lapsed holder.
+A lease whose release revives its registry custody is not a tombstone: it keeps the
+registry-only selection and its registration fields, and adds the same block with the lease's
+registrant as `owner`, when that selection is supported. Its current-state readers still see
+no holder, because a released name serves no `owner` or `manager` and lists under no current
+relation.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
@@ -1674,8 +1681,8 @@ and registration times, and whether the latest registry Transfer attributed to
 the name names the zero owner, attributed by the child-read contract (by the name the Transfer carries, else the latest named registry event of
 any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node), and the owner the name row serves
-(`control.owner`, the token holder, else the registry owner;
-else `control.registry_owner`, lower-cased), which the
+(`control.owner`, the token holder, else the registry owner, and none on a
+released name; lower-cased), which the
 registry labels' `owner` and `exclude_owner` filters read. Every name with a
 surface has a row. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,

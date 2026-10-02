@@ -361,7 +361,7 @@ fn push_token_holder_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, 
 fn push_registry_owner_match_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     address: &'a str,
-    skip_lease_handoffs: bool,
+    owner_only: bool,
 ) {
     builder.push(
         r#"
@@ -381,9 +381,14 @@ fn push_registry_owner_match_filter<'a>(
         "#,
     );
     builder.push_bind(address);
-    if skip_lease_handoffs {
+    if owner_only {
+        // As the served owner: a write the admitted Graveyard holds, or one the registry getter
+        // reports as zero, names no owner.
         builder.push(
             r#"
+            AND (ne.after_state ->> 'owner_getter_reason') IS DISTINCT FROM 'graveyard'
+            AND LOWER(COALESCE(ne.after_state ->> 'owner_getter', ''))
+                <> '0x0000000000000000000000000000000000000000'
             AND NOT EXISTS (
                 SELECT 1
                 FROM bigname_phase.project_binding_candidate handoff

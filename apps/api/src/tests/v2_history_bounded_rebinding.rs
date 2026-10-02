@@ -1049,6 +1049,10 @@ async fn a_lapsed_name_lists_its_registrant_under_former_owner_only() -> Result<
     persist(pool, &released).await?;
     project_to(pool, RELEASED, None).await?;
     let detail = released_detail_at(&database, RELEASED).await?;
+    let name = bigname_storage::logical_name_id_for_name("ens", &format!("{LABEL}.eth"));
+    let composed = bigname_storage::families::name::load_family_name(pool, &name)
+        .await?
+        .context("composed name")?;
     let relations = relations_of(pool, OWNER).await?;
     let (status, former) = read_family_response(
         &database,
@@ -1058,6 +1062,11 @@ async fn a_lapsed_name_lists_its_registrant_under_former_owner_only() -> Result<
     database.cleanup().await?;
 
     assert_eq!(detail["registration_status"], "released", "{detail}");
+    // The revived registry custody stays selected; a tombstone would null its authority kind.
+    assert_eq!(
+        composed.declared_summary["registration"]["authority_kind"],
+        "registry_only"
+    );
     assert!(detail.get("owner").is_none(), "{detail}");
     assert!(detail.get("manager").is_none(), "{detail}");
     // As on main: the lease resource carries the resolver, and the revived registry-only

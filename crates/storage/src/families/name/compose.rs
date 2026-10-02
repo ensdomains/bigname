@@ -163,6 +163,11 @@ fn wrapper_fields(summary: &mut Map<String, Value>, row: Option<&WrapperRow>, cl
         return;
     };
     let Some(state) = effective.wrapper_state else {
+        // A NameWrapper whose state is unknown or lapsed: the manager is withheld, as the
+        // `manager` relation's mask withholds it.
+        if row.is_some_and(|row| row.has_modifier) {
+            summary.insert("wrapper_masked".into(), json!(true));
+        }
         return;
     };
     let fuses = effective.fuses.unwrap_or_default();

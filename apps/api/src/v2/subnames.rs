@@ -326,10 +326,10 @@ pub(crate) fn build_subname(
             });
             (registration.owner.or(linked), manager)
         }
-        None => (
-            row.owner.clone().or_else(|| row.registrant.clone()),
-            row.owner.clone().filter(|_| !row.lifecycle_shadow),
-        ),
+        None => {
+            let owner = row.owner.clone().or_else(|| row.registrant.clone());
+            (owner.clone(), owner.filter(|_| !row.lifecycle_shadow))
+        }
     };
 
     Ok(Subname {

@@ -522,9 +522,56 @@ async fn a_surfaced_subname_the_graveyard_cleared_is_not_listed_under_the_gravey
             "{run}"
         );
     }
+    // The Graveyard's registry write names no owner, so it is no owner-history anchor, while
+    // CAROL's earlier tokenless ownership is.
+    assert!(
+        owner_history(pool, GRAVEYARD, LATER_BLOCK + 2)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        owner_history(pool, CAROL, LATER_BLOCK + 2)
+            .await?
+            .iter()
+            .any(|row| row == &format!("AuthorityTransferred@{}", LATER_BLOCK + 1))
+    );
 
     database.cleanup().await?;
     Ok(())
+}
+
+async fn owner_history(pool: &PgPool, address: &str, block: i64) -> TestResult<Vec<String>> {
+    let page = bigname_storage::load_address_history_page_for_relations(
+        pool,
+        address,
+        None,
+        Some(&[bigname_storage::AddressNameRelation::TokenHolder]),
+        bigname_storage::HistoryScope::Both,
+        false,
+        None,
+        50,
+        bigname_storage::HistorySummaryMode::None,
+        &bigname_storage::HistoryPageOptions {
+            publication_block_bounds: Some(std::collections::BTreeMap::from([(
+                CHAIN.to_owned(),
+                block,
+            )])),
+            ..bigname_storage::HistoryPageOptions::default()
+        },
+        false,
+    )
+    .await?;
+    Ok(page
+        .rows
+        .into_iter()
+        .map(|row| {
+            format!(
+                "{}@{}",
+                row.event_kind,
+                row.block_number.unwrap_or_default()
+            )
+        })
+        .collect())
 }
 
 /// Known gap, deferred to TYR-100 (a registry write away from the NameWrapper keeps the wrapper

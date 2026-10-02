@@ -476,9 +476,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                        "held_through": "registry", "release_kind": release_kind}),
             );
         }
-    } else if selected.event.is_some_and(|event| {
-        event.event_kind == "RegistrationReleased" && event.source_family == "ens_v1_registrar_l1"
-    }) {
+    } else if selection.unsupported_reason.is_none()
+        && selected.event.is_some_and(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.source_family == "ens_v1_registrar_l1"
+        })
+    {
         // A plain lapse revives the registry custody the lease left behind (state_expiry.rs).
         registration.insert(
             "lapsed_registration".into(),
@@ -566,8 +569,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 .as_ref()
                 .and_then(|node| node.latest_transfer())
                 .is_some_and(|write| write.graveyard_held());
-        // A released registration has neither an owner nor a manager, whatever registry record
-        // survives it.
+        // A released registration has neither an owner nor a manager.
         let released = registration.get("status") == Some(&json!("released"));
         let served = registrant.as_deref().or(owner.as_deref());
         control.insert(
