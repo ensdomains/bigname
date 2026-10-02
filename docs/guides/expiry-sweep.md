@@ -133,8 +133,7 @@ A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
   An explicit unregister burns the token
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741),
   so it cannot be renewed through the `.eth` registrar, whose grace renewal
-  needs that last owner
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20260916@366de741);
+  needs that last owner;
   its `expires_at` is `null`, so it is outside every window.
 - A released name keeps its old `expires_at` and appears in every window that
   covers it while it stays released. A new registration, or a renewal of an
@@ -145,8 +144,10 @@ A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
   After `grace_ends_at` the API states only that the name is released.
 
 To find names still renewable in grace, ask for `expires_after` at `T` minus
-the longest grace you care about, and keep only rows with `expires_at <= T`
-that the table puts in a grace phase: ENSv1 leases not yet `released`, and
+the longest grace you care about and leave the upper end open. Keep only the
+rows the table puts in a grace phase: ENSv1 leases whose lease date is at or
+before `T` and that are not yet `released`, reading the lease date from
+`ens_v1.expires_at` for a reserved name as the paragraph above says, and
 ENSv2 rows released as `expired` with `T < grace_ends_at`. The window also
 holds names that have not expired yet, which are not in grace. For
 the names one address last held, use
@@ -164,8 +165,9 @@ later block is not on that page.
 - A page states the names as they were at its `meta.as_of` timestamp `T`, so
   decide each row's phase against `T`, never against your wall clock.
 - Send a notice that says a date has passed ("expired", "in grace", "grace
-  ended") only once `T` is past that date. A row whose date is not yet past at
-  `T` waits for a page from a later publication.
+  ended") only once `T` has reached the phase the table in section 3 gives
+  for it. A row not yet in that phase at `T` waits for a page from a later
+  publication.
 - If `meta.as_of` lists more than one chain, use the smallest timestamp.
 - `T` tells you how fresh a page is. It does not tell you that a walk saw
   every name; section 6 covers that.
@@ -205,13 +207,14 @@ later block is not on that page.
   page is being read does not affect that page. The message says which case
   it is:
   - `collection publication changed during the read; retry the request`: a
-    new publication landed, or the namespace's set of indexed contracts
-    changed, between the request being accepted and the page's first read.
-    Retry at once.
+    new publication landed between the request being accepted and the page's
+    first read, or the namespace's manifests (the declared contracts it
+    indexes) changed before the page finished. Retry at once.
   - `collection publication is not available; retry after indexing is ready`
     or `requested snapshot is not available for name`: the API is not serving
     the namespace's indexed state right now, for example during a rebuild or
-    redo, or while the indexer trails the chain too far
+    redo, or while the served publication trails the indexer's stored head
+    by more than the server allows
     ([tier 2 product reads](../api-v1.md#tier-2-product-reads)). Back off and
     retry; the cursor holds no publication, so it stays valid.
 - `400 invalid_input` with `cursor must be a valid pagination cursor` means the
@@ -226,14 +229,22 @@ later block is not on that page.
 The API gives no guarantee that a walk sees every name: rows can repeat or be
 skipped between pages (section 5), and a reserved `.eth` name that ENSv1
 decides moves back to its earlier lease date when its reservation stops being
-live (section 3). On every run:
+live (section 1). On every run:
 
 - Check freshness with each page's `meta.as_of` (section 4).
 - Mark a window covered only after its walk ended with `has_more: false` and
   every notice it produced is durably recorded.
-- Rescan back by the longest grace you handle: walk again every window from
-  `T` minus that grace onwards, so skipped or moved rows, and rows due a
-  later notice such as "grace ends", are seen again.
+- Rescan back by the longest grace you handle `G`. Each run walks again every
+  window from this floor onwards:
+
+  ```text
+  rescan floor = (smallest T of the previous run) - G
+  ```
+
+  Every row whose grace ended since the previous run then sits in a
+  rescanned window, so rows due a later notice such as "grace ended" are seen
+  again, as are rows skipped or moved within that range. A row that moves back further, such as a reserved name
+  whose reservation was extended well past its lease, is not re-seen.
 
 Make every notification idempotent so that rescans and repeated rows send
 nothing twice. Which key to use is your policy; a natural one is
