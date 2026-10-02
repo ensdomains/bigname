@@ -30,12 +30,12 @@ mod projection_helpers;
 mod read_db;
 mod record_inventory;
 mod registries;
+mod resolution_state;
 mod resolution_support;
 mod resolver;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
-mod universal_resolver_cutover;
 mod unix_seconds;
 pub use expiry::contract_expiry_reason;
 pub use unix_seconds::UnixSeconds;
@@ -164,6 +164,7 @@ pub use registries::{
     load_registry_references_page, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };
+pub use resolution_state::{Protocol, ResolutionState, load_resolution_state_on};
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,
     ETHEREUM_MAINNET_CHAIN_ID, EVENT_LINKED_REGISTRY_SERVING_BASES,
@@ -187,9 +188,6 @@ pub use snapshot_selection::{
     SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
     load_served_project_generation, parse_rfc3339_utc_timestamp,
     resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
-};
-pub use universal_resolver_cutover::{
-    ProxyHop, UniversalResolverCutover, load_universal_resolver_cutovers,
 };
 
 /// Checked-in migrations retained for migration validation and test database construction.

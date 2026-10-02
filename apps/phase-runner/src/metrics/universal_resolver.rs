@@ -3,17 +3,17 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_metrics::{IntGaugeVec, MetricsRegistry};
-use bigname_storage::{ProxyHop, UniversalResolverCutover, load_universal_resolver_cutovers};
+use bigname_storage::{Protocol, ResolutionState, load_resolution_state_on};
 use sqlx::PgPool;
 
 #[derive(Clone)]
 pub(super) struct UniversalResolverGauges {
     cut_over: IntGaugeVec,
     unadmitted: IntGaugeVec,
-    /// Per chain, the unadmitted hop last reported, so each change logs once.
-    reported: Arc<Mutex<BTreeMap<String, ProxyHop>>>,
+    /// Per chain, the unadmitted state last warned about, so each change warns once.
+    reported: Arc<Mutex<BTreeMap<String, ResolutionState>>>,
     exported: Arc<Mutex<BTreeSet<String>>>,
 }
 
@@ -37,30 +37,33 @@ impl UniversalResolverGauges {
         })
     }
 
-    /// Exports both gauges for every chain with phase rows; a chain with no proxy row reads 0.
+    /// Exports both gauges for every chain with phase rows; a chain with no client-facing proxy
+    /// row reads 0 on both.
     pub(super) async fn refresh(
         &self,
         pool: &PgPool,
         rows: &[super::PhaseMetricRow],
     ) -> Result<()> {
-        let states = load_universal_resolver_cutovers(pool).await?;
-        self.apply(rows.iter().map(|row| row.chain_id.as_str()), &states);
+        let chains: BTreeSet<&str> = rows.iter().map(|row| row.chain_id.as_str()).collect();
+        let mut conn = pool
+            .acquire()
+            .await
+            .context("failed to acquire a connection for the resolution state")?;
+        let mut states = Vec::with_capacity(chains.len());
+        for chain in chains {
+            states.push((
+                chain.to_owned(),
+                load_resolution_state_on(&mut conn, chain).await?,
+            ));
+        }
+        self.apply(&states);
         Ok(())
     }
 
     /// Returns the chains this call warned about.
-    pub(super) fn apply<'a>(
-        &self,
-        chains: impl IntoIterator<Item = &'a str>,
-        states: &BTreeMap<String, UniversalResolverCutover>,
-    ) -> Vec<String> {
+    pub(super) fn apply(&self, states: &[(String, Option<ResolutionState>)]) -> Vec<String> {
         let mut warned = Vec::new();
-        let none = UniversalResolverCutover::default();
-        let next: BTreeSet<String> = chains
-            .into_iter()
-            .map(str::to_owned)
-            .chain(states.keys().cloned())
-            .collect();
+        let next: BTreeSet<String> = states.iter().map(|(chain, _)| chain.clone()).collect();
         let mut exported = lock(&self.exported);
         let mut reported = lock(&self.reported);
         for chain in exported.difference(&next) {
@@ -68,28 +71,30 @@ impl UniversalResolverGauges {
             let _ = self.unadmitted.remove_label_values(&[chain]);
             reported.remove(chain);
         }
-        for chain in &next {
-            let state = states.get(chain).unwrap_or(&none);
-            let unadmitted = state.unadmitted();
+        for (chain, state) in states {
+            let unadmitted = state.as_ref().filter(|state| state.unadmitted);
+            let cut_over = state
+                .as_ref()
+                .is_some_and(|state| state.protocol == Protocol::EnsV2);
             match (reported.get(chain), unadmitted) {
-                (previous, Some(hop)) if previous != Some(hop) => {
+                (previous, Some(state)) if previous != Some(state) => {
                     tracing::warn!(
                         chain_id = chain,
-                        proxy = hop.proxy_address,
-                        implementation = hop.implementation,
-                        block = hop.block_number,
+                        proxy = state.proxy,
+                        implementation = state.implementation,
+                        block = state.since_block,
                         "the client-facing Universal Resolver now ends at an implementation the \
                          ens_execution manifest does not admit; the chain is not cut over"
                     );
-                    reported.insert(chain.clone(), hop.clone());
+                    reported.insert(chain.clone(), state.clone());
                     warned.push(chain.clone());
                 }
                 (Some(previous), None) => {
                     tracing::info!(
                         chain_id = chain,
-                        proxy = previous.proxy_address,
+                        proxy = previous.proxy,
                         implementation = previous.implementation,
-                        cut_over = state.cut_over,
+                        cut_over,
                         "the client-facing Universal Resolver no longer ends at an unadmitted \
                          implementation"
                     );
@@ -100,7 +105,7 @@ impl UniversalResolverGauges {
             let labels = &[chain.as_str()];
             self.cut_over
                 .with_label_values(labels)
-                .set(i64::from(state.cut_over));
+                .set(i64::from(cut_over));
             self.unadmitted
                 .with_label_values(labels)
                 .set(i64::from(unadmitted.is_some()));

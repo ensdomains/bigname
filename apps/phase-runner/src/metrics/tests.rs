@@ -43,7 +43,7 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     }]);
     metrics
         .universal_resolver
-        .apply(["ethereum-mainnet"], &BTreeMap::new());
+        .apply(&[("ethereum-mainnet".to_owned(), None)]);
 
     let scrape = metrics.registry.encode()?;
     for metric_type in [
@@ -505,7 +505,7 @@ fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
 
 #[test]
 fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result<()> {
-    use bigname_storage::{ProxyHop, UniversalResolverCutover};
+    use bigname_storage::{Protocol, ResolutionState};
 
     let metrics = PipelineMetrics::new(
         900,
@@ -513,29 +513,28 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         RunnerPhaseProgress::default(),
     )?;
     let gauges = &metrics.universal_resolver;
-    let hop = |implementation: &str, kind: &str, block: i64| ProxyHop {
-        proxy_address: "0xmanaged".to_owned(),
-        implementation: implementation.to_owned(),
-        implementation_kind: kind.to_owned(),
-        block_number: block,
+    let sepolia = |protocol: Protocol, implementation: &str, block: i64, unadmitted: bool| {
+        vec![
+            ("ethereum-mainnet".to_owned(), None),
+            (
+                "ethereum-sepolia".to_owned(),
+                Some(ResolutionState {
+                    protocol,
+                    since_block: block,
+                    proxy: "0xmanaged".to_owned(),
+                    implementation: implementation.to_owned(),
+                    unadmitted,
+                }),
+            ),
+        ]
     };
-    let sepolia = |cut_over: bool, last: ProxyHop| {
-        BTreeMap::from([(
-            "ethereum-sepolia".to_owned(),
-            UniversalResolverCutover {
-                cut_over,
-                chain: vec![hop("0xmanaged", "universal_resolver_proxy", 10), last],
-            },
-        )])
-    };
-    let chains = ["ethereum-mainnet", "ethereum-sepolia"];
     let read = |gauge: &str, chain: &str| -> Result<bool> {
         let scrape = metrics.registry.encode()?;
         Ok(scrape.contains(&format!("{gauge}{{chain=\"{chain}\"}} 1\n")))
     };
 
-    let admitted = sepolia(true, hop("0xv2", "admitted_universal_resolver", 20));
-    assert!(gauges.apply(chains, &admitted).is_empty());
+    let admitted = sepolia(Protocol::EnsV2, "0xv2", 20, false);
+    assert!(gauges.apply(&admitted).is_empty());
     assert!(read(
         "phase_runner_universal_resolver_cut_over",
         "ethereum-sepolia"
@@ -545,10 +544,10 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         "ethereum-sepolia"
     )?);
 
-    let repointed = sepolia(false, hop("0xnew", "other", 30));
-    assert_eq!(gauges.apply(chains, &repointed), ["ethereum-sepolia"]);
+    let repointed = sepolia(Protocol::EnsV1, "0xnew", 30, true);
+    assert_eq!(gauges.apply(&repointed), ["ethereum-sepolia"]);
     assert!(
-        gauges.apply(chains, &repointed).is_empty(),
+        gauges.apply(&repointed).is_empty(),
         "one warning per transition"
     );
     assert!(!read(
@@ -560,26 +559,38 @@ fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result
         "ethereum-sepolia"
     )?);
     assert!(!read(
+        "phase_runner_universal_resolver_cut_over",
+        "ethereum-mainnet"
+    )?);
+    assert!(!read(
         "phase_runner_universal_resolver_unadmitted",
         "ethereum-mainnet"
     )?);
 
-    let again = sepolia(false, hop("0xnewer", "other", 40));
-    assert_eq!(gauges.apply(chains, &again), ["ethereum-sepolia"]);
-    assert!(gauges.apply(chains, &admitted).is_empty());
+    assert_eq!(
+        gauges.apply(&sepolia(Protocol::EnsV1, "0xnewer", 40, true)),
+        ["ethereum-sepolia"]
+    );
+    assert!(
+        gauges
+            .apply(&sepolia(Protocol::EnsV1, "0xmanaged", 10, false))
+            .is_empty(),
+        "a hop to a proxy with no row yet is not unadmitted"
+    );
     assert!(!read(
         "phase_runner_universal_resolver_unadmitted",
         "ethereum-sepolia"
     )?);
-    assert_eq!(gauges.apply(chains, &repointed), ["ethereum-sepolia"]);
+    assert!(gauges.apply(&admitted).is_empty());
+    assert_eq!(gauges.apply(&repointed), ["ethereum-sepolia"]);
 
-    gauges.apply(["ethereum-mainnet"], &BTreeMap::new());
+    gauges.apply(&[("ethereum-mainnet".to_owned(), None)]);
     assert!(
         !metrics
             .registry
             .encode()?
             .contains("chain=\"ethereum-sepolia\""),
-        "a chain with neither phase nor proxy rows leaves the gauges"
+        "a chain without phase rows leaves the gauges"
     );
     Ok(())
 }
