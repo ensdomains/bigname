@@ -626,7 +626,8 @@ collection route carry neither header.
   names in the dictionary shape `GET /v1/search` serves, each carrying its
   selected current registration, and because no route addresses a registration
   as a resource of its own: registrations appear only as `registration_id` on
-  history and permission rows.
+  history and permission rows. [Running an expiry sweep](guides/expiry-sweep.md)
+  shows how a notification service applies the rules below.
 - Request parameters: query `namespace` (required), `expires_after`,
   `expires_before`, `sort=expires_at`, `order=asc|desc`, `cursor`,
   `page_size`, and optional `finality=latest`. `at` and historical `finality`
