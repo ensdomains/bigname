@@ -30,7 +30,7 @@ impl IngestRpcCounters {
             null_results: registry.int_counter_vec(
                 "phase_runner_ingest_provider_null_results_total",
                 "Receipts and transactions of selected logs the source's RPC endpoint answered \
-                 null, counted on every answer including re-requests.",
+                 null, counted on every null answer Ingest accepted, including re-requests.",
                 &["chain", "source", "method"],
             )?,
         })

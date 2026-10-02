@@ -402,6 +402,36 @@ async fn a_transaction_answered_null_is_asked_again_alone() -> AnyResult<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_receipt_and_transaction_answered_null_together_are_asked_again() -> AnyResult<()> {
+    let (result, counts, totals) =
+        counted_window(Tamper::NullPayloadAnswers(TAMPERED_BLOCK, 2)).await?;
+    let payloads = result?;
+    assert_eq!(payloads.receipts.len(), SELECTED_TRANSACTIONS);
+    assert_eq!(payloads.transactions.len(), SELECTED_TRANSACTIONS);
+    for method in ["eth_getTransactionReceipt", "eth_getTransactionByHash"] {
+        assert_eq!(counts.get(method), SELECTED_TRANSACTIONS + 2);
+        assert_eq!(total(&totals, RpcCountKind::NullResults, method), 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_null_answer_is_counted_when_a_sibling_batch_fails() -> AnyResult<()> {
+    let (result, _, totals) =
+        counted_window(Tamper::NullReceiptBesideRefusedTransaction(TAMPERED_BLOCK)).await?;
+    assert!(result.is_err());
+    assert_eq!(
+        total(
+            &totals,
+            RpcCountKind::NullResults,
+            "eth_getTransactionReceipt"
+        ),
+        1
+    );
+    Ok(())
+}
+
 const SELECTED_TRANSACTIONS: usize = WINDOW_BLOCKS as usize / 4;
 
 async fn counted_window(

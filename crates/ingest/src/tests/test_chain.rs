@@ -51,6 +51,11 @@ pub(crate) enum Tamper {
     NullReceiptAnswers(i64, usize),
     /// A transaction the provider holds but answers null for its first N requests.
     NullTransactionAnswers(i64, usize),
+    /// A transaction and its receipt the provider holds but answers null for the first N
+    /// requests of each.
+    NullPayloadAnswers(i64, usize),
+    /// A receipt answered null whose transaction the provider refuses to route, every time.
+    NullReceiptBesideRefusedTransaction(i64),
 }
 
 #[derive(Clone, Debug)]
@@ -266,6 +271,16 @@ impl TestNode {
             }
             "eth_getTransactionByHash" => {
                 self.counts.record("eth_getTransactionByHash");
+                if self.refuses_transaction(&params) {
+                    return json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "Can't route your request to suitable provider",
+                        },
+                    });
+                }
                 self.transaction(&params)
             }
             _ => Value::Null,
@@ -416,11 +431,15 @@ impl TestNode {
         else {
             return Value::Null;
         };
-        if self.tamper == Tamper::NullReceipt(block.number) && transaction.index == 1 {
+        if matches!(self.tamper, Tamper::NullReceipt(number)
+            | Tamper::NullReceiptBesideRefusedTransaction(number) if number == block.number)
+            && transaction.index == 1
+        {
             return Value::Null;
         }
-        if let Tamper::NullReceiptAnswers(number, nulls) = self.tamper
-            && self.answers_null(block, transaction, number, nulls)
+        if let Tamper::NullReceiptAnswers(number, nulls) | Tamper::NullPayloadAnswers(number, nulls) =
+            self.tamper
+            && self.answers_null(block, transaction, number, nulls, NULL_RECEIPT_ANSWERS)
         {
             return Value::Null;
         }
@@ -438,12 +457,24 @@ impl TestNode {
         if self.tamper == Tamper::NullTransaction(block.number) && transaction.index == 1 {
             return Value::Null;
         }
-        if let Tamper::NullTransactionAnswers(number, nulls) = self.tamper
-            && self.answers_null(block, transaction, number, nulls)
+        if let Tamper::NullTransactionAnswers(number, nulls)
+        | Tamper::NullPayloadAnswers(number, nulls) = self.tamper
+            && self.answers_null(block, transaction, number, nulls, NULL_TRANSACTION_ANSWERS)
         {
             return Value::Null;
         }
         self.transaction_value(block, transaction)
+    }
+
+    fn refuses_transaction(&self, params: &[Value]) -> bool {
+        let Tamper::NullReceiptBesideRefusedTransaction(number) = self.tamper else {
+            return false;
+        };
+        params
+            .first()
+            .and_then(Value::as_str)
+            .and_then(|hash| self.chain.transaction(hash))
+            .is_some_and(|(block, transaction)| block.number == number && transaction.index == 1)
     }
 
     fn answers_null(
@@ -452,12 +483,12 @@ impl TestNode {
         transaction: &TestTransaction,
         number: i64,
         nulls: usize,
+        label: &'static str,
     ) -> bool {
-        let answers = block.number == number
-            && transaction.index == 1
-            && self.counts.get(NULL_ANSWERS) < nulls;
+        let answers =
+            block.number == number && transaction.index == 1 && self.counts.get(label) < nulls;
         if answers {
-            self.counts.record(NULL_ANSWERS);
+            self.counts.record(label);
         }
         answers
     }
@@ -573,8 +604,10 @@ pub(crate) const BLOCK_BODY: &str = "eth_getBlockByHash(full)";
 pub(crate) const BLOCK_RECEIPTS: &str = "eth_getBlockReceipts";
 /// Label for the exact-block log fetch the per-transaction path must never issue.
 pub(crate) const EXACT_BLOCK_LOGS: &str = "eth_getLogs(blockHash)";
-/// Label for each null answer a `Null*Answers` tamper gave.
-pub(crate) const NULL_ANSWERS: &str = "null answers";
+/// Label for each null receipt a `Null*Answers` tamper gave.
+pub(crate) const NULL_RECEIPT_ANSWERS: &str = "null receipt answers";
+/// Label for each null transaction a `Null*Answers` tamper gave.
+pub(crate) const NULL_TRANSACTION_ANSWERS: &str = "null transaction answers";
 
 pub(crate) struct TestEndpoint {
     pub(crate) endpoint: String,

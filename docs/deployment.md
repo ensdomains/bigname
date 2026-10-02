@@ -492,7 +492,7 @@ that came back `null` again, without the rest of the window, up to three times
 with a 250 ms, 500 ms and 1 s pause, before it fails the window as a transient
 error. A result still `null` after that is treated as the transaction leaving
 the chain, as before. `phase_runner_ingest_provider_null_results_total` counts
-every `null` answer ([monitoring
+every `null` answer Ingest accepted, including re-requests ([monitoring
 runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic)); if it keeps
 climbing, lower the batch size or the in-flight limit.
 
@@ -2088,8 +2088,8 @@ The build that re-requests `null` receipts and transactions in place (see
 [interpreter content hash](glossary.md#interpreter-content-hash) covers and adds
 no schema-migration, so it needs no redo and no historical ingest fetch. A
 phase that fails with a retryable error now waits the initial restart delay
-again once any later batch commits, instead of keeping the longer delay an
-earlier run of failures reached. An HTTP 400 that says the provider cannot
+again once a later batch settles, including an idle Live poll, instead of
+keeping the longer delay an earlier run of failures reached. An HTTP 400 that says the provider cannot
 route the request to a node that serves it is retried with backoff instead of
 stopping the chain as a data integrity fault. The runner exports three new
 counters for Ingest and Live RPC traffic, described in the

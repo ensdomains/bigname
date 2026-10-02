@@ -16,6 +16,8 @@ use super::{
 
 const MAX_RECEIPT_FALLBACK: usize = 256;
 const NULL_REREQUESTS: usize = 3;
+/// Methods whose `null` answers count as provider null results.
+const NULL_COUNTED_METHODS: [&str; 2] = ["eth_getTransactionReceipt", "eth_getTransactionByHash"];
 
 impl JsonRpcProvider {
     pub async fn heads(&self) -> Result<HeadSnapshot> {
@@ -51,15 +53,32 @@ impl JsonRpcProvider {
     }
 
     /// Runs calls at the configured batch width and parallelism, preserving call order.
+    ///
+    /// Each chunk counts its receipt and transaction `null` answers as it completes, so a
+    /// sibling chunk's failure cannot discard them.
     async fn parallel_batches(&self, calls: Vec<BatchCall>) -> Result<Vec<Option<Value>>> {
         let chunks = calls
             .chunks(self.config.rpc_batch_size())
             .map(<[BatchCall]>::to_vec)
             .collect::<Vec<_>>();
-        let results = stream::iter(chunks.into_iter().map(|chunk| self.batch(chunk)))
-            .buffered(self.config.rpc_max_in_flight())
-            .try_collect::<Vec<_>>()
-            .await?;
+        let results = stream::iter(chunks.into_iter().map(|chunk| async move {
+            let methods = chunk.iter().map(|call| call.method).collect::<Vec<_>>();
+            let values = self.batch(chunk).await?;
+            self.counters.add(
+                RpcCountKind::NullResults,
+                methods
+                    .into_iter()
+                    .zip(&values)
+                    .filter(|(method, value)| {
+                        value.is_none() && NULL_COUNTED_METHODS.contains(method)
+                    })
+                    .map(|(method, _)| method),
+            );
+            Ok::<_, anyhow::Error>(values)
+        }))
+        .buffered(self.config.rpc_max_in_flight())
+        .try_collect::<Vec<_>>()
+        .await?;
         Ok(results.into_iter().flatten().collect())
     }
 
@@ -203,10 +222,6 @@ impl JsonRpcProvider {
             let nulls = (0..values.len())
                 .filter(|index| values[*index].is_none())
                 .collect::<Vec<_>>();
-            self.counters.add(
-                RpcCountKind::NullResults,
-                nulls.iter().map(|index| calls[*index].method),
-            );
             if nulls.is_empty() || attempt == NULL_REREQUESTS {
                 break;
             }

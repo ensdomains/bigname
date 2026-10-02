@@ -106,7 +106,6 @@ impl JsonRpcProvider {
         params: Vec<Value>,
         dispatch: Dispatch,
     ) -> Result<Option<Value>> {
-        self.counters.add(RpcCountKind::Calls, [method]);
         let body = self
             .send(
                 json!({
@@ -136,8 +135,6 @@ impl JsonRpcProvider {
                 })
                 .collect(),
         );
-        self.counters
-            .add(RpcCountKind::Calls, calls.iter().map(|call| call.method));
         let body = self.send(request, Dispatch::Data).await?;
         let responses = body
             .as_array()
@@ -181,9 +178,20 @@ impl JsonRpcProvider {
         self.request_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let body = self.post(&client, client_id, &request, permit).await;
+        // Counted only once the chain guard has passed and the request went out.
         self.counters.add(
             RpcCountKind::Requests,
             [if body.is_ok() { "ok" } else { "failed" }],
+        );
+        let calls = match &request {
+            Value::Array(calls) => calls.as_slice(),
+            call => std::slice::from_ref(call),
+        };
+        self.counters.add(
+            RpcCountKind::Calls,
+            calls
+                .iter()
+                .filter_map(|call| call.get("method").and_then(Value::as_str)),
         );
         body
     }

@@ -157,7 +157,11 @@ async fn a_matching_endpoint_is_checked_once_and_then_trusted() -> Result<()> {
 #[tokio::test]
 async fn a_wrong_chain_id_is_refused_without_retry_or_url() -> Result<()> {
     let node = Node::start("0xaa36a7", Some(SEPOLIA_GENESIS)).await?;
-    let provider = node.guarded("ethereum-mainnet", RpcChainCheck::Full)?;
+    let counters = RpcCounters::default();
+    let provider = JsonRpcProvider {
+        counters: counters.source("ethereum-mainnet", "primary"),
+        ..node.guarded("ethereum-mainnet", RpcChainCheck::Full)?
+    };
 
     let error = provider.heads().await.unwrap_err();
     let mismatch = mismatch_of(&error);
@@ -186,6 +190,17 @@ async fn a_wrong_chain_id_is_refused_without_retry_or_url() -> Result<()> {
 
     provider.heads().await.unwrap_err();
     assert_eq!(node.count("eth_chainId"), 2, "a refusal is never trusted");
+    let calls: Vec<_> = counters
+        .snapshot()
+        .into_iter()
+        .filter(|(count, _)| count.kind == RpcCountKind::Calls)
+        .map(|(count, total)| (count.label, total))
+        .collect();
+    assert_eq!(
+        calls,
+        [("eth_chainId".to_owned(), 2)],
+        "a data call the chain guard refused is not counted"
+    );
     Ok(())
 }
 
