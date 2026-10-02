@@ -474,6 +474,15 @@ provider instance, including range-log queries, retries and batch fallbacks.
 It is not a process-wide limit across different chains/providers. All header,
 source-boundary and reorg checks still run, regardless of window size.
 
+Some hosted providers answer `null` for a receipt or transaction they hold when
+many batches run at once. Ingest asks for each selected receipt or transaction
+that came back `null` again, on its own, up to three times with a 250 ms, 500 ms
+and 1 s pause, before it fails the window as a transient error. A result still
+`null` after that is treated as the transaction leaving the chain, as before.
+`phase_runner_ingest_provider_null_results_total` counts every `null` answer
+([monitoring runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic)); if it
+keeps climbing, lower the batch size or the in-flight limit.
+
 For a first historical-ingest comparison, set these in the server Compose env
 file, or export them when launching `phase-runner` directly:
 
@@ -2023,3 +2032,17 @@ returns block 0: a provider that cannot serve block 0 refuses the start in the
 default `full` mode. The API gains `BIGNAME_API_RPC_CHAIN_CHECK` with the same
 two values ([production environment](production.md#api-request-bounds)). Load
 the new `BignamePhaseRunnerRpcChainMismatch` rule with the runner.
+
+### Null receipt re-requests and Ingest RPC counters
+
+The build that re-requests `null` receipts and transactions in place (see
+[the RPC settings](#phase-runner-configuration)) edits no file the
+[interpreter content hash](glossary.md#interpreter-content-hash) covers and adds
+no schema-migration, so it needs no redo and no historical ingest fetch. A
+phase that fails with a retryable error now waits the initial restart delay
+again once any later batch commits, instead of keeping the longer delay an
+earlier run of failures reached. An HTTP 400 that says the provider cannot
+route the request to a node that serves it is retried with backoff instead of
+stopping the chain as a data integrity fault. The runner exports three new
+counters for Ingest and Live RPC traffic, described in the
+[monitoring runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic).

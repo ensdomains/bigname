@@ -2091,6 +2091,70 @@ async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_settled_batch_resets_the_restart_backoff() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_backoff_reset").await?;
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain("backoff-chain").await?;
+    seed_readable_lineage(scratch.pool(), "backoff-chain", 0).await?;
+    mark_completed(
+        scratch.pool(),
+        "backoff-chain",
+        PhaseName::Project,
+        Some(phase_runner::INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    mark_completed(scratch.pool(), "backoff-chain", PhaseName::Verify, None).await?;
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    // Five failures grow the delay to 320 ms; one settled batch, then a failure, then done.
+    let flaky = Arc::new(FunctionPhase {
+        name: PhaseName::Verify,
+        handler: {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_| {
+                let mut calls = calls.lock().expect("call log");
+                calls.push(std::time::Instant::now());
+                match calls.len() {
+                    1..=5 | 7 => Err(RunnerError::transient("provider omitted receipt")),
+                    6 => Ok(PhaseBatchOutcome::Continue(PhaseProgress::default())),
+                    _ => Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                        verification_level: Some(VerificationLevel::QuickSynced),
+                        ..PhaseProgress::default()
+                    })),
+                }
+            })
+        },
+    });
+    let runner = PhaseRunner::new(
+        scratch.runner(),
+        phase_set_replacing(PhaseName::Verify, flaky)?,
+        available_capacity(),
+        "backoff-runner",
+        TimingConfig {
+            initial_backoff: Duration::from_millis(20),
+            maximum_backoff: Duration::from_secs(5),
+            live_poll_interval: Duration::from_millis(1),
+        },
+    )?;
+    runner
+        .redo(
+            &chain("backoff-chain")?,
+            RedoPhase::Phase(PhaseName::Verify),
+            BlockRange::new(0, 0)?,
+            CancellationToken::new(),
+        )
+        .await?;
+    let calls = calls.lock().expect("call log").clone();
+    assert_eq!(calls.len(), 8);
+    assert!(calls[5] - calls[4] >= Duration::from_millis(320));
+    assert!(
+        calls[7] - calls[6] < Duration::from_millis(500),
+        "the failure after a settled batch waited {:?}, not the initial delay",
+        calls[7] - calls[6]
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn fatal_error_stops_only_its_chain_supervisor() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_isolation").await?;
     seed_identified_lineage(scratch.pool(), "good-chain", 0).await?;
