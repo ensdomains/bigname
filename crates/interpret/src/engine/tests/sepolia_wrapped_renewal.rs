@@ -182,6 +182,70 @@ async fn a_wrapper_minted_registration_is_no_owner_history_of_the_name_wrapper()
     Ok(())
 }
 
+/// An ENSv2 registration naming the NameWrapper on a resource of its own, in the transaction that
+/// wraps the same node on ENSv1, is not that wrap's custody: the ENSv1 wrap does not convey the
+/// ENSv2 resource, so the NameWrapper's owner history still selects it.
+#[tokio::test]
+async fn an_ensv2_grant_beside_a_same_node_ensv1_wrap_stays_in_owner_history() -> TestResult {
+    let database = database("interpret_ensv2_grant_beside_ensv1_wrap").await?;
+    let pool = database.pool();
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+    seed_lineage(pool).await?;
+    let label = b"crossfamily";
+    let labelhash = keccak256(label);
+    seed_wrapped_registration(pool, label, labelhash, eth_namehash(labelhash)).await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: REGISTRATION_BLOCK,
+            to_block: REGISTRATION_BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let ens_v2_resource = Uuid::from_u128(0xe25_0001);
+    sqlx::query(
+        "INSERT INTO resources (resource_id, chain_id, block_hash, block_number, provenance,
+             canonicality_state)
+         SELECT $1, chain_id, block_hash, block_number, '{}'::jsonb, canonicality_state
+         FROM resources WHERE resource_id = (
+             SELECT resource_id FROM normalized_events
+             WHERE source_family = 'ens_v1_registrar_l1' AND event_kind = 'RegistrationGranted')",
+    )
+    .bind(ens_v2_resource)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
+             event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
+             transaction_hash, transaction_index, log_index, raw_fact_ref, derivation_kind,
+             canonicality_state, before_state, after_state, consumer_visibility)
+         SELECT event_identity || ':ens-v2', namespace, logical_name_id, $1, event_kind,
+                'ens_v2_registry_l1', manifest_version, chain_id, block_number, block_hash,
+                transaction_hash, transaction_index, log_index + 100, raw_fact_ref,
+                'ens_v2_registry_resource_surface', canonicality_state, before_state,
+                after_state, consumer_visibility
+         FROM normalized_events
+         WHERE source_family = 'ens_v1_registrar_l1' AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(ens_v2_resource)
+    .execute(pool)
+    .await?;
+    let wrapper =
+        super::graveyard_burned::owner_history(pool, NAME_WRAPPER, REGISTRATION_BLOCK).await?;
+    database.cleanup().await?;
+    assert!(
+        wrapper
+            .iter()
+            .any(|row| row.starts_with("RegistrationGranted@")),
+        "{wrapper:?}"
+    );
+    Ok(())
+}
+
 /// The same registration when the wrapped token's receiver unwraps the name to `B` inside its
 /// mint callback, before the outer `NameWrapped`: that wrap records no registrar resource, and
 /// the NameWrapper still has no owner history of the name while `B`, who took the token, has.
