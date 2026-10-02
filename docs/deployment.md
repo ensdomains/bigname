@@ -1903,7 +1903,8 @@ wrapped name" release, whose Interpret and Project redos then run once for
 both. Before the release is recorded, run the Sepolia check in the route
 contract: `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` must answer
 `evers.eth` and `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` must answer
-`artitest.eth` on both sources, and
+`artitest.eth` on the indexed source and `not_found` on the verified source,
+and
 `GET /v1/events?contract_address=0x4F382928805ba0e23B30cFB75fC9E848e82DFD47`
 must list `primary_name` rows with `coin_type` `2147483648`.
 
@@ -2122,6 +2123,18 @@ another change discharges both with one redo pair. It needs no schema-migration,
 no manifest change and no historical ingest fetch. After it, a change to a
 read-only family query (search, bound names, record, reverse, permission,
 children or topology readers) no longer rotates the hash or forces a redo.
+
+### Verified primary names without a forward resolver
+
+The build that answers a verified ENS primary name `not_found` when its forward
+check reverts with `ResolverNotFound` for the claimed name (see
+[the route contract](api-v1-routes.md#get-v1addressesaddressprimary-name))
+changes only the lookup read path, none of it a hashed source, so the
+[interpreter content hash](glossary.md#interpreter-content-hash) does not
+rotate. It adds no schema-migration and needs no redo or historical ingest
+fetch. Verified answers that were `failed` with `resolver_call_reverted` for
+such names become `not_found`; indexed answers do not change. After it serves,
+run the Sepolia check in [Default reverse names](#default-reverse-names).
 
 ### Universal Resolver cutover gauges and alert
 

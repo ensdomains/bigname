@@ -300,7 +300,7 @@ to the applicable entries below.
 > § `GET /v1/addresses/{address}/primary-name`. The verified source follows the
 > upstream order with live calls and gives `name()` the same gas. It skips the
 > standalone registrar, which the Mainnet and Sepolia profiles do not declare,
-> and a failed `name()` call ends it with `execution_failed` instead of an
+> and a failed `name()` call ends it with `failed` instead of an
 > empty name; neither reads the default.
 > **Why**: the projection holds names only from admitted resolver events and
 > hydration, and unlisted emitters are unsupported; the verified source reads
@@ -335,6 +335,49 @@ to the applicable entries below.
 > caller identity to reproduce, and a direct call keeps the reverse leg to plain
 > hash-pinned `eth_call`s. Revisit if ETHReverseResolver ships.
 > **Since**: `2026-10-01`
+
+<a id="default-reverse-fallback-past-a-reverse-node-resolver"></a>
+> **`default.reverse` fallback past an empty name on the reverse node's own
+> resolver**: when `<address>.addr.reverse` has its own nonzero registry
+> resolver whose `name` returns an empty string, both bigname sources follow
+> ETHReverseResolver's order and take the address's `default.reverse` name as
+> its reverse claim. The verified answer for that claim still depends on
+> normalization, authority admission and the forward check.
+> The Universal Resolver's ENSIP-19 `reverse` answers no primary name there: it
+> uses the reverse node's own resolver, sees the empty name and stops. On
+> Sepolia on 2026-10-02, near block `11826770`, an `eth_call` to
+> `reverse(0x69420f05a11f617b4b74ffe2e04b2d300dfa556f, 60)` returned an empty
+> name, while bigname's reverse leg read `hcathgq2e.eth` from
+> `default.reverse`. That call's resolver lookup returned
+> `0x322b…9cb0`, which no pinned artifact or manifest names; the pinned
+> `ENSV1Resolver` is a different address, so which Universal Resolver
+> implementation and `reverse` resolver were live is not pinned. Which order is
+> canonical on Sepolia after the ENSv2 cutover is an open question, and this
+> entry records it without changing either source.
+> **Upstream**: ETHReverseResolver falls back to `default.reverse` when the
+> reverse node's resolver returns an empty name
+> `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`,
+> but the Universal Resolver reaches it only as an ancestor resolver, because a
+> reverse node's own nonzero resolver wins the resolver lookup
+> `(upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L33-L37 @ ens_v1@91c966f)`.
+> The ENSv1 Universal Resolver's `reverse` calls `name` on that resolver and
+> returns an empty name as no primary name
+> `(upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L200-L225 @ ens_v1@91c966f)`.
+> The ENSv2 Universal Resolver does the same
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L377-L399 @ ens_v2_sepolia_20260916@366de741)`
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L240-L249 @ ens_v2_sepolia_20260916@366de741)`;
+> its deployment gives `reverse` the `ENSV1Resolver`
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L26-L37 @ ens_v2_sepolia_20260916@366de741)`,
+> which finds the reverse node's ENSv1 resolver and passes `name` to it with no
+> `default.reverse` read
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)`
+> `(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20260916@366de741)`.
+> **Our rule**: `docs/api-v1-routes.md` § `GET /v1/addresses/{address}/primary-name`
+> (ENSIP-19 default name).
+> **Why**: bigname adopted ETHReverseResolver's order for `default.reverse`
+> names; the live Universal Resolver does not run that order for a reverse node
+> with its own resolver. Revisit once the canonical Sepolia order is settled.
+> **Since**: `2026-10-02`
 
 <a id="ensv1-authority-without-an-ensv2-entry"></a>
 > **ENSv1 authority for a `.eth` name without an ENSv2 entry** — bigname follows the chain for ENSv1 and ENSv2 name authority: a current ENSv2 registration decides, a premigration reservation defers to ENSv1, a released or expired ENSv2 registration stays with ENSv2 as released, and a name that never had an ENSv2 registration is decided by a live ENSv1 registration, or by its history when neither arm holds it. For a name ENSv1 decides without a live ENSv2 entry the ENSv2 Universal Resolver answers nothing: it reads only ENSv2 registries, keeps the nearest ancestor's resolver when a label has no live entry, and the deployment registers `eth` without a resolver, so the lookup fails with `ResolverNotFound`. bigname still serves the name's ownership and registration from its live ENSv1 registration, or as the released ENSv1 registration when that has ended. What it resolves to depends on the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): before it, clients resolve through ENSv1 and bigname serves the ENSv1 resolver and records; from it, bigname follows the Universal Resolver and serves no resolver or records for the name or any name below it, with `unresolvable_reason: "no_live_ens_v2_entry"` (`docs/api-v1.md` § Expiry and grace). On Sepolia at block `11807425` that covered 172 `.eth` second-level names held on ENSv1 (13 never reserved, 159 whose reservation passed its expiry unclaimed) and 149 live names below them.
