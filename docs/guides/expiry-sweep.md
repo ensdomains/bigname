@@ -253,8 +253,8 @@ live (section 1). On every run:
   ```
 
   A run that did not complete does not move the floor. On the first run,
-  use your clock's current time minus `G`: any floor at or before `T - G`
-  works, and an earlier one only costs extra rows. Every row whose grace
+  fetch one page first (`page_size=1`, any bound) to learn `T`, then start
+  at `T - G`; an earlier floor only costs extra rows. Every row whose grace
   ended since the previous completed run then sits in a rescanned window, so
   rows due a later notice such as "grace ended" are seen again. A completed
   walk returns every row that sorts after its cursor, so it skips only rows
@@ -264,7 +264,8 @@ live (section 1). On every run:
 - A row that moves back further is not re-seen by the rescan: a reserved
   name whose reservation was extended well past its lease returns to its
   lease date when the reservation stops being live. Keep each row whose
-  `ens_v1.expires_at` differs from its `expires_at` on a list, and once that
+  `ens_v1.expires_at` is finite, below the saturated value, and differs from
+  its `expires_at` on a list, and once that
   lease date passes, read the name by itself with
   [`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname) on every run
   until it is released or its `expires_at` equals `ens_v1.expires_at`; then
@@ -272,11 +273,12 @@ live (section 1). On every run:
 
 Make every notification idempotent so that rescans and repeated rows send
 nothing twice. Which key to use is your policy; a natural one is
-`(namespace, name, expires_at, kind, recipient)`, where `kind` is your
-notification type and `recipient` the address you notify. With it, a later
-page that shows a different `owner` with the same `expires_at` gives that
-address its own notice. The same key
-recurs, and you decide whether to notify again, in two cases:
+`(namespace, name, expiry, kind, recipient)`, where `expiry` is the date that
+decided the notice (`ens_v1.expires_at` for an ENSv1 lease notice on a
+reserved name, otherwise `expires_at`), `kind` is your notification type and
+`recipient` the address you notify. With it, a later page that shows a
+different `owner` with the same expiry gives that address its own notice.
+The same key recurs, and you decide whether to notify again, in two cases:
 
 - an ENSv2 registration is unregistered and the name registered again with
   the same expiry
