@@ -35,8 +35,11 @@ that block in `meta.as_of`.
 - The window matches the row's served `expires_at`. From the
   [Universal Resolver cutover](../glossary.md#universal-resolver-cutover) a
   `.eth` second-level name with a live ENSv2 entry is listed by that entry's
-  expiry, and before it by its ENSv1 lease's. While ENSv1 decides the name,
-  the lease's own date is `ens_v1.expires_at`
+  expiry, because resolution then starts at the ENSv2 root registry
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741),
+  and before it by its ENSv1 lease's
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f).
+  While ENSv1 decides the name, the lease's own date is `ens_v1.expires_at`
   ([expiry and grace](../api-v1.md#expiry-and-grace)).
 - A row whose expiry is `null` never matches a window. That covers
   `expires_at_reason` `no_expiry` and `not_set`, and an ENSv2 registration
@@ -51,19 +54,21 @@ The rules are in the request, coverage and status bullets of
 
 ## 2. Leases versus other registrations
 
-Without a filter, one window mixes every finite registration in the
-namespace: `.eth` registrar leases, ENSv2 registrations, wrapped subnames and
-ENSv2 subnames. Two filters narrow it, and they combine:
+Each request covers one namespace: `namespace=ens` or `namespace=basenames`.
+Without a filter, an `ens` window mixes every finite registration in it:
+`.eth` registrar leases, ENSv2 registrations, wrapped subnames and ENSv2
+subnames. Two filters narrow it, and they combine:
 
 - `parent=<name>` keeps only names one label below `<name>`. `parent=eth`
   selects the registrar-governed `.eth` second-level names on both sides of
-  the cutover and excludes every subname; `parent=base.eth` selects the
-  Basenames second-level names.
+  the cutover and excludes every subname. With `namespace=basenames`,
+  `parent=base.eth` selects the Basenames second-level names.
 - `authority=` keeps rows whose served
   [`authority`](../api-v1.md#naming-dictionary), the registry generation that
   decides the name, is one of the listed values (`ens_v0`, `ens_v1`,
-  `ens_v2`, comma-separated). A row that serves no `authority`, such as a
-  Basenames row, never matches.
+  `ens_v2`, comma-separated). A row that serves no `authority` never matches,
+  so a `namespace=basenames` sweep, whose rows serve none, does not use this
+  filter.
 
 For example, `parent=eth&authority=ens_v1,ens_v0` lists the `.eth` names whose
 registration ENSv1 still decides. Every row carries its own `authority`, so a
@@ -91,10 +96,20 @@ For a `.eth` second-level name:
 | Phase, at the page's `meta.as_of` timestamp `T` | What the row shows | Who to notify |
 | --- | --- | --- |
 | Before expiry: `T < expires_at` | the name is held: `registration_status` is not `released` | `owner` |
-| ENSv1 lease in grace: `expires_at <= T < grace_ends_at` | `registration_status` is unchanged; the lease is not released during its grace | `owner` |
-| ENSv2 registration past its expiry | `registration_status: released`; `lapsed_registration.release_kind: "expired"`; renewable until `grace_ends_at` | `lapsed_registration.owner` |
-| ENSv1 lease past its grace | `registration_status: released`; `lapsed_registration.release_kind: "expired"`; `released_at` is the first block after the grace | `lapsed_registration.owner` |
+| ENSv1 lease in grace: `expires_at <= T <= grace_ends_at` | `registration_status` is unchanged; the lease is not released during its grace, including the second `grace_ends_at` itself, when the registrar still renews it (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L161 @ ens_v1@91c966f) | `owner` |
+| ENSv2 registration past its expiry: `expires_at <= T` | `registration_status: released`; `lapsed_registration.release_kind: "expired"`; renewable while `T < grace_ends_at` | `lapsed_registration.owner` |
+| ENSv1 lease past its grace: `grace_ends_at < T` | `registration_status: released`; `lapsed_registration.release_kind: "expired"`; `released_at` is the first block whose time is after the grace | `lapsed_registration.owner` |
 | Released for another cause | `registration_status: released`, no `lapsed_registration` | nobody the API can name |
+
+The ENSv1 rows compare with the lease's own dates. Before the cutover those are
+the row's `expires_at` and `grace_ends_at`. From the cutover a reserved `.eth`
+name that ENSv1 still decides serves its ENSv2 reservation's expiry and grace
+instead, and the lease's expiry is `ens_v1.expires_at`, with its grace ending
+90 days later
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). The two grace deadlines usually fall on the same second, but
+not always: extending the reservation without renewing the lease splits them
+([naming dictionary](../api-v1.md#naming-dictionary), `ens_v1.expires_at`).
+For such a name, use `ens_v1.expires_at` in the ENSv1 rows.
 
 A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
 `expires_at`, so it has no grace phase.
@@ -107,22 +122,33 @@ A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
   is never read as an owner ([lapsed registration](../api-v1.md#lapsed-registration)).
   Its `released_at` is when the release was recorded and `held_through` the
   contract the registration was held through.
-- An ENSv2 registration is released at its expiry but stays renewable through
-  the `.eth` registrar until its grace ends, while the registry keeps its last
-  owner
+- An ENSv2 registration is released at its expiry
+  ([lapsed registration](../api-v1.md#lapsed-registration)): the registry
+  treats an entry as expired from the second its expiry is reached
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L663-L665 @ ens_v2_sepolia_20260916@366de741)
+  but still reports its last owner
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741),
+  and the `.eth` registrar renews it in grace while that last owner is set
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20260916@366de741).
-  An explicit unregister burns the token and cannot be renewed
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741);
+  An explicit unregister burns the token
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741),
+  so it cannot be renewed through the `.eth` registrar, whose grace renewal
+  needs that last owner
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20260916@366de741);
   its `expires_at` is `null`, so it is outside every window.
 - A released name keeps its old `expires_at` and appears in every window that
-  covers it until it is registered again; a new registration removes
+  covers it while it stays released. A new registration, or a renewal of an
+  ENSv2 registration in its grace, ends that state and removes
   `lapsed_registration`. A sweep that wants only held names filters rows on
   `registration_status`.
 - The API serves no field for a premium period after grace or for a price.
   After `grace_ends_at` the API states only that the name is released.
 
 To find names still renewable in grace, ask for `expires_after` at `T` minus
-the longest grace you care about and keep rows with `grace_ends_at > T`. For
+the longest grace you care about, and keep only rows with `expires_at <= T`
+that the table puts in a grace phase: ENSv1 leases not yet `released`, and
+ENSv2 rows released as `expired` with `T < grace_ends_at`. The window also
+holds names that have not expired yet, which are not in grace. For
 the names one address last held, use
 `GET /v1/addresses/{address}/names?relation=former_owner`
 ([address names](../api-v1-routes.md#get-v1addressesaddressnames)).
@@ -135,25 +161,28 @@ publication the page read
 ([finality and snapshots](../api-v1.md#finality-and-snapshots)). A renewal in a
 later block is not on that page.
 
-- Keep the sweep's own progress as a time: "notified everything with
-  `expires_at` before `S`". After a run, advance `S` to at most the smallest
-  `meta.as_of.<chain>.timestamp` the run's pages reported, never to your wall
-  clock. Rows with `expires_at` at or after that timestamp could still have
-  been renewed in a block the API has not published, so leave them for the
-  next run.
+- A page states the names as they were at its `meta.as_of` timestamp `T`, so
+  decide each row's phase against `T`, never against your wall clock.
+- Send a notice that says a date has passed ("expired", "in grace", "grace
+  ended") only once `T` is past that date. A row whose date is not yet past at
+  `T` waits for a page from a later publication.
 - If `meta.as_of` lists more than one chain, use the smallest timestamp.
+- `T` tells you how fresh a page is. It does not tell you that a walk saw
+  every name; section 6 covers that.
 - Before a run, `GET /v1/status` gives a readiness gate per chain
   ([`GET /v1/status`](../api-v1-routes.md#get-v1status)): `status` is
   `ready`, `degraded` or `stale`; `lag_blocks` and `lag_seconds` are how far
   the served publication trails the indexer's stored head;
   `ingestion_lag_blocks` and `ingestion_lag_seconds` are how far that stored
-  head trails the network head the API last observed. `ready` means both are
-  within the server's thresholds.
+  head trails the network head the API last observed, the seconds counted up
+  to when it observed that head. `ready` requires both to be within the
+  server's thresholds, along with the other conditions that route lists. During a full rebuild of the indexed state, `indexed_block`
+  shows the rebuild's progress rather than a served block.
 - `lag_blocks` and `lag_seconds` are `null` while an indexer redo (a rebuild
   of indexed state over a block range) is in progress, and the chain reports
-  `degraded`. Treat `null` as unknown, not zero: skip the run or keep `S`
-  where it is. During such a redo the listing can also refuse pages with
-  `409 stale` (section 5).
+  `degraded`, or `stale` if a stronger condition applies. Treat `null` as
+  unknown, not zero, and skip the run. During such a redo the listing can
+  also refuse pages with `409 stale` (section 5).
 - `/v1/status` is a gate only. What a page actually read is its own
   `meta.as_of`.
 
@@ -163,7 +192,8 @@ later block is not on that page.
   the `authority` and `parent` filters, and holds the position of the last row
   returned (its `expires_at`, namespace, name and namehash). It holds no
   publication. Send the next request with the same parameters plus `cursor`; a
-  cursor sent with different parameters returns `400 invalid_input`
+  cursor sent with a different namespace, bound, order or filter returns
+  `400 invalid_input`
   ([current-state list cursors](../api-v1.md#current-state-list-cursors)).
 - A continuation reads whatever is published when it runs and returns the rows
   after the cursor's position. Pages of one walk can therefore read different
@@ -175,11 +205,13 @@ later block is not on that page.
   page is being read does not affect that page. The message says which case
   it is:
   - `collection publication changed during the read; retry the request`: a
-    new publication landed between admission and the page's first read.
+    new publication landed, or the namespace's set of indexed contracts
+    changed, between the request being accepted and the page's first read.
     Retry at once.
   - `collection publication is not available; retry after indexing is ready`
-    or `requested snapshot is not available for name`: the indexed state is
-    being rebuilt or redone and is not served meanwhile
+    or `requested snapshot is not available for name`: the API is not serving
+    the namespace's indexed state right now, for example during a rebuild or
+    redo, or while the indexer trails the chain too far
     ([tier 2 product reads](../api-v1.md#tier-2-product-reads)). Back off and
     retry; the cursor holds no publication, so it stays valid.
 - `400 invalid_input` with `cursor must be a valid pagination cursor` means the
@@ -189,17 +221,34 @@ later block is not on that page.
   and cannot replay an older publication.
 - `page_size` is 1 to 200, default 50.
 
-## 6. Idempotency
+## 6. Completeness and idempotency
 
-Because pages and runs can repeat a row, make every notification idempotent:
+The API gives no guarantee that a walk sees every name: rows can repeat or be
+skipped between pages (section 5), and a reserved `.eth` name that ENSv1
+decides moves back to its earlier lease date when its reservation stops being
+live (section 3). On every run:
 
-- Key a notification on `(namespace, name, expires_at, kind)`, where `kind` is
-  your notification type, such as "30 days before expiry" or "grace ends".
-  Replaying a page, rerunning a window or overlapping two runs then sends
-  nothing twice.
-- A renewal changes `expires_at`, so the renewed registration gets new keys
-  and its own reminder cycle; the old keys stop matching any row.
-- A name skipped because it was renewed between pages sits under its new
-  `expires_at` and is found by the window that covers it. To cover the rare
-  row that moves behind the cursor some other way, let each run start a little
-  before the previous run's `S`; the idempotency key makes the overlap free.
+- Check freshness with each page's `meta.as_of` (section 4).
+- Mark a window covered only after its walk ended with `has_more: false` and
+  every notice it produced is durably recorded.
+- Rescan back by the longest grace you handle: walk again every window from
+  `T` minus that grace onwards, so skipped or moved rows, and rows due a
+  later notice such as "grace ends", are seen again.
+
+Make every notification idempotent so that rescans and repeated rows send
+nothing twice. Which key to use is your policy; a natural one is
+`(namespace, name, expires_at, kind, recipient)`, where `kind` is your
+notification type and `recipient` the address you notify. With it, a name
+transferred without a renewal still notifies the new holder. The same key
+recurs, and you decide whether to notify again, in two cases:
+
+- an ENSv2 registration is unregistered and the name registered again with
+  the same expiry
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L452-L494 @ ens_v2_sepolia_20260916@366de741);
+- a renewal keeps the same expiry
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L240-L255 @ ens_v2_sepolia_20260916@366de741).
+
+`GET /v1/names` rows carry no registration identity; to tell the first case
+apart, read `registration_id` from
+[`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname).
