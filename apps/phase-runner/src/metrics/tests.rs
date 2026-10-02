@@ -41,6 +41,9 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         observed_head_block_number: Some(104),
         publication_block_number: Some(100),
     }]);
+    metrics
+        .universal_resolver
+        .apply(["ethereum-mainnet"], &BTreeMap::new());
 
     let scrape = metrics.registry.encode()?;
     for metric_type in [
@@ -57,6 +60,8 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_phase_cursor_stall_age_seconds gauge",
         "# TYPE phase_runner_served_lag_blocks gauge",
         "# TYPE phase_runner_served_publication_block gauge",
+        "# TYPE phase_runner_universal_resolver_cut_over gauge",
+        "# TYPE phase_runner_universal_resolver_unadmitted gauge",
     ] {
         assert!(scrape.contains(metric_type), "missing {metric_type}");
     }
@@ -64,6 +69,16 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     assert!(
         scrape.contains("phase_runner_served_publication_block{chain=\"ethereum-mainnet\"} 100")
     );
+    for gauge in [
+        "phase_runner_universal_resolver_cut_over",
+        "phase_runner_universal_resolver_unadmitted",
+    ] {
+        let line = format!("{gauge}{{chain=\"ethereum-mainnet\"}} 0\n");
+        assert!(
+            scrape.contains(&line),
+            "a chain with no proxy event reads 0: {line}"
+        );
+    }
     assert!(scrape.contains("build_sha="));
     assert!(scrape.contains("interpreter_content_hash="));
     Ok(())
@@ -485,5 +500,86 @@ fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }
+    Ok(())
+}
+
+#[test]
+fn universal_resolver_gauges_warn_once_per_unadmitted_implementation() -> Result<()> {
+    use bigname_storage::{ProxyHop, UniversalResolverCutover};
+
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let gauges = &metrics.universal_resolver;
+    let hop = |implementation: &str, kind: &str, block: i64| ProxyHop {
+        proxy_address: "0xmanaged".to_owned(),
+        implementation: implementation.to_owned(),
+        implementation_kind: kind.to_owned(),
+        block_number: block,
+    };
+    let sepolia = |cut_over: bool, last: ProxyHop| {
+        BTreeMap::from([(
+            "ethereum-sepolia".to_owned(),
+            UniversalResolverCutover {
+                cut_over,
+                chain: vec![hop("0xmanaged", "universal_resolver_proxy", 10), last],
+            },
+        )])
+    };
+    let chains = ["ethereum-mainnet", "ethereum-sepolia"];
+    let read = |gauge: &str, chain: &str| -> Result<bool> {
+        let scrape = metrics.registry.encode()?;
+        Ok(scrape.contains(&format!("{gauge}{{chain=\"{chain}\"}} 1\n")))
+    };
+
+    let admitted = sepolia(true, hop("0xv2", "admitted_universal_resolver", 20));
+    assert!(gauges.apply(chains, &admitted).is_empty());
+    assert!(read(
+        "phase_runner_universal_resolver_cut_over",
+        "ethereum-sepolia"
+    )?);
+    assert!(!read(
+        "phase_runner_universal_resolver_unadmitted",
+        "ethereum-sepolia"
+    )?);
+
+    let repointed = sepolia(false, hop("0xnew", "other", 30));
+    assert_eq!(gauges.apply(chains, &repointed), ["ethereum-sepolia"]);
+    assert!(
+        gauges.apply(chains, &repointed).is_empty(),
+        "one warning per transition"
+    );
+    assert!(!read(
+        "phase_runner_universal_resolver_cut_over",
+        "ethereum-sepolia"
+    )?);
+    assert!(read(
+        "phase_runner_universal_resolver_unadmitted",
+        "ethereum-sepolia"
+    )?);
+    assert!(!read(
+        "phase_runner_universal_resolver_unadmitted",
+        "ethereum-mainnet"
+    )?);
+
+    let again = sepolia(false, hop("0xnewer", "other", 40));
+    assert_eq!(gauges.apply(chains, &again), ["ethereum-sepolia"]);
+    assert!(gauges.apply(chains, &admitted).is_empty());
+    assert!(!read(
+        "phase_runner_universal_resolver_unadmitted",
+        "ethereum-sepolia"
+    )?);
+    assert_eq!(gauges.apply(chains, &repointed), ["ethereum-sepolia"]);
+
+    gauges.apply(["ethereum-mainnet"], &BTreeMap::new());
+    assert!(
+        !metrics
+            .registry
+            .encode()?
+            .contains("chain=\"ethereum-sepolia\""),
+        "a chain with neither phase nor proxy rows leaves the gauges"
+    );
     Ok(())
 }

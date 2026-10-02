@@ -2122,3 +2122,19 @@ another change discharges both with one redo pair. It needs no schema-migration,
 no manifest change and no historical ingest fetch. After it, a change to a
 read-only family query (search, bound names, record, reverse, permission,
 children or topology readers) no longer rotates the hash or forces a redo.
+
+### Universal Resolver cutover gauges and alert
+
+The build that reports the
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) per chain
+edits no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+covers and adds no schema-migration, so it needs no redo and no historical
+ingest fetch. The runner exports `phase_runner_universal_resolver_cut_over` and
+`phase_runner_universal_resolver_unadmitted` and logs a warning when a chain's
+client-facing Universal Resolver comes to end at an implementation the
+`ens_execution` manifest does not admit
+([monitoring runbook](runbooks/pipeline-monitoring.md#universal-resolver-cutover)).
+Load the new `BignameUniversalResolverUnadmitted` rule with the runner. On a
+deployment whose manifests do not admit the implementation a chain's Universal
+Resolver currently points at, the rule pages once the publication is current;
+that page is the re-admission to do, not a fault of the build.

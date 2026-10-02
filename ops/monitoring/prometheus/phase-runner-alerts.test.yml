@@ -46,6 +46,45 @@ tests:
         alertname: BignamePhaseRunnerRpcChainMismatch
         exp_alerts: []
 
+  - name: an unadmitted Universal Resolver implementation pages once the publication is current
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x10'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x10'
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '0x10'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-mainnet"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-sepolia
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations:
+              threshold: "The client-facing Universal Resolver proxy chain ends at an implementation the ens_execution manifest does not admit for 5 minutes, while the family publication is within 30 blocks of the observed head."
+              meaning: "Upstream repointed the named chain's Universal Resolver to an implementation bigname does not admit, so the chain reads as not cut over and every .eth name ENSv1 decides serves its ENSv1 expiry, grace and resolver again. Pin and admit the new implementation."
+
+  - name: an unadmitted implementation in replayed history does not page
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x10'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '-1x5 110000-1000x5'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+
   - name: inactive one-hot phase states do not page
     interval: 1m
     input_series:

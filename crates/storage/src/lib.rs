@@ -35,6 +35,7 @@ mod resolver;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
+mod universal_resolver_cutover;
 mod unix_seconds;
 pub use expiry::contract_expiry_reason;
 pub use unix_seconds::UnixSeconds;
@@ -186,6 +187,9 @@ pub use snapshot_selection::{
     SnapshotSelectionScope, SnapshotSelectorInput, ensure_projection_chain_positions_match,
     load_served_project_generation, parse_rfc3339_utc_timestamp,
     resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
+};
+pub use universal_resolver_cutover::{
+    ProxyHop, UniversalResolverCutover, load_universal_resolver_cutovers,
 };
 
 /// Checked-in migrations retained for migration validation and test database construction.
