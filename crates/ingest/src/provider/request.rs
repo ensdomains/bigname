@@ -5,7 +5,7 @@ use reqwest::Url;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use super::{JsonRpcProvider, redacted_text};
+use super::{JsonRpcProvider, RpcCountKind, redacted_text};
 
 const MAX_ATTEMPTS: usize = 5;
 
@@ -106,6 +106,7 @@ impl JsonRpcProvider {
         params: Vec<Value>,
         dispatch: Dispatch,
     ) -> Result<Option<Value>> {
+        self.counters.add(RpcCountKind::Calls, [method]);
         let body = self
             .send(
                 json!({
@@ -135,6 +136,8 @@ impl JsonRpcProvider {
                 })
                 .collect(),
         );
+        self.counters
+            .add(RpcCountKind::Calls, calls.iter().map(|call| call.method));
         let body = self.send(request, Dispatch::Data).await?;
         let responses = body
             .as_array()
@@ -177,9 +180,24 @@ impl JsonRpcProvider {
         };
         self.request_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let body = self.post(&client, client_id, &request, permit).await;
+        self.counters.add(
+            RpcCountKind::Requests,
+            [if body.is_ok() { "ok" } else { "failed" }],
+        );
+        body
+    }
+
+    async fn post(
+        &self,
+        client: &reqwest::Client,
+        client_id: u64,
+        request: &Value,
+        permit: tokio::sync::SemaphorePermit<'_>,
+    ) -> Result<Value> {
         let response = match client
             .post(self.endpoint.clone())
-            .json(&request)
+            .json(request)
             .send()
             .await
         {
@@ -258,6 +276,8 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
             "timeout",
             "connection reset",
             "connection closed",
+            // dRPC answers HTTP 400 when no node it routes to serves the request right now.
+            "route your request to suitable provider",
             "provider block hashes changed during range log lookup",
             "provider block disappeared during range log lookup",
             "provider returned log outside resolved block",
@@ -361,7 +381,7 @@ fn truncate(body: &str) -> &str {
     &body[..end]
 }
 
-async fn backoff(attempt: usize) {
+pub(super) async fn backoff(attempt: usize) {
     let delay = 250_u64.saturating_mul(1_u64 << attempt.min(4));
     tokio::time::sleep(Duration::from_millis(delay)).await;
 }
@@ -415,6 +435,17 @@ mod tests {
         for message in ["provider omitted block 10", "block number is missing"] {
             assert!(!retryable(&anyhow::anyhow!(message)), "{message}");
         }
+    }
+
+    #[test]
+    fn a_hosted_routing_refusal_is_retryable() {
+        assert!(retryable(&anyhow::anyhow!(
+            "provider request failed with HTTP 400 Bad Request: {{\"message\":\"Can't route your \
+             request to suitable provider, if you specified certain providers revise the list\"}}"
+        )));
+        assert!(!retryable(&anyhow::anyhow!(
+            "provider request failed with HTTP 400 Bad Request: invalid JSON"
+        )));
     }
 
     #[test]

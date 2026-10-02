@@ -1,3 +1,5 @@
+use bigname_ingest::RpcCountKind;
+
 use super::*;
 use crate::{
     heads::BlockMarker,
@@ -439,6 +441,47 @@ fn rpc_chain_gauges_report_the_checked_id_and_a_runtime_mismatch() -> Result<()>
         "phase_runner_rpc_chain_mismatch{chain=\"ethereum-sepolia\",source=\"hydration\"} 0\n",
         "phase_runner_rpc_chain_id{chain=\"ethereum-sepolia\",source=\"primary\"} -1\n",
         "phase_runner_rpc_chain_mismatch{chain=\"ethereum-sepolia\",source=\"primary\"} 1\n",
+    ] {
+        assert!(scrape.contains(line), "missing {line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn ingest_rpc_counters_follow_the_engine_totals() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let count = |kind, label: &str| bigname_ingest::RpcCount {
+        kind,
+        chain: "ethereum-mainnet".to_owned(),
+        source: "primary".to_owned(),
+        label: label.to_owned(),
+    };
+    let totals = |calls, nulls| {
+        BTreeMap::from([
+            (count(RpcCountKind::Requests, "ok"), 3),
+            (
+                count(RpcCountKind::Calls, "eth_getTransactionReceipt"),
+                calls,
+            ),
+            (
+                count(RpcCountKind::NullResults, "eth_getTransactionReceipt"),
+                nulls,
+            ),
+        ])
+    };
+    metrics.ingest_rpc.apply(totals(256, 2));
+    metrics.ingest_rpc.apply(totals(258, 2));
+
+    let scrape = metrics.registry.encode()?;
+    for line in [
+        "# TYPE phase_runner_ingest_rpc_calls_total counter",
+        "phase_runner_ingest_rpc_requests_total{chain=\"ethereum-mainnet\",outcome=\"ok\",source=\"primary\"} 3\n",
+        "phase_runner_ingest_rpc_calls_total{chain=\"ethereum-mainnet\",method=\"eth_getTransactionReceipt\",source=\"primary\"} 258\n",
+        "phase_runner_ingest_provider_null_results_total{chain=\"ethereum-mainnet\",method=\"eth_getTransactionReceipt\",source=\"primary\"} 2\n",
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }

@@ -10,7 +10,9 @@ use crate::{
         BASE_COINBASE_SEAM_BLOCK, effective_redo_start, primary_source, publishable_heads,
         redo_source_target, sort_sources, target_number, validate_request,
     },
-    provider::{ChainProvider, ProviderKind, SharedProvider, normalized_kind, provider_error},
+    provider::{
+        ChainProvider, ProviderKind, RpcCounters, SharedProvider, normalized_kind, provider_error,
+    },
 };
 
 mod live;
@@ -116,6 +118,7 @@ pub struct Engine {
     coinbase_sources: Mutex<BTreeMap<String, Arc<CoinbaseSqlSource>>>,
     range_logs: Mutex<RangeLogCache>,
     redo_watch_plans: Mutex<BTreeMap<String, RedoWatchPlan>>,
+    rpc_counters: RpcCounters,
 }
 
 impl Engine {
@@ -133,7 +136,15 @@ impl Engine {
             coinbase_sources: Mutex::new(BTreeMap::new()),
             range_logs: Mutex::new(RangeLogCache::default()),
             redo_watch_plans: Mutex::new(BTreeMap::new()),
+            rpc_counters: RpcCounters::default(),
         }
+    }
+
+    /// Counts the JSON-RPC traffic of every provider this engine builds into `counters`.
+    #[must_use]
+    pub fn with_rpc_counters(mut self, counters: RpcCounters) -> Self {
+        self.rpc_counters = counters;
+        self
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -485,7 +496,8 @@ impl Engine {
                     format!("failed to configure source {}", source.key),
                     error,
                 )
-            })?,
+            })?
+            .with_rpc_counters(self.rpc_counters.source(chain_id, &source.key)),
         );
         providers.insert(key, provider.clone());
         Ok(provider)

@@ -303,6 +303,7 @@ pub(crate) async fn finish_failed_redo_start(
 }
 
 pub(crate) struct Backoff {
+    initial: Duration,
     current: Duration,
     maximum: Duration,
 }
@@ -310,6 +311,7 @@ pub(crate) struct Backoff {
 impl Backoff {
     pub(crate) fn new(config: &TimingConfig) -> Self {
         Self {
+            initial: config.initial_backoff,
             current: config.initial_backoff,
             maximum: config.maximum_backoff,
         }
@@ -319,6 +321,10 @@ impl Backoff {
         let delay = self.current;
         self.current = self.current.saturating_mul(2).min(self.maximum);
         delay
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.current = self.initial;
     }
 }
 
@@ -366,6 +372,8 @@ mod tests {
         assert_eq!(backoff.next_delay(), Duration::from_millis(6));
         assert_eq!(backoff.next_delay(), Duration::from_millis(10));
         assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(3));
     }
 }
 

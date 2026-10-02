@@ -19,6 +19,7 @@ pub struct RunnerMetricsFeed {
     configured_chains: Arc<Mutex<BTreeSet<String>>>,
     project_writes: super::project_writes::PendingProjectWrites,
     rpc_chains: super::rpc_chain::RpcChainStates,
+    ingest_rpc: bigname_ingest::RpcCounters,
 }
 
 impl RunnerMetricsFeed {
@@ -66,6 +67,12 @@ impl RunnerMetricsFeed {
 
     pub(super) fn rpc_chains(&self) -> &super::rpc_chain::RpcChainStates {
         &self.rpc_chains
+    }
+
+    /// The totals an ingest engine counts its JSON-RPC traffic into, for
+    /// [`bigname_ingest::Engine::with_rpc_counters`].
+    pub fn ingest_rpc_counters(&self) -> &bigname_ingest::RpcCounters {
+        &self.ingest_rpc
     }
 
     pub(super) fn take_project_writes(&self) -> super::project_writes::Pending {

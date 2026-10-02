@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::progress_monitor::RunnerPhaseProgress;
 
+mod ingest_rpc;
 mod project_writes;
 mod rpc_chain;
 mod served_lag;
@@ -89,6 +90,7 @@ struct PipelineMetrics {
     served_lag: ServedLagGauges,
     project_writes: ProjectWriteGauges,
     rpc_chains: rpc_chain::RpcChainGauges,
+    ingest_rpc: ingest_rpc::IngestRpcCounters,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -226,6 +228,7 @@ impl PipelineMetrics {
         let served_lag = ServedLagGauges::new(&registry)?;
         let project_writes = ProjectWriteGauges::new(&registry)?;
         let rpc_chains = rpc_chain::RpcChainGauges::new(&registry)?;
+        let ingest_rpc = ingest_rpc::IngestRpcCounters::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -254,6 +257,7 @@ impl PipelineMetrics {
             served_lag,
             project_writes,
             rpc_chains,
+            ingest_rpc,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -449,6 +453,9 @@ pub async fn start(
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
     metrics.served_lag.configure(&feed.configured_chains());
     metrics.rpc_chains.apply(feed.rpc_chains());
+    metrics
+        .ingest_rpc
+        .apply(feed.ingest_rpc_counters().snapshot());
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
@@ -486,6 +493,9 @@ async fn refresh_loop(
         };
         metrics.project_writes.apply(feed.take_project_writes());
         metrics.rpc_chains.apply(feed.rpc_chains());
+        metrics
+            .ingest_rpc
+            .apply(feed.ingest_rpc_counters().snapshot());
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");
         }

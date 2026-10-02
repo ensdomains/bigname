@@ -15,7 +15,7 @@ use crate::{
     phase_lock::PhaseLock,
     progress_monitor::RunnerPhaseProgress,
     runner_support::{
-        HeartbeatThrottle, PhaseLoopResult, StopClock, cancelled_redo_error,
+        Backoff, HeartbeatThrottle, PhaseLoopResult, StopClock, cancelled_redo_error,
         finish_failed_redo_start, finish_stopped_redo_start, redo_outcome,
         release_lock_racing_stop,
     },
@@ -153,6 +153,9 @@ impl PhaseRunner {
         Ok(())
     }
 
+    /// Resets `backoff` whenever a batch settles, so a failure after progress waits only the
+    /// initial delay.
+    #[allow(clippy::too_many_arguments)]
     async fn run_phase_once(
         &self,
         chain: &ChainConfig,
@@ -160,6 +163,7 @@ impl PhaseRunner {
         mode: RunMode,
         cancellation: CancellationToken,
         automatic_discovery_ingest: bool,
+        backoff: &mut Backoff,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         // Each attempt has its own stop budget, so a stop that lands during its
@@ -190,6 +194,7 @@ impl PhaseRunner {
                 cancellation.clone(),
                 automatic_discovery_ingest,
                 &mut phase_lock,
+                backoff,
             )
             .await;
         let release = release_lock_racing_stop(
@@ -226,6 +231,7 @@ impl PhaseRunner {
         cancellation: CancellationToken,
         automatic_discovery_ingest: bool,
         phase_lock: &mut PhaseLock,
+        backoff: &mut Backoff,
     ) -> RunnerResult<()> {
         let phase_name = phase.name();
         // Start-up is raced like the batch loop, from the lock in `run_phase_once`
@@ -374,6 +380,7 @@ impl PhaseRunner {
                 cancellation.clone(),
                 &mut heartbeat,
                 phase_lock,
+                backoff,
             )
             .await;
         let result = match result {
@@ -492,6 +499,7 @@ impl PhaseRunner {
         cancellation: CancellationToken,
         heartbeat: &mut HeartbeatThrottle,
         phase_lock: &mut PhaseLock,
+        backoff: &mut Backoff,
     ) -> RunnerResult<PhaseLoopResult> {
         let batch::Execution { mode, redo_attempt } = execution;
         let phase_name = phase.name();
@@ -561,6 +569,7 @@ impl PhaseRunner {
             )
             .await?;
             self.record_loop_progress(&chain.chain_id);
+            backoff.reset();
             reserved_write_bytes = progress.estimated_write_bytes;
             if !self
                 .follow_batch(chain, &*phase, &cancellation, heartbeat, phase_lock)

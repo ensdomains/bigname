@@ -47,6 +47,10 @@ pub(crate) enum Tamper {
     NullReceipt(i64),
     /// A transaction the provider no longer has.
     NullTransaction(i64),
+    /// A receipt the provider holds but answers null for its first N requests.
+    NullReceiptAnswers(i64, usize),
+    /// A transaction the provider holds but answers null for its first N requests.
+    NullTransactionAnswers(i64, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +419,11 @@ impl TestNode {
         if self.tamper == Tamper::NullReceipt(block.number) && transaction.index == 1 {
             return Value::Null;
         }
+        if let Tamper::NullReceiptAnswers(number, nulls) = self.tamper
+            && self.answers_null(block, transaction, number, nulls)
+        {
+            return Value::Null;
+        }
         self.receipt_value(block, transaction)
     }
 
@@ -429,7 +438,28 @@ impl TestNode {
         if self.tamper == Tamper::NullTransaction(block.number) && transaction.index == 1 {
             return Value::Null;
         }
+        if let Tamper::NullTransactionAnswers(number, nulls) = self.tamper
+            && self.answers_null(block, transaction, number, nulls)
+        {
+            return Value::Null;
+        }
         self.transaction_value(block, transaction)
+    }
+
+    fn answers_null(
+        &self,
+        block: &TestBlock,
+        transaction: &TestTransaction,
+        number: i64,
+        nulls: usize,
+    ) -> bool {
+        let answers = block.number == number
+            && transaction.index == 1
+            && self.counts.get(NULL_ANSWERS) < nulls;
+        if answers {
+            self.counts.record(NULL_ANSWERS);
+        }
+        answers
     }
 
     fn logs(&self, filter: &Value) -> Value {
@@ -543,6 +573,8 @@ pub(crate) const BLOCK_BODY: &str = "eth_getBlockByHash(full)";
 pub(crate) const BLOCK_RECEIPTS: &str = "eth_getBlockReceipts";
 /// Label for the exact-block log fetch the per-transaction path must never issue.
 pub(crate) const EXACT_BLOCK_LOGS: &str = "eth_getLogs(blockHash)";
+/// Label for each null answer a `Null*Answers` tamper gave.
+pub(crate) const NULL_ANSWERS: &str = "null answers";
 
 pub(crate) struct TestEndpoint {
     pub(crate) endpoint: String,

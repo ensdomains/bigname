@@ -45,6 +45,7 @@ impl PhaseRunner {
                 mode.clone(),
                 cancellation.clone(),
                 automatic_discovery_ingest,
+                &mut backoff,
             ))
             .await;
             self.record_loop_progress(&chain.chain_id);

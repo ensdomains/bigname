@@ -118,10 +118,13 @@ async fn main() -> Result<()> {
                         .max(1),
                 )
                 .await?;
-                let ingest_engine = Arc::new(bigname_ingest::Engine::with_config(
-                    database.pool().clone(),
-                    runtime.capacity.ingest,
-                ));
+                let ingest_engine = Arc::new(
+                    bigname_ingest::Engine::with_config(
+                        database.pool().clone(),
+                        runtime.capacity.ingest,
+                    )
+                    .with_rpc_counters(metrics_feed.ingest_rpc_counters().clone()),
+                );
                 let phases = PhaseSet::with_ingest_interpret_project_and_live(
                     Arc::new(
                         IngestPhase::with_engine(Arc::clone(&ingest_engine))
@@ -255,10 +258,10 @@ async fn main() -> Result<()> {
                 .await?;
                 rpc_chain_check::report(&metrics_feed, &verified_rpc);
                 let rpc_mode = rpc_chain_check::mode(&capacity);
-                let ingest_engine = Arc::new(bigname_ingest::Engine::with_config(
-                    database.pool().clone(),
-                    capacity.ingest,
-                ));
+                let ingest_engine = Arc::new(
+                    bigname_ingest::Engine::with_config(database.pool().clone(), capacity.ingest)
+                        .with_rpc_counters(metrics_feed.ingest_rpc_counters().clone()),
+                );
                 let ingest = Arc::new(
                     IngestPhase::with_engine(ingest_engine).with_metrics(metrics_feed.clone()),
                 );

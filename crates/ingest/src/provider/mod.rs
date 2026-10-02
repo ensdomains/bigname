@@ -16,6 +16,7 @@ mod bloom;
 mod chain_check;
 #[cfg(test)]
 mod chain_check_tests;
+mod counters;
 mod decode;
 mod http_client;
 mod request;
@@ -29,11 +30,13 @@ pub use bloom::bloom_contains;
 pub use chain_check::{
     ExpectedRpcChain, ObservedRpcChain, RPC_CHAIN_RECHECK_INTERVAL, RpcChainCheck, RpcChainMismatch,
 };
+pub use counters::{RpcCount, RpcCountKind, RpcCounters};
 pub use types::{
     Block, BlockBundle, HeadSnapshot, Log, Receipt, ResolvedBlock, Transaction, TransactionPayload,
 };
 
 use chain_check::{ChainGuard, chain_mismatch_in};
+use counters::SourceCounters;
 use http_client::RecoveringHttpClient;
 use request::validate_endpoint;
 pub use reth_db::RETH_DB_OPENED_STORAGE_CHILDREN;
@@ -62,6 +65,7 @@ pub struct JsonRpcProvider {
     endpoint: Url,
     client: RecoveringHttpClient,
     request_attempts: Arc<AtomicUsize>,
+    counters: SourceCounters,
     config: IngestConfig,
     in_flight: Arc<Semaphore>,
     chain_guard: Option<Arc<ChainGuard>>,
@@ -77,6 +81,7 @@ impl JsonRpcProvider {
             endpoint: validate_endpoint(endpoint)?,
             client: RecoveringHttpClient::new(CONNECT_TIMEOUT, REQUEST_TIMEOUT)?,
             request_attempts: Arc::new(AtomicUsize::new(0)),
+            counters: SourceCounters::default(),
             config,
             in_flight: Arc::new(Semaphore::new(config.rpc_max_in_flight())),
             chain_guard: None,
@@ -139,6 +144,17 @@ impl ChainProvider {
     pub(crate) fn with_chain_check(self, expected: ExpectedRpcChain) -> Self {
         match self {
             Self::JsonRpc(provider) => Self::JsonRpc(provider.with_chain_check(expected)),
+            Self::RethDb(provider) => Self::RethDb(provider),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_rpc_counters(self, counters: SourceCounters) -> Self {
+        match self {
+            Self::JsonRpc(provider) => Self::JsonRpc(JsonRpcProvider {
+                counters,
+                ..provider
+            }),
             Self::RethDb(provider) => Self::RethDb(provider),
         }
     }

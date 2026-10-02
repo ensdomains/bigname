@@ -11,10 +11,12 @@ use crate::{
         query::{self, QueryContext},
     },
     manifest::{WatchFilter, WatchQuery},
-    provider::{ChainProvider, Log, ResolvedBlock, SharedProvider},
+    provider::{
+        ChainProvider, Log, ResolvedBlock, RpcCount, RpcCountKind, RpcCounters, SharedProvider,
+    },
     test_chain::{
-        BLOCK_BODY, BLOCK_RECEIPTS, EXACT_BLOCK_LOGS, Tamper, TestChain, WATCHED_ADDRESS,
-        WATCHED_TOPIC, serve,
+        BLOCK_BODY, BLOCK_RECEIPTS, EXACT_BLOCK_LOGS, RequestCounts, Tamper, TestChain,
+        WATCHED_ADDRESS, WATCHED_TOPIC, serve,
     },
 };
 
@@ -334,10 +336,104 @@ async fn a_receipt_on_a_hash_the_window_did_not_resolve_is_transient() -> AnyRes
 
 #[tokio::test]
 async fn a_null_receipt_is_transient() -> AnyResult<()> {
-    let error = window_error(Tamper::NullReceipt(TAMPERED_BLOCK)).await?;
+    let (result, counts, _) = counted_window(Tamper::NullReceipt(TAMPERED_BLOCK)).await?;
+    let error = result.expect_err("a receipt that stays null must fail the window");
     assert_eq!(error.kind(), ErrorKind::Transient);
     assert!(error.to_string().contains("omitted receipt"), "{error}");
+    assert_eq!(
+        counts.get("eth_getTransactionReceipt"),
+        SELECTED_TRANSACTIONS + 3,
+        "the null receipt is asked again three times, alone"
+    );
     Ok(())
+}
+
+#[tokio::test]
+async fn a_receipt_answered_null_is_asked_again_alone() -> AnyResult<()> {
+    let (result, counts, totals) =
+        counted_window(Tamper::NullReceiptAnswers(TAMPERED_BLOCK, 2)).await?;
+    assert_eq!(result?.receipts.len(), SELECTED_TRANSACTIONS);
+    assert_eq!(
+        counts.get("eth_getTransactionReceipt"),
+        SELECTED_TRANSACTIONS + 2
+    );
+    assert_eq!(
+        counts.get("eth_getTransactionByHash"),
+        SELECTED_TRANSACTIONS
+    );
+    assert_eq!(
+        total(
+            &totals,
+            RpcCountKind::NullResults,
+            "eth_getTransactionReceipt"
+        ),
+        2
+    );
+    assert_eq!(
+        total(&totals, RpcCountKind::Calls, "eth_getTransactionReceipt"),
+        u64::try_from(SELECTED_TRANSACTIONS + 2)?
+    );
+    assert_eq!(total(&totals, RpcCountKind::Requests, "failed"), 0);
+    assert!(total(&totals, RpcCountKind::Requests, "ok") > 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_transaction_answered_null_is_asked_again_alone() -> AnyResult<()> {
+    let (result, counts, totals) =
+        counted_window(Tamper::NullTransactionAnswers(TAMPERED_BLOCK, 1)).await?;
+    assert_eq!(result?.transactions.len(), SELECTED_TRANSACTIONS);
+    assert_eq!(
+        counts.get("eth_getTransactionByHash"),
+        SELECTED_TRANSACTIONS + 1
+    );
+    assert_eq!(
+        counts.get("eth_getTransactionReceipt"),
+        SELECTED_TRANSACTIONS
+    );
+    assert_eq!(
+        total(
+            &totals,
+            RpcCountKind::NullResults,
+            "eth_getTransactionByHash"
+        ),
+        1
+    );
+    Ok(())
+}
+
+const SELECTED_TRANSACTIONS: usize = WINDOW_BLOCKS as usize / 4;
+
+async fn counted_window(
+    tamper: Tamper,
+) -> AnyResult<(
+    Result<FetchedBatch>,
+    Arc<RequestCounts>,
+    BTreeMap<RpcCount, u64>,
+)> {
+    let endpoint = serve(TestChain::synthetic(FIRST_BLOCK, WINDOW_BLOCKS, 4), tamper).await?;
+    let counters = RpcCounters::default();
+    let provider = shared(
+        endpoint
+            .provider
+            .with_rpc_counters(counters.source("test-chain", "rpc")),
+    );
+    let cache = Mutex::new(RangeLogCache::default());
+    let to = FIRST_BLOCK + WINDOW_BLOCKS - 1;
+    let result = run_window(&provider, &cache, FIRST_BLOCK, to, None).await;
+    Ok((result, endpoint.counts, counters.snapshot()))
+}
+
+fn total(totals: &BTreeMap<RpcCount, u64>, kind: RpcCountKind, label: &str) -> u64 {
+    totals
+        .get(&RpcCount {
+            kind,
+            chain: "test-chain".to_owned(),
+            source: "rpc".to_owned(),
+            label: label.to_owned(),
+        })
+        .copied()
+        .unwrap_or_default()
 }
 
 #[tokio::test]
