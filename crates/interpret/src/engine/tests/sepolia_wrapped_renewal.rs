@@ -182,6 +182,160 @@ async fn a_wrapper_minted_registration_is_no_owner_history_of_the_name_wrapper()
     Ok(())
 }
 
+/// The same registration when the wrapped token's receiver unwraps the name to `B` inside its
+/// mint callback, before the outer `NameWrapped`: that wrap records no registrar resource, and
+/// the NameWrapper still has no owner history of the name while `B`, who took the token, has.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L258 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_wrapper_minted_registration_unwrapped_in_its_mint_callback_is_no_owner_history_of_the_name_wrapper()
+-> TestResult {
+    const CONTROLLER: &str = "0x00000000000000000000000000000000000000a1";
+    const REGISTRANT: &str = "0x00000000000000000000000000000000000000b2";
+    let database = database("interpret_wrapper_minted_callback_owner_history").await?;
+    let pool = database.pool();
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+    seed_lineage(pool).await?;
+    let label = b"callbackunwrapped";
+    let labelhash = keccak256(label);
+    let namehash = eth_namehash(labelhash);
+    let receiver = OWNER.parse::<Address>()?;
+    let name_wrapper = NAME_WRAPPER.parse::<Address>()?;
+    let token = U256::from_be_bytes(labelhash.0);
+    let mut dns_name = vec![u8::try_from(label.len())?];
+    dns_name.extend_from_slice(label);
+    dns_name.extend_from_slice(b"\x03eth\0");
+
+    insert_transaction(pool, REGISTRATION_BLOCK, WRAPPED_CONTROLLER).await?;
+    let logs = [
+        (
+            BASE_REGISTRAR,
+            base_registrar::Transfer {
+                from: Address::ZERO,
+                to: name_wrapper,
+                tokenId: token,
+            }
+            .encode_log_data(),
+        ),
+        (
+            ENS_REGISTRY,
+            ens_registry::NewOwner {
+                node: eth_node(),
+                label: labelhash,
+                owner: name_wrapper,
+            }
+            .encode_log_data(),
+        ),
+        (
+            BASE_REGISTRAR,
+            renewal_events::NameRegistered {
+                id: token,
+                owner: name_wrapper,
+                expires: U256::from(REGISTRAR_EXPIRY),
+            }
+            .encode_log_data(),
+        ),
+        (
+            NAME_WRAPPER,
+            TransferSingle {
+                operator: name_wrapper,
+                from: Address::ZERO,
+                to: receiver,
+                id: U256::from_be_bytes(namehash.0),
+                value: U256::from(1_u64),
+            }
+            .encode_log_data(),
+        ),
+        (
+            NAME_WRAPPER,
+            TransferSingle {
+                operator: receiver,
+                from: receiver,
+                to: Address::ZERO,
+                id: U256::from_be_bytes(namehash.0),
+                value: U256::from(1_u64),
+            }
+            .encode_log_data(),
+        ),
+        (
+            ENS_REGISTRY,
+            ens_registry::Transfer {
+                node: namehash,
+                owner: CONTROLLER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            NAME_WRAPPER,
+            NameUnwrapped {
+                node: namehash,
+                owner: CONTROLLER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            BASE_REGISTRAR,
+            base_registrar::Transfer {
+                from: name_wrapper,
+                to: REGISTRANT.parse()?,
+                tokenId: token,
+            }
+            .encode_log_data(),
+        ),
+        (
+            NAME_WRAPPER,
+            NameWrapped {
+                node: namehash,
+                name: dns_name.into(),
+                owner: receiver,
+                fuses: DOT_ETH_FUSES,
+                expiry: REGISTRAR_EXPIRY + GRACE_PERIOD,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (index, (emitter, data)) in logs.into_iter().enumerate() {
+        insert_log(
+            pool,
+            REGISTRATION_BLOCK,
+            i64::try_from(index)?,
+            emitter,
+            data,
+        )
+        .await?;
+    }
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: REGISTRATION_BLOCK,
+            to_block: REGISTRATION_BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let unlinked: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT after_state -> 'wrapped_registrar_resource_id' FROM normalized_events
+         WHERE source_family = 'ens_v1_wrapper_l1' AND event_kind = $1
+           AND after_state ->> 'source_event' = 'NameWrapped'",
+    )
+    .bind(bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND)
+    .fetch_optional(pool)
+    .await?;
+    let wrapper =
+        super::graveyard_burned::owner_history(pool, NAME_WRAPPER, REGISTRATION_BLOCK).await?;
+    let registrant =
+        super::graveyard_burned::owner_history(pool, REGISTRANT, REGISTRATION_BLOCK).await?;
+    database.cleanup().await?;
+    assert_eq!(unlinked, Some(serde_json::Value::Null));
+    assert!(wrapper.is_empty(), "{wrapper:?}");
+    assert!(!registrant.is_empty(), "{registrant:?}");
+    Ok(())
+}
+
 /// `registerAndWrapETH2LD` from the wrapped controller: the BaseRegistrar mints to the
 /// NameWrapper, the registry names the NameWrapper owner, the BaseRegistrar emits its numeric
 /// `NameRegistered`, and the NameWrapper mints the ERC-1155 token and emits `NameWrapped`. The
