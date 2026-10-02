@@ -131,6 +131,30 @@ tests:
               severity: page
             exp_annotations: *universal_resolver_annotations
 
+  - name: an interrupted unadmitted hold starts again
+    interval: 1m
+    input_series:
+      - series: 'phase_runner_universal_resolver_unadmitted{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x16'
+      - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
+        values: '1x3 5000x1 1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: BignameUniversalResolverUnadmitted
+        exp_alerts:
+          - exp_labels:
+              chain: ethereum-sepolia
+              instance: phase-runner:9465
+              job: bigname-phase-runner
+              severity: page
+            exp_annotations: *universal_resolver_annotations
+
   - name: a Project redo near the head does not page the unadmitted state it replays
     interval: 1m
     input_series:
@@ -139,9 +163,9 @@ tests:
       - series: 'phase_runner_served_lag_blocks{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia"}'
         values: '20x15'
       - series: 'phase_runner_redo_in_progress{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia",phase="project"}'
-        values: '1x8 0x7'
+        values: '1x8 0x6'
       - series: 'phase_runner_redo_in_progress{job="bigname-phase-runner",instance="phase-runner:9465",chain="ethereum-sepolia",phase="interpret"}'
-        values: '0x15'
+        values: '1x15'
     alert_rule_test:
       - eval_time: 8m
         alertname: BignameUniversalResolverUnadmitted
