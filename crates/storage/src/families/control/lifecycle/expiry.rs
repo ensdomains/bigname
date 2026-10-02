@@ -155,8 +155,8 @@ pub(super) fn grace_ends_at(expiry: Option<&Value>, grace: Grace) -> Value {
 /// Apply Bigname's public no-expiry classification only to a contract context that defines it.
 /// A user-registry word remains a finite expiry, including values above the calendar range.
 /// Root eth/reverse registrations use MAX_EXPIRY in the pinned deployment:
-/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39 @ ens_v2_sepolia_20261001@07e55a05)
-/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L40-L51 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L31-L42 @ ens_v2_sepolia_20261001@07e55a05)
 /// Wrapper expiry is parent-capped, with maximum root/eth expiry:
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L978 @ ens_v1@91c966f)

@@ -13,7 +13,7 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ens_v1_lll` | `ensdomains/ens` | `7e377df8` | Historical evidence for the 2017 LLL registry only |
 | `ens_v2` | `ensdomains/contracts-v2` | `a971bd64` | Post-audit ENSv2 contracts and pinned Sepolia deployment evidence |
 | `ens_v2_sepolia_20261001` | `ensdomains/contracts-v2` | `07e55a05` | Official 2026-10-01 Sepolia redeploy artifacts, receipts, compiler inputs and matching source; current Sepolia manifest authority |
-| `ens_v2_sepolia_20260916` | `ensdomains/contracts-v2` | `366de741` | Superseded 2026-09-15 Sepolia deployment; ENSv2 Solidity source evidence only where the cited lines are unchanged in the 2026-10-01 redeploy |
+| `ens_v2_sepolia_20260916` | `ensdomains/contracts-v2` | `366de741` | Superseded 2026-09-15 Sepolia deployment; ENSv2 Solidity source evidence only where the cited lines are unchanged in the 2026-10-01 redeploy, and evidence of the dropped deployment's own history |
 | `ens_v2_sepolia_20260903` | `ensdomains/contracts-v2` | `5da83f6a` | Record-ID PermissionedResolver and direct PublicResolverV2 source evidence; not deployment-address authority |
 | `ens_v1_publicresolver_5141a2a` | `ensdomains/ens-contracts` | `5141a2ac` | Inherited PublicResolverV2 node-record source evidence only |
 | `ens_v2_sepolia_20260629` | `ensdomains/contracts-v2` | `ccaeb58b` | Historical implementation evidence for the admitted 2026-06-29 old-model Sepolia deployment only |
@@ -50,9 +50,9 @@ contracts-v2 commit that wrote the 2026-10-01 redeploy's `deployments/sepolia/`
 and archived the previous set as `deployments/sepolia-20260915-r1/`. The
 `ens_v2_sepolia_20260916` checkout is no longer deployment authority: the
 manifests drop its deployment, and docs and code comments keep citing it only
-for ENSv2 Solidity whose cited lines are unchanged at the new pin. Deployment
-facts (addresses, receipts, constructor arguments, deploy scripts) cite the new
-pin. The
+for ENSv2 Solidity whose cited lines are unchanged at the new pin and for the
+dropped deployment's own history. Deployment facts about the admitted set
+(addresses, receipts, constructor arguments, deploy scripts) cite the new pin. The
 `ens_v2_sepolia_20260903` pin supplies the record-ID resolver's matching
 `PermissionedResolver`, `AbstractRecordResolver`, resolver interfaces and
 `PermissionedResolverLib` sources. It does not establish correspondence of the

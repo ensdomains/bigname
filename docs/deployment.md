@@ -2165,17 +2165,24 @@ from the redeploy's blocks: the redeploy's
 `PermissionedResolverImpl` adds a watch for `Upgraded` naming it from any
 emitter, which is compiled from block zero, and the new ETHRegistry's
 announcement rule alone would already reach back to the earliest retained
-`RegistryCreated` log (block `10893181` on Sepolia). Size the refetch from the
-stamped range before the release. Complete that Ingest redo, then the
+`RegistryCreated` log (block `10893181` on Sepolia). Synchronization refuses
+to retire an address before its start, so start this build only on a database
+whose recorded Sepolia head is at or past `11709095`, the latest start among
+the dropped declarations (the 2026-09-15 `MigrationHelper`,
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20260916@366de741));
+keep the previous
+release until then. Size the refetch from the stamped range before the release. Complete that Ingest redo, then the
 full-history Interpret redo with `--attest-watch-set-coverage`, then the
 Project redo it installs, before the matching API serves. A release that also
 rotates the hash for another change, such as "Read-only family queries outside
 the content hash", runs that Interpret and Project pair once for both.
 
-After the redo, Sepolia's ENSv2 history starts with the redeploy. Every block
-before `11821680` reads as not cut over, including `11710193` to `11821679`,
-when the dropped deployment answered resolution, so `at=` reads there serve
-ENSv1 expiry, grace and resolvers for every `.eth` name. The dropped registries
+After the redo, Sepolia's ENSv2 history starts with the redeploy. The replayed
+proxy history classifies every block before `11821680` as not cut over,
+including `11710193` to `11821679`, when the dropped deployment answered
+resolution, so Project derives that range with ENSv1 expiry, grace and
+resolvers for every `.eth` name. Name reads still serve only the current
+family publication: an `at=` below it answers `stale`, as before. The dropped registries
 announced themselves with `RegistryCreated`, so like any self-announced registry
 they stay on the registry routes, but nothing admitted reaches them and their
 entries name no `.eth` name: check that no normalized event from the dropped

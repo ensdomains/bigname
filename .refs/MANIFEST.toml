@@ -79,6 +79,7 @@ commit = "366de741187e38686c904242753c532b7de70d47"
 purpose = "Official 2026-09-15 Sepolia deployment artifacts and matching ENSv2 source; superseded by the 2026-10-01 redeploy and no longer manifest authority."
 authoritative_for = [
   "ENSv2 Solidity semantics cited by docs and code comments where the cited lines are unchanged in the 2026-10-01 redeploy",
+  "The dropped 2026-09-15 deployment's own addresses and receipts, as history only",
 ]
 
 [refs.ens_v2_sepolia_20261001]
