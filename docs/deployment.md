@@ -2166,12 +2166,11 @@ from the redeploy's blocks: the redeploy's
 emitter, which is compiled from block zero, and the new ETHRegistry's
 announcement rule alone would already reach back to the earliest retained
 `RegistryCreated` log (block `10893181` on Sepolia). Synchronization refuses
-to retire an address before its start, so start this build only on a database
-whose recorded Sepolia head is at or past `11709095`, the latest start among
-the dropped declarations (the 2026-09-15 `MigrationHelper`,
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20260916@366de741));
-keep the previous
-release until then. Size the refetch from the stamped range before the release. Complete that Ingest redo, then the
+to retire an address before its start, so start the build only once the
+recorded Sepolia head is at or past `11709095`, the latest start among the
+dropped declarations (the 2026-09-15 `MigrationHelper`,
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20260916@366de741)),
+and keep the previous release until then. Size the refetch from the stamped range before the release. Complete that Ingest redo, then the
 full-history Interpret redo with `--attest-watch-set-coverage`, then the
 Project redo it installs, before the matching API serves. A release that also
 rotates the hash for another change, such as "Read-only family queries outside
@@ -2186,7 +2185,10 @@ family publication: an `at=` below it answers `stale`, as before. The dropped re
 announced themselves with `RegistryCreated`, so like any self-announced registry
 they stay on the registry routes, but nothing admitted reaches them and their
 entries name no `.eth` name: check that no normalized event from the dropped
-ETHRegistry `0x657ea849…` carries a logical name. The redeploy re-ran premigration: `nick.eth` is
+ETHRegistry `0x657ea849…` carries a logical name. An upgraded database ignores
+a dropped registry's writes after the synchronization head, because the retired
+declaration caps its re-announced admission there; a fresh corpus derives them
+unnamed. Nothing is named on either path (TYR-195 tracks converging the two). The redeploy re-ran premigration: `nick.eth` is
 reserved on the new ETHRegistry at block `11821474` with expiry `1803965433`,
 so the "ENSv1 lease date on name rows" check stands as written. Also check that
 an ENSv1-only `.eth` name with no entry on the new ETHRegistry serves

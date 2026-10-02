@@ -83,7 +83,9 @@ without them; the release entry in
 the order and the stamped range. Raw facts the dropped contracts emitted stay
 stored, as raw facts always do. Their registries announced themselves with
 `RegistryCreated`, so like any self-announced registry they remain indexable,
-but they are not reachable from the admitted root and name nothing.
+but they are not reachable from the admitted root and name nothing. On an
+upgraded database their writes after the synchronization head are ignored; see
+the release entry.
 
 ## Resolver and discovery coverage
 
