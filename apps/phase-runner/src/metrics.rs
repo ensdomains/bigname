@@ -16,6 +16,7 @@ mod ingest_rpc;
 mod project_writes;
 mod rpc_chain;
 mod served_lag;
+mod universal_resolver;
 use project_writes::ProjectWriteGauges;
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
@@ -91,6 +92,7 @@ struct PipelineMetrics {
     project_writes: ProjectWriteGauges,
     rpc_chains: rpc_chain::RpcChainGauges,
     ingest_rpc: ingest_rpc::IngestRpcCounters,
+    universal_resolver: universal_resolver::UniversalResolverGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -229,6 +231,7 @@ impl PipelineMetrics {
         let project_writes = ProjectWriteGauges::new(&registry)?;
         let rpc_chains = rpc_chain::RpcChainGauges::new(&registry)?;
         let ingest_rpc = ingest_rpc::IngestRpcCounters::new(&registry)?;
+        let universal_resolver = universal_resolver::UniversalResolverGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -258,6 +261,7 @@ impl PipelineMetrics {
             project_writes,
             rpc_chains,
             ingest_rpc,
+            universal_resolver,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -280,6 +284,10 @@ impl PipelineMetrics {
             return Err(error);
         }
         if let Err(error) = self.refresh_served_lag(pool).await {
+            self.refresh_success.set(0);
+            return Err(error);
+        }
+        if let Err(error) = self.universal_resolver.refresh(pool, &rows).await {
             self.refresh_success.set(0);
             return Err(error);
         }
