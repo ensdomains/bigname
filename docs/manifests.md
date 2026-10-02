@@ -900,10 +900,10 @@ Its order is unwrapped, unlocked-wrapped, locked-wrapped, then locked children.
 The helper is therefore unobservable: using it is optional, and the transfers it
 batches produce the same log sequence a caller would produce by sending the same
 transfers itself, so correlation never keys on the helper's participation.
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L108-L113 @ ens_v2_sepolia_20260629@ccaeb58)
-(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L124 @ ens_v2_sepolia_20260629@ccaeb58)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L118-L123 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L134 @ ens_v2_sepolia_20261001@07e55a05)
 The current family-wide watch planner assigns the
-ENSv1→ENSv2 migration manifest's complete topic set to this declared address. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L103 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/migration/MigrationHelper.sol:L133 @ ens_v2_sepolia_20260629@ccaeb58)
+ENSv1→ENSv2 migration manifest's complete topic set to this declared address. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L113 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L143 @ ens_v2_sepolia_20261001@07e55a05)
 
 ENSv1→ENSv2 migration-created `WrapperRegistry` proxies are not direct declarations and
 do not use a new discovery rule. Each proxy's initializer emits
@@ -1746,10 +1746,10 @@ and neither its constructor nor its initializer emits anything
 Among the pinned sources the event first appears in the post-audit `ens_v2`
 pin, declared on `IRecordResolver`
 (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L31 @ ens_v2@a971bd64),
-and the 2026-09-15 Sepolia deployment is the first admitted generation whose
+and the 2026-10-01 Sepolia redeploy is the admitted generation whose
 resolver emits it
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20260916@366de741).
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L108 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_20261001@07e55a05).
 Resolvers of the older generation never announce this way, and the support
 rule needs the resolver's implementation observation in any case, so
 `ens_v2_resolver_l1` also admits a resolver from the block in which it, or its
