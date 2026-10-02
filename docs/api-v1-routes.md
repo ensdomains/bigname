@@ -3454,13 +3454,23 @@ introduces it rebuilds Project from full history before serving the option; see
   (`resolver_return_data_malformed`). Neither case falls back to the default.
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/LibABI.sol:L8-L27 @ ens_v1@91c966f)
-  The forward check is unchanged. `coin_type=2147483648` reads the
-  `default.reverse` claim itself on the indexed source.
+  The forward check calls the Universal Resolver for the name's `addr` record
+  on coin type `60`. When that call reverts with `ResolverNotFound(bytes)`
+  carrying the claimed name's own DNS encoding, the name has no resolver to
+  verify against and the verified answer is `not_found`, as for a resolver
+  with no `addr` record. `ResolverNotFound` for any other name, and every other
+  revert, stays `execution_failed`.
+  (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L85 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L405-L417 @ ens_v2_sepolia_20260916@366de74)
+  `coin_type=2147483648` reads the `default.reverse` claim itself on the
+  indexed source.
   Sepolia check after the release's redo:
   `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` answers `evers.eth` and
-  `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth`, on
-  both sources. On 2026-10-01 both reverse nodes had a zero registry resolver
-  and those names stored on `default.reverse`.
+  `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth` on the
+  indexed source, and both answer `not_found` on the verified source. On
+  2026-10-01 both reverse nodes had a zero registry resolver, those names were
+  stored on `default.reverse`, and neither name had a resolver, so the forward
+  call reverts with `ResolverNotFound` for each.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry

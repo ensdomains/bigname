@@ -21,8 +21,9 @@ use tokio::{
 };
 
 use crate::{
-    BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameStatus, ErrorKind,
-    LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse, RecordSelector,
+    BASENAMES_NAMESPACE, ChainRpcUrls, ENS_NAMESPACE, EnsPrimaryNameLookup, EnsPrimaryNameStatus,
+    ErrorKind, LedgerAction, LookupEngine, LookupPosition, LookupRequest, LookupResponse,
+    RecordSelector,
     abi::{hex_string, namehash},
     admitted_verified_authority_arms,
     ccip::{encode_batch_query_for_test, encode_offchain_lookup_for_test},
@@ -3694,19 +3695,17 @@ async fn primary_name_missing_forward_address_is_not_found() -> AnyResult<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn primary_name_does_not_reclassify_resolver_not_found() -> AnyResult<()> {
-    let target = "0x8e8db5ccef88cca9d624701db544989c996e3216";
-    let reverse_resolver = "0xa2c122be93b0074270ebee7f6b7292c7deb45047";
+// TYR-178. A `default.reverse` name with no resolver cannot forward-verify: the Universal
+// Resolver reverts `ResolverNotFound` with the name's own DNS encoding.
+async fn primary_name_with_forward_revert(revert_name: &[u8]) -> AnyResult<EnsPrimaryNameLookup> {
+    const DEFAULT_REVERSE_REGISTRAR: &str = "0x283f227c4bd38ece252c4ae7ece650b0e913f1f9";
     let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![
-        RpcResponse::Result(Value::String(hex_string(
-            &Address::from_str(reverse_resolver)?.abi_encode(),
-        ))),
+        RpcResponse::Result(Value::String(hex_string(&Address::ZERO.abi_encode()))),
         RpcResponse::Result(Value::String(hex_string(&"alice.eth".abi_encode()))),
         RpcResponse::Error {
             code: 3,
             message: "execution reverted".to_owned(),
-            data: Value::String(resolver_not_found_revert(b"\x05alice\x03eth\0")),
+            data: Value::String(resolver_not_found_revert(revert_name)),
         },
     ])
     .await?;
@@ -3720,14 +3719,41 @@ async fn primary_name_does_not_reclassify_resolver_not_found() -> AnyResult<()> 
         "00000000-0000-0000-0000-000000000104",
     )
     .await?;
-
+    seed_manifest(
+        fixture.pool(),
+        ENS_NAMESPACE,
+        "ens_v1_reverse_l1",
+        "default_reverse_registrar",
+        DEFAULT_REVERSE_REGISTRAR,
+        "00000000-0000-0000-0000-000000000105",
+    )
+    .await?;
     let result = lookup_engine(fixture.pool(), &rpc_url)?
-        .lookup_ens_primary_name(ETHEREUM, target)
+        .lookup_ens_primary_name(ETHEREUM, "0x8e8db5ccef88cca9d624701db544989c996e3216")
         .await?;
-    assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
-
     fixture.cleanup().await?;
     join_rpc(rpc_handle).await?;
+    Ok(result)
+}
+
+#[tokio::test]
+async fn primary_name_without_a_forward_resolver_is_not_found() -> AnyResult<()> {
+    let result = primary_name_with_forward_revert(b"\x05alice\x03eth\0").await?;
+    assert_eq!(result.status, EnsPrimaryNameStatus::NotFound);
+    assert_eq!(result.name.as_deref(), Some("alice.eth"));
+    assert_eq!(result.forward_address, None);
+    assert_eq!(result.failure_reason.as_deref(), Some("resolver_not_found"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_resolver_not_found_for_another_name_fails() -> AnyResult<()> {
+    let result = primary_name_with_forward_revert(b"\x03bob\x03eth\0").await?;
+    assert_eq!(result.status, EnsPrimaryNameStatus::ExecutionFailed);
+    assert_eq!(
+        result.failure_reason.as_deref(),
+        Some("resolver_call_reverted")
+    );
     Ok(())
 }
 

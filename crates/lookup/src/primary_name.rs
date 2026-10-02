@@ -168,7 +168,7 @@ where
             block: &block,
             follow_ccip: true,
             result_abi: ResolutionResultAbi::EnsUniversalResolver,
-            resolver_not_found_is_not_found: false,
+            resolver_not_found_is_not_found: true,
             rpc: &rpc,
         },
         &record,
