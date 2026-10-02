@@ -9,6 +9,8 @@ mod compute;
 mod lockfile;
 #[path = "src/source_paths.rs"]
 mod source_paths;
+#[path = "src/storage_families.rs"]
+mod storage_families;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
@@ -28,6 +30,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/source_paths.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/storage_families.rs").display()
     );
     for path in compute::watched_paths(workspace_root) {
         println!("cargo:rerun-if-changed={}", path.display());

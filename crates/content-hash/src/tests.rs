@@ -15,6 +15,7 @@ use crate::compute::{
 use crate::lockfile::{semantic_crate_fingerprints, semantic_crate_lists};
 
 mod project_sql;
+mod storage_families;
 
 const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
     ("alloy-dyn-abi", "1.5.7", "aa"),
@@ -564,15 +565,11 @@ fn write_conflict_policy_changes_the_hash() {
 }
 
 #[test]
-fn storage_family_sources_change_the_hash_and_other_storage_sources_do_not() {
-    // The family step stores name summaries composed by the storage families code
-    // (crates/storage/src/families/name/summary.rs and what it calls, including the expiry and
-    // registration timestamp reads in crates/storage/src/address_names/query.rs), so that code
-    // decides persisted rows; the rest of the storage crate serves reads and does not.
+fn storage_semantic_sources_change_the_hash_and_other_storage_sources_do_not() {
+    // The stored name summaries take their expiry and registration timestamps from
+    // crates/storage/src/address_names/query.rs, so it decides persisted rows; the rest of the
+    // storage crate outside the families composition (tests/storage_families.rs) does not.
     for (relative_path, rotates) in [
-        ("crates/storage/src/families/name/summary.rs", true),
-        ("crates/storage/src/families/control/wrapper.rs", true),
-        ("crates/storage/src/families/mod.rs", true),
         ("crates/storage/src/address_names/query.rs", true),
         ("crates/storage/src/address_names/query/timestamps.rs", true),
         ("crates/storage/src/unix_seconds.rs", true),
@@ -994,7 +991,10 @@ impl SampleTree {
             "crates/interpret/src/write/identity_names.rs",
             "fn source_priority() -> u8 { 1 }\n",
         );
-        for relative_path in semantic_source_files() {
+        for relative_path in semantic_source_files()
+            .iter()
+            .chain(crate::storage_families::COMPOSITION_FILES)
+        {
             tree.write(relative_path, "pub fn semantics() -> bool { true }\n");
         }
         tree.write(

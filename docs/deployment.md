@@ -2094,3 +2094,17 @@ says the provider cannot route the request to a node that serves it is retried
 with backoff instead of stopping the chain as a data integrity fault. The runner exports three new
 counters for Ingest and Live RPC traffic, described in the
 [monitoring runbook](runbooks/pipeline-monitoring.md#ingest-rpc-traffic).
+
+### Read-only family queries outside the content hash
+
+The build that hashes only the composition part of `crates/storage/src/families`
+(TYR-149, see [interpretation replay](storage.md#interpretation-replay)) changes
+which files the [interpreter content hash](glossary.md#interpreter-content-hash)
+reads, so it rotates the hash once for every chain although no code that runs
+changes and no stored row changes. An existing deployment finishes the
+full-history Interpret redo and the Project redo it installs before the matching
+API serves, as for any rotation; a release batch that rotates the hash for
+another change discharges both with one redo pair. It needs no schema-migration,
+no manifest change and no historical ingest fetch. After it, a change to a
+read-only family query (search, bound names, record, reverse, permission,
+children or topology readers) no longer rotates the hash or forces a redo.

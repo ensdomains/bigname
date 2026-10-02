@@ -7,16 +7,14 @@ use std::{
 
 use alloy_primitives::{hex, keccak256};
 
-use crate::source_paths;
+use crate::{source_paths, storage_families};
 
 const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
-/// The storage families code: Project's family step stores name summaries it composes
-/// (families/name/summary.rs and the composition it calls), so it decides persisted rows. The
-/// rest of the storage crate serves reads and stays outside.
-const STORAGE_FAMILIES_SOURCE_ROOT: &str = "crates/storage/src/families";
+/// Watched and scanned whole, but only its composition files are hashed (`storage_families`).
+const STORAGE_FAMILIES_SOURCE_ROOT: &str = storage_families::ROOT;
 /// Interpret's persistence stage: which interpreted row wins a conflict, how a redo range reopens
 /// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
 /// decides which identity, discovery, and label-preimage rows the projections then read.
@@ -68,8 +66,8 @@ const SEMANTIC_SOURCE_FILES: &[&str] = &[
     // Redo-range preparation and the normalizer-version recompute that drive the stage above.
     "crates/interpret/src/write.rs",
     "crates/interpret/src/recompute.rs",
-    // The expiry and registration timestamp reads the stored name summary (under the storage
-    // families root) takes its `expires_at` and `registered_at` from. The rest of the address-names
+    // The expiry and registration timestamp reads the stored name summary (composed under the
+    // storage families root) takes its `expires_at` and `registered_at` from. The rest of the address-names
     // code serves reads only.
     "crates/storage/src/address_names/query.rs",
     "crates/storage/src/address_names/query/timestamps.rs",
@@ -220,18 +218,13 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
     }
     collect_rust_sources(
         workspace_root,
-        &workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
-        &cfg_test_sources,
-        &mut inputs,
-    )?;
-    collect_rust_sources(
-        workspace_root,
         &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
         &cfg_test_sources,
         &mut inputs,
     )?;
     collect_manifest_event_blocks(workspace_root, &mut inputs)?;
     collect_semantic_sources(workspace_root, &mut inputs)?;
+    storage_families::collect(workspace_root, &cfg_test_sources, &mut inputs)?;
     crate::lockfile::collect_semantic_crate_fingerprints(workspace_root, &mut inputs)?;
     Ok(inputs)
 }
@@ -277,7 +270,7 @@ fn collect_rust_sources(
     Ok(())
 }
 
-fn source_exclusion(
+pub(crate) fn source_exclusion(
     workspace_root: &Path,
     path: &Path,
     cfg_test_sources: &BTreeSet<String>,
@@ -297,7 +290,11 @@ fn source_exclusion(
     Ok(None)
 }
 
-fn collect_file(workspace_root: &Path, path: &Path, inputs: &mut Vec<Input>) -> io::Result<()> {
+pub(crate) fn collect_file(
+    workspace_root: &Path,
+    path: &Path,
+    inputs: &mut Vec<Input>,
+) -> io::Result<()> {
     let key = relative_key(workspace_root, path)?;
     inputs.push(Input {
         key: format!("source:{key}"),
@@ -434,7 +431,7 @@ fn collect_files_with_extension(
     Ok(())
 }
 
-fn relative_key(workspace_root: &Path, path: &Path) -> io::Result<String> {
+pub(crate) fn relative_key(workspace_root: &Path, path: &Path) -> io::Result<String> {
     path.strip_prefix(workspace_root)
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         .map_err(|_| {
