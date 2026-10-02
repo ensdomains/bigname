@@ -2251,11 +2251,10 @@ Product ruling of 2026-09-25 (Linear TYR-36 step 6).
 the authority tombstone left when the latest ENSv1 registrar lifecycle fact for a
 name is a release and no custody was revived behind it: either no binding of any
 arm is open and the registry owner is not a proven zero, or the name's only open
-binding is a registry-only binding that stands for the released lease. That binding is
-either the one a registrar token transfer without `reclaim` opened, standing for the lease
-it replaced or, once that was released, the successor lease `registerOnly` granted under
-it without touching the registry, or the one the release itself opens on the registry
-record that survives the lease.
+binding is the registry-only binding a registrar token transfer without
+`reclaim` opened and the released lease is the one that binding stands for: the
+lease it replaced or, once that was released, the successor lease `registerOnly`
+granted under it without touching the registry.
 The lease that lapsed while wrapped is the ordinary case: the NameWrapper's
 registry custody expired with the lease, so nothing current owns the node. The
 tombstone selects the released lease binding, serves the registration as

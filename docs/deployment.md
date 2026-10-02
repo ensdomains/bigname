@@ -2200,6 +2200,9 @@ environment change and no historical ingest fetch. The stored
 `project_name_summary.owner`, which the registry-label `owner` and
 `exclude_owner` filters read, now holds the token holder of wrapped names and
 unwrapped `.eth` second-level names, and the address index drops its
-`registrant` rows; the Project redo rebuilds both. The API change is breaking
+`registrant` rows; the Project redo rebuilds both. It also recomposes every
+released name: none keeps an owner or manager, and an ENSv1 lease that lapsed with
+its registry record left in place now carries `lapsed_registration`, so it lists
+under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.

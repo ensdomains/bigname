@@ -232,7 +232,7 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
 
     let mut registration = shadow.registration.clone();
     registration.insert("created_at".into(), created_at(parts));
-    if selection.released_tombstone
+    if !selection.is_v2()
         && let Some(Value::Object(lapsed)) = registration.get_mut("lapsed_registration")
     {
         let (kind, key) = lapsed_authority(parts);

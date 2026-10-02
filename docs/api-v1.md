@@ -1767,8 +1767,11 @@ does not apply ([known divergence](upstream.md#ensv1-authority-without-an-ensv2-
 
 A released name carries `lapsed_registration` when it is an ENSv1 lease that lapsed
 past its grace, or an ENSv2 registration released by `RegistryPathExpired` or
-`LabelUnregistered`. Other release causes, such as a registration displaced during
-token regeneration, carry no block and do not enter `relation=former_owner`.
+`LabelUnregistered`. An ENSv1 lease whose registry record the release leaves in place
+carries it too: the name keeps that record as its registry custody, with no `owner` or
+`manager`, and the block names the lease's last holder. Other release causes, such as a
+registration displaced during token regeneration, carry no block and do not enter
+`relation=former_owner`.
 Only those two kinds of registration lapse: a subname with no registrar lease,
 wrapped or not, never carries the block. A `.eth` name inside its registrar
 grace period has not lapsed; it keeps its current `owner` and still lists under

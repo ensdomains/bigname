@@ -3726,7 +3726,8 @@ introduces it rebuilds Project from full history before serving the option; see
   which matches `manager` too. Under a
   [registry-only handoff](glossary.md#registry-only-handoff) (a `.eth` token
   transfer without `reclaim`) the registry owner is only the `manager`, so
-  that `AuthorityTransferred` matches `manager` and not `owner`.
+  that `AuthorityTransferred` matches `manager` and not `owner` from the
+  position that handoff opens; an earlier tokenless owner's match stays.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate

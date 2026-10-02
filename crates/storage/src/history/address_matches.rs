@@ -279,7 +279,7 @@ fn push_address_match_filter<'a>(
         needs_or = true;
     }
     // A name with no token is owned by its registry owner, so `owner` also matches the registry
-    // ownership transfers `manager` does, except from the block a registry-only binding that
+    // ownership transfers `manager` does, except from the position a registry-only binding that
     // stands for a BaseRegistrar lease opens: the lease's holder owns the name after a transfer
     // without `reclaim`, and a released lease has no owner. The registry-only resource is one
     // per node, so an earlier tokenless owner of it keeps its history.
@@ -390,7 +390,10 @@ fn push_registry_owner_match_filter<'a>(
                 WHERE handoff.chain_id = ne.chain_id
                   AND handoff.resource_id = ne.resource_id
                   AND handoff.registry_only
-                  AND handoff.block_number <= ne.block_number
+                  AND ROW(handoff.block_number, COALESCE(handoff.transaction_index, -1),
+                          COALESCE(handoff.log_index, -1))
+                      <= ROW(ne.block_number, COALESCE(ne.transaction_index, -1),
+                             COALESCE(ne.log_index, -1))
                   AND EXISTS (
                       SELECT 1 FROM normalized_events lease
                       WHERE lease.resource_id = handoff.lease_resource_id
