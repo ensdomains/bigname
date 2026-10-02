@@ -2143,9 +2143,15 @@ The build that lets a `resolver_implementations` entry carry an optional
 announcement](manifests.md#resolver-admission-by-implementation-announcement))
 changes `crates/manifests/src` and the Sepolia `ens_v2_resolver_l1` manifest, so
 it rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
-for every chain and changes Sepolia's manifest authority. It shares the one
-full-history Interpret redo and Project redo that the v0.3.0 release already
-runs for TYR-149, TYR-183 and TYR-191, so it adds no redo of its own. It sets
+for every chain. It also changes the Sepolia manifest payload, so manifest
+synchronization records a [manifest-authority
+marker](glossary.md#manifest-authority-marker) for Sepolia and its
+full-history Interpret redo runs with `--attest-watch-set-coverage`, attesting
+that no watch-plan range widened. A release batch that rotates the hash for
+another change, such as [read-only family queries outside the content
+hash](#read-only-family-queries-outside-the-content-hash) (TYR-149),
+discharges both with that one Interpret and Project redo pair; v0.3.0 runs it
+for TYR-149, TYR-183 and TYR-191, so this adds no redo of its own. It sets
 the start of the admitted implementation
 `0x14f09fd05d4585759e54844dc9b00147131cf243` to its creation block `11709070`.
 The compiled watch plan already covers that implementation from block zero, so

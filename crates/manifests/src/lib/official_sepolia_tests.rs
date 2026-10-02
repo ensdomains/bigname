@@ -141,6 +141,17 @@ fn official_sepolia_keeps_canonical_v1_dependencies_and_both_execution_arms() ->
                 .unwrap()
         )
     );
+    let receipt_block = artifact("PermissionedResolverImpl")?["receipt"]["blockNumber"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        implementation.start_block,
+        Some(u64::from_str_radix(
+            receipt_block.trim_start_matches("0x"),
+            16
+        )?)
+    );
     assert_eq!(
         implementation.read_features,
         [ResolverReadFeature::Ensip19DefaultAddress]

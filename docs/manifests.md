@@ -1388,7 +1388,8 @@ from the new start. The first binary that compiles these entries
 widens every existing deployment whose active `ens_v2_resolver_l1` manifest
 already declares implementations, because the stored compiled plan preceding
 it has no such entry: that deployment's next manifest synchronization stamps
-the required Ingest redo from its ingest start and mints a manifest-authority
+the required Ingest redo from the earliest entry's start (block zero when
+omitted), clamped to its ingest start, and mints a manifest-authority
 marker, so its Interpret redo must be run as the attested full-range redo
 described below.
 
@@ -1911,6 +1912,7 @@ above does not change that provenance rule.
 | ENSv2 RootRegistry (official Sepolia) | `11708988` | [^v2-deploy-root] |
 | ENSv2 ETHRegistry (official Sepolia) | `11709066` | [^v2-deploy-ethreg] |
 | ENSv2 ETHRegistrar (official Sepolia) | `11709083` | [^v2-deploy-ethrc] |
+| ENSv2 PermissionedResolver implementation (official Sepolia) | `11709070` | [^v2-deploy-pres-impl] |
 
 ---
 
@@ -1979,6 +1981,7 @@ above does not change that provenance rule.
 [^v2-deploy-root]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/RootRegistry.json:L2995 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2995 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L1427 @ ens_v2_sepolia_20260916@366de741)
+[^v2-deploy-pres-impl]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2250 @ ens_v2_sepolia_20260916@366de741)
 [^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L2 @ ens_v2@a971bd64)
 [^v2-pres-uups]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L22 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L89 @ ens_v2_sepolia_20260629@ccaeb58)
 [^v2-pres-upgraded]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L627 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/PermissionedResolverImpl.json:L637 @ ens_v2@a971bd64)
