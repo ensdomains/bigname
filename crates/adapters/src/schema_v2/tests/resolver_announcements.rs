@@ -170,7 +170,11 @@ fn pointer(block: i64, log_index: i64) -> RawLogInput {
 }
 
 fn interpret(raw_logs: Vec<RawLogInput>) -> anyhow::Result<BatchOutput> {
-    interpret_test_batch(BatchInput {
+    interpret_test_batch(batch(raw_logs))
+}
+
+fn batch(raw_logs: Vec<RawLogInput>) -> BatchInput {
+    BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![root_manifest(), resolver_manifest()],
         discovery_rules: vec![root_rule()],
@@ -178,11 +182,28 @@ fn interpret(raw_logs: Vec<RawLogInput>) -> anyhow::Result<BatchOutput> {
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs,
-    })
+    }
 }
 
 fn interpret_with_factory(raw_logs: Vec<RawLogInput>) -> anyhow::Result<BatchOutput> {
-    interpret_test_batch(BatchInput {
+    interpret_test_batch(factory_batch(raw_logs))
+}
+
+/// Declares `IMPLEMENTATION` with `start_block = start` in the batch's resolver manifest.
+fn starting_at(start: i64, mut input: BatchInput) -> BatchInput {
+    for manifest in &mut input.manifests {
+        if manifest.manifest_id == RESOLVER_MANIFEST {
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&manifest.payload_json).unwrap();
+            payload["resolver_implementations"][0]["start_block"] = json!(start);
+            manifest.payload_json = payload.to_string();
+        }
+    }
+    input
+}
+
+fn factory_batch(raw_logs: Vec<RawLogInput>) -> BatchInput {
+    BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![root_manifest(), resolver_manifest(), migration_manifest()],
         discovery_rules: vec![root_rule()],
@@ -193,7 +214,7 @@ fn interpret_with_factory(raw_logs: Vec<RawLogInput>) -> anyhow::Result<BatchOut
         prior_events: Vec::new(),
         blocks: Vec::new(),
         raw_logs,
-    })
+    }
 }
 
 fn event_kinds(output: &BatchOutput) -> Vec<(i64, i64, String)> {
@@ -288,6 +309,128 @@ fn upgraded_naming_an_undeclared_implementation_is_not_selected_from_an_unknown_
     assert!(event_kinds(&output).is_empty());
     assert!(output.discovery_edges.is_empty());
     assert!(output.decode_skips.is_empty());
+    Ok(())
+}
+
+#[test]
+fn upgraded_before_the_implementation_start_admits_nothing() -> anyhow::Result<()> {
+    for block in [4, 5, 6] {
+        let output = interpret_test_batch(starting_at(
+            5,
+            batch(vec![
+                upgraded(IMPLEMENTATION, block, 0),
+                text_changed(block, 1),
+            ]),
+        ))?;
+        if block < 5 {
+            assert!(event_kinds(&output).is_empty(), "block {block}");
+            assert!(output.discovery_edges.is_empty(), "block {block}");
+        } else {
+            assert_eq!(
+                event_kinds(&output),
+                [
+                    (block, 0, "Upgraded".to_owned()),
+                    (block, 1, "RecordChanged".to_owned()),
+                ]
+            );
+            let edges = resolver_edges(&output);
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].active_from_block_number, block);
+        }
+    }
+    Ok(())
+}
+
+/// A database whose Ingest redo for the implementation started at its declared start never holds
+/// the earlier announcement; a fresh one fetching the whole range does. Both interpret alike.
+#[test]
+fn a_pre_start_announcement_interprets_alike_whether_or_not_it_was_fetched() -> anyhow::Result<()> {
+    let fresh = interpret_test_batch(starting_at(
+        5,
+        batch(vec![
+            upgraded(IMPLEMENTATION, 4, 0),
+            upgraded(IMPLEMENTATION, 6, 0),
+            text_changed(7, 0),
+        ]),
+    ))?;
+    let retained = interpret_test_batch(starting_at(
+        5,
+        batch(vec![upgraded(IMPLEMENTATION, 6, 0), text_changed(7, 0)]),
+    ))?;
+
+    assert_eq!(
+        event_kinds(&fresh),
+        [
+            (6, 0, "Upgraded".to_owned()),
+            (7, 0, "RecordChanged".to_owned()),
+        ]
+    );
+    assert_eq!(event_kinds(&fresh), event_kinds(&retained));
+    assert_eq!(fresh.discovery_edges, retained.discovery_edges);
+    // The unfetched log can only add an operator diagnostic, never interpreted state.
+    assert!(retained.decode_skips.is_empty());
+    assert_eq!(
+        fresh
+            .decode_skips
+            .iter()
+            .map(|skip| (skip.block_number, skip.log_index))
+            .collect::<Vec<_>>(),
+        [(4, 0)]
+    );
+    Ok(())
+}
+
+/// An admitted resolver's own `Upgraded` comes from its address watch, which every database runs,
+/// so a pre-start one is still its implementation history; it only admits nothing.
+#[test]
+fn an_admitted_resolver_keeps_its_pre_start_upgraded_history() -> anyhow::Result<()> {
+    let mut input = starting_at(5, batch(vec![upgraded(IMPLEMENTATION, 4, 0)]));
+    input.admissions.push(AddressAdmissionInput {
+        address: RESOLVER.to_owned(),
+        contract_instance_id: Uuid::from_u128(77),
+        source_manifest_id: Some(RESOLVER_MANIFEST),
+        role: None,
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(Uuid::from_u128(1)),
+        discovery_observation_key: Some("earlier-admission".to_owned()),
+        active_from_block: Some(1),
+        active_to_block: None,
+    });
+    let output = interpret_test_batch(input)?;
+
+    assert_eq!(event_kinds(&output), [(4, 0, "Upgraded".to_owned())]);
+    assert!(
+        output
+            .discovery_edges
+            .iter()
+            .any(|edge| edge.edge_kind == "proxy_implementation")
+    );
+    assert!(resolver_edges(&output).is_empty());
+    assert!(output.decode_skips.is_empty());
+    Ok(())
+}
+
+/// The start bounds only the `Upgraded` announcement, whose logs the implementation watch
+/// fetches; a factory's `ProxyDeployed` comes from the factory's own address watch.
+#[test]
+fn proxy_deployed_is_not_bounded_by_the_implementation_start() -> anyhow::Result<()> {
+    let deployed = raw_at(
+        ProxyDeployed {
+            sender: ACCOUNT.parse()?,
+            proxyAddress: RESOLVER.parse()?,
+            salt: U256::from(7),
+            implementation: IMPLEMENTATION.parse()?,
+        }
+        .encode_log_data(),
+        1,
+        0,
+        FACTORY,
+    );
+    let output = interpret_test_batch(starting_at(5, factory_batch(vec![deployed])))?;
+
+    let edges = resolver_edges(&output);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].discovery_source, "ProxyDeployed");
     Ok(())
 }
 

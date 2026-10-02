@@ -1560,6 +1560,29 @@
             }
           },
           {
+            "name": "authority",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/Authority"
+              }
+            },
+            "style": "form",
+            "explode": false
+          },
+          {
+            "name": "parent",
+            "in": "query",
+            "required": false,
+            "description": "A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "sort",
             "in": "query",
             "required": false,
@@ -7062,9 +7085,13 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
+          "authority": {
+            "$ref": "#/components/schemas/Authority",
+            "description": "Registry generation that owns the node, as the name's detail serves it; omitted when none is selected or for an ownerless registry row without a retained registrar binding."
+          },
           "ens_v1": {
             "$ref": "#/components/schemas/EnsV1",
-            "description": "What only ENSv1 holds about the name; present exactly while the authority its name detail serves is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
+            "description": "What only ENSv1 holds about the name; present exactly while the row's `authority` is `ens_v1` or `ens_v0`.\n\nPresence condition: The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records.",
             "x-presence": "when ens_v1_authority"
           },
           "lapsed_registration": {

@@ -478,6 +478,7 @@ include!("tests/v2_node_record_events.rs");
 include!("tests/v2_history_event_data.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
+include!("tests/v2_names_filters.rs");
 include!("tests/v2_former_registrant_cursors.rs");
 #[path = "tests/v2_former_registrant_produced.rs"]
 mod v2_former_registrant_produced;
@@ -502,6 +503,8 @@ mod lookup_redo;
 mod read_only_lookup;
 #[path = "tests/v2_family_lookup_release.rs"]
 mod v2_family_lookup_release;
+#[path = "tests/v2_sepolia_redeploy.rs"]
+mod v2_sepolia_redeploy;
 include!("tests/v2_family_permissions.rs");
 include!("tests/v2_family_history_publication.rs");
 include!("tests/v2_family_records_review.rs");

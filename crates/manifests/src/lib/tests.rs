@@ -326,6 +326,33 @@ async fn discovery_watch_coverage_ignores_unrelated_address_on_shared_instance()
 }
 
 #[test]
+fn resolver_implementation_start_block_is_optional_and_omitted_from_the_payload() -> Result<()> {
+    let manifest = load_one(manifest_contents())?.manifests()[0]
+        .manifest
+        .clone();
+    assert_eq!(manifest.resolver_implementations[0].start_block, None);
+    assert!(
+        serde_json::to_value(&manifest)?["resolver_implementations"][0]
+            .get("start_block")
+            .is_none(),
+        "an entry without a start keeps its stored payload shape"
+    );
+
+    let started = manifest_contents().replacen(
+        "address = \"0x00000000000000000000000000000000000000CC\" }",
+        "address = \"0x00000000000000000000000000000000000000CC\", start_block = 777 }",
+        1,
+    );
+    let manifest = load_one(&started)?.manifests()[0].manifest.clone();
+    assert_eq!(manifest.resolver_implementations[0].start_block, Some(777));
+    assert_eq!(
+        serde_json::to_value(&manifest)?["resolver_implementations"][0]["start_block"],
+        777
+    );
+    Ok(())
+}
+
+#[test]
 fn resolver_implementation_validation_preserves_alloy_address_grammar() -> Result<()> {
     let unprefixed = manifest_contents().replacen(
         "0x00000000000000000000000000000000000000CC",
@@ -391,6 +418,15 @@ fn repository_loader_rejects_invalid_single_manifest_declarations() -> Result<()
             "duplicate resolver implementation address",
             duplicate_implementation_address,
             "duplicates resolver implementation address",
+        ),
+        (
+            "negative resolver implementation start block",
+            base.replacen(
+                "address = \"0x00000000000000000000000000000000000000CC\" }",
+                "address = \"0x00000000000000000000000000000000000000CC\", start_block = -1 }",
+                1,
+            ),
+            "start_block must be a non-negative integer",
         ),
         (
             "unsupported normalizer",

@@ -21,6 +21,8 @@ use bigname_project::families::FamilyMode;
 #[path = "production_interpret/families.rs"]
 mod family_reads;
 use family_reads::*;
+#[path = "production_interpret/sepolia_redeploy.rs"]
+mod sepolia_redeploy;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -4067,9 +4069,9 @@ async fn registry_pointer_alone_does_not_admit_the_resolver() -> Result<()> {
 #[tokio::test]
 async fn declared_v1_resolver_precedes_v2_discovery_and_preserves_topology() -> Result<()> {
     const CHAIN: &str = "ethereum-sepolia";
-    const REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
+    const REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
     const RESOLVER: &str = "0xE99638b40E4Fff0129D56f03b55b6bbC4BBE49b5";
-    const FIRST_BLOCK: i64 = 11_709_100;
+    const FIRST_BLOCK: i64 = 11_820_500;
 
     let scratch = ScratchDatabase::create("production_interpret_declared_v1_resolver").await?;
     let profile = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

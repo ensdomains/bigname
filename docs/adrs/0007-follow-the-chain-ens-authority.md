@@ -31,8 +31,8 @@ decisions kept. Linear TYR-36 step 6.
   its authority epoch starts at that binding, like any other. The deployment
   registers `eth` and `reverse` in the root registry; this does not make all
   four names ordinary root-registry registrations.
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05)
 - The released ENSv2 regime, the rule that kept a released name under ENSv2
   across its later facts so that a regrant continued the old ENSv2 authority,
   is removed, and a simpler rule takes its place (product ruling of
@@ -115,8 +115,8 @@ migration successor proof or child registration proof is needed. The reason
 `ensv2_exact_name_profile_shadow` and its public name
 `exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
 the root-registry names `eth` and `reverse` become supported
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741). Admitting a
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05). Admitting a
 chain's ENSv2 [source families](../glossary.md#source-family) is therefore the decision that exposes its names:
 the `exact_name_profile` flag stays a namespace summary for `/v1/namespaces` and
 no longer gates serving, so a future Mainnet ENSv2 admission serves each
@@ -174,13 +174,13 @@ The ENSv2 contracts answer this question themselves, without a proof:
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L207-L219 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L466 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L238 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L247 @ ens_v2_sepolia_20261001@07e55a05)
 - What keeps a live ENSv1 name from being registered afresh on ENSv2 is the
   premigration script, not the contracts: it writes each live ENSv1 name into
   the ENSv2 registry as a reservation with owner zero and `ENSV1Resolver` as its
   resolver.
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L3-L8 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L151-L152 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/docs/premigration.md:L3-L8 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/docs/premigration.md:L167-L168 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L64-L65 @ ens_v2_sepolia_20260916@366de741)
 - The ENSv2 Universal Resolver has one read path and it starts from the ENSv2
   root registry. It walks ENSv2 registries label by label, taking each entry's
@@ -259,9 +259,9 @@ either halt.
 - The `.eth` registry refuses to overwrite a registered label, and its public
   `register` needs `ROLE_REGISTER_RESERVED` for a reserved one:
   `PermissionedRegistry.sol` L207-L219, L466 and L471, cited above. A migration
-  `WrapperRegistry` skips that role check: `WrapperRegistry.sol` L238.
+  `WrapperRegistry` skips that role check: `WrapperRegistry.sol` L247.
 - Premigration reservations carry `ENSV1Resolver`: `premigration.md` L3-L8 and
-  L151-L152, and `BatchRegistrar.sol` L64-L65, cited above.
+  L167-L168, and `BatchRegistrar.sol` L64-L65, cited above.
 - The Universal Resolver reads only ENSv2 registries, and `ENSV1Resolver`
   forwards to the ENSv1 registry: `UniversalResolverV2.sol` L56-L63,
   `LibResolution.sol` L58-L85, `PermissionedRegistry.sol` L283-L286 and
@@ -271,7 +271,7 @@ One case differs from the Universal Resolver. When a `.eth` label has no live
 ENSv2 entry, the resolver walk keeps the nearest ancestor's resolver, and the
 deployment registers `eth` in the root registry without one, so the Universal
 Resolver finds no resolver and the lookup fails.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L406-L408 @ ens_v2_sepolia_20260916@366de741)
 bigname instead lets ENSv1 decide such a name, which is what the ENSv1 registry
 itself records. The premigration reservation normally covers every live ENSv1

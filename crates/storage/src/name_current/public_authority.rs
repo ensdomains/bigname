@@ -67,15 +67,29 @@ pub(crate) fn push_public_authority_filter_in(
     authorities: &[&str],
 ) {
     builder.push(format!(
-        r#" AND EXISTS (
+        " AND EXISTS (
                 SELECT 1
                 FROM {names} authority_nc
-                WHERE authority_nc.logical_name_id = {logical_name_id}
-                  AND authority_nc.provenance #> '{{authority_selection,ownerless_registry}}'
+                WHERE authority_nc.logical_name_id = {logical_name_id}"
+    ));
+    push_public_authority_predicate(builder, "authority_nc", authorities);
+    builder.push(")");
+}
+
+/// ` AND` the row `alias` serves one of the public `authorities` values, read from its
+/// `provenance` as [`name_current_public_authority`] maps it.
+pub(crate) fn push_public_authority_predicate(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    alias: &str,
+    authorities: &[impl AsRef<str>],
+) {
+    builder.push(format!(
+        r#"
+                  AND {alias}.provenance #> '{{authority_selection,ownerless_registry}}'
                       IS DISTINCT FROM 'true'::jsonb
-                  AND CASE authority_nc.provenance #>> '{{authority_selection,authority_arm}}'
+                  AND CASE {alias}.provenance #>> '{{authority_selection,authority_arm}}'
                           WHEN 'ens_v1' THEN CASE
-                              WHEN authority_nc.provenance
+                              WHEN {alias}.provenance
                                        #>> '{{authority_selection,registry_generation}}' = 'old'
                                   THEN 'ens_v0' ELSE 'ens_v1' END
                           WHEN 'ens_v2' THEN 'ens_v2'
@@ -84,10 +98,26 @@ pub(crate) fn push_public_authority_filter_in(
     builder.push_bind(
         authorities
             .iter()
-            .map(|authority| (*authority).to_owned())
+            .map(|authority| authority.as_ref().to_owned())
             .collect::<Vec<_>>(),
     );
-    builder.push("))");
+    builder.push(")");
+}
+
+/// The selected authority arms whose rows can serve one of the public `authorities` values:
+/// `ens_v1` for `ens_v0` and `ens_v1`, `ens_v2` for `ens_v2`.
+pub(crate) fn public_authority_arms(authorities: &[impl AsRef<str>]) -> Vec<&'static str> {
+    let mut arms = authorities
+        .iter()
+        .filter_map(|authority| match authority.as_ref() {
+            "ens_v0" | "ens_v1" => Some("ens_v1"),
+            "ens_v2" => Some("ens_v2"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    arms.sort_unstable();
+    arms.dedup();
+    arms
 }
 
 #[cfg(test)]

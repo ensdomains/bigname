@@ -28,7 +28,10 @@ use crate::{
     NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
     NameCurrentRow, UnixSeconds,
-    name_current::{escape_like_pattern, expiring_page_from, list_page_from},
+    name_current::{
+        escape_like_pattern, expiring_page_from, list_page_from, parent_like_patterns,
+        public_authority_arms,
+    },
     name_current_list_cursor_from_row,
 };
 
@@ -262,7 +265,7 @@ pub async fn load_family_expiring_page(
     loop {
         let pairs = expiry_pairs(
             &mut snapshot,
-            namespace,
+            filter,
             (low, high),
             ascending,
             position.as_ref(),
@@ -325,7 +328,8 @@ fn truncate(mut page: NameCurrentListPage, page_size: u64) -> NameCurrentListPag
 /// (control::lifecycle::load): the event's own names, the triple's name, and the names whose
 /// binding candidates, associations or key states name the resource it sits on. Both walks use
 /// it, so a name reached only through its resource is found whether its expiry is integral or
-/// not. `$NAMESPACE` stands for the namespace's parameter.
+/// not. `$NAMESPACE` stands for the namespace's parameter and `$PRUNE` for further predicates on
+/// the name's `surface`.
 const EXPIRY_HIT_NAMES: &str = "
              CROSS JOIN LATERAL (
                  SELECT hits.original_logical_name_id
@@ -349,7 +353,7 @@ const EXPIRY_HIT_NAMES: &str = "
                AND EXISTS (
                    SELECT 1 FROM bigname_phase.name_surfaces surface
                    WHERE surface.logical_name_id = name.logical_name_id
-                     AND surface.namespace = $NAMESPACE)";
+                     AND surface.namespace = $NAMESPACE$PRUNE)";
 
 /// Names of `namespace` a retained lifecycle event whose expiry is a JSON number but not an
 /// integral second can load ([`EXPIRY_HIT_NAMES`]): the walk cannot place them, so they are
@@ -367,7 +371,9 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
          )
          SELECT DISTINCT name.logical_name_id
          FROM hits{}",
-        EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$1")
+        EXPIRY_HIT_NAMES
+            .replace("$NAMESPACE", "$1")
+            .replace("$PRUNE", "")
     );
     sqlx::query_scalar(&sql)
         .bind(namespace)
@@ -376,12 +382,24 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
         .context("failed to load the names with an inexact expiry")
 }
 
+/// Keeps the walk's names that `filter` can list: with `authorities`, a name whose stored
+/// summary selects an arm that can serve one of them (the composed row decides, at the same
+/// publication); with `parent`, a name one label below it.
+const EXPIRY_PAIRS_PRUNE: &str = "
+                     AND ($7::text[] IS NULL OR EXISTS (
+                         SELECT 1 FROM bigname_phase.project_name_summary summary
+                         WHERE summary.chain_id = surface.chain_id
+                           AND summary.logical_name_id = surface.logical_name_id
+                           AND summary.authority_arm = ANY($7::text[])))
+                     AND ($8::text IS NULL OR (surface.raw_name LIKE $8 ESCAPE '\\'
+                         AND surface.raw_name NOT LIKE $9 ESCAPE '\\'))";
+
 /// The next (expiry second, name) pairs of the walk after `after`: every retained lifecycle
 /// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name of
-/// `namespace` it can load ([`EXPIRY_HIT_NAMES`]).
+/// `filter.namespace` it can load ([`EXPIRY_HIT_NAMES`]) that [`EXPIRY_PAIRS_PRUNE`] keeps.
 async fn expiry_pairs(
     conn: &mut PgConnection,
-    namespace: &str,
+    filter: &NameCurrentExpiringFilter,
     (low, high): (Option<i128>, Option<i128>),
     ascending: bool,
     after: Option<&(i128, String)>,
@@ -419,8 +437,12 @@ async fn expiry_pairs(
          WHERE $3::numeric IS NULL OR (at, logical_name_id) {compare} ($3::numeric, $4)
          ORDER BY pairs.at {direction}, pairs.logical_name_id {direction}
          LIMIT $5",
-        names = EXPIRY_HIT_NAMES.replace("$NAMESPACE", "$6")
+        names = EXPIRY_HIT_NAMES
+            .replace("$NAMESPACE", "$6")
+            .replace("$PRUNE", EXPIRY_PAIRS_PRUNE)
     );
+    let arms = filter.authorities.as_deref().map(public_authority_arms);
+    let parent = filter.parent.as_deref().map(parent_like_patterns);
     // Decimal strings keep the i128 bounds exact. SQLx binds them as TEXT, so every
     // numeric comparison above casts its parameter, not only the null guard.
     let rows = sqlx::query(&sql)
@@ -429,7 +451,10 @@ async fn expiry_pairs(
         .bind(after.map(|(at, _)| at.to_string()))
         .bind(after.map(|(_, name)| name.as_str()))
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)
-        .bind(namespace)
+        .bind(filter.namespace.as_str())
+        .bind(arms)
+        .bind(parent.as_ref().map(|(one_below, _)| one_below.as_str()))
+        .bind(parent.as_ref().map(|(_, deeper)| deeper.as_str()))
         .fetch_all(conn)
         .await
         .context("failed to walk the expiry candidates")?;

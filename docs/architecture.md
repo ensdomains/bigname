@@ -489,8 +489,8 @@ every other name. The ENSv2 deployment registers `eth` and `reverse` in the
 root registry, so a current registration there opens an ENSv2 binding that
 decides the name whatever ENSv1 holds, and its authority epoch starts at that
 binding.
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ETHRegistry.ts:L39-L51 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deploy/01_ReverseMirror.ts:L30-L42 @ ens_v2_sepolia_20261001@07e55a05)
 An activated ENSv1→ENSv2 [migration boundary](glossary.md#migration-boundary)
 takes no precedence: it selects no arm, binding or epoch start, and Project
 keeps it only to serve `migrated_at` and `is_migrated`. The ENSv2 registration
@@ -648,7 +648,7 @@ Registry-name suffix labels are retained verbatim. Raw label text keys the live 
   `Upgraded` observation. The rule and its watch-plan effect are specified in
   [`manifests.md` § Resolver admission by implementation
   announcement](manifests.md#resolver-admission-by-implementation-announcement).
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PermissionedResolverImpl.json:L514-L526 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/PermissionedResolverImpl.json:L514-L526 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/VerifiableFactory.json:L48 @ ens_v2_sepolia_20261001@07e55a05)
 
 Project applies the same declaration precedence when it classifies an active
 resolver-discovery admission for serving. An applicable exact resolver
@@ -2027,9 +2027,9 @@ the API; route behavior remains owned by API crate tests.
 [^v2-0916-label-registered]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2_sepolia_20260916@366de741)
 [^v2-0916-label-reserved]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2_sepolia_20260916@366de741)
 [^v2-0916-parent-updated]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2_sepolia_20260916@366de741)
-[^v2-0916-name-registered]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L261 @ ens_v2_sepolia_20260916@366de741)
-[^v2-0916-name-renewed]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L310 @ ens_v2_sepolia_20260916@366de741)
-[^v2-0916-renewer-name-renewed]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRenewerV1.json:L156 @ ens_v2_sepolia_20260916@366de741)
+[^v2-0916-name-registered]: (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistrar.json:L261 @ ens_v2_sepolia_20261001@07e55a05)
+[^v2-0916-name-renewed]: (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRegistrar.json:L310 @ ens_v2_sepolia_20261001@07e55a05)
+[^v2-0916-renewer-name-renewed]: (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ETHRenewerV1.json:L156 @ ens_v2_sepolia_20261001@07e55a05)
 [^v2-0916-linked]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/interfaces/IRecordResolver.sol:L38 @ ens_v2_sepolia_20260916@366de741)
 [^v2-0916-name-updated]: (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/interfaces/setters/INameSetter.sol:L13 @ ens_v2_sepolia_20260916@366de741)
 [^v2-pres-namechanged]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L469-L472 @ ens_v2_sepolia_20260629@ccaeb58)

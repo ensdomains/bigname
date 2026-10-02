@@ -89,7 +89,7 @@ async fn v2_events_describe_admitted_registrar_controller_changes() -> Result<()
         event ControllerRemoved(address indexed controller);
     }
     const CHAIN: &str = "ethereum-sepolia";
-    const BLOCK: i64 = 11_709_100;
+    const BLOCK: i64 = 11_820_500;
     const HASH: &str = "0xcontroller-history";
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia"),
@@ -102,7 +102,10 @@ async fn v2_events_describe_admitted_registrar_controller_changes() -> Result<()
         let manifest = &repository
             .manifests()
             .iter()
-            .find(|loaded| loaded.manifest.source_family == family && loaded.version_tag == "v1")
+            .find(|loaded| {
+                loaded.manifest.source_family == family
+                    && loaded.manifest.rollout_status == bigname_manifests::RolloutStatus::Active
+            })
             .context("checked-in controller manifest")?
             .manifest;
         if family == "ens_v2_migration_l1" {
