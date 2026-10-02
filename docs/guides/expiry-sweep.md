@@ -36,7 +36,7 @@ that block in `meta.as_of`.
   [Universal Resolver cutover](../glossary.md#universal-resolver-cutover) a
   `.eth` second-level name with a live ENSv2 entry is listed by that entry's
   expiry, because resolution then starts at the ENSv2 root registry
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20260916@366de741),
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/UniversalResolverV2.sol:L55-L63 @ ens_v2_sepolia_20261001@07e55a05),
   and before it by its ENSv1 lease's
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f).
   While ENSv1 decides the name, the lease's own date is `ens_v1.expires_at`
@@ -106,17 +106,25 @@ the row's `expires_at` and `grace_ends_at`. From the cutover a reserved `.eth`
 name that ENSv1 still decides serves its ENSv2 reservation's expiry and grace
 instead, and the lease's expiry is `ens_v1.expires_at`, with its grace ending
 90 days later
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). The two grace deadlines usually fall on the same second, but
-not always: extending the reservation without renewing the lease splits them
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f),
+except at the saturated value `"9223372036854775807"`, which no longer
+carries the lease's own expiry, so its grace cannot be recovered
 ([naming dictionary](../api-v1.md#naming-dictionary), `ens_v1.expires_at`).
+The two grace deadlines usually fall on the same second, but not always:
+extending the reservation without renewing the lease splits them, as the
+batch registrar can
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20261001@07e55a05).
 For such a name, use `ens_v1.expires_at` in the ENSv1 rows.
 
 A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
 `expires_at`, so it has no grace phase.
 
 - `owner` is the token holder, or the registry owner of a name with no token.
-  On a wrapped `.eth` name in grace `manager` is omitted, so do not use
-  `manager` as the notification address.
+  It is absent on a held wrapped name whose NameWrapper expiry alone has
+  passed, until a renewal through the NameWrapper restores it
+  ([lapsed registration](../api-v1.md#lapsed-registration)); such a row has
+  no one to notify. On a wrapped `.eth` name in grace `manager` is omitted, so
+  do not use `manager` as the notification address.
 - A released row has no `owner` or `manager`. `lapsed_registration.owner` is
   the holder when the registration ended, kept apart from current state so it
   is never read as an owner ([lapsed registration](../api-v1.md#lapsed-registration)).
@@ -125,13 +133,13 @@ A name with no registrar grace, such as a subname, has `grace_ends_at` equal to
 - An ENSv2 registration is released at its expiry
   ([lapsed registration](../api-v1.md#lapsed-registration)): the registry
   treats an entry as expired from the second its expiry is reached
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L663-L665 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L671-L673 @ ens_v2_sepolia_20261001@07e55a05)
   but still reports its last owner
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L353-L362 @ ens_v2_sepolia_20260916@366de741),
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L361-L370 @ ens_v2_sepolia_20261001@07e55a05),
   and the `.eth` registrar renews it in grace while that last owner is set
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20260916@366de741).
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L264-L291 @ ens_v2_sepolia_20261001@07e55a05).
   An explicit unregister burns the token
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741),
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05),
   so it cannot be renewed through the `.eth` registrar, whose grace renewal
   needs that last owner;
   its `expires_at` is `null`, so it is outside every window.
@@ -166,8 +174,9 @@ later block is not on that page.
   decide each row's phase against `T`, never against your wall clock.
 - Send a notice that says a date has passed ("expired", "in grace", "grace
   ended") only once `T` has reached the phase the table in section 3 gives
-  for it. A row not yet in that phase at `T` waits for a page from a later
-  publication.
+  for it; for a row outside that table, such as a subname or a Basenames
+  name, once `expires_at <= T`. A row not yet in that phase at `T` waits for
+  a page from a later publication.
 - If `meta.as_of` lists more than one chain, use the smallest timestamp.
 - `T` tells you how fresh a page is. It does not tell you that a walk saw
   every name; section 6 covers that.
@@ -191,7 +200,7 @@ later block is not on that page.
 ## 5. Pagination and retries
 
 - `next_cursor` is opaque. It binds the namespace, both bounds, the order and
-  the `authority` and `parent` filters, and holds the position of the last row
+  the `authority` and `parent` filters when sent, and holds the position of the last row
   returned (its `expires_at`, namespace, name and namehash). It holds no
   publication. Send the next request with the same parameters plus `cursor`; a
   cursor sent with a different namespace, bound, order or filter returns
@@ -208,8 +217,8 @@ later block is not on that page.
   it is:
   - `collection publication changed during the read; retry the request`: a
     new publication landed between the request being accepted and the page's
-    first read, or the namespace's manifests (the declared contracts it
-    indexes) changed before the page finished. Retry at once.
+    first read, or the namespace's [manifests](../manifests.md) (the declared
+    contracts it indexes) changed before the page finished. Retry at once.
   - `collection publication is not available; retry after indexing is ready`
     or `requested snapshot is not available for name`: the API is not serving
     the namespace's indexed state right now, for example during a rebuild or
@@ -234,17 +243,24 @@ live (section 1). On every run:
 - Check freshness with each page's `meta.as_of` (section 4).
 - Mark a window covered only after its walk ended with `has_more: false` and
   every notice it produced is durably recorded.
-- Rescan back by the longest grace you handle `G`. Each run walks again every
-  window from this floor onwards:
+- Rescan back by the longest grace you handle `G`. Each run walks again
+  every window from this floor onwards, with the upper end open, since a live
+  reservation's expiry can sit well after `T`:
 
   ```text
   rescan floor = (smallest T of the previous run) - G
   ```
 
-  Every row whose grace ended since the previous run then sits in a
-  rescanned window, so rows due a later notice such as "grace ended" are seen
-  again, as are rows skipped or moved within that range. A row that moves back further, such as a reserved name
-  whose reservation was extended well past its lease, is not re-seen.
+  On the first run, use that run's `T` instead of the previous one. Every row
+  whose grace ended since the previous run then sits in a rescanned window,
+  so rows due a later notice such as "grace ended" are seen again, as are
+  rows skipped or moved within that range.
+- A row that moves back further is not re-seen by the rescan: a reserved
+  name whose reservation was extended well past its lease returns to its
+  lease date when the reservation stops being live. Remember each row whose
+  `ens_v1.expires_at` differs from its `expires_at`, and once that lease date
+  passes, read the name again by itself with
+  [`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname).
 
 Make every notification idempotent so that rescans and repeated rows send
 nothing twice. Which key to use is your policy; a natural one is
@@ -255,11 +271,12 @@ recurs, and you decide whether to notify again, in two cases:
 
 - an ENSv2 registration is unregistered and the name registered again with
   the same expiry
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L224-L235 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L452-L494 @ ens_v2_sepolia_20260916@366de741);
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L460-L502 @ ens_v2_sepolia_20261001@07e55a05);
 - a renewal keeps the same expiry
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L240-L255 @ ens_v2_sepolia_20260916@366de741).
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05).
 
-`GET /v1/names` rows carry no registration identity; to tell the first case
-apart, read `registration_id` from
-[`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname).
+`GET /v1/names` rows carry no registration identity, so the listing cannot
+tell the first case from a repeat. A later `GET /v1/names/{name}` read shows
+the registration current at that read, not the one the page showed; a
+consumer that must tell registrations apart has to keep its own history.
