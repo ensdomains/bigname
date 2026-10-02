@@ -910,10 +910,10 @@ Its order is unwrapped, unlocked-wrapped, locked-wrapped, then locked children.
 The helper is therefore unobservable: using it is optional, and the transfers it
 batches produce the same log sequence a caller would produce by sending the same
 transfers itself, so correlation never keys on the helper's participation.
-(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L118-L123 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L101-L145 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L134 @ ens_v2_sepolia_20261001@07e55a05)
-The current family-wide watch planner assigns the
-ENSv1→ENSv2 migration manifest's complete topic set to this declared address. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L113 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/MigrationHelper.sol:L143 @ ens_v2_sepolia_20261001@07e55a05)
+The current family-wide watch planner (`crates/manifests/src/schema_v2_watch/compile.rs`) assigns the
+ENSv1→ENSv2 migration manifest's complete topic set to this declared address. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/MigrationHelper.json:L558 @ ens_v2_sepolia_20261001@07e55a05)
 
 ENSv1→ENSv2 migration-created `WrapperRegistry` proxies are not direct declarations and
 do not use a new discovery rule. Each proxy's initializer emits
