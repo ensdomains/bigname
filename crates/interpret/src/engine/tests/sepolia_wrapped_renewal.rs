@@ -149,6 +149,39 @@ async fn renewal_moves_the_wrapper_expiry(controller: &str, database_name: &str)
     Ok(())
 }
 
+/// A name registered straight into the NameWrapper names the NameWrapper as its BaseRegistrar
+/// registrant, but the NameWrapper never owns it: the wrapped token's holder does. Its owner
+/// history has no anchor for that name.
+#[tokio::test]
+async fn a_wrapper_minted_registration_is_no_owner_history_of_the_name_wrapper() -> TestResult {
+    let database = database("interpret_wrapper_minted_owner_history").await?;
+    let pool = database.pool();
+    let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("manifests/sepolia");
+    sync_schema_v2_repository(pool, &load_repository(manifest_root)?).await?;
+    seed_lineage(pool).await?;
+    let label = b"mintedwrapped";
+    let labelhash = keccak256(label);
+    seed_wrapped_registration(pool, label, labelhash, eth_namehash(labelhash)).await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            from_block: REGISTRATION_BLOCK,
+            to_block: REGISTRATION_BLOCK,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let wrapper =
+        super::graveyard_burned::owner_history(pool, NAME_WRAPPER, REGISTRATION_BLOCK).await?;
+    let holder = super::graveyard_burned::owner_history(pool, OWNER, REGISTRATION_BLOCK).await?;
+    database.cleanup().await?;
+    assert!(wrapper.is_empty(), "{wrapper:?}");
+    assert!(!holder.is_empty(), "{holder:?}");
+    Ok(())
+}
+
 /// `registerAndWrapETH2LD` from the wrapped controller: the BaseRegistrar mints to the
 /// NameWrapper, the registry names the NameWrapper owner, the BaseRegistrar emits its numeric
 /// `NameRegistered`, and the NameWrapper mints the ERC-1155 token and emits `NameWrapped`. The

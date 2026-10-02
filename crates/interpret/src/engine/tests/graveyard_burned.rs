@@ -540,7 +540,11 @@ async fn a_surfaced_subname_the_graveyard_cleared_is_not_listed_under_the_gravey
     Ok(())
 }
 
-async fn owner_history(pool: &PgPool, address: &str, block: i64) -> TestResult<Vec<String>> {
+pub(super) async fn owner_history(
+    pool: &PgPool,
+    address: &str,
+    block: i64,
+) -> TestResult<Vec<String>> {
     let page = bigname_storage::load_address_history_page_for_relations(
         pool,
         address,

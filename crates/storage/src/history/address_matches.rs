@@ -318,8 +318,23 @@ fn push_registrant_match_filter<'a>(builder: &mut QueryBuilder<'a, Postgres>, ad
         "#,
     );
     builder.push_bind(address);
+    // A lease registered straight into the NameWrapper names it as registrant, but the wrapped
+    // token's holder owns the name; `registerAndWrapETH2LD` wraps it in the same transaction.
     builder.push(
         r#"
+                    AND NOT EXISTS (
+                        SELECT 1 FROM normalized_events wrap
+                        WHERE wrap.chain_id = ne.chain_id
+                          AND wrap.block_number = ne.block_number
+                          AND wrap.transaction_index IS NOT DISTINCT FROM ne.transaction_index
+                          AND wrap.source_family = 'ens_v1_wrapper_l1'
+                          AND wrap.after_state ->> 'wrapped_registrar_resource_id'
+                              = ne.resource_id::text
+                          AND LOWER(wrap.raw_fact_ref ->> 'emitting_address')
+                              = LOWER(ne.after_state ->> 'registrant')
+                          AND wrap.canonicality_state
+                              <> 'orphaned'::bigname_phase.canonicality_state
+                    )
                 )
             )
         )
