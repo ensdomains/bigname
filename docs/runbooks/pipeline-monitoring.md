@@ -303,7 +303,7 @@ eligible (no overlapping redo, within the publication lag tolerance).
   with the pre-cutover expiry, grace and resolvability rules
   ([Expiry and grace](../api-v1.md#expiry-and-grace)).
 
-A chain with no proxy `Upgraded` at all, such as Mainnet, reads `0` on both and
+A chain with no proxy `Upgraded` at all reads `0` on both and
 is not an alert. A proxy whose implementation is another declared proxy with no
 `Upgraded` yet is not cut over and not unadmitted either. Each refresh exports
 both gauges for every chain with phase rows.
