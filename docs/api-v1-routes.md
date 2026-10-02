@@ -3432,7 +3432,10 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f)
   Upstream's first source, a standalone `addr.reverse` registrar, has no
-  declared deployment in either profile and is not read.
+  declared deployment in either profile and is not read. The Universal
+  Resolver's own ENSIP-19 `reverse` does not fall back past an empty name on
+  the reverse node's own resolver
+  ([divergence](upstream.md#default-reverse-fallback-past-a-reverse-node-resolver)).
   The indexed source applies this to the projected claims
   ([projections](projections.md#primary-names)): an `addr.reverse` claim whose
   projected or hydrated name has no bytes, or whose reverse node has no nonzero
@@ -3448,23 +3451,40 @@ introduces it rebuilds Project from full history before serving the option; see
   succeeds with an empty string calls `nameForAddr(address)` on the
   `default.reverse` registrar the `ens_v1_reverse_l1` manifest declares. A
   `name` call that reverts or runs out of gas ends the lookup with
-  `execution_failed` and no default read; upstream returns an empty name there,
+  `failed` and no default read; upstream returns an empty name there,
   so the status differs while neither falls back. Upstream decodes the return
   by checking only that the encoded byte array fits inside the return data. A
-  return that fails that check is an empty name upstream and `execution_failed`
+  return that fails that check is an empty name upstream and `failed`
   (`resolver_return_data_malformed`) here. A nonempty byte string that is not
   valid UTF-8 passes upstream's check and is returned as the name, while the
-  verified source's string decoder rejects it as `execution_failed`
+  verified source's string decoder rejects it as `failed`
   (`resolver_return_data_malformed`). Neither case falls back to the default.
   (upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L54-L69 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/utils/LibABI.sol:L8-L27 @ ens_v1@91c966f)
-  The forward check is unchanged. `coin_type=2147483648` reads the
-  `default.reverse` claim itself on the indexed source.
+  The forward check calls the Universal Resolver for the name's `addr` record
+  on coin type `60`. When that call reverts with `ResolverNotFound(bytes)`
+  carrying the claimed name's own DNS encoding, the Universal Resolver found
+  no resolver for the name, or only a nearest ancestor that does not implement
+  ENSIP-10, so there is nothing to verify against and the verified answer is
+  `not_found`, as for a resolver with no `addr` record. `ResolverNotFound` for
+  any other name, and every other revert, stays `failed`. That
+  includes a revert from the resolver itself, which the Universal Resolver
+  wraps as `ResolverError(bytes)`, such as an ENSv2 entry whose mirror resolver
+  finds no ENSv1 resolver for the name.
+  (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L73-L85 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L429-L437 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L405-L417 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L485-L493 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L69 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L57-L59 @ ens_v1@91c966f)
+  `coin_type=2147483648` reads the `default.reverse` claim itself on the
+  indexed source.
   Sepolia check after the release's redo:
   `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` answers `evers.eth` and
-  `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth`, on
-  both sources. On 2026-10-01 both reverse nodes had a zero registry resolver
-  and those names stored on `default.reverse`.
+  `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` answers `artitest.eth` on the
+  indexed source, and both answer `not_found` on the verified source. On
+  2026-10-01 both reverse nodes had a zero registry resolver and those names
+  were stored on `default.reverse`.
 - Pagination behavior: none.
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
