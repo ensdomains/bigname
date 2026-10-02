@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context as _;
-use bigname_adapters::schema_v2::{StateCacheCapacity, prepare_schema_v2_batch_lookahead};
+use bigname_adapters::schema_v2::StateCacheCapacity;
 
 fn manifest(source_family: &str) -> bigname_adapters::schema_v2::ManifestInput {
     bigname_adapters::schema_v2::ManifestInput {
@@ -36,21 +36,38 @@ fn any_uncovered_manifest_family_requires_the_full_state_loader() {
     .into();
     assert_eq!(super::full_state_reason(&mainnet, &mainnet), None);
 
-    let mut sepolia = mainnet.clone();
-    sepolia.push(manifest("ens_v2_registry_l1"));
+    let sepolia: Vec<_> = [
+        "ens_execution",
+        "ens_v1_registrar_l1",
+        "ens_v1_registry_l1",
+        "ens_v1_resolver_l1",
+        "ens_v1_reverse_l1",
+        "ens_v1_wrapper_l1",
+        "ens_v2_migration_l1",
+        "ens_v2_registrar_l1",
+        "ens_v2_registry_l1",
+        "ens_v2_resolver_l1",
+        "ens_v2_root_l1",
+    ]
+    .map(manifest)
+    .into();
+    assert_eq!(super::full_state_reason(&sepolia, &sepolia), None);
+
+    let mut uncovered = mainnet.clone();
+    uncovered.push(manifest("dns_l1"));
     assert_eq!(
-        super::full_state_reason(&sepolia, &sepolia),
+        super::full_state_reason(&uncovered, &uncovered),
         Some(UnsupportedSourceFamily {
-            source_family: "ens_v2_registry_l1".to_owned(),
+            source_family: "dns_l1".to_owned(),
             rollout_status: "active",
         })
     );
     // The full-state loader restores a deprecated manifest's retained events; lookahead
     // reads none of them, so a deprecated uncovered family also requires the full-state loader.
     assert_eq!(
-        super::full_state_reason(&mainnet, &sepolia),
+        super::full_state_reason(&mainnet, &uncovered),
         Some(UnsupportedSourceFamily {
-            source_family: "ens_v2_registry_l1".to_owned(),
+            source_family: "dns_l1".to_owned(),
             rollout_status: "deprecated",
         })
     );
@@ -146,21 +163,12 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
         let load_ms = started.elapsed().as_millis();
         let count = loaded.restored_event_count;
         let raw = loaded.input.raw_logs.len();
-        let session = loaded
-            .adapter_session
-            .expect("both loaders restore a session");
-        let prepared = match &loaded.lookahead_nodes {
-            Some(nodes) => prepare_schema_v2_batch_lookahead(
-                loaded.input,
-                loaded.provenance_manifests,
-                session,
-                nodes,
-                capacity,
-            )?,
+        let prepared = match loaded.prepared {
+            Some(prepared) => *prepared,
             None => bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
                 loaded.input,
                 loaded.provenance_manifests,
-                Some(session),
+                loaded.adapter_session,
                 capacity,
             )?,
         };

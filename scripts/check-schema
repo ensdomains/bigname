@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=287
+expected_refusal_assertions=333
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=59
+expected_predecessor_shape_proof_count=60
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -640,6 +640,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql" preceding-shape
             else
                 emit_phase_migration "$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql" baseline-first
+            fi
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql" baseline-first
             fi
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261001150000_lookup_guard_configured_publication_lag.sql" preceding-shape
@@ -777,6 +782,7 @@ for migration_file in \
     "$ROOT/migrations/20261001110100_project_child_edge_candidate_child_index.sql" \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql" \
+    "$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql" \
     "$ROOT/migrations/20261001150000_lookup_guard_configured_publication_lag.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql"
 do
@@ -2022,28 +2028,46 @@ DROP INDEX $project_history_index_name;
 $project_history_found_definition;
 SQL
 done
-# Recreate each pair of lookahead loader indexes (ENSv1, then Basenames Base)
-# from its preceding schema shape. Compare each resulting catalog definition to
+# Recreate the lookahead loader indexes of each schema-migration (the ENSv1
+# pair, the Basenames Base pair, then the ENSv2 four) from its preceding schema shape. Compare each resulting catalog definition to
 # the fresh baseline, then prove a rerun leaves them unchanged.
 v1_lookahead_install="$ROOT/ops/v1-lookahead-indexes/install.sql"
 v1_lookahead_readme=ops/v1-lookahead-indexes/README.md
 v1_lookahead_migration="$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql"
 basenames_lookahead_migration="$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql"
+v2_lookahead_migration="$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql"
 v1_lookahead_index_names=(
     normalized_events_v1_due_probe_idx
     normalized_events_v1_direct_node_probe_idx
     normalized_events_basenames_due_probe_idx
     normalized_events_basenames_direct_node_probe_idx
+    normalized_events_v2_lookahead_probe_idx
+    normalized_events_v2_direct_node_probe_idx
+    normalized_events_v2_key_probe_idx
+    normalized_events_v2_due_probe_idx
 )
 declare -A lookahead_index_migration=(
     [normalized_events_v1_due_probe_idx]="$v1_lookahead_migration"
     [normalized_events_v1_direct_node_probe_idx]="$v1_lookahead_migration"
     [normalized_events_basenames_due_probe_idx]="$basenames_lookahead_migration"
     [normalized_events_basenames_direct_node_probe_idx]="$basenames_lookahead_migration"
+    [normalized_events_v2_lookahead_probe_idx]="$v2_lookahead_migration"
+    [normalized_events_v2_direct_node_probe_idx]="$v2_lookahead_migration"
+    [normalized_events_v2_key_probe_idx]="$v2_lookahead_migration"
+    [normalized_events_v2_due_probe_idx]="$v2_lookahead_migration"
+)
+# The ENSv2 block probe keys only columns, so it has no JSON key literal to alter.
+declare -A lookahead_index_json_key_literals=(
+    [normalized_events_v2_lookahead_probe_idx]=no-json-key-literal
 )
 check_lookahead_index_migration() {
-    local migration="$1" due_index="$2" direct_index="$3"
-    if [ "${4:-}" = absent-from-fixture ]; then
+    local migration="$1" fixture="$2" preceding_count="$3" baseline_count="$4"
+    shift 4
+    local -a indexes=("$@")
+    local index_list
+    index_list="$(printf "'%s', " "${indexes[@]}")"
+    index_list="${index_list%, }"
+    if [ "$fixture" = absent-from-fixture ]; then
         # The historical-probe schema predates these indexes, so applying the
         # schema-migration here is the upgrade from its preceding shape; the
         # removal parity check above already proved that upgrade equals the
@@ -2062,14 +2086,14 @@ SELECT index_class.relname AS index_name,
 FROM pg_index
 JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass
-  AND index_class.relname IN ('$due_index', '$direct_index');
+  AND index_class.relname IN ($index_list);
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM expected_lookahead_indexes) <> 2 THEN
-        RAISE EXCEPTION 'fresh baseline does not define both $due_index and $direct_index';
+    IF (SELECT count(*) FROM expected_lookahead_indexes) <> ${#indexes[@]} THEN
+        RAISE EXCEPTION 'fresh baseline does not define every index of $(basename "$migration")';
     END IF;
 END \$\$;
-DROP INDEX $due_index, $direct_index;
+DROP INDEX $(IFS=,; printf '%s' "${indexes[*]}");
 SQL
         emit_phase_migration "$migration" preceding-shape
         emit_phase_migration "$migration" baseline-first
@@ -2085,7 +2109,7 @@ BEGIN
           AND pg_index.indisvalid AND pg_index.indisready
           AND pg_index.indpred IS NOT NULL
           AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
-    ) <> 2 THEN
+    ) <> ${#indexes[@]} THEN
         RAISE EXCEPTION '$(basename "$migration") upgrade differs from the baseline';
     END IF;
 END \$\$;
@@ -2094,7 +2118,7 @@ SQL
     } | run_psql
     fi
     # The schema-migration adopts an existing relation by name alone, so its check
-    # must accept the two indexes it just rebuilt. sqlx runs schema-migrations
+    # must accept the indexes it just rebuilt. sqlx runs schema-migrations
     # without the phase schema on search_path, which makes PostgreSQL print the
     # enum type in each predicate with its schema name unless the check controls
     # search_path itself, so prove both session settings. The check must also
@@ -2116,15 +2140,17 @@ SQL
         emit_quote_all_identifiers_probe "$migration" in-transaction
     } | run_psql
     assert_migration_context_count "$migration" empty-schema 1
-    assert_migration_context_count "$migration" preceding-shape "${5:-1}"
-    assert_migration_context_count "$migration" baseline-first "${6:-3}"
+    assert_migration_context_count "$migration" preceding-shape "$preceding_count"
+    assert_migration_context_count "$migration" baseline-first "$baseline_count"
 }
-check_lookahead_index_migration "$v1_lookahead_migration" \
+check_lookahead_index_migration "$v1_lookahead_migration" in-fixture 1 3 \
     normalized_events_v1_due_probe_idx normalized_events_v1_direct_node_probe_idx
-check_lookahead_index_migration "$basenames_lookahead_migration" \
-    normalized_events_basenames_due_probe_idx normalized_events_basenames_direct_node_probe_idx \
-    absent-from-fixture 2 3
-# The live prebuild in ops/v1-lookahead-indexes/install.sql builds all four
+check_lookahead_index_migration "$basenames_lookahead_migration" absent-from-fixture 2 3 \
+    normalized_events_basenames_due_probe_idx normalized_events_basenames_direct_node_probe_idx
+check_lookahead_index_migration "$v2_lookahead_migration" absent-from-fixture 2 3 \
+    normalized_events_v2_lookahead_probe_idx normalized_events_v2_direct_node_probe_idx \
+    normalized_events_v2_key_probe_idx normalized_events_v2_due_probe_idx
+# The live prebuild in ops/v1-lookahead-indexes/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition, refuse
 # an invalid index, a valid index with other keys, a valid index whose JSON
 # key literals start with the schema name, and a table under the name, and
@@ -2135,13 +2161,14 @@ for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
         "$v1_lookahead_install" \
         "$v1_lookahead_readme" \
         normalized_events \
-        "block_number, chain_id"
+        "block_number, chain_id" \
+        "${lookahead_index_json_key_literals[$v1_lookahead_index_name]:-json-key-literals}"
 done
 # The installer refuses before it builds anything. With the last index
 # invalid and the first one absent, it must stop on the invalid one, tell the
 # operator how to drop it, and leave the first one unbuilt.
 v1_lookahead_first_index="${v1_lookahead_index_names[0]}"
-v1_lookahead_last_index="${v1_lookahead_index_names[3]}"
+v1_lookahead_last_index="${v1_lookahead_index_names[-1]}"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
@@ -2259,6 +2286,9 @@ SQL
     # index is valid, ready, and on the right table, but it indexes
     # after_state ->> '<schema>.expiry' and the like, which is NULL for every
     # real row.
+    if [ -n "${lookahead_index_json_key_literals[$v1_lookahead_index_name]:-}" ]; then
+        continue
+    fi
     v1_lookahead_found_definition="${v1_lookahead_reviewed_definition//->> \'/->> \'$scratch_schema.}"
     if [ "$v1_lookahead_found_definition" = "$v1_lookahead_reviewed_definition" ]; then
         printf '%s\n' "$v1_lookahead_index_name: reviewed definition has no JSON key literal to alter" >&2

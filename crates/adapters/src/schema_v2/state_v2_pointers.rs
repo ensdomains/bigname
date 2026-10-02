@@ -318,11 +318,7 @@ pub(super) fn same_resolver_observation(left: &str, right: &str) -> bool {
 }
 
 pub(super) fn resolver_observation_id(token_id: &str) -> String {
-    token_id
-        .get(..token_id.len().saturating_sub(8))
-        .map(|prefix| format!("{prefix}00000000"))
-        .unwrap_or_else(|| token_id.to_owned())
-        .to_ascii_lowercase()
+    crate::schema_v2::lookahead::v2_observation_id(token_id)
 }
 
 fn record_subregistry_lookup_visits(visits: usize) {

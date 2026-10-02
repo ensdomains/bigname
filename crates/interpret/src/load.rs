@@ -31,6 +31,8 @@ pub(crate) struct LoadedBatch {
     pub provenance_manifests: Vec<ManifestInput>,
     pub prior_cache: PriorCache,
     pub adapter_session: Option<SchemaV2AdapterSession>,
+    /// The batch lookahead already interpreted inside its loading snapshot.
+    pub prepared: Option<Box<bigname_adapters::schema_v2::PreparedAdapterBatch>>,
     pub restored_event_count: usize,
     pub lookahead_nodes:
         Option<std::collections::BTreeSet<bigname_adapters::schema_v2::V1NodeRequest>>,
@@ -160,6 +162,7 @@ pub(crate) async fn batch_input(
         provenance_manifests,
         prior_cache,
         adapter_session: Some(adapter_session),
+        prepared: None,
         restored_event_count,
         lookahead_nodes: None,
     })

@@ -51,7 +51,11 @@ impl State {
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
         self.v2_dirty_tokens.clear();
         self.v2_dirty_registries.clear();
-        let keys = self.v2_tokens.keys().cloned().collect::<Vec<_>>();
+        let keys = self
+            .v2_tokens
+            .loaded()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
         self.refresh_v2_name_keys(keys, at_unix_timestamp, &imbl::ordset::OrdSet::new())
     }
 
@@ -106,14 +110,9 @@ impl State {
         if current_timestamp <= previous_timestamp || current_timestamp < 0 {
             return imbl::ordset::OrdSet::new();
         }
-        let first_expiry = u64::try_from(previous_timestamp.saturating_add(1)).unwrap_or_default();
-        let last_expiry = u64::try_from(current_timestamp).expect("non-negative timestamp");
         let crossed = self
             .v2_expiries
-            .range((first_expiry, String::new())..)
-            .take_while(|(expiry, _)| *expiry <= last_expiry)
-            .map(|(_, token_key)| token_key.clone())
-            .collect::<imbl::ordset::OrdSet<String>>();
+            .crossed(previous_timestamp, current_timestamp);
         for token_key in &crossed {
             self.mark_v2_token_component_dirty(token_key);
         }
@@ -129,14 +128,7 @@ impl State {
             if visited.insert(registry.clone()).is_some() {
                 continue;
             }
-            let prefix = format!("{registry}:");
-            let keys = self
-                .v2_tokens
-                .range(prefix.clone()..)
-                .take_while(|(key, _)| key.starts_with(&prefix))
-                .map(|(key, _)| key.clone())
-                .collect::<Vec<_>>();
-            for key in keys {
+            for key in self.v2_tokens.registry_keys(&registry) {
                 self.v2_dirty_tokens.insert(key.clone());
                 let Some(token) = self.v2_tokens.get(&key) else {
                     continue;
@@ -254,7 +246,8 @@ impl State {
                 if let Some(previous) = previous.as_ref()
                     && token.registration.is_some()
                     && token.resource_id.is_some_and(|resource_id| {
-                        self.active_resources.get(&previous.logical_name_id) == Some(&resource_id)
+                        self.observed_active_resource(&previous.logical_name_id)
+                            == Some(resource_id)
                     })
                 {
                     self.active_resources.remove(&previous.logical_name_id);

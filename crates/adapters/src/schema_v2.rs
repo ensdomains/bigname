@@ -24,9 +24,9 @@ mod state_residency;
 mod state_restore;
 
 pub use lookahead::{
-    V1BatchDependencies, V1NodeRequest, collect_v1_batch_dependencies,
+    UnloadedKeys, V1BatchDependencies, V1NodeRequest, collect_v1_batch_dependencies,
     prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
-    v1_lookahead_supports_family,
+    v1_lookahead_supports_family, v2_event_keys, v2_key, v2_key_loaded, v2_registry_key,
 };
 pub use model::*;
 pub use session::{

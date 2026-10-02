@@ -18,11 +18,21 @@ use crate::{InterpretError, Result};
 // operator's concern, managed through `BIGNAME_INTERPRET_BLOCKS_PER_BATCH`.
 const ENS_GRACE_PERIOD_SECS: i64 = 90 * 24 * 60 * 60;
 const EVENTS: &str = include_str!("lookahead/events.sql");
+pub(super) const V2_KEYS: &str = include_str!("lookahead/v2_keys.sql");
 const DUE_NAMES: &str = include_str!("lookahead/due_names.sql");
+const V2_DUE_KEYS: &str = include_str!("lookahead/v2_due_keys.sql");
+const V2_LATEST_TOPOLOGY: &str = include_str!("lookahead/v2_latest_topology.sql");
 const RETAINED_FAMILIES: &str = include_str!("lookahead/retained_families.sql");
 
 type EventRow = (Value, Option<OffsetDateTime>);
 
+/// A loaded event with the position the restore must apply it in.
+pub(super) struct OrderedEvent {
+    pub(super) order: (i64, i64),
+    pub(super) event: PriorEventInput,
+}
+
+#[cfg(test)]
 pub(super) async fn events(
     connection: &mut PgConnection,
     chain: &str,
@@ -30,10 +40,31 @@ pub(super) async fn events(
     names: &[String],
     resources: &[Uuid],
 ) -> Result<Vec<PriorEventInput>> {
-    if names.is_empty() && resources.is_empty() {
+    Ok(
+        ordered_events(connection, chain, before, names, resources, &[])
+            .await?
+            .into_iter()
+            .map(|ordered| ordered.event)
+            .collect(),
+    )
+}
+
+/// The latest event of every state key among the events of `names` (every covered family),
+/// of `resources` (ENSv1-model events naming no name) and of the ENSv2 state keys `v2_keys`,
+/// in restore order.
+pub(super) async fn ordered_events(
+    connection: &mut PgConnection,
+    chain: &str,
+    before: i64,
+    names: &[String],
+    resources: &[Uuid],
+    v2_keys: &[String],
+) -> Result<Vec<OrderedEvent>> {
+    if names.is_empty() && resources.is_empty() && v2_keys.is_empty() {
         return Ok(Vec::new());
     }
     let query = EVENTS
+        .replace("{v2_keys}", V2_KEYS.trim_end())
         .replace("{state_key}", INTERPRETER_STATE_KEY)
         .replace("{state_scope}", STATE_SCOPE_KEY)
         .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
@@ -44,16 +75,63 @@ pub(super) async fn events(
         .bind(before)
         .bind(names)
         .bind(resources)
+        .bind(v2_keys)
         .fetch(connection);
     let mut result = Vec::new();
-    while let Some((body, timestamp)) = rows
+    while let Some((mut body, timestamp)) = rows
         .try_next()
         .await
         .map_err(|error| InterpretError::database("failed to load lookahead prior events", error))?
     {
-        result.push(decode_event(body, timestamp)?);
+        let normalized_event_id = body["normalized_event_id"].as_i64().ok_or_else(|| {
+            InterpretError::data_integrity("lookahead prior event has no normalized event id")
+        })?;
+        let block_number = body["block_number"].as_i64().ok_or_else(|| {
+            InterpretError::data_integrity("lookahead prior event has no block number")
+        })?;
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("normalized_event_id");
+        }
+        result.push(OrderedEvent {
+            order: (block_number, normalized_event_id),
+            event: decode_event(body, timestamp)?,
+        });
     }
     Ok(result)
+}
+
+/// The ENSv2 state keys of the tokens whose expiry lies in `(start, end]`; see
+/// `lookahead/v2_due_keys.sql`.
+pub(super) async fn v2_due_keys(
+    connection: &mut PgConnection,
+    chain: &str,
+    before: i64,
+    (start, end): (i64, i64),
+) -> Result<Vec<String>> {
+    sqlx::query_scalar(&V2_DUE_KEYS.replace("{state_scope}", STATE_SCOPE_KEY))
+        .bind(chain)
+        .bind(before)
+        .bind(start)
+        .bind(end)
+        .fetch_all(connection)
+        .await
+        .map_err(|error| InterpretError::database("failed to load due ENSv2 tokens", error))
+}
+
+/// The timestamp of the latest ENSv2 registry event before `before`.
+pub(super) async fn v2_latest_topology(
+    connection: &mut PgConnection,
+    chain: &str,
+    before: i64,
+) -> Result<Option<OffsetDateTime>> {
+    sqlx::query_scalar(V2_LATEST_TOPOLOGY)
+        .bind(chain)
+        .bind(before)
+        .fetch_optional(connection)
+        .await
+        .map_err(|error| {
+            InterpretError::database("failed to load the latest ENSv2 topology timestamp", error)
+        })
 }
 
 pub(super) async fn due_names(

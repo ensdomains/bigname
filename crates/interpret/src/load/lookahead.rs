@@ -1,10 +1,11 @@
-//! Per-batch ENSv1 and Basenames Base state loading: restore only the history of names the
-//! batch touches.
-//! Canonical history remains the sole durable state.
+//! Per-batch ENSv1, ENSv2 and Basenames Base state loading: restore only the history of the
+//! names, resources and [ENSv2 state keys](../../../../docs/glossary.md#ensv2-state-key) the
+//! batch touches. Canonical history remains the sole durable state.
 use bigname_adapters::schema_v2::{
-    BatchInput, ManifestInput, StateCacheCapacity, V1BatchDependencies, V1NodeRequest,
-    begin_schema_v2_adapter_restore_with_provenance, collect_v1_batch_dependencies,
-    restore_schema_v2_lookahead_session, v1_lookahead_supports_family,
+    BatchInput, ManifestInput, StateCacheCapacity, UnloadedKeys, V1BatchDependencies,
+    V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance, collect_v1_batch_dependencies,
+    prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
+    v1_lookahead_supports_family, v2_key_loaded,
 };
 use sqlx::PgPool;
 
@@ -59,9 +60,10 @@ pub(crate) async fn batch_input(
     // and the history the full-state loader would restore. Deprecated manifests count too:
     // the full-state loader restores their retained events, and lookahead reads none from a
     // family it does not cover.
+    let other_families = lookahead_query::other_manifest_families(&mut tx, chain_id).await?;
     let reason = match full_state_reason(&manifests, &provenance) {
         Some(reason) => Some(reason),
-        None => retained_family_reason(&mut tx, chain_id, from_block).await?,
+        None => retained_family_reason(&mut tx, chain_id, from_block, &other_families).await?,
     };
     if let Some(reason) = reason {
         return Ok(Attempt::FullStateRequired(StateLoader::FullState {
@@ -102,49 +104,105 @@ pub(crate) async fn batch_input(
             node: node.to_owned(),
         });
     }
-    // Load the events of the requested names and resources, add the names and resources
-    // those events link to, and repeat until a round adds nothing. There is no round limit:
-    // every round that continues adds at least one name or resource that occurs in the
-    // chain's stored history before this batch, that history is finite and fixed inside this
-    // snapshot, and nothing is ever removed, so the set stops growing after finitely many
-    // rounds. A subname many labels deep costs one round per label, because each stored
-    // `NewOwner` links a name to its parent.
-    let prior = loop {
-        validate_dependencies(&dependencies)?;
-        let previous = (dependencies.nodes.len(), dependencies.resource_ids.len());
-        let names: Vec<_> = dependencies
-            .nodes
-            .iter()
-            .map(|request| format!("{}:{}", request.namespace, request.node))
-            .collect();
-        let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-        let events =
-            lookahead_query::events(&mut tx, chain_id, from_block, &names, &resources).await?;
-        dependencies
-            .include_prior_events(&events)
-            .map_err(|error| invalid_dependencies("expand prior links", error))?;
-        validate_dependencies(&dependencies)?;
-        if previous == (dependencies.nodes.len(), dependencies.resource_ids.len()) {
-            break events;
-        }
-        // Discard this partial fetch before querying the expanded set. Never retain the
-        // previous round's full payload while loading the next one.
+    // Every event is written under one of the chain's manifests, so a chain with no ENSv2
+    // manifest row has no ENSv2 history to read.
+    let has_v2_manifest = provenance
+        .iter()
+        .map(|manifest| manifest.source_family.as_str())
+        .chain(other_families.iter().map(|(family, _)| family.as_str()))
+        .any(|family| family.starts_with("ens_v2_"));
+    let latest_v2_topology = if has_v2_manifest {
+        lookahead_query::v2_latest_topology(&mut tx, chain_id, from_block).await?
+    } else {
+        None
     };
-    let restored_event_count = prior.len();
-    let restore = begin_schema_v2_adapter_restore_with_provenance(
-        chain_id.to_owned(),
-        input.manifests.clone(),
-        provenance.clone(),
-        input.discovery_rules.clone(),
-        input.admissions.clone(),
-        state_cache_capacity,
-    )
-    .map_err(|error| invalid_dependencies("begin restore", error))?;
-    // Restore runs under the same loaded-names check as interpretation, so an event that
-    // reaches a name whose history was not loaded fails the batch.
-    let adapter_session =
-        restore_schema_v2_lookahead_session(restore, prior, predecessor, &dependencies.nodes)
-            .map_err(|error| invalid_dependencies("restore", error))?;
+    // A batch refresh releases the ENSv2 tokens whose expiry lies after the restored
+    // topology timestamp, raised to the predecessor's, and at or before the last block's.
+    // With no ENSv2 history the restore has no topology timestamp, so the window opens
+    // unbounded below; there is no token to load either way.
+    let window_start = match (latest_v2_topology, predecessor) {
+        (Some(_), Some(predecessor)) => predecessor.unix_timestamp(),
+        _ => i64::MIN,
+    };
+    let window = (window_start, last_timestamp.unix_timestamp());
+    if has_v2_manifest {
+        dependencies
+            .v2_keys
+            .extend(lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?);
+    }
+    dependencies.v2_due_window = Some(window);
+    let (prepared, restored_event_count) = loop {
+        let prior = load_closure(&mut tx, chain_id, from_block, &mut dependencies).await?;
+        let restored_event_count = prior.len();
+        let restore = begin_schema_v2_adapter_restore_with_provenance(
+            chain_id.to_owned(),
+            input.manifests.clone(),
+            provenance.clone(),
+            input.discovery_rules.clone(),
+            input.admissions.clone(),
+            state_cache_capacity,
+        )
+        .map_err(|error| invalid_dependencies("begin restore", error))?;
+        // Restore and interpretation both run under the loaded-keys check. An attempt that
+        // reads a name or ENSv2 state key whose history was not loaded is discarded, and the
+        // next one loads it: ENSv2 derives names from registry state while it interprets, so
+        // the collector cannot name them all in advance. Every attempt that continues adds a
+        // key not loaded before, one the batch's logs and the snapshot's finite history
+        // derive, so the attempts end. A key read under another spelling than the loaded one
+        // fails only when that spelling is loaded too; otherwise it loads no history, so the
+        // state maps' keys must match the `state_scope` events are filed under.
+        let attempt = restore_schema_v2_lookahead_session(
+            restore,
+            prior,
+            predecessor,
+            latest_v2_topology,
+            &dependencies,
+        )
+        .and_then(|session| {
+            prepare_schema_v2_batch_lookahead(
+                input.clone(),
+                provenance.clone(),
+                session,
+                &dependencies,
+                state_cache_capacity,
+            )
+        });
+        match attempt {
+            Ok(prepared) => break (prepared, restored_event_count),
+            Err(error) => match error.downcast_ref::<UnloadedKeys>() {
+                Some(unloaded)
+                    if unloaded.names.is_disjoint(&dependencies.nodes)
+                        && !unloaded
+                            .v2_keys
+                            .iter()
+                            .any(|key| v2_key_loaded(&dependencies, key)) =>
+                {
+                    #[cfg(test)]
+                    {
+                        RETRIES.set(RETRIES.get() + 1);
+                        WHOLE_REGISTRY_BATCHES.with_borrow_mut(|batches| {
+                            batches.extend(
+                                unloaded
+                                    .v2_keys
+                                    .iter()
+                                    .filter(|key| key.ends_with(":*"))
+                                    .map(|key| (from_block, key.clone())),
+                            )
+                        });
+                    }
+                    dependencies.nodes.extend(unloaded.names.iter().cloned());
+                    dependencies
+                        .v2_keys
+                        .extend(unloaded.v2_keys.iter().cloned());
+                }
+                _ => {
+                    return Err(InterpretError::data_integrity(format!(
+                        "hash-covered adapter interpretation failed: {error:#}"
+                    )));
+                }
+            },
+        }
+    };
     tx.commit().await.map_err(|error| {
         InterpretError::database("failed to commit lookahead input snapshot", error)
     })?;
@@ -152,10 +210,59 @@ pub(crate) async fn batch_input(
         input,
         provenance_manifests: provenance,
         prior_cache: cache::freshly_loaded(orphaning_epoch),
-        adapter_session: Some(adapter_session),
+        adapter_session: None,
+        prepared: Some(Box::new(prepared)),
         restored_event_count,
         lookahead_nodes: Some(dependencies.nodes),
     })))
+}
+
+/// Load the events of the requested names, resources and ENSv2 state keys, add the ones those
+/// events link to, and repeat until a round adds nothing. There is no round limit: every round
+/// that continues adds at least one name, resource or ENSv2 state key that occurs in the
+/// chain's stored history before this batch (or is the registry-only resource of such a name),
+/// that history is finite and fixed inside this snapshot, and nothing is ever removed, so the
+/// set stops growing after finitely many rounds. A subname many labels deep costs one round
+/// per label, because each stored `NewOwner` links a name to its parent, and each stored ENSv2
+/// `ParentChanged` a registry to its parent token. Returns the loaded events in restore order.
+async fn load_closure(
+    connection: &mut sqlx::PgConnection,
+    chain_id: &str,
+    from_block: i64,
+    dependencies: &mut V1BatchDependencies,
+) -> Result<Vec<bigname_adapters::schema_v2::PriorEventInput>> {
+    loop {
+        validate_dependencies(dependencies)?;
+        let size = |dependencies: &V1BatchDependencies| {
+            (
+                dependencies.nodes.len(),
+                dependencies.resource_ids.len(),
+                dependencies.v2_keys.len(),
+            )
+        };
+        let previous = size(dependencies);
+        let names: Vec<_> = dependencies
+            .nodes
+            .iter()
+            .map(|request| format!("{}:{}", request.namespace, request.node))
+            .collect();
+        let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
+        let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
+        let mut events = lookahead_query::ordered_events(
+            connection, chain_id, from_block, &names, &resources, &v2_keys,
+        )
+        .await?;
+        dependencies
+            .include_prior_events(events.iter().map(|ordered| &ordered.event))
+            .map_err(|error| invalid_dependencies("expand prior links", error))?;
+        dependencies.include_registry_only_resources(chain_id);
+        validate_dependencies(dependencies)?;
+        if previous == size(dependencies) {
+            events.sort_by_key(|ordered| ordered.order);
+            return Ok(events.into_iter().map(|ordered| ordered.event).collect());
+        }
+        // Discard this partial fetch before querying the expanded set.
+    }
 }
 
 /// The first manifest, in the loader's stable order, whose source family lookahead does not
@@ -180,9 +287,9 @@ fn full_state_reason(
 /// The first uncovered source family, in name order, whose manifest on the chain is in a
 /// rollout state other than `active` or `deprecated` (`draft` or `shadow`) and that retains a
 /// readable event before the batch. The full-state loader restores every retained event with
-/// no source-family filter, while lookahead reads only `ens_v1_*` and `basenames_base_*`
-/// families, so history of such a family (written while its manifest was active, before the
-/// manifest moved back) would be restored by one loader and not the other.
+/// no source-family filter, while lookahead reads only `ens_v1_*`, `ens_v2_*` and
+/// `basenames_base_*` families, so history of such a family (written while its manifest was
+/// active, before the manifest moved back) would be restored by one loader and not the other.
 ///
 /// Only families with a manifest row on the chain are probed: every event is written under
 /// one of the chain's manifests, and `manifest_versions` rows are never deleted, only moved
@@ -192,13 +299,12 @@ async fn retained_family_reason(
     connection: &mut sqlx::PgConnection,
     chain_id: &str,
     from_block: i64,
+    other_families: &[(String, String)],
 ) -> Result<Option<FullStateReason>> {
-    let candidates: Vec<(String, String)> =
-        lookahead_query::other_manifest_families(connection, chain_id)
-            .await?
-            .into_iter()
-            .filter(|(family, _)| !v1_lookahead_supports_family(family))
-            .collect();
+    let candidates: Vec<&(String, String)> = other_families
+        .iter()
+        .filter(|(family, _)| !v1_lookahead_supports_family(family))
+        .collect();
     let mut families: Vec<String> = candidates
         .iter()
         .map(|(family, _)| family.clone())
@@ -246,6 +352,15 @@ fn invalid_dependencies(operation: &str, error: anyhow::Error) -> InterpretError
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Lookahead attempts discarded because they read an unloaded key, on this thread.
+    pub(super) static RETRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The batches, by first block, that loaded a whole ENSv2 registry, and its key.
+    pub(super) static WHOLE_REGISTRY_BATCHES: std::cell::RefCell<std::collections::BTreeSet<(i64, String)>> =
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+#[cfg(test)]
 #[path = "lookahead_tests.rs"]
 mod tests;
 
@@ -256,3 +371,7 @@ mod equivalence_tests;
 #[cfg(test)]
 #[path = "lookahead_basenames_equivalence_tests.rs"]
 mod basenames_equivalence_tests;
+
+#[cfg(test)]
+#[path = "lookahead_ensv2_equivalence_tests.rs"]
+mod ensv2_equivalence_tests;

@@ -68,6 +68,13 @@ impl AdapterSessionRestore {
         Ok(())
     }
 
+    pub(super) fn include_v2_topology_timestamp(&mut self, at: Option<time::OffsetDateTime>) {
+        if let Some(at) = at {
+            self.state
+                .include_v2_topology_timestamp(at.unix_timestamp());
+        }
+    }
+
     pub fn finish(
         mut self,
         resume_predecessor_timestamp: Option<time::OffsetDateTime>,

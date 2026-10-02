@@ -17,7 +17,8 @@ SET statement_timeout = '6h';
 -- the recovery.
 -- The definition check matches the one in the schema-migrations
 -- 20260917150000_normalized_events_v1_lookahead_indexes.sql (ENSv1) and
--- 20261001120100_normalized_events_basenames_lookahead_indexes.sql (Basenames Base). PostgreSQL always
+-- 20261001120100_normalized_events_basenames_lookahead_indexes.sql (Basenames Base) and
+-- 20261001130000_normalized_events_v2_lookahead_indexes.sql (ENSv2). PostgreSQL always
 -- prints the table's schema name, and a type's schema name only when the
 -- session search_path does not include it. The printed text is not rewritten to
 -- even that out, because a text replacement would also change a string literal
@@ -71,7 +72,23 @@ CASE
     ELSE NULL::numeric
 END), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family = 'basenames_base_registrar'::text) AND (event_kind = ANY (ARRAY['RegistrationGranted'::text, 'RegistrationRenewed'::text, 'TokenControlTransferred'::text])))$def$),
             ('normalized_events_basenames_direct_node_probe_idx',
-             $def$CREATE INDEX normalized_events_basenames_direct_node_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, COALESCE(((namespace || ':'::text) || lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text), (after_state #>> '{grant_source,node}'::text[]), (after_state #>> '{revocation_source,node}'::text[])))), logical_name_id), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'basenames\_base\_%'::text))$def$)
+             $def$CREATE INDEX normalized_events_basenames_direct_node_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, COALESCE(((namespace || ':'::text) || lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text), (after_state #>> '{grant_source,node}'::text[]), (after_state #>> '{revocation_source,node}'::text[])))), logical_name_id), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'basenames\_base\_%'::text))$def$),
+            ('normalized_events_v2_lookahead_probe_idx',
+             $def$CREATE INDEX normalized_events_v2_lookahead_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'ens\_v2\_%'::text))$def$),
+            ('normalized_events_v2_direct_node_probe_idx',
+             $def$CREATE INDEX normalized_events_v2_direct_node_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, COALESCE(((namespace || ':'::text) || lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text), (after_state #>> '{grant_source,node}'::text[]), (after_state #>> '{revocation_source,node}'::text[])))), logical_name_id), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'ens\_v2\_%'::text))$def$),
+            ('normalized_events_v2_key_probe_idx',
+             $def$CREATE INDEX normalized_events_v2_key_probe_idx ON bigname_phase.normalized_events USING gin (array_remove(ARRAY[(((lower(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 1)) || ':'::text) || lower("left"(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 3), GREATEST((length(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 3)) - 8), 0)))) || '00000000'::text), (lower(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 1)) || ':*'::text), (((lower(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 1)) || ':'::text) || lower("left"((after_state ->> 'new_token_id'::text), GREATEST((length((after_state ->> 'new_token_id'::text)) - 8), 0)))) || '00000000'::text), (((lower(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 1)) || ':'::text) || lower("left"(COALESCE((after_state ->> 'resource'::text), (after_state ->> 'upstream_resource'::text)), GREATEST((length(COALESCE((after_state ->> 'resource'::text), (after_state ->> 'upstream_resource'::text))) - 8), 0)))) || '00000000'::text), (((lower(split_part((raw_fact_ref ->> 'state_scope'::text), ':'::text, 1)) || ':'::text) || lower("left"((after_state ->> 'labelhash'::text), GREATEST((length((after_state ->> 'labelhash'::text)) - 8), 0)))) || '00000000'::text)], NULL::text)) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family ~~ 'ens\_v2\_%'::text))$def$),
+            ('normalized_events_v2_due_probe_idx',
+             $def$CREATE INDEX normalized_events_v2_due_probe_idx ON bigname_phase.normalized_events USING btree (chain_id, (
+CASE
+    WHEN ((jsonb_typeof((after_state -> 'expiry'::text)) = ANY (ARRAY['number'::text, 'string'::text])) AND ((after_state ->> 'expiry'::text) ~ '^[+-]?[0-9]+$'::text) AND (length(ltrim((after_state ->> 'expiry'::text), '+-0'::text)) <= 19)) THEN ((
+    CASE
+        WHEN ("left"((after_state ->> 'expiry'::text), 1) = '-'::text) THEN '-'::text
+        ELSE ''::text
+    END || COALESCE(NULLIF(ltrim((after_state ->> 'expiry'::text), '+-0'::text), ''::text), '0'::text)))::numeric
+    ELSE NULL::numeric
+END), block_number) WHERE ((canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (source_family = ANY (ARRAY['ens_v2_registry_l1'::text, 'ens_v2_root_l1'::text])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -187,6 +204,47 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_basenames_direct_node_
     WHERE canonicality_state IN ('canonical','safe','finalized')
       AND source_family LIKE 'basenames\_base\_%';
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_lookahead_probe_idx
+    ON bigname_phase.normalized_events (chain_id, block_number)
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_direct_node_probe_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        (COALESCE(namespace || ':' || lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node', after_state #>> '{grant_source,node}', after_state #>> '{revocation_source,node}')), logical_name_id)),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_key_probe_idx
+    ON bigname_phase.normalized_events USING gin ((
+        array_remove(ARRAY[
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(split_part(raw_fact_ref ->> 'state_scope', ':', 3), greatest(length(split_part(raw_fact_ref ->> 'state_scope', ':', 3)) - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':*',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'new_token_id', greatest(length(after_state ->> 'new_token_id') - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource'), greatest(length(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource')) - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'labelhash', greatest(length(after_state ->> 'labelhash') - 8, 0))) || '00000000'
+        ]::text[], NULL)
+    ))
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v2_due_probe_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        (CASE WHEN jsonb_typeof(after_state -> 'expiry') IN ('number','string')
+            AND after_state ->> 'expiry' ~ '^[+-]?[0-9]+$'
+            AND length(ltrim(after_state ->> 'expiry', '+-0')) <= 19
+          THEN ((CASE WHEN left(after_state ->> 'expiry', 1) = '-' THEN '-' ELSE '' END)
+            || COALESCE(NULLIF(ltrim(after_state ->> 'expiry', '+-0'), ''), '0'))::numeric
+        END),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family IN ('ens_v2_registry_l1','ens_v2_root_l1');
+
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
@@ -196,9 +254,13 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_v1_due_probe_idx'),
     to_regclass('bigname_phase.normalized_events_v1_direct_node_probe_idx'),
     to_regclass('bigname_phase.normalized_events_basenames_due_probe_idx'),
-    to_regclass('bigname_phase.normalized_events_basenames_direct_node_probe_idx')
+    to_regclass('bigname_phase.normalized_events_basenames_direct_node_probe_idx'),
+    to_regclass('bigname_phase.normalized_events_v2_lookahead_probe_idx'),
+    to_regclass('bigname_phase.normalized_events_v2_direct_node_probe_idx'),
+    to_regclass('bigname_phase.normalized_events_v2_key_probe_idx'),
+    to_regclass('bigname_phase.normalized_events_v2_due_probe_idx')
 ) ORDER BY index_name;
 
--- All four must now exist, belong to bigname_phase.normalized_events, be valid
+-- All eight must now exist, belong to bigname_phase.normalized_events, be valid
 -- and ready, and have the reviewed definition.
 DO $$ BEGIN PERFORM pg_temp.check_v1_lookahead_indexes(true); END $$;

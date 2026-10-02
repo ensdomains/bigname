@@ -65,21 +65,21 @@ impl State {
             surface_removal_candidates: OrdSet::new(),
             restoring_state_key: None,
             active_resources: OrdMap::new(),
-            v2_tokens: OrdMap::new(),
-            v2_subregistry_tokens_by_observation: OrdMap::new(),
-            v2_resolver_tokens_by_observation: OrdMap::new(),
-            v2_resolver_aliases_by_observation: OrdMap::new(),
-            v2_expiries: OrdSet::new(),
+            v2_tokens: Default::default(),
+            v2_subregistry_tokens_by_observation: Default::default(),
+            v2_resolver_tokens_by_observation: Default::default(),
+            v2_resolver_aliases_by_observation: Default::default(),
+            v2_expiries: Default::default(),
             v2_dirty_tokens: OrdSet::new(),
             v2_dirty_registries: OrdSet::new(),
             v2_terminal_closure_hits: OrdSet::new(),
-            v2_token_by_upstream_resource_index: OrdMap::new(),
-            v2_token_by_name_index: OrdMap::new(),
-            v2_tokens_by_current_name_index: OrdMap::new(),
-            v2_entry_by_parent_label: OrdMap::new(),
-            v2_parent_claims: OrdMap::new(),
-            v2_resolver_hints: OrdMap::new(),
-            v2_resolver_arguments: OrdMap::new(),
+            v2_token_by_upstream_resource_index: Default::default(),
+            v2_token_by_name_index: Default::default(),
+            v2_tokens_by_current_name_index: Default::default(),
+            v2_entry_by_parent_label: Default::default(),
+            v2_parent_claims: Default::default(),
+            v2_resolver_hints: Default::default(),
+            v2_resolver_arguments: Default::default(),
             materialized_token_lineages: OrdSet::new(),
             v2_suffix_anchors: v2_suffix_anchors
                 .into_iter()
@@ -135,7 +135,7 @@ impl State {
     }
 
     pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {
-        if self.latest_v2_timestamp.is_none() && self.v2_tokens.is_empty() {
+        if self.latest_v2_timestamp.is_none() && self.v2_tokens.is_empty_loaded() {
             return;
         }
         self.refresh_dirty_v2_names(at_unix_timestamp);
@@ -144,6 +144,12 @@ impl State {
 
     pub(in crate::schema_v2) fn restore_prior_event_chunk(&mut self, prior: Vec<PriorEventInput>) {
         self.apply_prior_events(prior, true, false);
+    }
+
+    /// Raise the restored ENSv2 topology timestamp to `at`, the latest one among events a
+    /// partial restore did not read.
+    pub(in crate::schema_v2) fn include_v2_topology_timestamp(&mut self, at: i64) {
+        self.latest_v2_timestamp = self.latest_v2_timestamp.max(Some(at));
     }
 
     pub(in crate::schema_v2) fn finish_prior_event_restore(
@@ -157,7 +163,7 @@ impl State {
             self.refresh_all_v2_names(timestamp);
         }
         if let Some(timestamp) = resume_predecessor_timestamp
-            && (self.latest_v2_timestamp.is_some() || !self.v2_tokens.is_empty())
+            && (self.latest_v2_timestamp.is_some() || !self.v2_tokens.is_empty_loaded())
         {
             self.refresh_dirty_v2_names(timestamp);
         }
@@ -344,6 +350,7 @@ impl State {
 
     fn prune_unbacked_surfaces(&mut self) {
         for surface in std::mem::take(&mut self.surface_removal_candidates) {
+            crate::schema_v2::lookahead::observe_name(&surface);
             if !self.restored_surface_counts.contains_key(&surface)
                 && !self.v2_current_surface_counts.contains_key(&surface)
             {
@@ -385,7 +392,7 @@ fn v2_token_key(emitter: &str, token_id: &str) -> String {
     )
 }
 
-fn restored_raw_label(after_state: &Value) -> Option<Vec<u8>> {
+pub(in crate::schema_v2) fn restored_raw_label(after_state: &Value) -> Option<Vec<u8>> {
     after_state
         .get("raw_label_hex")
         .and_then(Value::as_str)

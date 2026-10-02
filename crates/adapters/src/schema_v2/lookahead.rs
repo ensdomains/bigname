@@ -1,6 +1,7 @@
-//! ENSv1-model per-batch working-set requests, for the ENSv1 families and the Basenames Base
-//! families the same protocol code interprets. Persistence and canonical selection stay in
-//! Interpret.
+//! Per-batch working-set requests. ENSv1-model state (the ENSv1 families and the Basenames Base
+//! families the same protocol code interprets) is requested per name, ENSv2 state per name and
+//! per [ENSv2 state key](../../../../docs/glossary.md#ensv2-state-key). Persistence and
+//! canonical selection stay in Interpret.
 use std::collections::BTreeSet;
 
 use anyhow::{Context, ensure};
@@ -13,6 +14,7 @@ use super::{
     catalog::{Catalog, Selected},
     common::stable_uuid,
 };
+use crate::evm_abi::hex_string;
 
 mod coverage;
 #[path = "lookahead_decode.rs"]
@@ -29,6 +31,11 @@ pub struct V1NodeRequest {
 pub struct V1BatchDependencies {
     pub nodes: BTreeSet<V1NodeRequest>,
     pub resource_ids: BTreeSet<Uuid>,
+    /// ENSv2 state keys (`v2_key`) and whole registries (`v2_registry_key`).
+    pub v2_keys: BTreeSet<String>,
+    /// The window `(start, end]` of expiries whose ENSv2 tokens were loaded: every token a
+    /// batch refresh can release.
+    pub v2_due_window: Option<(i64, i64)>,
     pub unsupported: BTreeSet<String>,
 }
 
@@ -42,9 +49,22 @@ impl V1BatchDependencies {
         Ok(())
     }
 
+    /// Add each name's registry-only resource, whose history can hold events that name no node.
+    pub fn include_registry_only_resources(&mut self, chain_id: &str) {
+        for request in &self.nodes {
+            self.resource_ids.insert(stable_uuid(&format!(
+                "resource:registry-only:{chain_id}:{}",
+                request.node
+            )));
+        }
+    }
+
     /// Expand stored explicit links before interpreting. The caller must fetch new requests
     /// to closure; an empty complete query certifies absence, a query not run does not.
-    pub fn include_prior_events(&mut self, events: &[PriorEventInput]) -> anyhow::Result<()> {
+    pub fn include_prior_events<'a>(
+        &mut self,
+        events: impl IntoIterator<Item = &'a PriorEventInput>,
+    ) -> anyhow::Result<()> {
         for event in events {
             if !supported_family(&event.source_family) {
                 self.unsupported
@@ -60,8 +80,77 @@ impl V1BatchDependencies {
                 self.node(namespace, node)?;
             }
             self.prior_links(&event.namespace, &event.after_state)?;
+            self.prior_v2_links(event);
         }
         Ok(())
+    }
+
+    /// The ENSv2 state a restored event needs beside its own: for a registry event, its token
+    /// under every id it carries, the registry's parent claim, the parent token a claim names,
+    /// and the claim of a subregistry it points at; for a resolver hint or argument, every
+    /// version of it.
+    fn prior_v2_links(&mut self, event: &PriorEventInput) {
+        let Some(address) = event
+            .state_scope
+            .as_deref()
+            .and_then(|scope| scope.split(':').next())
+        else {
+            return;
+        };
+        let after = &event.after_state;
+        let text = |field: &str| after.get(field).and_then(Value::as_str);
+        match event.source_family.as_str() {
+            "ens_v2_registry_l1" | "ens_v2_root_l1" => {
+                self.v2_keys.extend(
+                    v2_event_keys(event)
+                        .into_iter()
+                        .filter(|key| !key.ends_with(":*")),
+                );
+                self.v2_keys.insert(v2_key(address, "-"));
+                let ids = [
+                    "token_id",
+                    "current_token_id",
+                    "old_token_id",
+                    "new_token_id",
+                ]
+                .into_iter()
+                .filter_map(text)
+                .chain(
+                    after
+                        .get("resolver_discovery_aliases")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str),
+                );
+                for id in ids {
+                    self.v2_keys.insert(v2_key(address, id));
+                }
+                if let Some(subregistry) = text("subregistry") {
+                    self.v2_keys.insert(v2_key(subregistry, "-"));
+                }
+                if event.event_kind == "ParentChanged"
+                    && let (Some(parent), Some(label)) =
+                        (text("parent"), super::state::restored_raw_label(after))
+                {
+                    self.v2_keys.insert(v2_key(
+                        parent,
+                        &hex_string(alloy_primitives::keccak256(label)),
+                    ));
+                }
+            }
+            "ens_v2_resolver_l1"
+                if matches!(
+                    event.event_kind.as_str(),
+                    "PreimageObserved" | "ResolverPermissionArgument"
+                ) =>
+            {
+                if let Some(resource) = v2_event_resource(after) {
+                    self.v2_keys.insert(v2_key(address, resource));
+                }
+            }
+            _ => {}
+        }
     }
 
     fn prior_links(&mut self, namespace: &str, value: &Value) -> anyhow::Result<()> {
@@ -70,7 +159,12 @@ impl V1BatchDependencies {
                 for (key, value) in fields {
                     if matches!(
                         key.as_str(),
-                        "node" | "namehash" | "child_node" | "reverse_node"
+                        "node"
+                            | "namehash"
+                            | "child_node"
+                            | "reverse_node"
+                            | "previous_namehash"
+                            | "current_namehash"
                     ) {
                         if let Some(node) = value.as_str() {
                             self.node(namespace, node)?;
@@ -106,6 +200,52 @@ impl V1BatchDependencies {
     }
 }
 
+/// The ENSv2 state keys a retained ENSv2 event is filed under; the loader loads an event when
+/// one of them is requested. The SQL expression of `normalized_events_v2_key_probe_idx` and the
+/// lookahead events query must compute the same keys:
+///
+/// - the first and third `state_scope` segments, the emitter (a contract instance id for
+///   resolver arguments) and the token or resource id (`-` or empty when it has none);
+/// - the emitter and `new_token_id`, so a regenerated token's new id reaches its history;
+/// - the emitter and the upstream resource (`resource`, else `upstream_resource`), so a
+///   resource reaches its token and a resolver's hint for it;
+/// - the emitter and `labelhash`, so a registry's label reaches its token;
+/// - the emitter's whole-registry key.
+pub fn v2_event_keys(event: &PriorEventInput) -> Vec<String> {
+    let Some(scope) = event
+        .state_scope
+        .as_deref()
+        .filter(|_| event.source_family.starts_with("ens_v2_"))
+    else {
+        return Vec::new();
+    };
+    let mut segments = scope.split(':');
+    let address = segments.next().unwrap_or_default();
+    let id = segments.nth(1).unwrap_or_default();
+    let mut keys = vec![v2_key(address, id), v2_registry_key(address)];
+    if let Some(new) = event
+        .after_state
+        .get("new_token_id")
+        .and_then(Value::as_str)
+    {
+        keys.push(v2_key(address, new));
+    }
+    if let Some(resource) = v2_event_resource(&event.after_state) {
+        keys.push(v2_key(address, resource));
+    }
+    if let Some(labelhash) = event.after_state.get("labelhash").and_then(Value::as_str) {
+        keys.push(v2_key(address, labelhash));
+    }
+    keys
+}
+
+fn v2_event_resource(after: &Value) -> Option<&str> {
+    after
+        .get("resource")
+        .and_then(Value::as_str)
+        .or_else(|| after.get("upstream_resource").and_then(Value::as_str))
+}
+
 /// Whether lookahead restores everything a manifest of this source family can depend on.
 /// Interpret uses it to choose between lookahead and the full-state loader.
 pub fn v1_lookahead_supports_family(family: &str) -> bool {
@@ -125,6 +265,11 @@ fn supported_family(family: &str) -> bool {
             | "basenames_base_registrar"
             | "basenames_base_resolver"
             | "basenames_base_primary"
+            | "ens_v2_root_l1"
+            | "ens_v2_registry_l1"
+            | "ens_v2_registrar_l1"
+            | "ens_v2_resolver_l1"
+            | "ens_v2_migration_l1"
     ) || family.ends_with("_execution")
 }
 
@@ -162,7 +307,7 @@ pub fn collect_v1_batch_dependencies(
                 let Some(source) = catalog.source(manifest.manifest_id).filter(|source| {
                     matches!(
                         source.source_family.as_str(),
-                        "ens_v1_resolver_l1" | "basenames_base_resolver"
+                        "ens_v1_resolver_l1" | "basenames_base_resolver" | "ens_v2_resolver_l1"
                     )
                 }) else {
                     continue;
@@ -187,36 +332,35 @@ pub fn collect_v1_batch_dependencies(
             }
         }
     }
-    for request in &dependencies.nodes {
-        dependencies.resource_ids.insert(stable_uuid(&format!(
-            "resource:registry-only:{}:{}",
-            input.chain_id, request.node
-        )));
-    }
+    dependencies.include_registry_only_resources(&input.chain_id);
     Ok(dependencies)
 }
 
-/// The supplied fresh session must come from complete canonical queries for `loaded_nodes`,
-/// finished at the batch's predecessor timestamp. Node access outside that certificate fails
-/// before the prepared result can be published. No prior session is carried between batches.
+/// The supplied fresh session must come from complete canonical queries for `loaded`, finished
+/// at the batch's predecessor timestamp. State access outside that certificate fails before
+/// the prepared result can be published. No prior session is carried between batches.
 pub fn prepare_schema_v2_batch_lookahead(
     input: BatchInput,
     provenance_manifests: Vec<ManifestInput>,
     session: AdapterSession,
-    loaded_nodes: &BTreeSet<V1NodeRequest>,
+    loaded: &V1BatchDependencies,
     cache_capacity: StateCacheCapacity,
 ) -> anyhow::Result<PreparedAdapterBatch> {
     let dependencies = collect_v1_batch_dependencies(&input, &provenance_manifests)?;
     ensure!(
         dependencies.unsupported.is_empty(),
-        "unsupported V1 lookahead coverage: {:?}",
+        "unsupported lookahead coverage: {:?}",
         dependencies.unsupported
     );
     ensure!(
-        dependencies.nodes.is_subset(loaded_nodes),
-        "V1 lookahead dependencies were not completely loaded"
+        dependencies.nodes.is_subset(&loaded.nodes)
+            && dependencies
+                .v2_keys
+                .iter()
+                .all(|key| v2_key_loaded(loaded, key)),
+        "lookahead dependencies were not completely loaded"
     );
-    coverage::checked(loaded_nodes, || {
+    coverage::checked(loaded, false, || {
         super::prepare_schema_v2_batch_incremental_with_provenance(
             input,
             provenance_manifests,
@@ -227,19 +371,33 @@ pub fn prepare_schema_v2_batch_lookahead(
 }
 
 /// Restore the session for a lookahead batch from exactly the prior events loaded for
-/// `loaded_nodes`, then advance time-derived state to the batch's predecessor timestamp.
-/// Restore must only touch names whose complete history was loaded: an event that
-/// reaches another name would rebuild that name from part of its history.
+/// `loaded`, then advance time-derived state to the batch's predecessor timestamp.
+/// `latest_v2_topology` is the timestamp of the chain's latest ENSv2 registry event before the
+/// batch, which a restore of every event would have reached.
 pub fn restore_schema_v2_lookahead_session(
     mut restore: AdapterSessionRestore,
     prior_events: Vec<PriorEventInput>,
     resume_predecessor_timestamp: Option<time::OffsetDateTime>,
-    loaded_nodes: &BTreeSet<V1NodeRequest>,
+    latest_v2_topology: Option<time::OffsetDateTime>,
+    loaded: &V1BatchDependencies,
 ) -> anyhow::Result<AdapterSession> {
-    coverage::checked(loaded_nodes, || {
+    coverage::checked(loaded, true, || {
         restore.apply_prior_events(prior_events)?;
+        restore.include_v2_topology_timestamp(latest_v2_topology);
         Ok(restore.finish(resume_predecessor_timestamp))
     })
 }
 
-pub(super) use coverage::observe_node;
+/// Whether `key` is loaded, itself or through its registry.
+pub fn v2_key_loaded(loaded: &V1BatchDependencies, key: &str) -> bool {
+    loaded.v2_keys.contains(key)
+        || key
+            .rsplit_once(':')
+            .is_some_and(|(address, _)| loaded.v2_keys.contains(&v2_registry_key(address)))
+}
+
+pub use coverage::{UnloadedKeys, v2_key, v2_registry_key};
+pub(super) use coverage::{
+    observe_name, observe_node, observe_v2, observe_v2_expiry_window, observe_v2_registry,
+    restoring, v2_observation_id,
+};

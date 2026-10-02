@@ -6,7 +6,6 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use bigname_adapters::{
     SchemaV2BatchOutput, StateCacheCapacity, prepare_schema_v2_batch_incremental_with_provenance,
-    schema_v2::prepare_schema_v2_batch_lookahead,
 };
 use bigname_manifests::{load_repository, sync_schema_v2_repository};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -27,8 +26,9 @@ pub(super) const OWNER: &str = "0x0000000000000000000000000000000000000051";
 pub(super) const SECOND_OWNER: &str = "0x0000000000000000000000000000000000000052";
 const RESOLVER: &str = "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41";
 pub(super) const CAPACITY: StateCacheCapacity = StateCacheCapacity::Entries(65_536);
-/// An ENSv2 family lookahead does not cover, under which the drift tests retain history.
-const UNCOVERED_FAMILY: &str = "ens_v2_registry_l1";
+/// A family lookahead does not cover, under which the drift tests retain history. No
+/// repository manifest declares one today; the check guards families added later.
+const UNCOVERED_FAMILY: &str = "dns_l1";
 
 mod registry {
     alloy_sol_types::sol! {
@@ -109,7 +109,7 @@ pub(super) fn transaction_hash(number: i64) -> String {
     format!("0x{:064x}", number + 10_000)
 }
 
-fn eth_node() -> B256 {
+pub(super) fn eth_node() -> B256 {
     keccak256([B256::ZERO.as_slice(), keccak256(b"eth").as_slice()].concat())
 }
 
@@ -127,6 +127,14 @@ pub(super) fn token(label: &str) -> U256 {
 
 /// A database holding every checked-in mainnet manifest: Ethereum and Base.
 pub(super) async fn database(prefix: &str) -> TestResult<TestDatabase> {
+    database_with_manifests(prefix, "mainnet").await
+}
+
+/// A database with the baseline schema and the repository's manifests for `network`.
+pub(super) async fn database_with_manifests(
+    prefix: &str,
+    network: &str,
+) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
     database.create_phase_schema().await?;
     for statement in [
@@ -149,7 +157,8 @@ pub(super) async fn database(prefix: &str) -> TestResult<TestDatabase> {
     }
     let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("manifests/mainnet");
+        .join("manifests")
+        .join(network);
     sync_schema_v2_repository(database.pool(), &load_repository(manifest_root)?).await?;
     Ok(database)
 }
@@ -176,6 +185,18 @@ impl Seeder<'_> {
         hash: &str,
         transaction: &str,
     ) -> TestResult {
+        self.block_sent_to(number, hash, transaction, LEGACY_CONTROLLER)
+            .await
+    }
+
+    /// `block_with_hash`, with the block's one transaction sent to `to`.
+    pub(super) async fn block_sent_to(
+        &mut self,
+        number: i64,
+        hash: &str,
+        transaction: &str,
+        to: &str,
+    ) -> TestResult {
         self.block = number;
         self.hash = hash.to_owned();
         self.transaction = transaction.to_owned();
@@ -191,7 +212,7 @@ impl Seeder<'_> {
         .bind(number)
         .bind(transaction)
         .bind(OWNER)
-        .bind(LEGACY_CONTROLLER)
+        .bind(to)
         .execute(self.pool)
         .await?;
         Ok(())
@@ -435,21 +456,16 @@ pub(super) async fn interpret(
     from: i64,
     loaded: load::LoadedBatch,
 ) -> TestResult<(SchemaV2BatchOutput, load::CachedPrior)> {
-    let session = loaded
-        .adapter_session
-        .expect("both loaders restore a session");
-    let prepared = match &loaded.lookahead_nodes {
-        Some(nodes) => prepare_schema_v2_batch_lookahead(
-            loaded.input,
-            loaded.provenance_manifests,
-            session,
-            nodes,
-            CAPACITY,
-        )?,
+    let prepared = match loaded.prepared {
+        Some(prepared) => *prepared,
         None => prepare_schema_v2_batch_incremental_with_provenance(
             loaded.input,
             loaded.provenance_manifests,
-            Some(session),
+            Some(
+                loaded
+                    .adapter_session
+                    .expect("the full-state loader restores a session"),
+            ),
             CAPACITY,
         )?,
     };
@@ -466,11 +482,16 @@ pub(super) async fn interpret(
     ))
 }
 
+/// Names released by the ENSv1-model families. ENSv2 releases are loaded through the due
+/// ENSv2 state keys, not due names.
 fn released(output: &SchemaV2BatchOutput) -> BTreeSet<String> {
     output
         .normalized_events
         .iter()
-        .filter(|event| event.event_kind == "RegistrationReleased")
+        .filter(|event| {
+            event.event_kind == "RegistrationReleased"
+                && !event.source_family.starts_with("ens_v2_")
+        })
         .map(|event| {
             format!(
                 "{}:{}",
@@ -484,7 +505,7 @@ fn released(output: &SchemaV2BatchOutput) -> BTreeSet<String> {
 }
 
 pub(super) struct Walk {
-    /// Every name a `RegistrationReleased` event was emitted for.
+    /// Every name an ENSv1 or Basenames `RegistrationReleased` event was emitted for.
     pub(super) released: BTreeSet<String>,
     /// Releases of names no log in their batch mentioned: only the due-names query loads them.
     pub(super) quiet_releases: usize,
@@ -796,7 +817,7 @@ async fn add_manifest(pool: &PgPool, source_family: &str, rollout_status: &str) 
 
 /// Retains one event of `UNCOVERED_FAMILY` at the chain's second block, attributed to a
 /// manifest that was active when the event was written, and then moves that manifest to
-/// `rollout_status`. The event carries no state scope, so restoring it changes no ENSv1
+/// `rollout_status`. The event carries no state scope, so restoring it changes no
 /// state: the two loaders differ only in whether they read it.
 async fn retain_uncovered_family(pool: &PgPool, rollout_status: &str) -> TestResult {
     let manifest_id = add_manifest(pool, UNCOVERED_FAMILY, "active").await?;
@@ -847,7 +868,7 @@ async fn walk_with_retained_uncovered_family(
     let first = engine();
     let mut current = run_batch(&first, None, last_block).await?;
     let (from, to) = (current.number + 1, current.number + 3);
-    add_manifest(pool, "ens_v2_root_l1", rollout_status).await?;
+    add_manifest(pool, "dns_resolver_l1", rollout_status).await?;
     if !force_full_state {
         match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
             super::Attempt::Loaded(_) => {}

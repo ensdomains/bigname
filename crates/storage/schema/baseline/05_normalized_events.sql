@@ -733,6 +733,60 @@ CREATE INDEX IF NOT EXISTS normalized_events_basenames_direct_node_probe_idx
     WHERE canonicality_state IN ('canonical','safe','finalized')
       AND source_family LIKE 'basenames\_base\_%';
 
+-- The ENSv2 reads of the lookahead loader. Keep each identical to its read in
+-- crates/interpret/src/load/lookahead/ (named per index below), to
+-- ops/v1-lookahead-indexes/install.sql and to
+-- migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql.
+--
+-- The timestamp of a chain's latest ENSv2 registry event before a batch
+-- (v2_latest_topology.sql), read backwards by block.
+CREATE INDEX IF NOT EXISTS normalized_events_v2_lookahead_probe_idx
+    ON normalized_events (chain_id, block_number)
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+-- Every ENSv2 event of one name (the name arm of events.sql), as for the families above.
+CREATE INDEX IF NOT EXISTS normalized_events_v2_direct_node_probe_idx
+    ON normalized_events (
+        chain_id,
+        (COALESCE(namespace || ':' || lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node', after_state #>> '{grant_source,node}', after_state #>> '{revocation_source,node}')), logical_name_id)),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+-- Every ENSv2 event filed under one of a set of ENSv2 state keys (the key arm of events.sql,
+-- whose array is v2_keys.sql). An event is filed under several keys, so the index is an
+-- inverted index over the array; `v2_event_keys` in the adapter crate computes the same keys.
+CREATE INDEX IF NOT EXISTS normalized_events_v2_key_probe_idx
+    ON normalized_events USING gin ((
+        array_remove(ARRAY[
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(split_part(raw_fact_ref ->> 'state_scope', ':', 3), greatest(length(split_part(raw_fact_ref ->> 'state_scope', ':', 3)) - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':*',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'new_token_id', greatest(length(after_state ->> 'new_token_id') - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource'), greatest(length(COALESCE(after_state ->> 'resource', after_state ->> 'upstream_resource')) - 8, 0))) || '00000000',
+            lower(split_part(raw_fact_ref ->> 'state_scope', ':', 1)) || ':' || lower(left(after_state ->> 'labelhash', greatest(length(after_state ->> 'labelhash') - 8, 0))) || '00000000'
+        ]::text[], NULL)
+    ))
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family LIKE 'ens\_v2\_%';
+
+-- The ENSv2 registry events whose expiry falls in a batch's window (v2_due_keys.sql), with
+-- the expiry expression of the due-name indexes above.
+CREATE INDEX IF NOT EXISTS normalized_events_v2_due_probe_idx
+    ON normalized_events (
+        chain_id,
+        (CASE WHEN jsonb_typeof(after_state -> 'expiry') IN ('number','string')
+            AND after_state ->> 'expiry' ~ '^[+-]?[0-9]+$'
+            AND length(ltrim(after_state ->> 'expiry', '+-0')) <= 19
+          THEN ((CASE WHEN left(after_state ->> 'expiry', 1) = '-' THEN '-' ELSE '' END)
+            || COALESCE(NULLIF(ltrim(after_state ->> 'expiry', '+-0'), ''), '0'))::numeric
+        END),
+        block_number
+    )
+    WHERE canonicality_state IN ('canonical','safe','finalized')
+      AND source_family IN ('ens_v2_registry_l1','ens_v2_root_l1');
+
 -- The address history read finds the names and resources an address held in the past from
 -- three kinds of events: a registration granted to it, a token transferred to it, and a
 -- registry ownership transfer to it. Each partial index keys one kind by the lowercased new

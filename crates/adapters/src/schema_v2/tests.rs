@@ -18434,9 +18434,10 @@ fn interpret_test_batch(mut input: BatchInput) -> anyhow::Result<BatchOutput> {
 }
 
 #[test]
-fn every_ensv1_adapter_fixture_matches_scoped_lookahead() -> anyhow::Result<()> {
+fn every_covered_adapter_fixture_matches_scoped_lookahead() -> anyhow::Result<()> {
     // `interpret_test_batch` is the entry point of the adapter fixture tests. This pins that
-    // it runs the lookahead comparison for ENSv1-only inputs, and only for those.
+    // it runs the lookahead comparison for inputs whose families lookahead covers, ENSv2
+    // included, and only for those.
     let ensv1 = BatchInput {
         chain_id: CHAIN.to_owned(),
         manifests: vec![lookahead::registrar_manifest()],
@@ -18453,7 +18454,10 @@ fn every_ensv1_adapter_fixture_matches_scoped_lookahead() -> anyhow::Result<()> 
 
     let mut with_v2 = ensv1;
     with_v2.manifests[0].source_family = "ens_v2_registry_l1".to_owned();
-    assert!(!lookahead::is_lookahead_covered(&with_v2));
+    assert!(lookahead::is_lookahead_covered(&with_v2));
+    let mut uncovered = with_v2;
+    uncovered.manifests[0].source_family = "dns_l1".to_owned();
+    assert!(!lookahead::is_lookahead_covered(&uncovered));
     Ok(())
 }
 

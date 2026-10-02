@@ -1678,16 +1678,34 @@ whose `active` and `deprecated` manifests all belong to source families it
 covers (`ens_v1_registrar_l1`, `ens_v1_registry_l1`, `ens_v1_resolver_l1`,
 `ens_v1_wrapper_l1`, `ens_v1_reverse_l1`, `basenames_l1_compat`, the four
 Basenames Base families `basenames_base_registry`, `basenames_base_registrar`,
-`basenames_base_resolver` and `basenames_base_primary`, and every
-`*_execution` family) and whose retained `normalized_events` hold no history of
-an uncovered family under a `draft` or `shadow` manifest: it loads only the
-history of the names and resources the batch can touch (those its logs
-mention, those earlier events link to them, and registrations falling due in
-the batch) instead of all retained history. The other way is the *full-state
+`basenames_base_resolver` and `basenames_base_primary`, the five ENSv2 families
+`ens_v2_root_l1`, `ens_v2_registry_l1`, `ens_v2_registrar_l1`,
+`ens_v2_resolver_l1` and `ens_v2_migration_l1`, and every `*_execution` family)
+and whose retained `normalized_events` hold no history of an uncovered family
+under a `draft` or `shadow` manifest: it loads only the history of the names,
+resources and [ENSv2 state keys](#ensv2-state-key) the batch can touch (those
+its logs mention, those earlier events link to them, and registrations and
+ENSv2 tokens falling due in the batch), instead of all retained history. When
+interpretation reads a name or ENSv2 state key it did not load, it loads that
+too and interprets the batch again. The other way is the *full-state
 loader*, which restores everything once and then carries the
 [interpreter session](#interpreter-session) between batches. Interpret chooses
 between them automatically for each chain and batch; both must produce identical
 output. See [Interpret process memory](storage.md#interpret-process-memory).
+
+## ENSv2 state key
+
+the unit in which the [lookahead loader](#lookahead-loader) loads ENSv2
+registry, resolver and permission state that is not filed under a name:
+`address:id`, where the address is a registry or resolver (or a resolver's
+contract instance) and the id is a token id, resource id or labelhash with its
+low 32 bits zeroed. An ENSv2 registry derives every version of a label's token
+id and resource id from its labelhash by replacing only those bits
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/utils/LibLabel.sol:L15-16 @ ens_v2_sepolia_20260916@366de741),
+so one key covers a label across regenerations. `address:00000000` holds a
+registry's own parent claim, and `address:*` every event of that registry. Each
+retained ENSv2 event is filed under the keys of its emitter with the token,
+resource and labelhash it names; loading a key loads every event filed under it.
 
 ## Interpreter state key
 

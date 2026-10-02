@@ -80,9 +80,14 @@ pub(super) fn scoped_comparisons() -> usize {
     SCOPED_COMPARISONS.get()
 }
 
-/// The families whose retained events `events.sql` reads.
+/// The families whose retained events `events.sql` reads by name or resource.
 fn probed_family(family: &str) -> bool {
     family.starts_with("ens_v1_") || family.starts_with("basenames_base_")
+}
+
+/// The families whose retained events `events.sql` reads by name or by ENSv2 state key.
+fn v2_family(family: &str) -> bool {
+    family.starts_with("ens_v2_")
 }
 
 /// An input the lookahead loader would be chosen for: every manifest family is covered and
@@ -96,7 +101,7 @@ pub(super) fn is_lookahead_covered(input: &BatchInput) -> bool {
         && input
             .prior_events
             .iter()
-            .all(|event| probed_family(&event.source_family))
+            .all(|event| probed_family(&event.source_family) || v2_family(&event.source_family))
 }
 
 /// The name an event is filed under by `normalized_events_v1_direct_node_probe_idx` and
@@ -161,9 +166,47 @@ fn due_names(prior: &[PriorEventInput], predecessor: Option<i64>, last: i64) -> 
         .collect()
 }
 
+/// Mirrors `v2_due_keys.sql`: the ENSv2 state keys of registry events whose expiry lies in
+/// `(start, end]`.
+fn due_v2_keys(prior: &[PriorEventInput], (start, end): (i64, i64)) -> Vec<String> {
+    prior
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.source_family.as_str(),
+                "ens_v2_registry_l1" | "ens_v2_root_l1"
+            ) && event
+                .after_state
+                .get("expiry")
+                .and_then(|expiry| match expiry {
+                    Value::Number(number) => number.as_i64(),
+                    Value::String(text) => text.parse().ok(),
+                    _ => None,
+                })
+                .is_some_and(|expiry| expiry > start && expiry <= end)
+        })
+        .filter_map(|event| v2_event_keys(event).into_iter().next())
+        .collect()
+}
+
+/// Mirrors `v2_latest_topology.sql`: the latest ENSv2 registry event's timestamp.
+fn latest_v2_topology(prior: &[PriorEventInput]) -> Option<OffsetDateTime> {
+    prior
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.source_family.as_str(),
+                "ens_v2_registry_l1" | "ens_v2_root_l1"
+            )
+        })
+        .filter_map(|event| event.block_timestamp)
+        .max()
+}
+
 /// In-memory stand-in for the production selection in `events.sql`, run to the same closure
-/// as the Interpret loader. It files each event under exactly one name, as the index does,
-/// and reads an event by resource only when it has no name at all. Fixture history is already
+/// as the Interpret loader. It files each ENSv1-model event under exactly one name, as the
+/// index does, and reads an event by resource only when it has no name at all; an ENSv2
+/// event is read by its name or by any of its ENSv2 state keys. Fixture history is already
 /// folded to the latest event per state key, so the SQL's per-key winner step has nothing
 /// left to choose; that step has its own database tests.
 fn scope(
@@ -178,12 +221,22 @@ fn scope(
             .collect();
         let rows = prior
             .iter()
-            .filter(|event| probed_family(&event.source_family))
-            .filter(|event| match routed_name(event) {
-                Some(name) => names.contains(&name),
-                None => event
-                    .resource_id
-                    .is_some_and(|resource| deps.resource_ids.contains(&resource)),
+            .filter(|event| {
+                let named = || routed_name(event).is_some_and(|name| names.contains(&name));
+                if v2_family(&event.source_family) {
+                    named()
+                        || v2_event_keys(event)
+                            .iter()
+                            .any(|key| deps.v2_keys.contains(key))
+                } else {
+                    probed_family(&event.source_family)
+                        && match routed_name(event) {
+                            Some(_) => named(),
+                            None => event
+                                .resource_id
+                                .is_some_and(|resource| deps.resource_ids.contains(&resource)),
+                        }
+                }
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -249,31 +302,76 @@ pub(super) fn assert_scoped_matches(mut input: BatchInput) -> anyhow::Result<Ada
             last.block_timestamp.unix_timestamp(),
         ));
     }
-    let (dependencies, rows) = scope(dependencies, &prior)?;
-    assert!(dependencies.unsupported.is_empty());
-    let session = restore_schema_v2_lookahead_session(
-        begin_schema_v2_adapter_restore(
-            input.chain_id.clone(),
-            input.manifests.clone(),
-            input.discovery_rules.clone(),
-            input.admissions.clone(),
-            StateCacheCapacity::Unlimited,
-        )?,
-        rows,
-        predecessor,
-        &dependencies.nodes,
-    )?;
-    let prepared = prepare_schema_v2_batch_lookahead(
-        input.clone(),
-        provenance,
-        session,
-        &dependencies.nodes,
-        StateCacheCapacity::Unlimited,
-    )?;
+    let latest_v2 = latest_v2_topology(&prior);
+    if let Some(last) = input.blocks.last() {
+        let start = match (latest_v2, predecessor) {
+            (Some(_), Some(predecessor)) => predecessor.unix_timestamp(),
+            _ => i64::MIN,
+        };
+        let window = (start, last.block_timestamp.unix_timestamp());
+        dependencies.v2_keys.extend(due_v2_keys(&prior, window));
+        dependencies.v2_due_window = Some(window);
+    }
+    // Mirrors the Interpret loader: an attempt that reads a key outside the loaded set is
+    // discarded, and the next attempt loads that key too.
+    let prepared = loop {
+        let (scoped, rows) = scope(dependencies.clone(), &prior)?;
+        assert!(scoped.unsupported.is_empty());
+        let attempt = restore_schema_v2_lookahead_session(
+            begin_schema_v2_adapter_restore(
+                input.chain_id.clone(),
+                input.manifests.clone(),
+                input.discovery_rules.clone(),
+                input.admissions.clone(),
+                StateCacheCapacity::Unlimited,
+            )?,
+            rows,
+            predecessor,
+            latest_v2,
+            &scoped,
+        )
+        .and_then(|session| {
+            prepare_schema_v2_batch_lookahead(
+                input.clone(),
+                provenance.clone(),
+                session,
+                &scoped,
+                StateCacheCapacity::Unlimited,
+            )
+        });
+        match attempt {
+            Ok(prepared) => break prepared,
+            Err(error) => {
+                let Some(unloaded) = error.downcast_ref::<UnloadedKeys>() else {
+                    return Err(error);
+                };
+                assert!(unloaded.names.is_disjoint(&scoped.nodes));
+                assert!(
+                    unloaded
+                        .v2_keys
+                        .iter()
+                        .all(|key| !v2_key_loaded(&scoped, key))
+                );
+                dependencies = scoped;
+                dependencies.nodes.extend(unloaded.names.iter().cloned());
+                dependencies
+                    .v2_keys
+                    .extend(unloaded.v2_keys.iter().cloned());
+            }
+        }
+    };
     let (actual, session) = complete(prepared, &prior)?;
     assert_eq!(actual, expected, "complete scoped suffix output differs");
     SCOPED_COMPARISONS.set(SCOPED_COMPARISONS.get() + 1);
     Ok(session)
+}
+
+/// The certificate for history with no ENSv2 token: no expiry can be crossed.
+fn no_v2_history(dependencies: V1BatchDependencies) -> V1BatchDependencies {
+    V1BatchDependencies {
+        v2_due_window: Some((i64::MIN, i64::MAX)),
+        ..dependencies
+    }
 }
 
 pub(super) fn registrar_manifest() -> ManifestInput {
@@ -383,7 +481,7 @@ fn known_absent_node_is_distinct_from_unloaded_node() -> anyhow::Result<()> {
         input.clone(),
         input.manifests.clone(),
         restore(&input, vec![])?,
-        &BTreeSet::new(),
+        &no_v2_history(V1BatchDependencies::default()),
         StateCacheCapacity::Unlimited,
     )
     .err()
@@ -394,7 +492,7 @@ fn known_absent_node_is_distinct_from_unloaded_node() -> anyhow::Result<()> {
             input.clone(),
             input.manifests.clone(),
             restore(&input, vec![])?,
-            &deps.nodes,
+            &no_v2_history(deps),
             StateCacheCapacity::Unlimited,
         )?,
         &[],
@@ -410,7 +508,7 @@ fn known_absent_node_is_distinct_from_unloaded_node() -> anyhow::Result<()> {
 }
 
 #[test]
-fn quiet_v2_manifest_is_explicitly_unsupported() -> anyhow::Result<()> {
+fn quiet_v2_manifest_is_covered() -> anyhow::Result<()> {
     let input = input(
         vec![manifest(
             1,
@@ -424,11 +522,7 @@ fn quiet_v2_manifest_is_explicitly_unsupported() -> anyhow::Result<()> {
         vec![],
     );
     let deps = collect_v1_batch_dependencies(&input, &input.manifests)?;
-    assert!(
-        deps.unsupported
-            .iter()
-            .any(|reason| reason.contains("ens_v2_registry_l1"))
-    );
+    assert!(deps.unsupported.is_empty(), "{deps:?}");
     Ok(())
 }
 
@@ -608,12 +702,12 @@ fn quiet_due_node_requires_a_loaded_certificate_before_publication() -> anyhow::
         quiet.clone(),
         quiet.manifests.clone(),
         restore(&quiet, prior.clone())?,
-        &BTreeSet::new(),
+        &no_v2_history(V1BatchDependencies::default()),
         StateCacheCapacity::Unlimited,
     )
     .err()
     .expect("a quiet expiry outside certified nodes must reject publication");
-    assert!(error.to_string().contains("accessed unloaded nodes"));
+    assert!(error.downcast_ref::<UnloadedKeys>().is_some(), "{error:#}");
     let mut deps = V1BatchDependencies::default();
     deps.include_prior_events(&prior)?;
     let output = complete(
@@ -621,7 +715,7 @@ fn quiet_due_node_requires_a_loaded_certificate_before_publication() -> anyhow::
             quiet.clone(),
             quiet.manifests.clone(),
             restore(&quiet, prior.clone())?,
-            &deps.nodes,
+            &no_v2_history(deps),
             StateCacheCapacity::Unlimited,
         )?,
         &prior,
@@ -800,17 +894,22 @@ fn restore_reads_outside_loaded_nodes_fail() -> anyhow::Result<()> {
         )
     };
     // Both names loaded: every restore read is inside the loaded set.
-    let both = BTreeSet::from([node("alice"), node("bob")]);
-    let session = restore_schema_v2_lookahead_session(begin()?, prior.clone(), None, &both)?;
+    let loaded = |nodes: &[V1NodeRequest]| V1BatchDependencies {
+        nodes: nodes.iter().cloned().collect(),
+        ..V1BatchDependencies::default()
+    };
+    let both = loaded(&[node("alice"), node("bob")]);
+    let session = restore_schema_v2_lookahead_session(begin()?, prior.clone(), None, None, &both)?;
     assert!(session.v1_name("ens", &node("bob").node).is_some());
     // Bob's events handed to a restore that loaded only alice would rebuild bob from an
     // arbitrary part of his history. Restore must refuse instead.
-    let alice_only = BTreeSet::from([node("alice")]);
-    let error = restore_schema_v2_lookahead_session(begin()?, prior, None, &alice_only)
+    let alice_only = loaded(&[node("alice")]);
+    let error = restore_schema_v2_lookahead_session(begin()?, prior, None, None, &alice_only)
         .expect_err("restore outside the loaded names must fail");
     assert!(
-        error.to_string().contains("accessed unloaded nodes")
-            && error.to_string().contains(&node("bob").node),
+        error
+            .downcast_ref::<UnloadedKeys>()
+            .is_some_and(|unloaded| unloaded.names.contains(&node("bob"))),
         "{error:#}"
     );
     Ok(())
@@ -865,10 +964,13 @@ fn resolver_changed_node_precedence_matches_restore() -> anyhow::Result<()> {
             Some(format!("ens:{filed_under}").as_str())
         );
         // Restoring with only that name loaded proves restore touches no other name.
-        let loaded = BTreeSet::from([V1NodeRequest {
-            namespace: "ens".to_owned(),
-            node: filed_under.clone(),
-        }]);
+        let loaded = V1BatchDependencies {
+            nodes: BTreeSet::from([V1NodeRequest {
+                namespace: "ens".to_owned(),
+                node: filed_under.clone(),
+            }]),
+            ..V1BatchDependencies::default()
+        };
         restore_schema_v2_lookahead_session(
             begin_schema_v2_adapter_restore(
                 CHAIN.to_owned(),
@@ -879,18 +981,20 @@ fn resolver_changed_node_precedence_matches_restore() -> anyhow::Result<()> {
             )?,
             vec![event],
             None,
+            None,
             &loaded,
         )?;
     }
     Ok(())
 }
 
-/// Lookahead reads retained events of the `ens_v1_*` and `basenames_base_*` families only, yet
-/// it also covers these
-/// families. That is sound because they keep no state: a manifest of one of them cannot
-/// declare an event, so no log is ever interpreted under it and no event of it is stored.
+/// Lookahead reads retained events of the `ens_v1_*`, `basenames_base_*` and `ens_v2_*`
+/// families only, yet it also covers these families. That is sound because nothing they
+/// interpret depends on prior name state: `ens_execution` admits only the universal resolver
+/// proxy's `Upgraded`, which names no name or resource, and a name-state event such as a
+/// registrar's is refused under any of them.
 #[test]
-fn covered_families_outside_ens_v1_cannot_interpret_a_log() {
+fn covered_families_outside_the_name_families_refuse_registrar_events() {
     for family in [
         "basenames_l1_compat",
         "basenames_execution",
@@ -906,5 +1010,5 @@ fn covered_families_outside_ens_v1_cannot_interpret_a_log() {
             "{family}: {error:#}"
         );
     }
-    assert!(!v1_lookahead_supports_family("ens_v2_registry_l1"));
+    assert!(!v1_lookahead_supports_family("dns_l1"));
 }

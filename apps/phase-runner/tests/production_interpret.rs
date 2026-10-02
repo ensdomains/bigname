@@ -6794,7 +6794,9 @@ async fn seed_planted_marker_redo_fixture(
     chain: &str,
     marker: ReplayMarker,
 ) -> Result<(Uuid, Uuid)> {
-    let logical_name_id = "ens:0xplanted-marker";
+    let namehash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let wrong_namehash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let logical_name_id = &format!("ens:{namehash}");
     let arm_wide_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000101")?;
     let migration_predecessor = Uuid::parse_str("00000000-0000-0000-0000-000000000102")?;
     let replacement = Uuid::parse_str("00000000-0000-0000-0000-000000000103")?;
@@ -6846,11 +6848,11 @@ async fn seed_planted_marker_redo_fixture(
              chain_id, block_hash, block_number, canonicality_state
          ) VALUES (
              $1, 'ens', 'planted-marker.eth', ARRAY['planted-marker','eth'],
-             decode('00', 'hex'), '0xplanted-marker', ARRAY['0xplanted-marker','0xeth'],
+             decode('00', 'hex'), $5, ARRAY[$5, '0xeth'],
              $2, 'active', $3, $4, 1, 'canonical'
          ), (
-             'ens:0xwrong-marker', 'ens', 'wrong-marker.eth', ARRAY['wrong-marker','eth'],
-             decode('01', 'hex'), '0xwrong-marker', ARRAY['0xwrong-marker','0xeth'],
+             'ens:' || $6, 'ens', 'wrong-marker.eth', ARRAY['wrong-marker','eth'],
+             decode('01', 'hex'), $6, ARRAY[$6, '0xeth'],
              $2, 'active', $3, $4, 1, 'canonical'
          )",
     )
@@ -6858,6 +6860,8 @@ async fn seed_planted_marker_redo_fixture(
     .bind(NORMALIZER)
     .bind(chain)
     .bind(block_hash(chain, 1))
+    .bind(namehash)
+    .bind(wrong_namehash)
     .execute(pool)
     .await?;
     sqlx::query(
@@ -6945,7 +6949,7 @@ async fn seed_planted_marker_redo_fixture(
     .await?;
     if marker != ReplayMarker::Absent {
         let marker_name = if marker == ReplayMarker::WrongName {
-            "ens:0xwrong-marker"
+            &format!("ens:{wrong_namehash}")
         } else {
             logical_name_id
         };

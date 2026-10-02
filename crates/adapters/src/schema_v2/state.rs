@@ -7,6 +7,7 @@ mod expiry;
 pub(super) use expiry::{ENS_GRACE_PERIOD_SECS, v1_registration_is_live};
 #[path = "state_incremental.rs"]
 mod incremental;
+pub(super) use incremental::restored_raw_label;
 #[path = "state_topology.rs"]
 mod topology;
 
@@ -76,6 +77,10 @@ mod v2_refresh;
 #[path = "state_v2_pointers.rs"]
 mod v2_pointers;
 
+#[path = "state_v2_maps.rs"]
+pub(super) mod maps;
+use maps::Covered;
+
 #[cfg(test)]
 #[path = "state_v2_tests.rs"]
 mod v2_tests;
@@ -135,23 +140,26 @@ pub(super) struct State {
     surface_removal_candidates: OrdSet<String>,
     pub(super) restoring_state_key: Option<String>,
     active_resources: OrdMap<String, Uuid>,
-    v2_tokens: OrdMap<String, V2TokenState>,
-    v2_subregistry_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
-    v2_resolver_tokens_by_observation: OrdMap<(String, String), OrdSet<String>>,
-    v2_resolver_aliases_by_observation: OrdMap<(String, String), OrdSet<(String, String)>>,
-    v2_expiries: OrdSet<(u64, String)>,
+    v2_tokens: Covered<maps::TokenKey, String, V2TokenState>,
+    v2_subregistry_tokens_by_observation:
+        Covered<maps::AddressId, (String, String), OrdSet<String>>,
+    v2_resolver_tokens_by_observation: Covered<maps::AddressId, (String, String), OrdSet<String>>,
+    v2_resolver_aliases_by_observation:
+        Covered<maps::AddressId, (String, String), OrdSet<(String, String)>>,
+    v2_expiries: maps::V2Expiries,
     v2_dirty_tokens: OrdSet<String>,
     v2_dirty_registries: OrdSet<String>,
     v2_terminal_closure_hits: OrdSet<(String, String)>,
-    v2_token_by_upstream_resource_index: OrdMap<(String, String), OrdSet<String>>,
-    v2_token_by_name_index: OrdMap<(String, String), OrdSet<String>>,
-    v2_tokens_by_current_name_index: OrdMap<String, OrdSet<String>>,
-    v2_entry_by_parent_label: OrdMap<(String, Vec<u8>), String>,
-    v2_parent_claims: OrdMap<String, (String, Vec<u8>)>,
+    v2_token_by_upstream_resource_index: Covered<maps::AddressId, (String, String), OrdSet<String>>,
+    v2_token_by_name_index: Covered<maps::TokenName, (String, String), OrdSet<String>>,
+    v2_tokens_by_current_name_index: Covered<maps::Name, String, OrdSet<String>>,
+    v2_entry_by_parent_label: Covered<maps::RegistryLabel, (String, Vec<u8>), String>,
+    v2_parent_claims: Covered<maps::RegistryClaim, String, (String, Vec<u8>)>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
     latest_v2_timestamp: Option<i64>,
-    pub(in crate::schema_v2) v2_resolver_arguments: OrdMap<(Uuid, String), Vec<u8>>,
-    v2_resolver_hints: OrdMap<(String, String), (String, Value)>,
+    pub(in crate::schema_v2) v2_resolver_arguments:
+        Covered<maps::InstanceResource, (Uuid, String), Vec<u8>>,
+    v2_resolver_hints: Covered<maps::AddressId, (String, String), (String, Value)>,
     materialized_token_lineages: OrdSet<Uuid>,
 }
 

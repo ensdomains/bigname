@@ -239,26 +239,21 @@ impl Engine {
         }
         write_lineage.extend(loaded_markers.iter().cloned());
         let phase_started = Instant::now();
-        let prepared = match loaded.lookahead_nodes {
-            Some(nodes) => bigname_adapters::schema_v2::prepare_schema_v2_batch_lookahead(
-                input,
-                provenance_manifests,
-                adapter_session.expect("lookahead supplies a restored session"),
-                &nodes,
-                self.state_cache_capacity,
-            ),
+        // Lookahead interprets the batch inside its loading snapshot.
+        let prepared = match loaded.prepared {
+            Some(prepared) => *prepared,
             None => bigname_adapters::prepare_schema_v2_batch_incremental_with_provenance(
                 input,
                 provenance_manifests,
                 adapter_session,
                 self.state_cache_capacity,
-            ),
-        }
-        .map_err(|error| {
-            InterpretError::data_integrity(format!(
-                "hash-covered adapter interpretation failed: {error:#}"
-            ))
-        })?;
+            )
+            .map_err(|error| {
+                InterpretError::data_integrity(format!(
+                    "hash-covered adapter interpretation failed: {error:#}"
+                ))
+            })?,
+        };
         let state_values = load::prior_state_values(
             &self.pool,
             &request.chain_id,

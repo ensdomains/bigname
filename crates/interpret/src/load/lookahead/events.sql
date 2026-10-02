@@ -9,9 +9,9 @@ WITH candidates AS MATERIALIZED (
            event.after_state ? '{clear_marker}' AS clear_marker
     FROM unnest($3::text[]) requested(name)
     JOIN LATERAL (
-        -- One arm per probe index: the ENSv1 families and the Basenames Base families each
-        -- have a partial index, and a family test the planner cannot prove against one
-        -- predicate would scan instead.
+        -- One arm per probe index: the ENSv1, Basenames Base and ENSv2 families each have a
+        -- partial index, and a family test the planner cannot prove against one predicate
+        -- would scan instead.
         (SELECT event.* FROM normalized_events event
         WHERE COALESCE(event.namespace || ':' || lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node', event.after_state #>> '{grant_source,node}', event.after_state #>> '{revocation_source,node}')), event.logical_name_id) = requested.name
           AND event.chain_id = $1 AND event.block_number < $2
@@ -25,6 +25,13 @@ WITH candidates AS MATERIALIZED (
         WHERE COALESCE(event.namespace || ':' || lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node', event.after_state #>> '{grant_source,node}', event.after_state #>> '{revocation_source,node}')), event.logical_name_id) = requested.name
           AND event.chain_id = $1 AND event.block_number < $2
           AND event.source_family LIKE 'basenames\_base\_%'
+          AND event.canonicality_state IN ('canonical','safe','finalized')
+        OFFSET 0)
+        UNION ALL
+        (SELECT event.* FROM normalized_events event
+        WHERE COALESCE(event.namespace || ':' || lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node', event.after_state #>> '{grant_source,node}', event.after_state #>> '{revocation_source,node}')), event.logical_name_id) = requested.name
+          AND event.chain_id = $1 AND event.block_number < $2
+          AND event.source_family LIKE 'ens\_v2\_%'
           AND event.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0)
     ) event ON TRUE
@@ -58,6 +65,25 @@ WITH candidates AS MATERIALIZED (
           AND lineage.canonicality_state IN ('canonical','safe','finalized')
         LIMIT 1
     ) readable ON TRUE
+    UNION ALL
+    -- ENSv2 events filed under a requested ENSv2 state key. The array must stay identical to
+    -- normalized_events_v2_key_probe_idx and to `v2_event_keys` in the adapter crate.
+    SELECT event.normalized_event_id,
+           event.raw_fact_ref ? '{state_key}',
+           COALESCE(event.raw_fact_ref ->> '{state_key}', event.event_identity),
+           event.after_state ? '{clear_marker}'
+    FROM normalized_events event
+    JOIN LATERAL (
+        SELECT 1 FROM chain_lineage lineage
+        WHERE lineage.chain_id = event.chain_id
+          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
+          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+        LIMIT 1
+    ) readable ON TRUE
+    WHERE {v2_keys} && $5::text[]
+      AND event.chain_id = $1 AND event.block_number < $2
+      AND event.source_family LIKE 'ens\_v2\_%'
+      AND event.canonicality_state IN ('canonical','safe','finalized')
 ), keys AS MATERIALIZED (
     SELECT DISTINCT has_key, state_key, clear_marker FROM candidates
 ), winners AS MATERIALIZED (
@@ -124,7 +150,8 @@ CROSS JOIN LATERAL (
         'emitting_address', event.raw_fact_ref ->> 'emitting_address',
         '{state_key}', event.raw_fact_ref ->> '{state_key}',
         'event_identity', event.event_identity, '{state_scope}', event.raw_fact_ref ->> '{state_scope}',
-        'block_number', event.block_number, '{transaction_index}', event.transaction_index,
+        'block_number', event.block_number, 'normalized_event_id', event.normalized_event_id,
+        '{transaction_index}', event.transaction_index,
         '{log_index}', event.log_index,
         'after_state', event.after_state
     ) AS body

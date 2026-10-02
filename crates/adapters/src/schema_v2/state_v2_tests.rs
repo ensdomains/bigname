@@ -534,7 +534,7 @@ fn assert_v2_indexes_are_derived(state: &State) {
     let mut resolver_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
     let mut resolver_aliases = OrdMap::<(String, String), OrdSet<(String, String)>>::new();
     let mut subregistry_tokens = OrdMap::<(String, String), OrdSet<String>>::new();
-    for (token_key, token) in &state.v2_tokens {
+    for (token_key, token) in state.v2_tokens.loaded() {
         let (emitter, token_id) = token_key
             .rsplit_once(':')
             .expect("retained ENSv2 token key");
@@ -587,14 +587,26 @@ fn assert_v2_indexes_are_derived(state: &State) {
                 .insert((token_id.to_owned(), alias.clone()));
         }
     }
-    assert_eq!(state.v2_token_by_upstream_resource_index, upstream);
-    assert_eq!(state.v2_token_by_name_index, names);
-    assert_eq!(state.v2_tokens_by_current_name_index, current_names);
-    assert_eq!(state.v2_expiries, expiries);
-    assert_eq!(state.v2_resolver_tokens_by_observation, resolver_tokens);
-    assert_eq!(state.v2_resolver_aliases_by_observation, resolver_aliases);
     assert_eq!(
-        state.v2_subregistry_tokens_by_observation,
+        *state.v2_token_by_upstream_resource_index.as_map(),
+        upstream
+    );
+    assert_eq!(*state.v2_token_by_name_index.as_map(), names);
+    assert_eq!(
+        *state.v2_tokens_by_current_name_index.as_map(),
+        current_names
+    );
+    assert_eq!(*state.v2_expiries.as_set(), expiries);
+    assert_eq!(
+        *state.v2_resolver_tokens_by_observation.as_map(),
+        resolver_tokens
+    );
+    assert_eq!(
+        *state.v2_resolver_aliases_by_observation.as_map(),
+        resolver_aliases
+    );
+    assert_eq!(
+        *state.v2_subregistry_tokens_by_observation.as_map(),
         subregistry_tokens
     );
 }

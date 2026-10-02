@@ -1653,7 +1653,7 @@ the adapter advances time-derived protocol state to that timestamp. Exact
 cold-restore reconstruction therefore depends on the predecessor remaining
 readable in the same input snapshot.
 
-On a chain whose manifests all belong to ENSv1 or Basenames Base source
+On a chain whose manifests all belong to ENSv1, ENSv2 or Basenames Base source
 families (or to the families that interpret no logs), Interpret instead
 restores state for each batch with the [lookahead loader](glossary.md#lookahead-loader).
 Interpret's adapter handles the Basenames Base families with its ENSv1 protocol
@@ -1675,21 +1675,45 @@ boundary has already settled. Interpret then reads, in the batch's input
 snapshot, the latest readable event per interpreter state key among the events
 of those names and resources, adds the names and resources those events
 reference, and repeats until a round adds nothing. There is no round limit: each
-continuing round adds a name or resource from the chain's finite stored history,
-so the repetition ends. Interpret restores a fresh adapter state from exactly those events under the
-same canonical-lineage and pre-batch boundary rules as a cold restore. The
+continuing round adds a name, resource or ENSv2 state key from a finite set (the
+names, resources and keys the batch's logs and the chain's stored history
+reference or derive, and the registry-only resource of each of those names), so the
+repetition ends. On a chain with an ENSv2 manifest the rounds also read the
+readable ENSv2 events filed under each name and
+[ENSv2 state key](glossary.md#ensv2-state-key) in the set, starting from the
+keys the batch's logs name and the keys of registry tokens whose expiry falls
+inside the batch's time span; the keys, names and resources those events
+reference join the set. Interpret restores a fresh adapter state from exactly those events under the
+same canonical-lineage and pre-batch boundary rules as a cold restore, and
+interprets the batch against it in the same input snapshot. ENSv2
+interpretation derives names from registry state, such as the ENSv1 predecessor
+an [ENSv1→ENSv2 migration](glossary.md#ensv1ensv2-migration) retires, so the collector cannot list them all in advance: when
+restore or interpretation reads a name or ENSv2 state key that was not loaded,
+Interpret discards that attempt, adds it, repeats the rounds above and
+interprets again. Every attempt that continues adds a name or key not loaded
+before, and those a batch can read are derived from its logs and the snapshot's
+finite stored history, so the attempts end. A read under another spelling than
+the loaded one fails the batch only when that spelling is loaded too, so the
+adapter's state keys must match the keys its events are filed under. Only an attempt that read nothing unloaded is
+published. The
 session is discarded after the batch. Two partial expression indexes on
 `normalized_events` serve these reads for the ENSv1 families:
 `normalized_events_v1_direct_node_probe_idx` (events of one name) and
 `normalized_events_v1_due_probe_idx` (registrar expiry ranges); two more with the
 same expressions, `normalized_events_basenames_direct_node_probe_idx` and
 `normalized_events_basenames_due_probe_idx`, serve them for the Basenames Base
-families. The loader is an access path, not a semantic: it must produce the same
+families. For ENSv2, `normalized_events_v2_direct_node_probe_idx` has the
+same name expression, `normalized_events_v2_key_probe_idx` is an inverted
+(GIN) index over the [ENSv2 state keys](glossary.md#ensv2-state-key) each event
+is filed under, `normalized_events_v2_due_probe_idx` finds registry tokens whose
+expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
+by chain and block, finds the latest ENSv2 registry event before it. An ENSv2
+read of an unloaded state key is retried like an unloaded name. The loader is an access path, not a semantic: it must produce the same
 normalized events, identity rows and discovery edges as the full-state loader,
 and it is covered by the same interpreter content hash. The loader choice
 therefore looks past the manifests the batch interprets: the full-state loader
 restores every retained row regardless of family and lookahead reads only the
-ENSv1 and Basenames Base families, so `normalized_events` history of a family lookahead does not cover,
+ENSv1, ENSv2 and Basenames Base families, so `normalized_events` history of a family lookahead does not cover,
 written while that family's manifest was `active` and still retained after the
 manifest moved to `draft` or `shadow`, would be restored by one loader and not
 the other. Before choosing lookahead, Interpret lists the chain's manifests in
@@ -1701,8 +1725,7 @@ ever moved between rollout states, never deleted. No index leads with
 `source_family`, so each probed family costs one scan of the chain's retained
 events, stopping at the first match; a chain with no uncovered manifest in those
 states runs no probe.
-It fails the batch, rather than publishing, if interpretation reads a name that
-was not loaded.
+It never publishes an attempt that read a name that was not loaded.
 
 For ENSv2, a retained registry/root `PreimageObserved` event for a canonical
 [name surface](glossary.md#surface-name-surface)
