@@ -127,29 +127,35 @@ async fn a_locked_name_is_managed_by_its_holder_and_a_lineageless_name_by_its_co
 
 /// A wrapped name whose wrapper expiry is unknown serves no wrapper state, so neither its grace
 /// nor its manager is known and it is marked `wrapper_masked`, but it still has its token holder
-/// as `owner`: the relation lists it as the field serves it.
+/// as `owner`: the relation lists it as the field serves it, with or without a token lineage, and
+/// lists no manager relation for the manager the field omits.
 #[tokio::test]
 async fn an_unknown_wrapper_mask_keeps_the_token_holder() -> Result<()> {
-    let fixture = Fixture::new("families_address_names_unknown_mask", 20).await?;
-    let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL | IS_DOT_ETH, timestamp(14)).await?;
-    with_token_lineage(&fixture, &resource).await?;
-    sqlx::query(
-        "UPDATE normalized_events SET after_state = after_state - 'expiry'
-         WHERE resource_id = $1::uuid",
-    )
-    .bind(&resource)
-    .execute(&fixture.pool)
-    .await?;
-    assert_eq!(
-        publish_and_compare_addresses(&fixture, 14).await?,
-        ["token_holder"]
-    );
-    assert_eq!(composed(&fixture).await?, (Some(HOLDER.to_owned()), false));
-    let row = bigname_storage::families::name::load_family_name(&fixture.pool, &name(1))
-        .await?
-        .context("composed wrapped name")?;
-    assert_eq!(row.declared_summary["wrapper_masked"], true);
-    fixture.cleanup().await
+    for lineage in [true, false] {
+        let fixture = Fixture::new("families_address_names_unknown_mask", 20).await?;
+        let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL | IS_DOT_ETH, timestamp(14)).await?;
+        if lineage {
+            with_token_lineage(&fixture, &resource).await?;
+        }
+        sqlx::query(
+            "UPDATE normalized_events SET after_state = after_state - 'expiry'
+             WHERE resource_id = $1::uuid",
+        )
+        .bind(&resource)
+        .execute(&fixture.pool)
+        .await?;
+        assert_eq!(
+            publish_and_compare_addresses(&fixture, 14).await?,
+            ["token_holder"]
+        );
+        assert_eq!(composed(&fixture).await?, (Some(HOLDER.to_owned()), false));
+        let row = bigname_storage::families::name::load_family_name(&fixture.pool, &name(1))
+            .await?
+            .context("composed wrapped name")?;
+        assert_eq!(row.declared_summary["wrapper_masked"], true);
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
 
 /// The composed `control.owner` and `wrapper_in_grace` of the wrapped name; the stored

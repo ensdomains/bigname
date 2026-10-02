@@ -1085,6 +1085,61 @@ async fn a_lapsed_name_lists_its_registrant_under_former_owner_only() -> Result<
     Ok(())
 }
 
+/// The lapsed block a plain lapse composes on its revived registry custody needs a supported
+/// selection: the same facts read under an unsupported selection carry none.
+#[tokio::test]
+async fn an_unsupported_lapsed_name_has_no_lapsed_block() -> Result<()> {
+    use bigname_storage::families::control::lifecycle::{
+        AuthoritySelection, Clock, NameInput, NamePlace, evaluate, load_name_facts,
+    };
+    const RELEASED: i64 = 131;
+    let registered = registration_at(REGISTERED, OWNER, LAPSED_EXPIRY, None);
+    let (lapsed, session) = interpret(REGISTERED, registered, None)?;
+    let (released, _) = interpret(RELEASED, Vec::new(), Some(session))?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=RELEASED).await?;
+    let pool = &database.pool;
+    persist(pool, &lapsed).await?;
+    persist(pool, &released).await?;
+    project_to(pool, RELEASED, None).await?;
+    released_detail_at(&database, RELEASED).await?;
+    let name = bigname_storage::logical_name_id_for_name("ens", &format!("{LABEL}.eth"));
+    let composed = bigname_storage::families::name::load_family_name(pool, &name)
+        .await?
+        .context("composed name")?;
+    let input = NameInput {
+        logical_name_id: name,
+        namehash: composed.namehash.to_ascii_lowercase(),
+        selection: AuthoritySelection::default(),
+        place: NamePlace::EthSecondLevel,
+    };
+    let mut facts = load_name_facts(pool, CHAIN, &[input])
+        .await?
+        .pop()
+        .context("name facts")?;
+    database.cleanup().await?;
+    let clock = Clock {
+        block_number: RELEASED,
+        timestamp_seconds: 1_700_000_131,
+    };
+    let lapsed_block = |facts: &_| -> Result<Option<Value>> {
+        Ok(evaluate(facts, &clock)?
+            .registration
+            .get("lapsed_registration")
+            .cloned())
+    };
+
+    facts.input.selection = AuthoritySelection::from_provenance(&composed.provenance);
+    assert!(facts.input.selection.unsupported_reason.is_none());
+    assert_eq!(
+        lapsed_block(&facts)?.context("supported lapsed block")?["owner"],
+        OWNER
+    );
+    facts.input.selection.unsupported_reason = Some("current_authority_not_projected".into());
+    assert_eq!(lapsed_block(&facts)?, None);
+    Ok(())
+}
+
 async fn released_detail_at(database: &TestDatabase, block: i64) -> Result<Value> {
     database
         .seed_snapshot_selector_chain_positions(&json!({CHAIN: {
