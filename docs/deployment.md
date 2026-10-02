@@ -1903,8 +1903,8 @@ wrapped name" release, whose Interpret and Project redos then run once for
 both. Before the release is recorded, run the Sepolia check in the route
 contract: `0x4f06fd857f8d4c6172aaa3f6a96a645b6940aacc` must answer
 `evers.eth` and `0x1d84ad46f1ec91b4bb3208f645ad2fa7abec19f8` must answer
-`artitest.eth` on the indexed source and `not_found` on the verified source
-(neither name has a resolver to verify against), and
+`artitest.eth` on the indexed source and `not_found` on the verified source,
+and
 `GET /v1/events?contract_address=0x4F382928805ba0e23B30cFB75fC9E848e82DFD47`
 must list `primary_name` rows with `coin_type` `2147483648`.
 
