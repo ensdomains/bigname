@@ -686,3 +686,99 @@ async fn endpoint_exports_committed_family_publication_metrics() -> Result<()> {
     tokio::task::yield_now().await;
     scratch.cleanup().await
 }
+
+/// Proxy rows as Project leaves them: one chain cut over through the managed proxy, one whose
+/// managed proxy was repointed to an implementation the manifest does not list, and one with no
+/// `Upgraded` at all.
+#[tokio::test]
+async fn endpoint_exports_the_universal_resolver_cutover_per_chain() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_metrics_universal_resolver").await?;
+    let pool = scratch.pool();
+    let store = PhaseStore::new(pool.clone());
+    let chains = ["admitted", "unadmitted", "no-events"];
+    for chain in chains {
+        store.initialize_chain(chain).await?;
+    }
+    for (chain, proxy, role, implementation, kind, block) in [
+        (
+            "admitted",
+            "0xtop",
+            "universal_resolver",
+            "0xmanaged",
+            "universal_resolver_proxy",
+            10,
+        ),
+        (
+            "admitted",
+            "0xmanaged",
+            "universal_resolver_managed",
+            "0xv2",
+            "admitted_universal_resolver",
+            20,
+        ),
+        (
+            "unadmitted",
+            "0xtop",
+            "universal_resolver",
+            "0xmanaged",
+            "universal_resolver_proxy",
+            10,
+        ),
+        (
+            "unadmitted",
+            "0xmanaged",
+            "universal_resolver_managed",
+            "0xnew",
+            "other",
+            11_821_680,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO bigname_phase.project_universal_resolver_proxy (
+                 chain_id, proxy_address, proxy_role, implementation, implementation_kind,
+                 block_number, transaction_index, log_index, event_identity
+             ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $1 || $2)",
+        )
+        .bind(chain)
+        .bind(proxy)
+        .bind(role)
+        .bind(implementation)
+        .bind(kind)
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+
+    let cancellation = CancellationToken::new();
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        pool.clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        RunnerMetricsFeed::default(),
+    )
+    .await?;
+    let response = tokio::task::spawn_blocking(move || scrape(address))
+        .await
+        .context("phase metrics scrape task panicked")??;
+    cancellation.cancel();
+    let body = parse_http_scrape(&response)?;
+    let gauges = chains
+        .iter()
+        .map(|chain| {
+            let label = format!("chain=\"{chain}\"");
+            Ok((
+                sample(body, "phase_runner_universal_resolver_cut_over", &[&label])?,
+                sample(
+                    body,
+                    "phase_runner_universal_resolver_unadmitted",
+                    &[&label],
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(gauges, vec![(1.0, 0.0), (0.0, 1.0), (0.0, 0.0)]);
+    scratch.cleanup().await
+}
