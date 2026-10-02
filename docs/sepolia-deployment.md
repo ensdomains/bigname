@@ -2,11 +2,14 @@
 
 `manifests/sepolia` selects the official 2026-10-01 Sepolia redeploy at contracts-v2
 `07e55a056f5b6a9c90119f501bdd05714e67dddd`. Upstream deployed a fresh ENSv2 set
-on 2026-10-01 and pointed the long-lived Universal Resolver proxies at it, so the
-2026-09-15 deployment the manifests previously selected no longer decides
-resolution. Its contracts are dropped, not kept as retired history: no Sepolia
+on 2026-10-01
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20261001@07e55a05),
+and on chain the managed Universal Resolver proxy moved to its
+implementation at block `11821680` ([resolver and discovery
+coverage](#resolver-and-discovery-coverage); the pinned artifacts carry no upgrade
+receipt), so the 2026-09-15 deployment the manifests previously selected no
+longer decides resolution. Its contracts are dropped, not kept as retired history: no Sepolia
 manifest names them, and Sepolia's ENSv2 history starts with the new set.
-(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/.deployment.json:L4 @ ens_v2_sepolia_20261001@07e55a05)
 
 The following inventory accounts for every entry in the pinned address list.
 A helper's presence does not grant indexed ownership, records, or permissions.
@@ -136,7 +139,9 @@ proxy moved to the managed proxy at block `10928435`, and the managed proxy reac
 are in `docs/upstream.md` ("Sepolia Universal Resolver proxies admitted from chain evidence").
 Because only the new implementation is listed, every block before `11821680` reads as not cut
 over, including the `11710193`–`11821679` window in which the dropped deployment answered
-resolution: with that deployment dropped, no admitted ENSv2 registry existed there. A later
+resolution: with that deployment dropped, no admitted ENSv2 registry existed there
+before the redeploy's ETHRegistry at `11820399`, and from then until `11821680` the
+new registry is admitted while resolution stays on the pre-cutover path. A later
 upgrade to an unlisted implementation ends the cutover for the names it affects
 (`docs/api-v1.md` § Expiry and grace) until the manifest lists it. This does not replace
 the request-time root check above.

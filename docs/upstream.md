@@ -357,11 +357,12 @@ to the applicable entries below.
 > `reverse(0x69420f05a11f617b4b74ffe2e04b2d300dfa556f, 60)` returned an empty
 > name, while bigname's reverse leg read `hcathgq2e.eth` from
 > `default.reverse`. That call's resolver lookup returned
-> `0x322b…9cb0`, which no pinned artifact or manifest names; the pinned
-> `ENSV1Resolver` is a different address, so which Universal Resolver
-> implementation and `reverse` resolver were live is not pinned. Which order is
-> canonical on Sepolia after the ENSv2 cutover is an open question, and this
-> entry records it without changing either source.
+> `0x322b…9cb0`, the 2026-10-01 redeploy's `ENSV1Resolver`
+> `(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/ENSV1Resolver.json:L2 @ ens_v2_sepolia_20261001@07e55a05)`,
+> behind the redeploy's Universal Resolver, which the managed proxy has served
+> since block `11821680`. Which order is canonical on Sepolia after the ENSv2
+> cutover is an open question, and this entry records it without changing either
+> source.
 > **Upstream**: ETHReverseResolver falls back to `default.reverse` when the
 > reverse node's resolver returns an empty name
 > `(upstream: .refs/ens_v1/contracts/reverseResolver/ETHReverseResolver.sol:L42-L70 @ ens_v1@91c966f)`,
