@@ -380,6 +380,35 @@ fn a_pre_start_announcement_interprets_alike_whether_or_not_it_was_fetched() -> 
     Ok(())
 }
 
+/// An admitted resolver's own `Upgraded` comes from its address watch, which every database runs,
+/// so a pre-start one is still its implementation history; it only admits nothing.
+#[test]
+fn an_admitted_resolver_keeps_its_pre_start_upgraded_history() -> anyhow::Result<()> {
+    let mut input = starting_at(5, batch(vec![upgraded(IMPLEMENTATION, 4, 0)]));
+    input.admissions.push(AddressAdmissionInput {
+        address: RESOLVER.to_owned(),
+        contract_instance_id: Uuid::from_u128(77),
+        source_manifest_id: Some(RESOLVER_MANIFEST),
+        role: None,
+        discovery_edge_kind: Some("resolver".to_owned()),
+        discovery_from_contract_instance_id: Some(Uuid::from_u128(1)),
+        discovery_observation_key: Some("earlier-admission".to_owned()),
+        active_from_block: Some(1),
+        active_to_block: None,
+    });
+    let output = interpret_test_batch(input)?;
+
+    assert_eq!(event_kinds(&output), [(4, 0, "Upgraded".to_owned())]);
+    assert!(
+        output
+            .discovery_edges
+            .iter()
+            .any(|edge| edge.edge_kind == "proxy_implementation")
+    );
+    assert!(resolver_edges(&output).is_empty());
+    Ok(())
+}
+
 /// The start bounds only the `Upgraded` announcement, whose logs the implementation watch
 /// fetches; a factory's `ProxyDeployed` comes from the factory's own address watch.
 #[test]

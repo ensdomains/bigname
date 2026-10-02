@@ -1768,9 +1768,15 @@ factory, announces a declared implementation:
   `implementation` is in the same-namespace, same-deployment
   `ens_v2_resolver_l1` manifest's `resolver_implementations` admits the emitter
   as an `ens_v2_resolver_l1` instance from that block, unless the block is
-  before that entry's `start_block`: such an announcement is neither selected
-  nor admitting, so a database whose Ingest redo started at the declared start
-  and one that fetched the earlier log interpret alike. The event is selected
+  before that entry's `start_block`. Before that start the announcement
+  neither selects an otherwise unadmitted emitter nor authorizes an
+  announcement admission, so a database whose Ingest redo started at the
+  declared start and one that fetched the earlier log write the same identity,
+  discovery and normalized-event rows; the fetched log can add only an
+  [operator diagnostic](storage.md#table-ownership) row. An emitter admitted
+  some other way, for example by `ResolverCreated`, keeps its own earlier
+  `Upgraded` history, which its address-scoped watch fetches in every
+  database. The event is selected
   across every emitter — the precedent is the ENSv1 resolver family's match-all
   signature set — but narrowed by `topic1` to the declared implementation
   addresses, both in the [compiled watch plan](glossary.md#compiled-watch-plan)
@@ -1846,8 +1852,8 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
   resolver's own address-scoped `Upgraded` watch. The start bounds the compiled
   plan, and so the lower end of a required Ingest redo that a new
   implementation stamps; runtime intake keeps the `topic1` filter over the
-  manifest's whole active range, and Interpret ignores an announcement it
-  fetched before the start. An announcement emitted through the OpenZeppelin
+  manifest's whole active range, and Interpret does not let an announcement
+  it fetched before the start select or admit an emitter. An announcement emitted through the OpenZeppelin
   ERC-1967 upgrade path cannot precede the implementation's creation block,
   because that path reverts for an implementation address without code before
   it emits `Upgraded`; another emitter can log one earlier, which is why
