@@ -88,8 +88,8 @@ const OFFSETS: [i64; 9] = [
     1_000 + GRACE + 1,   // 4: quiet; carol's ENSv1 registration lapses
     1_000 + GRACE + 100, // 5: quiet; dave's ENSv2 registration has lapsed
     1_000 + GRACE + 200, // 6: alice gets a resolver, a text record, a new token id and a subregistry
-    1_000 + GRACE + 300, // 7: bob transferred; a text record
-    1_000 + GRACE + 400, // 8: quiet
+    1_000 + GRACE + 300, // 7: bob transferred; a text record; alice's subregistry cleared
+    1_000 + GRACE + 400, // 8: the ETH registry's parent set again
 ];
 
 /// ENSv2 token ids carry a version in their low four bytes
@@ -380,7 +380,23 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     seed.log(ETH_REGISTRY, subregistry.encode_log_data())
         .await?;
 
-    seed_last_block(&mut seed, &block_hash(FIRST_BLOCK + 7), "0x07").await
+    seed_last_block(&mut seed, &block_hash(FIRST_BLOCK + 7), "0x07").await?;
+    if lineage.len() > 8 {
+        seed_reparent(&mut seed).await?;
+    }
+    Ok(())
+}
+
+/// Block 8: the ETH registry's parent set again, which renames every token in it, so a later
+/// batch requests the registry whole.
+async fn seed_reparent(seed: &mut Seeder<'_>) -> TestResult {
+    seed.block(FIRST_BLOCK + 8).await?;
+    let parent = v2::ParentUpdated {
+        parent: ROOT_REGISTRY.parse()?,
+        label: "eth".to_owned(),
+        sender: OWNER.parse()?,
+    };
+    seed.log(ETH_REGISTRY, parent.encode_log_data()).await
 }
 
 /// Block 7. A reorg replaces it with a block of the same shape but another text value.
@@ -401,7 +417,15 @@ async fn seed_last_block(seed: &mut Seeder<'_>, hash: &str, text: &str) -> TestR
     };
     seed.log(ETH_REGISTRY, transferred.encode_log_data())
         .await?;
-    seed.text("bob", text).await
+    seed.text("bob", text).await?;
+    // A zero-address update clears the pointer and is retained beside the token's latest
+    // ordinary subregistry event.
+    let cleared = v2::SubregistryUpdated {
+        tokenId: v2_token_version("alice", 1),
+        subregistry: Address::ZERO,
+        sender: OWNER.parse()?,
+    };
+    seed.log(ETH_REGISTRY, cleared.encode_log_data()).await
 }
 
 fn name(label: &str) -> String {
@@ -435,15 +459,20 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         database.cleanup().await?;
         // The walk runs the lookahead loader beside the engine's choice. This history reads
         // names no log or stored event mentions, so it must exercise the retry.
-        // Only the batches that give a registry a parent rename every token in it: the
-        // ETH registry's ParentUpdated and alice's SubregistryUpdated.
+        // Only the batches that give a registry a parent or take it away rename every token
+        // in it: the ETH registry's two ParentUpdated, and alice's SubregistryUpdated and its
+        // clear for the migration registry.
         let span = i64::from(blocks_per_batch);
         let batch_of = |block: i64| FIRST_BLOCK + (block - FIRST_BLOCK) / span * span;
+        let eth = format!("{ETH_REGISTRY}:*");
+        let migration = format!("{MIGRATION_REGISTRY}:*");
         assert_eq!(
             super::WHOLE_REGISTRY_BATCHES.take(),
             BTreeSet::from([
-                (batch_of(FIRST_BLOCK), format!("{ETH_REGISTRY}:*")),
-                (batch_of(FIRST_BLOCK + 6), format!("{MIGRATION_REGISTRY}:*")),
+                (batch_of(FIRST_BLOCK), eth.clone()),
+                (batch_of(FIRST_BLOCK + 6), migration.clone()),
+                (batch_of(FIRST_BLOCK + 7), migration),
+                (batch_of(FIRST_BLOCK + 8), eth),
             ]),
             "batches that loaded a whole ENSv2 registry at {blocks_per_batch} blocks per batch"
         );
@@ -617,7 +646,9 @@ async fn reorg_and_restart(force_full_state: bool) -> TestResult<(Vec<String>, V
         .execute(pool)
         .await?;
     }
-    seed_last_block(&mut seeder(pool), &replacement, "0x0b").await?;
+    let mut seed = seeder(pool);
+    seed_last_block(&mut seed, &replacement, "0x0b").await?;
+    seed_reparent(&mut seed).await?;
 
     run(&first, None, orphaned, RunMode::Redo).await?;
     let redone = Marker {
