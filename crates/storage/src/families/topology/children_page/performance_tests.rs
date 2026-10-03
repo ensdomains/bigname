@@ -227,9 +227,10 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
     result
 }
 
-/// The released-lease probe of a child with no name surface enters
+/// The released-lease and token-holder probes of a child with no name surface enter
 /// `project_lifecycle_event_namehash_idx` by chain and child node, never by chain alone, and
-/// reads the newest lease event: a release, then a later grant.
+/// read the newest lease event at or below the clock: a release, then a later grant, then a
+/// transfer, whose recipient holds the lease.
 #[tokio::test]
 async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
     let database = TestDatabase::create(
@@ -241,14 +242,17 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
         install(&mut conn).await?;
         let child = child_id(1);
         let node = child.strip_prefix("ens:").unwrap();
-        let lease = |identity: &str, kind: &str, block: i64, position: &str| {
+        let lease_to = |identity: &str, kind: &str, block: i64, position: &str, to: &str| {
             format!(
                 "INSERT INTO project_lifecycle_event(chain_id, state_kind, state_key,
                      block_number, transaction_index, log_index, event_identity, event_kind,
-                     source_family, namehash)
+                     source_family, namehash, to_address)
                  VALUES ('{CHAIN}', 'resource', 'lease', {block}, {position}, '{identity}',
-                     '{kind}', 'ens_v1_registrar_l1', '{node}');"
+                     '{kind}', 'ens_v1_registrar_l1', '{node}', NULLIF('{to}', ''));"
             )
+        };
+        let lease = |identity: &str, kind: &str, block: i64, position: &str| {
+            lease_to(identity, kind, block, position, "")
         };
         raw_sql(&format!(
             "{}{}
@@ -288,19 +292,45 @@ async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
                 "the probe does not enter the namehash index by chain and node: {probe}"
             );
         }
-        let released = |page: &FamilyChildrenPage| {
+        let served = |page: &FamilyChildrenPage| {
             page.rows
                 .iter()
                 .find(|row| row.child_logical_name_id == child)
-                .map(|row| row.released_lease)
+                .map(|row| (row.released_lease, row.token_holder.clone()))
         };
         let first = page(&mut conn, PARENT, &filter, None, None, 5).await?;
-        ensure!(released(&first) == Some(true), "{first:?}");
+        ensure!(served(&first) == Some((true, None)), "{first:?}");
         raw_sql(&lease("again", "RegistrationGranted", 100, "0, 0"))
             .execute(&mut *conn)
             .await?;
         let again = page(&mut conn, PARENT, &filter, None, None, 5).await?;
-        ensure!(released(&again) == Some(false), "{again:?}");
+        ensure!(served(&again) == Some((false, None)), "{again:?}");
+        let buyer = "0x2222222222222222222222222222222222222222";
+        raw_sql(&lease_to(
+            "late",
+            "TokenControlTransferred",
+            101,
+            "0, 0",
+            buyer,
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let late = page(&mut conn, PARENT, &filter, None, None, 5).await?;
+        ensure!(served(&late) == Some((false, None)), "{late:?}");
+        raw_sql(&lease_to(
+            "sold",
+            "TokenControlTransferred",
+            100,
+            "0, 1",
+            buyer,
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let sold = page(&mut conn, PARENT, &filter, None, None, 5).await?;
+        ensure!(
+            served(&sold) == Some((false, Some(buyer.to_owned()))),
+            "{sold:?}"
+        );
         Ok(())
     }
     .await;
@@ -315,6 +345,160 @@ fn lifecycle_scans(plan: &Value) -> Vec<&Value> {
     }
     for child in plan["Plans"].as_array().into_iter().flatten() {
         scans.extend(lifecycle_scans(child));
+    }
+    scans
+}
+
+/// The child counts read no served field of a child, so the planner drops the lifecycle probes
+/// of the children relation from their statements: a parent count never probes the lifecycle
+/// table, however many of its children have no name surface.
+#[tokio::test]
+async fn child_counts_do_not_probe_the_lifecycle_table() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("children_count_lifecycle_plan").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        let parents = vec![PARENT.to_owned()];
+        for (name, types, query, arguments) in [
+            (
+                "one_count",
+                "text, text",
+                count_query(PARENT, None),
+                format!("'{PARENT}'"),
+            ),
+            (
+                "many_counts",
+                "text[], text",
+                counts_query(&parents),
+                format!("ARRAY['{PARENT}']"),
+            ),
+        ] {
+            ensure!(
+                !query.sql().contains("child_node = ANY("),
+                "{name} narrows its children"
+            );
+            raw_sql(&format!("PREPARE {name} ({types}) AS {}", query.sql()))
+                .execute(&mut *conn)
+                .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (FORMAT JSON) EXECUTE {name} ({arguments}, '{}')",
+                bigname_content_hash::INTERPRETER_CONTENT_HASH
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            ensure!(
+                lifecycle_scans(&plan[0]["Plan"]).is_empty(),
+                "{name} probes the lifecycle table: {plan}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The surface-less children an address owns or manages are read by candidate node: the edge
+/// scan enters `project_child_edge_candidate_child_idx` by the candidates' nodes instead of
+/// enumerating every edge of the parent, which the candidate filter outside the relation, an
+/// expression over the name id, cannot do. The page statement is not narrowed.
+#[tokio::test]
+async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
+    use crate::families::topology::registry_children::owned_children_query;
+
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("owned_registry_children_plan").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        let child = child_id(1);
+        let node = child.strip_prefix("ens:").unwrap().to_owned();
+        let owner = "0x1111111111111111111111111111111111111111";
+        raw_sql(&format!(
+            "INSERT INTO project_registry_node_state(chain_id, namespace, node, block_number,
+                 transaction_index, log_index, event_identity, owner, owner_resource_id)
+             VALUES ('{CHAIN}', 'ens', '{node}', 100, 0, 1, 'child:1:0', '{owner}',
+                 '00000000-0000-0000-0000-000000000011');
+             ANALYZE project_registry_node_state;"
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let filter = ChildrenCurrentPageFilter::default();
+        ensure!(
+            !page_query(PARENT, &filter, None, None, 6)
+                .sql()
+                .contains("child_node = ANY(")
+        );
+        let parents = vec![PARENT.to_owned()];
+        let candidates = vec![child.clone()];
+        let nodes = vec![node];
+        let query = owned_children_query(owner, &candidates, &nodes, &parents, 100);
+        raw_sql(&format!(
+            "PREPARE owned (text[], text, text[], text[], text[], text, text, bigint) AS {}",
+            query.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        for mode in ["force_custom_plan", "force_generic_plan"] {
+            raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                .execute(&mut *conn)
+                .await?;
+            let plan: Value = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE owned (ARRAY['{PARENT}'],
+                     '{hash}', ARRAY['{node}'], ARRAY['{node}'], ARRAY['{child}'], '{owner}',
+                     '{owner}', 100)",
+                node = nodes[0],
+                hash = bigname_content_hash::INTERPRETER_CONTENT_HASH
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            ensure!(plan[0]["Plan"]["Actual Rows"] == 1, "{mode}: {plan}");
+            let scans = edge_scans(&plan[0]["Plan"]);
+            ensure!(
+                scans.iter().any(|scan| {
+                    scan["Index Name"] == "project_child_edge_candidate_child_idx"
+                        && scan["Index Cond"]
+                            .as_str()
+                            .is_some_and(|condition| condition.contains("child_node = ANY"))
+                }),
+                "{mode}: no edge scan by candidate node: {plan}"
+            );
+            // Rows a scan examined: those it emitted and those its filter or recheck dropped.
+            for scan in scans {
+                let examined = [
+                    "Actual Rows",
+                    "Rows Removed by Filter",
+                    "Rows Removed by Index Recheck",
+                ]
+                .iter()
+                .map(|key| scan[*key].as_f64().unwrap_or_default())
+                .sum::<f64>()
+                    * scan["Actual Loops"].as_f64().unwrap_or_default();
+                ensure!(
+                    examined <= candidates.len() as f64,
+                    "{mode}: an edge scan examines more rows than the candidates: {scan}"
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+fn edge_scans(plan: &Value) -> Vec<&Value> {
+    let mut scans: Vec<&Value> = Vec::new();
+    if plan["Relation Name"] == "project_child_edge_candidate" {
+        scans.push(plan);
+    }
+    for child in plan["Plans"].as_array().into_iter().flatten() {
+        scans.extend(edge_scans(child));
     }
     scans
 }

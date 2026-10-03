@@ -304,6 +304,9 @@ pub(crate) fn build_subname(
         None => ens_v1_of_registry_child(authority, row.lifecycle_shadow)?,
     };
     // A child with no name row serves its registry owner, or an ENSv2 child its token holder,
+    // as manager and, unless the registrar retains a lease on its node whose token has moved
+    // without the registry record, as owner too
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
     // but not the NameWrapper holding it for a token holder bigname does not record
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
     // and nobody once its lease is released, though expiry leaves the registry record in
@@ -344,10 +347,13 @@ pub(crate) fn build_subname(
         }
         None if row.released_lease => (None, None),
         None => {
-            let owner = row.owner.clone().or_else(|| row.registrant.clone());
+            let manager = row.owner.clone().or_else(|| row.registrant.clone());
             (
-                owner.clone().filter(|_| !row.wrapper_held),
-                owner.filter(|_| !row.lifecycle_shadow),
+                row.token_holder
+                    .clone()
+                    .or_else(|| manager.clone())
+                    .filter(|_| !row.wrapper_held),
+                manager.filter(|_| !row.lifecycle_shadow),
             )
         }
     };

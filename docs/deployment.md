@@ -2482,14 +2482,10 @@ before the matching API serves; in v0.4.0 it shares the release's one Interpret
 and Project redo pair with the other hash-rotating changes in the batch. Stamp no
 Ingest redo: it changes no manifest, watch set, start block, table or
 schema-migration, and Project reads only retained normalized events. It needs no
-environment change and no historical ingest fetch. On its own it changes no API
-response: the address-names and subnames readers still serve a surface-less
-ENSv1 registry child for its registry owner, never for the token holder these
-rows add, and for no one once its lease is released
-([released registrar children](#released-registrar-children)) or while the
-NameWrapper that named it holds its registry record ([Manager](api-v1.md#manager)); the
-address-names reader lists no surface-less Basenames child, so the new
-Basenames index rows list nothing.
+environment change and no historical ingest fetch. It changes no API response
+until the build of
+[the lease holder of a registry child with no name surface](#lease-holder-of-a-registry-child-with-no-name-surface),
+which serves the token holder these rows add.
 
 ### ENSv2 registries read whole only when their suffix moves
 
@@ -2546,6 +2542,31 @@ one Interpret and Project redo pair with the other hash-rotating changes in the
 bundle. The whole-registry warning now counts a token once under all of its
 ids, so its token count no longer includes resource ids.
 
+### Lease holder of a registry child with no name surface
+
+The build that serves the holder of a `.eth` or Basenames lease as the `owner` of a
+registry child with no [name surface](glossary.md#surface-name-surface) (TYR-201, see
+[subnames](api-v1-routes.md#get-v1namesnamesubnames) and
+[names by address](api-v1-routes.md#get-v1addressesaddressnames)) changes only readers in
+`crates/storage/src/families`, `crates/storage/src/children` and
+`crates/storage/src/address_names`, and the API, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate.
+It needs no schema-migration, no redo, no manifest or environment change and no historical
+ingest fetch: it reads the address index rows of
+[the token holder of a lease with no name surface](#token-holder-of-a-lease-with-no-name-surface-in-the-address-index)
+and the registrar lease rows Project already keeps. While the registrar retains such a
+child's lease, its `owner` is the lease's holder, the recipient of its latest token
+`Transfer` or else its registrant, and its `manager` stays its registry owner: after a
+token transfer without `reclaim`
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+`GET /v1/addresses/{address}/names`, which lists ENSv1 `.eth` children only, lists the child for
+the buyer under `owner` and for the seller under `manager` only, and
+`relation=owner&parent=eth&dedupe=registration` counts it for the buyer and not for the
+seller. The parent's subnames page serves the buyer as `owner` and the seller as `manager`,
+with the same rows and counts. The change is breaking for clients that relied on the seller
+counting under `owner`. A released lease, and a child the NameWrapper that named it holds,
+are still served for no one.
+
 ### v0.4.0 rollout
 
 v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority
@@ -2557,8 +2578,10 @@ suffix-walk reads (TYR-202) and
 ENSv2 registry and root registry `PermissionChanged` rows, which
 `/v1/diagnostics/events` shows; no product row changes. It also carries the builds from
 [Ingest redo after a killed supervisor](#ingest-redo-after-a-killed-supervisor)
-through [released registrar children](#released-registrar-children) and the
-lookahead loader's read-path changes, none of which rotates the hash. Deploy
+through [released registrar children](#released-registrar-children), the
+lookahead loader's read-path changes and the
+[lease holder of a registry child with no name surface](#lease-holder-of-a-registry-child-with-no-name-surface),
+none of which rotates the hash. Deploy
 it with the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 From v0.3.0:
