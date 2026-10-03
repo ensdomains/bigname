@@ -29,7 +29,8 @@ use crate::{
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
     NameCurrentRow, UnixSeconds,
     name_current::{
-        escape_like_pattern, expiring_page_from, list_page_from, public_authority_arms,
+        escape_like_pattern, expiring_page_from, list_page_from, parent_like_patterns,
+        public_authority_arms,
     },
     name_current_list_cursor_from_row,
 };
@@ -383,14 +384,16 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
 
 /// Keeps the walk's names that `filter` can list: with `authorities`, a name whose stored
 /// summary selects an arm that can serve one of them (the composed row decides, at the same
-/// publication). `parent` is not pruned here: it compares the composed name's normalized
-/// spelling, which the surface's stored spelling need not be.
+/// publication); with `parent`, a name one label below it. The stored spelling is exact for
+/// `parent`: Interpret activates a surface only when every label is already normalized.
 const EXPIRY_PAIRS_PRUNE: &str = "
                      AND ($7::text[] IS NULL OR EXISTS (
                          SELECT 1 FROM bigname_phase.project_name_summary summary
                          WHERE summary.chain_id = surface.chain_id
                            AND summary.logical_name_id = surface.logical_name_id
-                           AND summary.authority_arm = ANY($7::text[])))";
+                           AND summary.authority_arm = ANY($7::text[])))
+                     AND ($8::text IS NULL OR (surface.raw_name LIKE $8 ESCAPE '\\'
+                         AND surface.raw_name NOT LIKE $9 ESCAPE '\\'))";
 
 /// The next (expiry second, name) pairs of the walk after `after`: every retained lifecycle
 /// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name of
@@ -440,6 +443,7 @@ async fn expiry_pairs(
             .replace("$PRUNE", EXPIRY_PAIRS_PRUNE)
     );
     let arms = filter.authorities.as_deref().map(public_authority_arms);
+    let parent = filter.parent.as_deref().map(parent_like_patterns);
     // Decimal strings keep the i128 bounds exact. SQLx binds them as TEXT, so every
     // numeric comparison above casts its parameter, not only the null guard.
     let rows = sqlx::query(&sql)
@@ -450,6 +454,8 @@ async fn expiry_pairs(
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)
         .bind(filter.namespace.as_str())
         .bind(arms)
+        .bind(parent.as_ref().map(|(one_below, _)| one_below.as_str()))
+        .bind(parent.as_ref().map(|(_, deeper)| deeper.as_str()))
         .fetch_all(conn)
         .await
         .context("failed to walk the expiry candidates")?;

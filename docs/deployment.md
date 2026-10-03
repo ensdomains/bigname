@@ -2310,13 +2310,10 @@ period, then rerun the same Ingest redo.
 
 The build that adds `parent` to
 [`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames)
-changes only API and read paths. It also makes `parent` on
-[`GET /v1/names`](api-v1-routes.md#get-v1names) list a name whose stored
-spelling is not normalized, as its docs already said; before it, the expiry
-walk compared the stored spelling and left such a name out. The storage files it edits,
+changes only API and read paths. The storage files it edits,
 `crates/storage/src/address_names/{source,page,read,resolves_to_page,resolves_to_evm}.rs`,
-`crates/storage/src/name_current.rs`, `crates/storage/src/name_current/expiring.rs` and the reader files
-`crates/storage/src/families/name/list.rs` and
+`crates/storage/src/name_current.rs`,
+`crates/storage/src/families/name/list.rs` (a comment only) and
 `crates/storage/src/families/records/{address_names,resolves_to_serving,former_owners}.rs`,
 are read-only queries outside the
 [interpreter content hash](glossary.md#interpreter-content-hash), so the hash

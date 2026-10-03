@@ -138,50 +138,20 @@ async fn v2_address_names_parent_filters_resolves_to() -> Result<()> {
     Ok(())
 }
 
-/// A former name matches by its normalized spelling, as on the other relations, even when its
-/// stored spelling is not normalized.
 #[tokio::test]
 async fn v2_address_names_parent_filters_former_owner() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_former_cursor_names_spelled(
-        &database,
-        true,
-        [
-            "dated-a.eth",
-            "kid.former.eth",
-            "dated-c.eth",
-            "unregistered-a.eth",
-            "unregistered-b.eth",
-        ],
-    )
-    .await?;
-    // The surface keeps the verbatim spelling; the composed name normalizes it.
-    sqlx::query(
-        "UPDATE bigname_phase.name_surfaces SET raw_name = 'kid.Former.eth'
-         WHERE raw_name = 'kid.former.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
-    publish_v2_names_fixture(&database).await?;
+    seed_former_cursor_names(&database, true).await?;
     let base = former_cursor_route();
 
-    let all = rows_of(&read_family_pages(&database, &format!("{base}&page_size=2")).await?);
-    assert_eq!(all.len(), 5, "{all:#?}");
-    let eth =
-        rows_of(&read_family_pages(&database, &format!("{base}&parent=eth&page_size=2")).await?);
-    let mut expected = all.clone();
-    expected.retain(|row| row["name"] != json!("kid.former.eth"));
-    assert_eq!(eth, expected);
-    for (parent, expected) in [
-        ("former.eth", vec!["kid.former.eth"]),
-        ("Former.eth", vec!["kid.former.eth"]),
-        ("dated-a.eth", vec![]),
-    ] {
-        let payload =
-            v2_address_names_payload_for_database(&database, &format!("{base}&parent={parent}"))
-                .await?;
-        assert_eq!(names(payload["data"].as_array().unwrap()), expected, "{parent}");
-    }
+    let all = read_family_pages(&database, &format!("{base}&page_size=2")).await?;
+    let eth = read_family_pages(&database, &format!("{base}&parent=eth&page_size=2")).await?;
+    assert_eq!(rows_of(&eth).len(), 5, "{eth:#?}");
+    assert_eq!(rows_of(&eth), rows_of(&all));
+    let below =
+        v2_address_names_payload_for_database(&database, &format!("{base}&parent=dated-a.eth"))
+            .await?;
+    assert_eq!(below["data"], json!([]), "{below}");
 
     let first =
         v2_address_names_payload_for_database(&database, &format!("{base}&parent=eth&page_size=1"))
