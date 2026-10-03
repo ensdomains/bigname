@@ -2306,6 +2306,63 @@ run their unattended work, so once that error is logged, stop the
 .env.server -f docker-compose.server.yml stop phase-runner` within its grace
 period, then rerun the same Ingest redo.
 
+### History record attribution indexes
+
+The build that keys history's record attribution (TYR-168, see
+[table ownership](storage.md#table-ownership)) changes `crates/storage/src/history`, the
+normalized-events baseline and one schema-migration, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
+and it needs no redo, no manifest or environment change and no historical ingest fetch. It
+speeds up `GET /v1/names/{name}/history` with `scope=registration` or `scope=both` and
+`GET /v1/events?registration_id=` on every chain that holds writes with
+[storage model](glossary.md#storage-model) `resolver_record_id` or ENSv2 resolver pointers;
+today only the Sepolia manifests admit ENSv2 sources. Responses do not change.
+
+`20261003120000_normalized_events_record_id_attribution_indexes.sql` adds
+`normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, partial on
+`RecordChanged` and `ResolverRecordLinked` rows with storage model `resolver_record_id`. Each is
+a plain `CREATE INDEX` that scans all of `normalized_events` while holding a SHARE lock on it
+until the schema-migration commits, which blocks Interpret's writes. On a large initialized
+database, prebuild both concurrently first, outside a transaction; the phase runner and API can
+keep running while they build:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_write_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        (after_state ->> 'resolver_record_id')
+    )
+    WHERE event_kind = 'RecordChanged'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_link_idx
+    ON bigname_phase.normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        lower(after_state ->> 'node')
+    )
+    WHERE event_kind = 'ResolverRecordLinked'
+      AND after_state ->> 'storage_model' = 'resolver_record_id'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+ANALYZE bigname_phase.normalized_events;
+```
+
+Then apply the schema-migrations with `--target-version 20261003120000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
+build. `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks
+that each name is an index on `normalized_events` that is `indisvalid` and `indisready` with the
+reviewed `pg_get_indexdef`, and fails without recording itself otherwise. To recover, drop the
+named relation (an interrupted concurrent build leaves an invalid index: confirm in
+`pg_stat_progress_create_index` that no build is still running, then `DROP INDEX CONCURRENTLY`
+it), rebuild it with the statement above and apply the schema-migrations again. Without the
+prebuild, apply the schema-migration with the phase runner and redo processes stopped. API
+standbys receive the indexes through replication.
+
 ### Parent filter on names by address
 
 The build that adds `parent` to
