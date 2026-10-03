@@ -77,8 +77,11 @@ incomplete:
    its recorded block, finishes it with every index in place; the Project redo then runs
    with them too, from this command or from its own.
 
-If Interpret completed before the stop, the Project redo has already started without the
-indexes: let it run, or stop it, run `install.sql`, and rerun its command.
+A stop lets the batch in flight finish, so Interpret can still complete. If the `interpret`
+row no longer shows `redo_in_progress`, the Project redo is stamped and may already have
+started without the indexes. Run `install.sql`, then start the Project redo with its own
+command, or rerun that command if it was running; do not rerun the Interpret command, whose
+attestation token, if it had one, is spent.
 
 For a from-zero walk under the long-running runner, run `drop.sql` after `init-schema` and
 before the first start. Project starts on its own once Interpret completes, so stop the
