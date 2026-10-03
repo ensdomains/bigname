@@ -31,6 +31,9 @@ pub struct ChildrenCurrentRow {
     /// The child has no name surface and its node's registrar lease has been released
     /// (`families::topology::FamilyChildRow::released_lease`).
     pub released_lease: bool,
+    /// The holder of the node's `.eth` or Basenames lease when the child has no name surface and
+    /// the registrar retains one (`families::topology::FamilyChildRow::token_holder`).
+    pub token_holder: Option<String>,
     pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,

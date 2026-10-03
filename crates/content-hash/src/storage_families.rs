@@ -94,6 +94,7 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/records/text_hydration.rs",
     "crates/storage/src/families/topology/children.rs",
     "crates/storage/src/families/topology/children_page.rs",
+    "crates/storage/src/families/topology/children_page/child_flags.rs",
     "crates/storage/src/families/topology/collections.rs",
     "crates/storage/src/families/topology/mod.rs",
     "crates/storage/src/families/topology/name_summary.rs",
