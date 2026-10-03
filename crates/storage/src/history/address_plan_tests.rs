@@ -432,8 +432,8 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
 }
 
 /// Each arm of the pointer-window attribution reads its record writes and record links through
-/// its own index: the ENSv1 and Basenames arms through their node and resolver indexes, the
-/// ENSv2 declared-resolver arm through `normalized_events_project_node_history_idx` (its literal
+/// one of five indexes: the ENSv1 and Basenames arms through their node and resolver indexes or
+/// the node history index, which both can prove, the ENSv2 declared-resolver arm through `normalized_events_project_node_history_idx` (its literal
 /// family list proves that index's predicate), and the record-ID arm through the record-ID write
 /// and link indexes. Any other index, `normalized_events_projection_idx` above all, walks every
 /// write of the chain. The node history index spans every resolver family and the write index
@@ -489,9 +489,14 @@ fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
             node["Alias"]
         );
     }
-    // The ENSv1 and Basenames arms may also prove the node history index, so only the three
-    // indexes the declared-resolver and record-ID arms need are required.
-    let missing = INDEXES[2..]
+    // The ENSv1 and Basenames arms may read either of two indexes, so only the indexes the
+    // declared-resolver and record-ID arms need are required.
+    const REQUIRED: [&str; 3] = [
+        "normalized_events_project_node_history_idx",
+        "normalized_events_record_id_write_idx",
+        "normalized_events_record_id_link_idx",
+    ];
+    let missing = REQUIRED
         .iter()
         .filter(|index| !used.contains(*index))
         .collect::<Vec<_>>();
@@ -534,6 +539,10 @@ fn attribution_probes_are_keyed_only_by_the_pointer_keys() {
     assert!(!attribution_probe_is_keyed(&probe(
         write,
         "((chain_id = selection.chain_id) AND (lower((after_state ->> 'resolver'::text)) = selection.resolver_address))",
+    )));
+    assert!(!attribution_probe_is_keyed(&probe(
+        write,
+        "((chain_id = selection.chain_id) AND ((after_state ->> 'resolver_record_id'::text) = selection.record_id))",
     )));
     assert!(attribution_probe_is_keyed(&probe(
         write,

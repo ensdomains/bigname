@@ -501,16 +501,18 @@ node: its family comes from the resolver's classification at run time, so the ar
 two families it admits literally, which lets the planner prove that index's partial predicate.
 The record-ID arm reads a selected record's writes through `normalized_events_record_id_write_idx`
 and the record links on the pointer's resolver through `normalized_events_record_id_link_idx`.
-Without these, the declared-resolver arm and the record-ID arm read every `RecordChanged` row of
-the chain, and the `links` CTE every `ResolverRecordLinked` row, through the broad
+Without these, the declared-resolver arm read every `RecordChanged` and `RecordVersionChanged`
+row of the chain, the record-ID arm every `RecordChanged` row and the `links` CTE every
+`ResolverRecordLinked` row, through the broad
 `normalized_events_projection_idx`. The mirror lookup of the ENSv1 registry pointer by addressed node uses
 `normalized_events_project_v1_pointer_addressed_node_idx`
 ([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
 the declaring manifest also reads through the projection index, on every deployment. Plan tests
 in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
 sequentially, that every record write and record link the attribution reads goes through one of
-the five indexes above, that the declared-resolver and record-ID arms read the three this
-paragraph names, with the node history and record-ID write probes keyed by the pointer, and that
+the five indexes above, that the plan reads `normalized_events_project_node_history_idx`,
+`normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, with the node
+history and record-ID write probes keyed by the pointer, and that
 the mirror lookup, run over a non-empty walk, reads registry pointers
 through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
