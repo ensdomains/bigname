@@ -333,10 +333,10 @@ fn the_name_wrappers_own_unwrap_write_keeps_the_wrapper_until_name_unwrapped() -
 }
 
 #[test]
-fn a_name_unwrapped_earlier_in_the_transaction_does_not_shield_a_later_write() -> anyhow::Result<()>
-{
+fn a_name_unwrapped_shields_only_the_registry_write_just_before_it() -> anyhow::Result<()> {
     // A contract parent takes the child, re-wraps it to REWRAPPED_HOLDER and then hands the
-    // registry record to LAST_OWNER, all in one transaction.
+    // registry record to LAST_OWNER, all in one transaction. Only the write to the NameWrapper
+    // directly precedes the `NameUnwrapped` of the re-mint's burn.
     let mut logs = wrapped_child();
     logs.extend([
         parent_sets_owner(3, 0, NEW_OWNER),
@@ -348,12 +348,11 @@ fn a_name_unwrapped_earlier_in_the_transaction_does_not_shield_a_later_write() -
     ]);
     let events = interpret(logs)?;
     let registry_only = registry_only_resource(&events);
-    let wrapper = wrapper_resource(&events);
 
-    let shielded =
-        find(&events, 3, 0, "AuthorityTransferred").expect("the write before the re-wrap");
-    assert_eq!(shielded.resource_id, Some(wrapper));
-    assert_eq!(shielded.after_state["authority_kind"], "wrapper");
+    let taken = find(&events, 3, 0, "AuthorityTransferred").expect("the parent's first write");
+    assert_eq!(taken.resource_id, Some(registry_only));
+    assert_eq!(taken.after_state["authority_kind"], "registry_only");
+    assert_eq!(taken.after_state["owner"], NEW_OWNER);
     let last = find(&events, 3, 5, "AuthorityTransferred").expect("the write after the re-wrap");
     assert_eq!(last.resource_id, Some(registry_only));
     assert_eq!(last.after_state["authority_kind"], "registry_only");

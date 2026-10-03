@@ -2303,7 +2303,7 @@ interprets, so no historical ingest fetch is needed. In v0.4.0 it shares the
 release's one Interpret and Project redo pair with the other hash-rotating
 changes in the bundle: run one pair under a binary that holds all of them.
 After the redo such a name serves its registry owner as `owner` and `manager`,
-carries no `ens_v1.wrapper_state`, and is listed under its registry owner
+or no owner when the parent set it to zero, carries no `ens_v1.wrapper_state`, and is listed under its registry owner
 instead of the old token holder; a Graveyard sent a cleared subname's surviving
 token is no longer listed as its manager. The Project redo also recomposes a
 subname that was unwrapped and whose registry record was later given to

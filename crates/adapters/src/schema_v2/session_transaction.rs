@@ -90,10 +90,21 @@ impl TransactionIndex {
         if selected.source.source_family == "ens_v1_registry_l1"
             && let Some((namehash, _)) = registry_registration_setup_namehash(selected, raw)?
         {
-            context.wrapper_custody.unwrap_follows = self
-                .name_unwraps
-                .get(&key(selected, raw, namehash))
-                .is_some_and(|unwraps| unwraps.iter().any(|index| *index > raw.log_index));
+            // `_unwrap` writes the registry just before it emits `NameUnwrapped`, so only the
+            // last write for the node ahead of an unwrap is the NameWrapper's own.
+            let node = key(selected, raw, namehash);
+            let writes = self.registry_setups.get(&node);
+            context.wrapper_custody.unwrap_follows =
+                self.name_unwraps.get(&node).is_some_and(|unwraps| {
+                    unwraps.iter().any(|&unwrap| {
+                        unwrap > raw.log_index
+                            && !writes.is_some_and(|writes| {
+                                writes
+                                    .iter()
+                                    .any(|(write, _)| (raw.log_index + 1..unwrap).contains(write))
+                            })
+                    })
+                });
         }
         Ok(())
     }

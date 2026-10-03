@@ -9709,7 +9709,7 @@ fn ownerless_registry_resolver_uses_retained_anchor_without_reopening_control() 
             raw_at(
                 NameUnwrapped {
                     node,
-                    owner: OWNER.parse()?,
+                    owner: REGISTRY.parse()?,
                 }
                 .encode_log_data(),
                 4,
