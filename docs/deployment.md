@@ -2290,10 +2290,12 @@ The build that indexes the token holder of a `.eth` or Basenames lease with no
 [name surface](glossary.md#surface-name-surface) (TYR-201) changes
 `crates/project/src`, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
-A registrar `Transfer` of such a lease now writes its address fold row
-under the lease's `<namespace>:<namehash>` id, so the recipient, who holds the
+A registrar `Transfer` of such a lease now writes its row in
+`project_address_name_fold` (the per-name summary of the addresses that hold or
+control a name) under the lease's `<namespace>:<namehash>` id, so the recipient, who holds the
 token while the previous holder keeps the registry record until `reclaim`
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L330 @ basenames@1809bbc),
 reaches the address index beside the registry owner. Normalized events do not
 change. Finish the full-history Interpret redo and the Project redo it installs
 before the matching API serves; in v0.4.0 it shares the release's one Interpret
@@ -2301,5 +2303,7 @@ and Project redo pair with the other hash-rotating changes in the batch. Stamp n
 Ingest redo: it changes no manifest, watch set, start block, table or
 schema-migration, and Project reads only retained normalized events. It needs no
 environment change and no historical ingest fetch. On its own it changes no API
-response: the address-names and subnames readers still serve such a child for
-its registry owner under both `owner` and `manager`.
+response: the address-names and subnames readers still serve a surface-less
+ENSv1 registry child for its registry owner under both `owner` and `manager`,
+and the address-names reader lists no surface-less Basenames child, so the new
+Basenames index rows list nothing.

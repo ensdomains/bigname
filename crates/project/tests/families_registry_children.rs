@@ -274,8 +274,9 @@ async fn an_unnamed_lease_transfer_indexes_its_recipient_under_the_node_id() -> 
     fixture.cleanup().await
 }
 
-// A NameWrapper transfer carries the node, not a registrar namehash, so a wrapped token with no
-// name surface still writes no fold row.
+// Only a registrar transfer falls back to the node id: an unnamed NameWrapper transfer writes no
+// fold row even though it carries the namehash. The adapter always names a wrapper transfer, so
+// this input is synthetic and guards the family check.
 #[tokio::test]
 async fn an_unnamed_wrapper_transfer_writes_no_fold_row() -> Result<()> {
     let fixture = Fixture::new("families_registry_children_wrapper", 20).await?;
@@ -289,7 +290,8 @@ async fn an_unnamed_wrapper_transfer_writes_no_fold_row() -> Result<()> {
             "ens_v1_wrapper_l1",
             None,
             Some(&uuid(6)),
-            json!({"source_event": "TransferSingle", "node": node(9), "to": CAROL}),
+            json!({"source_event": "TransferSingle", "operator": CAROL, "to": CAROL,
+                   "id": node(9), "namehash": node(9), "value": "1"}),
             REGISTRY,
         )
         .await?;

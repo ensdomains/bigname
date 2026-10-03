@@ -547,11 +547,14 @@ relations. For a node an ENSv1 registry `NewOwner` created, the address index
 also holds, as `token_holder` and `effective_controller` under the node's `<namespace>:<node>` id,
 the node's registry owner facts and the owner each such `NewOwner` reported,
 whether or not a surface names the node. Under the same id it holds the
-recipient of the latest registrar transfer of the node's `.eth` or Basenames
-lease, even when no surface names the lease: after a token transfer without
+recipient of the latest registrar transfer of the node's `.eth` lease, even
+when no surface names the lease, and does the same for a Basenames lease, whose
+node has no registry-child rows, so the recipient is the only address indexed
+under its id until a surface names it: after a token transfer without
 `reclaim` that recipient holds the token while the previous holder keeps the
 registry record
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L330 @ basenames@1809bbc).
 A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and

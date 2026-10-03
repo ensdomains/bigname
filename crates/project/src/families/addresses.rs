@@ -4,8 +4,9 @@
 //! resource-scoped PermissionChanged sets it when its effective powers hold `resource_control`
 //! and otherwise revokes it from its subject only. The name also keeps its latest token holder,
 //! and its latest registrant as the retained F2a rows of the name give it (lifecycle.rs,
-//! `fold_registrants`). A registrar transfer of a lease with no name surface folds under the
-//! lease's `<namespace>:<namehash>` id, which is the name's id once a surface names it.
+//! `fold_registrants`). A registrar transfer of a lease with no name surface
+//! (docs/glossary.md#surface-name-surface: no known name carries it yet) folds under the lease's
+//! `<namespace>:<namehash>` id, which is the name's id once a surface names it.
 //!
 //! The served fold runs over the admitted events only: the selected authority resource, the
 //! registry-only predecessor window (address_names.rs:115-211) and the resource equality of a
@@ -353,8 +354,9 @@ mod tests {
         );
     }
 
-    /// An unnamed transfer folds under `<namespace>:<namehash>` only from a registrar family;
-    /// a NameWrapper transfer (`node`, no `namehash`) and an unnamed controller event key nothing.
+    /// An unnamed transfer folds under `<namespace>:<namehash>` only from a registrar family; a
+    /// NameWrapper transfer, which carries the namehash too, and an unnamed controller event key
+    /// nothing.
     #[test]
     fn an_unnamed_registrar_transfer_keys_its_namespace_and_namehash() {
         let keyed = |namespace: &str, family: &str, kind: &str, after: Value| {
