@@ -68,10 +68,17 @@ index, such as a batch in flight, so the script lifts the lock timeout and bound
 to one hour. `DROP INDEX` matches the name alone, so before any drop the script refuses a
 name held by anything other than an index on `normalized_events`.
 
-A drop that fails, for example at the one-hour limit, leaves its index in place. The script
-goes on with the other drops, prints the receipt and runs the second check. If that check
-fails, run `install.sql` as it says; otherwise the script then fails naming the indexes left,
-and a rerun of `drop.sql` drops them, skipping the names already dropped.
+A drop that fails with an SQL error while the connection stays up, for example at the
+one-hour limit, leaves its index in place, possibly marked invalid. The script goes on with
+the other drops, prints the receipt and runs the second check. If that check fails, run
+`install.sql` as it says; otherwise the script then fails naming the indexes left, and a
+rerun of `drop.sql` drops them, skipping the names already dropped.
+
+If the run is cut off instead, by a lost connection, a database restart or an interrupt to
+`psql`, it exits non-zero without the receipt or either check, and any of the drops may have
+happened. Reconnect and check the `chain_phase_state` rows the script checks. If `drop.sql`
+may still run, rerun it; otherwise run `install.sql`, recovering any invalid index it names
+as [Checks and recovery](#checks-and-recovery) describes.
 
 `install.sql` builds each missing index with `CREATE INDEX CONCURRENTLY`, one at a time, each
 bounded to six hours, then runs `ANALYZE bigname_phase.normalized_events`: expression and

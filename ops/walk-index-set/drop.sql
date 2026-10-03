@@ -2,8 +2,10 @@
 -- or a full-history Interpret redo. README.md lists what it keeps and why.
 -- DROP INDEX CONCURRENTLY waits for every transaction that can use the index, such as a
 -- running Interpret batch, so the wait is bounded rather than refused. A drop that fails
--- leaves its index in place and the script continues to the checks after the drops, which
--- fail naming it.
+-- with an SQL error leaves its index in place and the script continues to the checks after
+-- the drops: the served-chain check fails first if a chain may now be served, otherwise the
+-- last check fails naming the index. A lost connection or an interrupt ends the script
+-- before them; README.md describes the recovery.
 SET lock_timeout = '0';
 SET statement_timeout = '1h';
 
