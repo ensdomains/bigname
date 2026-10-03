@@ -2615,3 +2615,22 @@ From v0.3.0:
   after the first start. One full-history Interpret redo with
   `--attest-watch-set-coverage` under the v0.4.0 binary, and the Project redo it
   installs, then discharge every rotation and marker in between.
+
+### Walk index set
+
+The build that adds [`ops/walk-index-set`](../ops/walk-index-set/README.md) (TYR-209, see
+[walk index set](storage.md#walk-index-set)) adds two operator scripts, documentation and
+tests. It changes no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+covers, so the hash does not rotate, and it adds no schema-migration, environment setting or
+runner behavior, so it needs no redo and no historical ingest fetch. Deploying it changes
+nothing until an operator runs the scripts.
+
+The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
+`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 16 indexes on the table instead of 49, and `install.sql` rebuilds them concurrently with their
+reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
+chain on the database may be served. Rebuilding takes a pass over the table per index; on a
+large database, schedule it before Project starts, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+describes. Without the rebuild no row changes, but Project reads more slowly and an API read
+that needs a dropped index may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
