@@ -1420,13 +1420,27 @@ async fn v2_surface_less_child_registered_without_the_registry_serves_its_regist
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (node, labelhash) = seed_lapsed_registrar_child(&database).await?;
-    let lease = Uuid::from_u128(LAPSED_LEASE);
+    // The successor lease is a new resource.
+    let successor = Uuid::from_u128(LAPSED_LEASE + 1);
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id: successor,
+            token_lineage_id: None,
+            chain_id: FAMILY_CHAIN.to_owned(),
+            block_hash: "0xhistory230".to_owned(),
+            block_number: 230,
+            provenance: json!({"authority_kind": "registrar"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
     let mut events = vec![synthesised_release(
         "rc-register-only-release",
         ("ens_v1_registrar_l1", "ens"),
         (&node, &labelhash),
         230,
-        lease,
+        Uuid::from_u128(LAPSED_LEASE),
     )];
     events.extend(unnamed_lease_events(
         "rc-register-only-grant",
@@ -1435,7 +1449,7 @@ async fn v2_surface_less_child_registered_without_the_registry_serves_its_regist
         (&node, &labelhash),
         (RC_BUYER, 1_900_000_000),
         230,
-        lease,
+        successor,
     ));
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_test_families(&database, 231).await?;
@@ -1498,9 +1512,15 @@ async fn publish_base_families(database: &TestDatabase, target: i64) -> Result<(
     rebuild_fixture_families(&database.pool, BASE, target, &hash).await
 }
 
-/// The Basenames registrar runs the same lease and release as the ENSv1 BaseRegistrar
-/// (crates/adapters/src/schema_v2/protocol/v1.rs routes `basenames_base_registrar` to the
-/// registrar adapter), so a released surface-less child of a Basenames parent loses its owner
+/// The Basenames registrar runs the same lease and release as the ENSv1 BaseRegistrar: a name
+/// stays unavailable through its 90-day grace
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
+/// and expiry leaves the registry record, which only a registration or a `reclaim` writes
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc).
+/// crates/adapters/src/schema_v2/protocol/v1.rs routes `basenames_base_registrar` to the same
+/// registrar adapter, so a released surface-less child of a Basenames parent loses its owner
 /// and manager on the subnames route too.
 #[tokio::test]
 async fn v2_released_surface_less_basenames_child_serves_no_owner_or_manager() -> Result<()> {

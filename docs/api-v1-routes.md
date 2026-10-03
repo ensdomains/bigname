@@ -1780,10 +1780,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc),
-  keeps its registry record, since the registrar writes the registry only when it
-  registers a name
+  keeps its registry record: expiry never writes the registry, and the registrar writes
+  it only on a registration
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
-  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc);
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+  or a `reclaim` by a live token's holder
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc);
   it is listed as `released` with no `owner` or `manager` and no `expires_at`,
   `grace_ends_at` or `lapsed_registration`, since its lease is projected without a name
   row, and `include_expired=false` omits it. A later registration of the label serves
@@ -3433,12 +3436,15 @@ introduces it rebuilds Project from full history before serving the option; see
   A `.eth` child whose registrar lease bigname has released
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
   is listed for no address under any relation, as a released name serves no owner or
-  manager, although its registry record survives the lapse, since the registrar writes
-  the registry only when it registers a name
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f);
+  manager, although its registry record survives the lapse: expiry never writes the
+  registry, and the registrar writes it only on a registration
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  or a `reclaim` by a live token's holder
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f);
   its parent's subnames page lists it as `released`. A later registration of the
-  label lists it for its new registry owner again, which `register` sets to the
-  registrant. A known residual:
+  label lists it for its registry owner again, which `register` sets to the
+  registrant and `registerOnly` leaves as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f). A known residual:
   `relation=former_owner` lists only names with a name row, so it never lists such
   a child for the registrant whose lease lapsed.
   Every other registry child described here is listed under both

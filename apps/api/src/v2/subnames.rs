@@ -306,9 +306,10 @@ pub(crate) fn build_subname(
     // A child with no name row serves its registry owner, or an ENSv2 child its token holder,
     // but not the NameWrapper holding it for a token holder bigname does not record
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
-    // and nobody once its lease is released, though the registrar leaves the registry
-    // record in place: it writes the registry only when it registers a name
-    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f).
+    // and nobody once its lease is released, though expiry leaves the registry record in
+    // place: the registrar writes it only on a registration or a live token's `reclaim`
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
     let (owner, manager) = match name_row {
         Some(name) => {
             let linked = registration
