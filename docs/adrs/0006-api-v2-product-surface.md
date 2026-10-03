@@ -8,7 +8,20 @@ Amended: 2026-08-13 (status readiness for removed chains); 2026-08-25
 enforcement); 2026-08-26 (issue #449 request-scoped lookup and search
 `meta.as_of` coverage); 2026-09-23 (records route serves only per-key
 `records`); 2026-09-28 (landing page and API reference move to the static
-site)
+site); 2026-10-03 (lookup feed records carry expiry and grace)
+
+## 2026-10-03 Amendment: Lookup Feed Records Carry Expiry And Grace
+
+`profile=feed` on the lookup route now carries `expires_at`,
+`expires_at_reason`, `grace_ends_at` and the `ens_v1` object beside the
+identity fields, `is_primary`/`relations` and `status` named under
+[Envelope](#envelope). Each has the value and presence of the same field on
+the `profile=detail` record, which follows name detail and `GET /v1/names`.
+An app that renders expiry or grace from a feed lookup otherwise needs a
+second request per name, which defeats the latency path. Feed still returns
+fewer fields, not different ones: `owner`, `manager`, `authority`, the other
+registration fields, the resolver fields and `records` stay detail-only.
+Route details live in [`api-v1-routes.md`](../api-v1-routes.md#post-v1lookup).
 
 ## 2026-09-28 Amendment: The Landing Page And API Reference Leave The API
 

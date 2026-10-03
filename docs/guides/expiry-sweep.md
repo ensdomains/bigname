@@ -269,7 +269,12 @@ live (section 1). On every run:
   lease date passes, read the name by itself with
   [`GET /v1/names/{name}`](../api-v1-routes.md#get-v1namesname) on every run
   until it is released or its `expires_at` equals `ens_v1.expires_at`; then
-  apply the section 3 table to that read.
+  apply the section 3 table to that read. To read many such names in one
+  request, use [`POST /v1/lookup`](../api-v1-routes.md#post-v1lookup) with
+  `profile=detail`, which serves name detail's fields. `profile=feed` records
+  carry the same `expires_at`, `grace_ends_at` and `ens_v1`, enough to see
+  when the two dates meet, but not the `owner`, `registration_status` and
+  `lapsed_registration` the section 3 table needs.
 
 Make every notification idempotent so that rescans and repeated rows send
 nothing twice. Which key to use is your policy; a natural one is

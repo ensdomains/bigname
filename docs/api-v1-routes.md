@@ -338,7 +338,17 @@ collection route carry neither header.
   echoes the normalized relation set; `any`
   serializes as `owner,manager` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
-  the same record object; it does not introduce another DTO.
+  the same record object; it does not introduce another DTO. A feed record
+  carries the identity fields, `chain_id`, `network`, `status` and its
+  reasons, `subregistry` on name results, `is_primary` and `relations` on
+  reverse rows, `resolution` on `resolves_to` rows, and the expiry fields
+  `expires_at`, `expires_at_reason` and `grace_ends_at` with the `ens_v1`
+  object, each with the value and presence it has on the `profile=detail`
+  record for the same name, which are those of name detail and
+  `GET /v1/names`. Every other registration field (`owner`, `manager`,
+  `registration_status`, `registration_id`, `token_id`, `registered_at`,
+  `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
+  resolver fields and `records` are detail-only.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
   as defined in the [naming dictionary](api-v1.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
@@ -348,7 +358,7 @@ collection route carry neither header.
   registry rows. `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
   wrapper_fuses?}`, the ENSv1 lease date and NameWrapper position) exactly as
-  name detail does; feed records carry no `expires_at` and no `ens_v1`.
+  name detail does, and so do feed records, which omit `authority` itself.
   Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
@@ -882,7 +892,7 @@ collection route carry neither header.
   name in any `ens_v1.wrapper_state`, except while a wrapped `.eth`
   second-level name is in its registrar grace period. It is absent then,
   wherever the address it copies is absent, and on `profile=feed` lookup records, which
-  carry no registration fields. No null placeholder is emitted. `authority` names where the chain
+  carry no registration fields beyond expiry and grace. No null placeholder is emitted. `authority` names where the chain
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
   `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
