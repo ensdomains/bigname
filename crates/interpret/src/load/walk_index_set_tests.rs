@@ -182,7 +182,8 @@ async fn await_backends_exited(pool: &PgPool) -> TestResult {
 }
 
 /// The drop list and the keep list together are every index the baseline puts on
-/// `normalized_events`, and the install script rebuilds exactly the drop list. A new index must
+/// `normalized_events`, and the install script rebuilds, and the drop script checks, exactly
+/// the drop list. A new index must
 /// be classified before it lands.
 #[tokio::test]
 async fn walk_index_set_lists_cover_every_baseline_index() -> TestResult {
@@ -212,6 +213,16 @@ async fn walk_index_set_lists_cover_every_baseline_index() -> TestResult {
         listed(INSTALL_SQL, "CREATE INDEX CONCURRENTLY IF NOT EXISTS "),
         dropped,
         "install.sql must rebuild exactly what drop.sql drops"
+    );
+    let checked: BTreeSet<String> = DROP_SQL
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('\''))
+        .filter(|rest| rest.starts_with("normalized_events_"))
+        .map(|rest| rest.trim_end_matches(['\'', ',']).to_owned())
+        .collect();
+    assert_eq!(
+        checked, dropped,
+        "drop.sql's checked names must be exactly what it drops"
     );
     Ok(())
 }

@@ -63,9 +63,15 @@ the index rows, but `drop.sql` runs its second check after them, so the rows alo
 show that it succeeded.
 
 Run `drop.sql` as the walk or redo starts (see above). It can run while Interpret is
-processing batches. `DROP INDEX CONCURRENTLY` waits for
-the transactions that may use the index, such as a batch in flight, so the script lifts the
-lock timeout and bounds each drop to one hour. A rerun skips the names already dropped.
+processing batches. `DROP INDEX CONCURRENTLY` waits for the transactions that may use the
+index, such as a batch in flight, so the script lifts the lock timeout and bounds each drop
+to one hour. `DROP INDEX` matches the name alone, so before any drop the script refuses a
+name held by anything other than an index on `normalized_events`.
+
+A drop that fails, for example at the one-hour limit, leaves its index in place. The script
+goes on with the other drops, prints the receipt and runs the second check. If that check
+fails, run `install.sql` as it says; otherwise the script then fails naming the indexes left,
+and a rerun of `drop.sql` drops them, skipping the names already dropped.
 
 `install.sql` builds each missing index with `CREATE INDEX CONCURRENTLY`, one at a time, each
 bounded to six hours, then runs `ANALYZE bigname_phase.normalized_events`: expression and
@@ -133,7 +139,8 @@ first.
 The runner never checks or recreates these indexes, so a restart while they are dropped
 resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
 `drop.sql` refuses a chain with Project progress and a chain with only a live publication,
-fails after its drops when a fresh chain's Project is running by then, and drops exactly
+fails after its drops when a fresh chain's Project is running by then, refuses a name held by
+another table's index, fails naming an index whose drop failed, and drops exactly
 its list, and that `install.sql` rebuilds the fresh baseline's definitions and refuses an
 invalid index, an index with other keys or another definition, and a table under one of its
 names. A database test in

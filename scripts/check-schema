@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=363
+expected_refusal_assertions=365
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=62
 refusal_probe_seconds=0
@@ -549,6 +549,9 @@ cleanup() {
     fi
     if [ -n "${walk_index_late_drop:-}" ]; then
         rm -f -- "$walk_index_late_drop"
+    fi
+    if [ -n "${walk_index_partial_drop:-}" ]; then
+        rm -f -- "$walk_index_partial_drop"
     fi
     printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\nDROP SCHEMA IF EXISTS "%s_removal" CASCADE;\nDROP SCHEMA IF EXISTS "%s_fresh" CASCADE;\n' \
         "$scratch_schema" "$scratch_schema" "$scratch_schema" "$scratch_schema" \
@@ -2539,7 +2542,9 @@ assert_index_install_hint address-match-index-on-another-table-hint \
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
 # including a marker committed before Project recorded progress, and must fail after
-# its drops when a chain became servable while they ran. With every chain in an
+# its drops when a chain became servable while they ran. It must refuse a name another
+# relation holds, and a drop that fails must leave the script to fail naming the index.
+# With every chain in an
 # Interpret redo it must drop exactly its list and keep every other index, and a
 # rerun must be a no-op. install.sql must then rebuild the fresh baseline's
 # definitions, rerun as a no-op, and refuse each bad name as the other installers do.
@@ -2590,8 +2595,40 @@ assert_index_install_refusal walk-index-published-chain "$walk_index_drop" \
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
 DELETE FROM project_family_marker WHERE chain_id = 'walk-index-published';
+DROP INDEX normalized_events_block_idx;
+CREATE INDEX normalized_events_block_idx ON chain_phase_state (chain_id);
 SQL
 } | run_psql >/dev/null
+assert_index_install_refusal walk-index-misplaced-name "$walk_index_drop" \
+    "$scratch_schema.normalized_events_block_idx is not an index on normalized_events; follow $walk_index_readme before retrying"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DROP INDEX normalized_events_block_idx;
+SQL
+} | run_psql >/dev/null
+# A drop that fails leaves its index, and the check after the drops names it.
+walk_index_partial_drop="$(mktemp "${TMPDIR:-/tmp}/walk-index-partial-drop.XXXXXX")"
+awk '/^DROP INDEX CONCURRENTLY IF EXISTS bigname_phase\.normalized_events_emitter_history_idx;$/ {
+    print "SELECT 1 / 0;"
+    next
+} { print }' "$walk_index_drop" > "$walk_index_partial_drop"
+walk_index_partial_message="drop.sql left normalized_events_emitter_history_idx in place; see the errors above and rerun it"
+if walk_index_partial_stderr="$(
+    render_phase_migration "$walk_index_partial_drop" | run_psql 2>&1 >/dev/null
+)"; then
+    printf '%s\n' "walk-index-partial-drop: drop.sql unexpectedly succeeded" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$walk_index_partial_stderr" | grep -qF "$walk_index_partial_message"; then
+    printf '%s\n' \
+        "walk-index-partial-drop: expected PostgreSQL error: $walk_index_partial_message" \
+        "walk-index-partial-drop: complete stderr:" \
+        "$walk_index_partial_stderr" >&2
+    exit 1
+fi
+refusal_assertions_passed=$((refusal_assertions_passed + 1))
+rm -f "$walk_index_partial_drop"
 # A fresh chain whose Project starts its first batch while the drops run fails the check
 # after them.
 walk_index_late_drop="$(mktemp "${TMPDIR:-/tmp}/walk-index-late-drop.XXXXXX")"

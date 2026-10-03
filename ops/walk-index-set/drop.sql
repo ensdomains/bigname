@@ -1,7 +1,9 @@
 -- Run with psql -X -v ON_ERROR_STOP=1, outside any transaction, before a from-zero walk
 -- or a full-history Interpret redo. README.md lists what it keeps and why.
 -- DROP INDEX CONCURRENTLY waits for every transaction that can use the index, such as a
--- running Interpret batch, so the wait is bounded rather than refused.
+-- running Interpret batch, so the wait is bounded rather than refused. A drop that fails
+-- leaves its index in place and the script continues to the checks after the drops, which
+-- fail naming it.
 SET lock_timeout = '0';
 SET statement_timeout = '1h';
 
@@ -34,6 +36,45 @@ LANGUAGE sql STABLE AS $$
     )
 $$;
 
+CREATE OR REPLACE FUNCTION pg_temp.walk_index_dropped() RETURNS text[]
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT ARRAY[
+        'normalized_events_v1_subregistry_after_node_scope_idx',
+        'normalized_events_v1_subregistry_after_child_scope_idx',
+        'normalized_events_v1_subregistry_before_node_scope_idx',
+        'normalized_events_v2_subregistry_pointer_scope_idx',
+        'normalized_events_v1_subregistry_before_child_scope_idx',
+        'normalized_events_block_idx',
+        'normalized_events_emitter_history_idx',
+        'normalized_events_v2_expiry_scope_idx',
+        'normalized_events_ens_v1_record_node_resolver_idx',
+        'normalized_events_basenames_record_node_resolver_idx',
+        'normalized_events_record_id_write_idx',
+        'normalized_events_record_id_link_idx',
+        'normalized_events_resolver_alias_history_idx',
+        'normalized_events_resolver_upgrade_history_idx',
+        'normalized_events_pointer_after_resolver_history_idx',
+        'normalized_events_pointer_before_resolver_history_idx',
+        'normalized_events_permission_after_resolver_history_idx',
+        'normalized_events_permission_before_resolver_history_idx',
+        'normalized_events_subregistry_registration_history_idx',
+        'normalized_events_project_name_node_idx',
+        'normalized_events_project_name_child_idx',
+        'normalized_events_project_name_after_target_idx',
+        'normalized_events_project_name_before_target_idx',
+        'normalized_events_project_primary_after_idx',
+        'normalized_events_project_primary_before_idx',
+        'normalized_events_project_primary_after_source_idx',
+        'normalized_events_project_primary_before_source_idx',
+        'normalized_events_address_registrant_match_idx',
+        'normalized_events_address_token_holder_match_idx',
+        'normalized_events_address_registry_owner_match_idx',
+        'normalized_events_project_node_history_idx',
+        'normalized_events_project_v1_pointer_node_idx',
+        'normalized_events_project_v1_pointer_addressed_node_idx'
+    ]
+$$;
+
 DO $$
 DECLARE
     served text := pg_temp.walk_index_served_chains();
@@ -46,6 +87,30 @@ BEGIN
 END
 $$;
 
+-- DROP INDEX matches the name alone, so refuse a name another relation holds.
+DO $$
+DECLARE
+    misplaced text;
+BEGIN
+    SELECT string_agg(name, ', ' ORDER BY name)
+    INTO misplaced
+    FROM unnest(pg_temp.walk_index_dropped()) AS name
+    WHERE to_regclass('bigname_phase.' || name) IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pg_index
+          WHERE indexrelid = to_regclass('bigname_phase.' || name)
+            AND indrelid = 'bigname_phase.normalized_events'::regclass
+      );
+    IF misplaced IS NOT NULL THEN
+        RAISE EXCEPTION
+            'bigname_phase.% is not an index on normalized_events; follow ops/walk-index-set/README.md before retrying',
+            misplaced;
+    END IF;
+END
+$$;
+
+\set ON_ERROR_STOP off
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_after_node_scope_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_after_child_scope_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_before_node_scope_idx;
@@ -79,6 +144,7 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_regist
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_node_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_v1_pointer_node_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_v1_pointer_addressed_node_idx;
+\set ON_ERROR_STOP on
 
 -- The indexes left on the table, for the receipt.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
@@ -95,6 +161,22 @@ BEGIN
         RAISE EXCEPTION
             'chains % may now be served while the walk index set is dropped; run ops/walk-index-set/install.sql now',
             served;
+    END IF;
+END
+$$;
+
+DO $$
+DECLARE
+    remaining text;
+BEGIN
+    SELECT string_agg(name, ', ' ORDER BY name)
+    INTO remaining
+    FROM unnest(pg_temp.walk_index_dropped()) AS name
+    WHERE to_regclass('bigname_phase.' || name) IS NOT NULL;
+    IF remaining IS NOT NULL THEN
+        RAISE EXCEPTION
+            'drop.sql left % in place; see the errors above and rerun it',
+            remaining;
     END IF;
 END
 $$;
