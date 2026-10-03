@@ -235,8 +235,8 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
 > (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
 > **Our rule**: `docs/api-v1.md` § Manager; [projections](projections.md).
-> **Why**: a parent can move the record back with the registry's `setSubnodeOwner` or
-> `setOwner`, but reopening the old token's authority would need retained NameWrapper authority
+> **Why**: the parent's `setSubnodeOwner`, or `setOwner` by the record's owner, can move the
+> record back, but reopening the old token's authority would need retained NameWrapper authority
 > state that the interpreter does not keep.
 > **Since**: `2026-10-03`
 

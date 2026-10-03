@@ -1170,8 +1170,8 @@ The child then serves its new registry owner as `owner` and `manager` and under
 both relations, or no owner when the parent set it to zero, carries no
 `ens_v1.wrapper_state`, and later transfers of the old token, or fuses its
 holder sets with NameWrapper's `setFuses`, change nothing.
-NameWrapper's own unwrap, including one to a zero or registry-self controller,
-keeps the name wrapped until its `NameUnwrapped`
+NameWrapper's own unwrap, including one to a controller the registry reports
+as no owner, keeps the name wrapped until its `NameUnwrapped`
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
 NameWrapper's own `setRecord`, and its `setSubnodeRecord` over a wrapped child,
 write the record back to NameWrapper itself before moving the token, so the

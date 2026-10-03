@@ -633,7 +633,10 @@ fn a_lapsed_wrapped_eth_name_registered_again_without_the_name_wrapper_drops_the
         registrar_transfer(REREGISTERED, 1, ZERO_ADDRESS, NEW_OWNER),
         registry_owner(REREGISTERED, 2, NEW_OWNER),
         registered(REREGISTERED, 3, NEW_OWNER, REREGISTERED as u64 + 1_000),
-        // Robustness input, not a chain flow: the expired token has no holder to transfer it.
+        // Robustness input, not a chain flow: with PARENT_CANNOT_CONTROL burnt, the expired
+        // token has no holder to transfer it.
+        // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L176-L183 @ ens_v1@91c966f)
         raw_at(
             v2_registry::TransferSingle {
                 operator: addr(HOLDER),
