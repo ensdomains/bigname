@@ -721,6 +721,87 @@ async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() 
     Ok(())
 }
 
+/// A wrapped subname unwrapped to its holder, whose registry record that holder then gives to
+/// another owner, is owned by the new registry owner: the closed NameWrapper binding's token
+/// names no registrant of the registry-only binding that follows it.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+#[tokio::test]
+async fn an_unwrapped_subname_given_to_another_owner_serves_that_owner() -> TestResult {
+    let database = family_database("interpret_unwrapped_sub_transferred").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    insert_lineage(pool, LATER_BLOCK, MIGRATION_BLOCK + 1).await?;
+    insert_transaction(pool, LATER_BLOCK, NAME_WRAPPER).await?;
+    for (log, emitter, encoded) in [
+        (
+            0,
+            NAME_WRAPPER,
+            TransferSingle {
+                operator: sub_owner,
+                from: sub_owner,
+                to: Address::ZERO,
+                id: fixture.sub_token(),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+        ),
+        (
+            1,
+            ENS_REGISTRY,
+            ens_registry::Transfer {
+                node: fixture.sub_node,
+                owner: sub_owner,
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            NAME_WRAPPER,
+            NameUnwrapped {
+                node: fixture.sub_node,
+                owner: sub_owner,
+            }
+            .encode_log_data(),
+        ),
+    ] {
+        insert_log(pool, LATER_BLOCK, log, emitter, encoded).await?;
+    }
+    insert_lineage(pool, LATER_BLOCK + 1, MIGRATION_BLOCK + 2).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, ENS_REGISTRY).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        ENS_REGISTRY,
+        ens_registry::Transfer {
+            node: fixture.sub_node,
+            owner: CAROL.parse::<Address>()?,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    run(pool, SETUP_BLOCK, LATER_BLOCK + 1, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    for mode in [FamilyMode::Rebuild, FamilyMode::Normal] {
+        let run = format!("{mode:?}");
+        publish(pool, LATER_BLOCK + 1, mode).await?;
+        let served = summary(pool, &fixture.sub_id).await?;
+        assert_eq!(
+            served["control"]["registry_owner"], CAROL,
+            "{run}: {served:#}"
+        );
+        assert_eq!(served["control"]["owner"], CAROL, "{run}: {served:#}");
+        let relations = address_relations(pool, SUB_OWNER, &fixture.sub_id).await?;
+        assert!(relations.is_empty(), "{run}: {relations:?}");
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// `claimed-name.eth`, wrapped then unwrapped back to `OWNER`, with a subname `sub` whose
 /// registry record `OWNER` holds; the Graveyard can claim the parent once its lease lapses.
 struct ClearedSubname {
