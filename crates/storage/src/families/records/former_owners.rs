@@ -26,7 +26,7 @@ use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
     UnixSeconds,
     families::name::{CoverageShape, load_composed, servable_publication},
-    name_current::parent_like_patterns,
+    name_current::names_one_label_below,
 };
 
 /// What a former-owner page selects besides its order and position.
@@ -107,7 +107,6 @@ pub async fn load_family_former_owner_page(
 ) -> Result<FormerOwnerPage> {
     let after = cursor.map(cursor_key).transpose()?;
     let address = filter.address.to_ascii_lowercase();
-    let parent = filter.parent.map(parent_like_patterns);
     let mut snapshot = db.into().snapshot().await?;
     let indexed: Vec<(String, String)> = sqlx::query_as(
         "/* storage:families.records.former_owner_index */
@@ -117,17 +116,10 @@ pub async fn load_family_former_owner_page(
            AND ($2::text IS NULL OR EXISTS (
                SELECT 1 FROM bigname_phase.name_surfaces surface
                WHERE surface.logical_name_id = indexed.logical_name_id
-                 AND surface.namespace = $2))
-           AND ($3::text IS NULL OR EXISTS (
-               SELECT 1 FROM bigname_phase.name_surfaces surface
-               WHERE surface.logical_name_id = indexed.logical_name_id
-                 AND surface.raw_name LIKE $3 ESCAPE '\\'
-                 AND surface.raw_name NOT LIKE $4 ESCAPE '\\'))",
+                 AND surface.namespace = $2))",
     )
     .bind(&address)
     .bind(filter.namespace)
-    .bind(parent.as_ref().map(|(one_below, _)| one_below.as_str()))
-    .bind(parent.as_ref().map(|(_, deeper)| deeper.as_str()))
     .fetch_all(&mut *snapshot)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
@@ -149,6 +141,13 @@ pub async fn load_family_former_owner_page(
                     row,
                 }),
         );
+    }
+    // By the composed name's normalized spelling, as the other address relations match; the
+    // surface's stored spelling need not be normalized.
+    if let Some(parent) = filter.parent {
+        let names = held.iter().map(|held| held.row.normalized_name.clone());
+        let below = names_one_label_below(&mut *snapshot, names.collect(), parent).await?;
+        held.retain(|held| below.contains(&held.row.normalized_name));
     }
     snapshot.close().await?;
 

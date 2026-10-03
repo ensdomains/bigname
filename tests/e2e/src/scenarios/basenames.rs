@@ -257,6 +257,40 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     )
     .await?;
     assert_declared_primary(&declared, "alice.base.eth");
+
+    // The Basenames registrations an address holds: one label below `base.eth`, by token holder.
+    for (parent, expected) in [
+        ("base.eth", vec!["alice.base.eth", "mgmtonly.base.eth"]),
+        ("eth", vec![]),
+    ] {
+        let page = bigname_storage::load_address_names_current_page_filtered(
+            &run.db.pool,
+            &alice_path,
+            Some("basenames"),
+            Some(&[bigname_storage::AddressNameRelation::TokenHolder]),
+            bigname_storage::AddressNamesCurrentDedupe::Resource,
+            None,
+            None,
+            None,
+            Some(parent),
+            bigname_storage::AddressNamesCurrentSort::Name,
+            bigname_storage::AddressNamesCurrentOrder::Asc,
+            None,
+            50,
+        )
+        .await?;
+        let names = page
+            .entries
+            .iter()
+            .map(|entry| entry.normalized_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected, "{parent}");
+        assert_eq!(
+            page.summary.grouped_entry_count,
+            expected.len() as u64,
+            "{parent}"
+        );
+    }
     run.db.cleanup().await?;
 
     basenames::set_primary_name(&rpc, &deployment, alice, "").await?;

@@ -5,6 +5,8 @@
 //! batch. Registration expiry may be a decimal JSON string or number; neither is narrowed to
 //! a calendar timestamp or floating-point value.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result, bail};
 use sqlx::{PgExecutor, Postgres, QueryBuilder};
 
@@ -55,6 +57,25 @@ pub(crate) fn push_parent_predicate(
     builder.push(format!(" ESCAPE '\\' AND {column} NOT LIKE "));
     builder.push_bind(deeper);
     builder.push(" ESCAPE '\\'");
+}
+
+/// The `names` exactly one label below `parent`, by [`push_parent_predicate`].
+pub(crate) async fn names_one_label_below(
+    db: impl PgExecutor<'_>,
+    names: Vec<String>,
+    parent: &str,
+) -> Result<BTreeSet<String>> {
+    let mut query = QueryBuilder::<Postgres>::new("SELECT name FROM unnest(");
+    query.push_bind(names);
+    query.push("::text[]) AS candidate(name) WHERE TRUE");
+    push_parent_predicate(&mut query, "candidate.name", parent);
+    Ok(query
+        .build_query_scalar()
+        .fetch_all(db)
+        .await
+        .context("failed to select the names below a parent")?
+        .into_iter()
+        .collect())
 }
 
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
@@ -164,17 +185,11 @@ mod tests {
     use crate::families::control::lifecycle::NamePlace;
 
     async fn one_below(pool: &sqlx::PgPool, names: &[&str], parent: &str) -> Result<Vec<String>> {
-        let mut query = QueryBuilder::<Postgres>::new("SELECT name FROM unnest(");
-        query.push_bind(
-            names
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<Vec<_>>(),
-        );
-        query.push("::text[]) AS candidate(name) WHERE TRUE");
-        push_parent_predicate(&mut query, "candidate.name", parent);
-        query.push(" ORDER BY name");
-        Ok(query.build_query_scalar().fetch_all(pool).await?)
+        let names = names.iter().map(|name| (*name).to_owned()).collect();
+        Ok(names_one_label_below(pool, names, parent)
+            .await?
+            .into_iter()
+            .collect())
     }
 
     #[tokio::test]

@@ -2290,7 +2290,7 @@ The build that adds `parent` to
 [`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames)
 changes only API and read paths. The storage files it edits,
 `crates/storage/src/address_names/{source,page,read,resolves_to_page,resolves_to_evm}.rs`,
-`crates/storage/src/name_current.rs` and the reader files
+`crates/storage/src/name_current.rs`, `crates/storage/src/name_current/expiring.rs` and the reader files
 `crates/storage/src/families/records/{address_names,resolves_to_serving,former_owners}.rs`,
 are read-only queries outside the
 [interpreter content hash](glossary.md#interpreter-content-hash), so the hash

@@ -4,6 +4,26 @@ const FORMER_CURSOR_REGISTRY: &str = "0x0000000000000000000000000000000000006300
 const FORMER_CURSOR_EXPIRY: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
 async fn seed_former_cursor_names(database: &TestDatabase, dated: bool) -> Result<()> {
+    seed_former_cursor_names_spelled(
+        database,
+        dated,
+        [
+            "dated-a.eth",
+            "dated-b.eth",
+            "dated-c.eth",
+            "unregistered-a.eth",
+            "unregistered-b.eth",
+        ],
+    )
+    .await
+}
+
+/// As [`seed_former_cursor_names`], with each name stored in the given spelling.
+async fn seed_former_cursor_names_spelled(
+    database: &TestDatabase,
+    dated: bool,
+    names: [&str; 5],
+) -> Result<()> {
     const CHAIN: &str = "ethereum-mainnet";
     const FAMILY: &str = "ens_v2_registry_l1";
     upsert_phase_raw_blocks(
@@ -20,13 +40,6 @@ async fn seed_former_cursor_names(database: &TestDatabase, dated: bool) -> Resul
         FORMER_CURSOR_REGISTRY,
     )
     .await?;
-    let names = [
-        "dated-a.eth",
-        "dated-b.eth",
-        "dated-c.eth",
-        "unregistered-a.eth",
-        "unregistered-b.eth",
-    ];
     for (index, name) in names.into_iter().enumerate() {
         let undated = index >= 3;
         if !dated && !undated {
