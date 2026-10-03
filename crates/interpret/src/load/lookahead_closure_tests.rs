@@ -30,16 +30,12 @@ async fn walk_closures(
     let mut from = FIRST_BLOCK;
     while from <= last_block {
         let to = (from + i64::from(blocks_per_batch) - 1).min(last_block);
-        CLOSURES.take();
-        let super::Attempt::Loaded(_) =
-            super::batch_input(pool, chain, from, to, None, CAPACITY, None).await?
-        else {
+        CLOSURES.set(Some(Closure::default()));
+        let loaded = super::batch_input(pool, chain, from, to, None, CAPACITY, None).await;
+        let closure = CLOSURES.take().expect("the recorder is set");
+        let super::Attempt::Loaded(_) = loaded? else {
             anyhow::bail!("{chain} manifests must choose lookahead");
         };
-        let closure = CLOSURES
-            .take()
-            .pop()
-            .expect("the batch recorded its closure");
         let mut connection = pool.acquire().await?;
         for (prior, dependencies) in &closure.attempts {
             let names: Vec<_> = dependencies
@@ -83,7 +79,6 @@ async fn walk_closures(
         current = Some(outcome.current);
         from = to + 1;
     }
-    CLOSURES.take();
     Ok(closures)
 }
 

@@ -133,8 +133,6 @@ pub(crate) async fn batch_input(
             .extend(lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?);
     }
     dependencies.v2_due_window = Some(window);
-    #[cfg(test)]
-    CLOSURES.with_borrow_mut(|closures| closures.push(Closure::default()));
     // Shared by every attempt: a retry reads only the keys it adds and what they link to.
     let mut fetched = Fetched::default();
     let (prepared, restored_event_count) = loop {
@@ -148,8 +146,8 @@ pub(crate) async fn batch_input(
         .await?;
         let restored_event_count = prior.len();
         #[cfg(test)]
-        CLOSURES.with_borrow_mut(|closures| {
-            if let Some(closure) = closures.last_mut() {
+        CLOSURES.with_borrow_mut(|closure| {
+            if let Some(closure) = closure {
                 closure.attempts.push((prior.clone(), dependencies.clone()));
             }
         });
@@ -290,8 +288,8 @@ async fn load_closure(
             .map(|request| format!("{}:{}", request.namespace, request.node))
             .collect();
         #[cfg(test)]
-        CLOSURES.with_borrow_mut(|closures| {
-            if let Some(closure) = closures.last_mut() {
+        CLOSURES.with_borrow_mut(|closure| {
+            if let Some(closure) = closure {
                 closure
                     .requests
                     .push((names.clone(), resources.clone(), v2_keys.clone()));
@@ -412,9 +410,10 @@ thread_local! {
     /// The batches, by first block, that loaded a whole ENSv2 registry, and its key.
     pub(super) static WHOLE_REGISTRY_BATCHES: std::cell::RefCell<std::collections::BTreeSet<(i64, String)>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
-    /// One entry per `batch_input` call that reached the closure, on this thread.
-    pub(super) static CLOSURES: std::cell::RefCell<Vec<Closure>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// Records `batch_input`'s closure on this thread while a test sets it to `Some`. It
+    /// stays `None` otherwise, so no other test's timing or memory includes the recording.
+    pub(super) static CLOSURES: std::cell::RefCell<Option<Closure>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
