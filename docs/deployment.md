@@ -2277,7 +2277,8 @@ environment change and no historical ingest fetch. The stored
 unwrapped `.eth` second-level names, and the address index drops its
 `registrant` rows; the Project redo rebuilds both. It also recomposes every
 released name: none keeps an owner or manager (except a surface-less released `.eth`
-child without a label preimage, which still lists its registry owner as both, TYR-196), and
+child without a label preimage, which still lists its registry owner as both, TYR-196, until
+the build of [released registrar children](#released-registrar-children)), and
 an ENSv1 lease that lapsed with
 its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
@@ -2398,3 +2399,41 @@ are read-only queries outside the
 does not rotate. It adds no schema-migration and needs no redo or historical
 ingest fetch. Cursors issued before it continue unchanged, and a cursor issued
 with `parent` must be continued with the same `parent`.
+
+### Released registrar children
+
+The build that stops serving an owner or manager for a released registry child with no name
+row (TYR-196, see [subnames](api-v1-routes.md#get-v1namesnamesubnames) and
+[names by address](api-v1-routes.md#get-v1addressesaddressnames)) changes only readers in
+`crates/storage/src/families`, the API, the projections baseline and one schema-migration, all
+outside the [interpreter content hash](glossary.md#interpreter-content-hash), so the hash does
+not rotate and it needs no redo, no manifest or environment change and no historical ingest
+fetch. Such a child's registrar lease is already projected without a name row; once it has been
+released, `GET /v1/addresses/{address}/names` stops listing an ENSv1 `.eth` child for its
+surviving registry owner (that route lists no Basenames child without a name row), and the
+parent's subnames page serves an ENSv1 or Basenames child as `released` with no `owner` or
+`manager`, omitted under `include_expired=false`.
+
+`20261003130000_project_lifecycle_event_namehash_index.sql` adds
+`project_lifecycle_event_namehash_idx` on `project_lifecycle_event (chain_id, namehash)`, which
+the child reads probe for each child with no name row. It is a plain `CREATE INDEX` that holds a
+SHARE lock on `project_lifecycle_event` until the schema-migration commits, blocking Project's
+writes and `VACUUM` and `ANALYZE` on it. On a large initialized database, prebuild it
+concurrently first, outside a transaction; the phase runner and API can keep running:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS project_lifecycle_event_namehash_idx
+    ON bigname_phase.project_lifecycle_event (chain_id, namehash);
+```
+
+Then apply the schema-migrations with `--target-version 20261003130000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
+Without the prebuild, apply it with the phase runner and redo processes stopped.
+`CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks that the
+name is an index on `project_lifecycle_event` that is `indisvalid` and `indisready` with the
+reviewed `pg_get_indexdef`, `(chain_id, namehash)` with no predicate, and fails without
+recording itself otherwise. To recover, drop the named relation (an interrupted concurrent
+build leaves an invalid index: confirm in `pg_stat_progress_create_index` that no build is still
+running, then `DROP INDEX CONCURRENTLY` it), rebuild it with the statement above and apply the
+schema-migrations again. An API started before the index exists serves the same rows, only
+slower. API standbys receive the index through replication.

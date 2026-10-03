@@ -1774,7 +1774,37 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
   (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
-  owner and is listed only while it has a serving resource. An unmasked 2017
+  owner and is listed only while it has a serving resource. A `.eth` or Basenames
+  child with no current name row whose registrar lease bigname has released, past its
+  expiry and the 90-day grace
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc),
+  keeps its registry record: expiry never writes the registry, and the registrar writes
+  it only on a registration other than `registerOnly`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc)
+  or a `reclaim` by a live token's holder or an address it approved
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc);
+  it is listed as `released` with no `owner` or `manager` and no `expires_at`,
+  `grace_ends_at` or `lapsed_registration`, since its lease is projected without a name
+  row, and `include_expired=false` omits it. A later registration of the label serves
+  its new registry owner again, which `register` sets to the registrant;
+  `registerOnly` leaves the registry record as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc).
+  A known residual: a name migrated from ENSv1 to ENSv2 under a label that fails ENSIP-15
+  normalization is served from its ENSv1 registry record, and once its old ENSv1 lease
+  lapses it is served as `released` although its ENSv2 registration is live. An unmasked 2017
   registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
@@ -3060,9 +3090,9 @@ introduces it rebuilds Project from full history before serving the option; see
   `parent=base.eth&namespace=basenames` counts Basenames registrations. One
   known exception: a `.eth` name with no name surface, listed as a registry
   child below, is counted for its current registry owner whatever its registration
-  state: when another address holds the registration, after it is released,
-  or when it has none, except a NameWrapper-held child, which is counted for
-  no address. A name count uses `dedupe=name`.
+  state: when another address holds the registration or when it has none,
+  except a NameWrapper-held child or one whose registrar lease bigname has
+  released, which is counted for no address. A name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
@@ -3403,8 +3433,8 @@ introduces it rebuilds Project from full history before serving the option; see
   Such an ENSv1 registry child is listed for its current registry owner — the
   node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
   `relations: ["owner", "manager"]`, exactly while its parent's
-  `GET /v1/names/{name}/subnames` lists it, except the NameWrapper-held child
-  below, and as that route serves it:
+  `GET /v1/names/{name}/subnames` lists it, except the NameWrapper-held and
+  released children below, and as that route serves it:
   `name` and `display_name` carry the proven, normalization-verified label
   preimage under the parent, else a [non-name form](glossary.md#non-name-form);
   `namehash` is the child node, `owner` the registry owner, and
@@ -3436,6 +3466,23 @@ introduces it rebuilds Project from full history before serving the option; see
   token survives for it
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+  A `.eth` child whose registrar lease bigname has released
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  is listed for no address under any relation, as a released name serves no owner or
+  manager, although its registry record survives the lapse: expiry never writes the
+  registry, and the registrar writes it only on a registration other than `registerOnly`
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  or a `reclaim` by a live token's holder or an address it approved
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f);
+  its parent's subnames page lists it as `released`. A later registration of the
+  label lists it for its registry owner again, which `register` sets to the
+  registrant and `registerOnly` leaves as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f). A known residual:
+  `relation=former_owner` lists only names with a name row, so it never lists such
+  a child for the registrant whose lease lapsed.
   Every other registry child described here is listed under both
   `relation=owner` and `relation=manager`; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its

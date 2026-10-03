@@ -32,6 +32,8 @@ pub(crate) struct RegistryChildRow {
     /// The NameWrapper that observed the shadow is the registry owner
     /// (`FamilyChildRow::wrapper_held`).
     pub wrapper_held: bool,
+    /// The node's registrar lease has been released (`FamilyChildRow::released_lease`).
+    pub released_lease: bool,
 }
 
 /// The children among `candidates` (name ids of `chain_id` with no name surface) that a parent
@@ -77,7 +79,7 @@ pub(crate) async fn load_owned_registry_children(
         ") SELECT children.child_logical_name_id, children.namespace,
                   children.canonical_display_name, children.namehash, children.owner,
                   children.registry_authority, children.lifecycle_shadow,
-                  children.wrapper_held,
+                  children.wrapper_held, children.released_lease,
                   state.owner_resource_id
            FROM children
            JOIN parent ON parent.logical_name_id = children.parent_logical_name_id
@@ -113,6 +115,7 @@ pub(crate) async fn load_owned_registry_children(
             authority: row.try_get("registry_authority")?,
             lifecycle_shadow: row.try_get("lifecycle_shadow")?,
             wrapper_held: row.try_get("wrapper_held")?,
+            released_lease: row.try_get("released_lease")?,
         };
         if seen.insert(child.logical_name_id.clone()) {
             children.push(child);
