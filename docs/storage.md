@@ -1705,18 +1705,26 @@ of those names and resources, adds the names and resources those events
 reference, and repeats until a round adds nothing. To find the state keys of the
 requested names and resources it reads every stored event of theirs marked
 canonical, safe or finalized, whether or not the event's block is still on the
-canonical lineage; the restore then takes, for each key, the latest event whose
-block is. This returns the same events as checking every scanned event, for two
-reasons. No batch reads an event before its first block that lies on an orphaned
-block: orphaning a block Interpret has passed stamps an Interpret redo that
-deletes those events before any later batch reads them, and every Interpret write
-rechecks that no orphaning happened since its batch read. And an interpreter
-state key includes the event's logical name and resource, so these reads never
-reach one key through two names or resources. The read by
+canonical lineage, and the restore then takes, for each key, the latest event on
+that lineage. This returns the same events as checking every scanned event,
+because every event of one interpreter state key is filed under the same name or
+resource: the key embeds the event's logical name and resource, and its state
+scope the node the event is filed under
+(`crates/adapters/src/schema_v2/state_key.rs`). An event on an orphaned block can
+therefore only name a key whose latest readable event, if there is one, is also
+among the events read. Separately, every Interpret write rechecks that no block
+was orphaned between the batch's input snapshot and the write
+(`crates/interpret/src/write.rs`). The read by
 [ENSv2 state key](glossary.md#ensv2-state-key) below still checks the lineage of
-every event it scans, because a relabelled ENSv2 registry token keeps its
-interpreter state key but is filed under the new label's ENSv2 state key too, so
-one interpreter state key can be reached under several ENSv2 state keys. There is no round limit: each
+every event it scans. A registry may emit `LabelRegistered` for one token id under
+a second label: the adapter keys the token's registration state by registry and
+token and checks the supplied label only against its own hash, never against the
+token (`crates/adapters/src/schema_v2/protocol/v2_registry.rs`,
+`crates/adapters/src/schema_v2/state_v2.rs`), and the event's state scope carries
+the token, not the label hash (`crates/adapters/src/schema_v2/protocol.rs`),
+while its ENSv2 state keys include one derived from the label hash
+(`crates/interpret/src/load/lookahead/v2_keys.sql`). So one interpreter state key
+can be reached through several ENSv2 state keys. There is no round limit: each
 continuing round adds a name, resource or ENSv2 state key from a finite set (the
 names, resources and keys the batch's logs and the chain's stored history
 reference or derive, and the registry-only resource of each of those names), so the

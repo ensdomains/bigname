@@ -245,9 +245,10 @@ async fn keys_seen_only_on_orphaned_blocks_restore_nothing() -> Result {
     Ok(())
 }
 
-/// One ENSv2 state key can be filed under several routing keys: a registry token relabelled on
-/// a later block keeps its state key but gains the new label's routing key. Requesting only
-/// the orphaned label's routing key must not reach the token's readable older event.
+/// A registry may emit `LabelRegistered` for one token under a second label. The adapter keys
+/// the token's state by (registry, token) with the token, not the labelhash, in the state scope,
+/// while `v2_keys.sql` also files each event under its labelhash. Requesting only the orphaned
+/// label's ENSv2 state key must not reach the older event.
 #[tokio::test]
 async fn an_ensv2_key_seen_only_under_an_orphaned_alias_restores_nothing() -> Result {
     let db = database().await?;

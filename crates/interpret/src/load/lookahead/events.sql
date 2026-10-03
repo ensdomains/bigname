@@ -1,14 +1,17 @@
--- Lineage is checked where a row is selected: twice per key in `winners`, and for each restored
--- event's timestamp. `winners` matches a key across the whole chain, so a key with no readable
--- event on the chain returns nothing. The name and resource arms of `candidates` skip the check
--- and only list state keys. That changes no output because (a) no batch reads an event below $2
--- on an orphaned block: orphaning stamps an Interpret redo that deletes those events first, and
--- every write rechecks the orphaning epoch (write.rs); and (b) a state key embeds its logical
--- name and resource, so those arms never reach one key through two names or resources. If
--- either breaks, check lineage on one candidate per key before `winners`. The ENSv2 key arm
--- keeps its check: a relabelled registry token keeps its state key but gains the new label's
--- routing key, so one key is reachable under several labels. Each probe stays parameterized by
--- its event: a normal join can hash all 25M+ lineage rows.
+-- Lineage is checked where a row is selected: twice per interpreter state key in `winners`, and
+-- for each restored event's timestamp. `winners` matches a key across the whole chain, so a key
+-- with no readable event on the chain returns nothing. The name and resource arms of
+-- `candidates` skip the check, so they may list a key from an event on an orphaned block. That
+-- changes no output: a state key embeds its logical name and resource, and its state scope the
+-- node the event is filed under (adapters state_key.rs), so every event of one key is filed
+-- under the same name or resource. An orphaned candidate therefore only lists a key whose
+-- readable winner, if any, is itself a candidate. If that ever breaks, probe lineage on one
+-- candidate per key before `winners`. The ENSv2 key arm keeps its check: a registry may emit
+-- LabelRegistered for one token under a second label, and the adapter keys the token's state by
+-- (registry, token) with the token in the state scope (v2_registry.rs, state_v2.rs,
+-- protocol.rs), while v2_keys.sql also files the event under its labelhash, so one key can be
+-- reached through several ENSv2 state keys. Each probe stays parameterized by its event: a
+-- normal join can hash all 25M+ lineage rows.
 -- LIMIT prevents lateral pull-up. It cannot discard a matching lineage row because
 -- (chain_id, block_hash) is the chain_lineage primary key; exact height is also checked.
 WITH candidates AS MATERIALIZED (
