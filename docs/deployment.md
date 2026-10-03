@@ -2486,7 +2486,8 @@ environment change and no historical ingest fetch. On its own it changes no API
 response: the address-names and subnames readers still serve a surface-less
 ENSv1 registry child for its registry owner, never for the token holder these
 rows add, and for no one once its lease is released
-([released registrar children](#released-registrar-children)); the
+([released registrar children](#released-registrar-children)) or while the
+NameWrapper that named it holds its registry record ([Manager](api-v1.md#manager)); the
 address-names reader lists no surface-less Basenames child, so the new
 Basenames index rows list nothing.
 
