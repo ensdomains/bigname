@@ -181,6 +181,31 @@ fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl F
     assert_eq!(targeted, full_walk);
     assert_v2_indexes_are_derived(&targeted);
 }
+/// An ENSv1 authority that becomes current for a name an ENSv2 token holds yields to the ENSv2
+/// winner at the batch end, as a full refresh elects, whether or not the token's registry was
+/// dirtied in the batch.
+#[test]
+fn v2_refresh_after_an_ensv1_activation_matches_the_full_walk() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+    assert_targeted_refresh_matches_full_walk(state, |state| {
+        let name = name_id(state, ROOT, "0x01");
+        let (_, namehash) = name.split_once(':').expect("logical name id");
+        state.observe_v1_name(
+            NAMESPACE,
+            namehash,
+            name.clone(),
+            true,
+            Uuid::from_u128(1),
+            None,
+            "ens_v1_registry_l1".to_owned(),
+            None,
+            None,
+            None,
+        );
+    });
+}
 #[test]
 fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
     let mut state = anchored_state();
@@ -222,6 +247,35 @@ fn v2_registry_tokens_refresh_only_when_its_suffix_walk_changes() {
                 .as_ref()
                 .map(|name| &name.logical_name_id)
                 == Some(&leaf)
+            && transition.current.is_none()
+    }));
+}
+/// A suffix move renames the registry's own subregistries too, and a pointer cleared and set
+/// again before names are refreshed leaves every suffix where it was.
+#[test]
+fn v2_suffix_moves_reach_grandchildren_and_a_restored_pointer_moves_nothing() {
+    let mut state = nested_state(100);
+    state.set_v2_subregistry(CHILD, "0x02", Some(THIRD.to_owned()));
+    state.set_v2_parent_claim(THIRD, Some(CHILD.to_owned()), b"leaf");
+    install_token(&mut state, THIRD, "0x03", b"deep", 100);
+    state.refresh_dirty_v2_names(1);
+    let deep = name_id(&state, THIRD, "0x03");
+
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned()));
+    super::reset_v2_refresh_visits();
+    assert!(state.refresh_dirty_v2_names(2).is_empty());
+    assert_eq!(super::v2_refresh_visits(), 1);
+
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    let transitions = state.refresh_dirty_v2_names(3);
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == THIRD
+            && transition
+                .previous
+                .as_ref()
+                .map(|name| &name.logical_name_id)
+                == Some(&deep)
             && transition.current.is_none()
     }));
 }

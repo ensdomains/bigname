@@ -1705,27 +1705,39 @@ session is discarded after the batch.
 A batch marks an ENSv2 registry for a name refresh when its parent claim
 changes, when a subregistry pointer to it is set or cleared, or when the token
 pointing at it is released, replaced, regenerated, or has its expiry changed or
-crossed. Interpret then walks the registry's name suffix: its parent claim, the
+crossed. Interpret then walks the registry's
+[name suffix](glossary.md#ensv2-name-suffix-walk): its parent claim, the
 parent token's subregistry pointer and expiry, and so on up to a manifest-declared
 registry, whose suffix is fixed. It compares the result with the same walk over the
 registry-level state as it stood at the previous refresh, which the session keeps
-alongside its other state. When the two walks agree, no token in the registry
-changes name, so only the tokens the batch already touches are refreshed and the
-lookahead loader reads only the rows the walk reads. When they differ, every
-token in the registry takes a new name, with its old binding closed and a new one
-granted at the triggering event, so both loaders refresh every token and the
-lookahead loader reads the whole registry's history for that batch: the latest
-event per interpreter state key filed under the registry's `<registry>:*` key.
-That batch holds the registry in memory at roughly 1.4 KB of event state per
-retained event, about three per token, and the runner logs a warning naming the
-registry with its token count, event count and bytes. A manifest-declared
-registry, such as Sepolia's `.eth` registry, never moves, because its walk
-ends at itself; only a registry discovered through a subregistry pointer can.
-No mainnet manifest declares an ENSv2 registry yet. When one declares mainnet's
-`.eth` registry, it never takes this path either; a registry of that size that
-did would need about 4 GB per million tokens in one batch. A discovered
-registry's cost is bounded by its own tokens: one of 100,000 tokens takes about
-0.4 GB in that batch.
+alongside its other state. When the two walks agree, no token changes name
+because of the registry's suffix, so only the tokens the batch touches for their
+own reasons (a registration, renewal, expiry, release or replacement) are
+refreshed, and the lookahead loader reads only those and the rows the walk
+reads. When they differ, every token in the registry takes a new name, or loses
+it when the suffix is gone, at the triggering event, so both loaders refresh
+every token. The same holds for every registry below it, whose suffixes move
+too. The lookahead loader then reads the whole
+history of each of those registries for that batch: the latest event per
+interpreter state key filed under each registry's `<registry>:*` key. The batch
+holds all of those events in memory at once, beside the rest of its input, so its
+size is set by the moved registry and every registry below it. Once the input is
+read, the runner logs one warning per registry with its token count, event
+count and the bytes of the events' serialized state; it marks a completed read,
+not a written batch, so a batch that fails later and is retried logs it again.
+The first batch with ENSv2 events on a chain has no earlier refresh to compare
+with, so it counts every dirty registry as moved and reads it whole, even a
+manifest-declared one; its registries are new, so those reads return few or no
+events. Apart from that batch, a manifest-declared registry, such as Sepolia's
+`.eth` registry, is never read whole, because its walk ends at itself; only a
+registry discovered through a subregistry pointer can move. No mainnet manifest
+declares an ENSv2 registry yet; once one declares mainnet's `.eth` registry,
+the same holds for it. Memory sizes here are estimates, not bounds: on a Sepolia
+staging copy, one discovered registry's 37,832 retained events averaged about
+1.4 KB of serialized state, and resident memory is higher than that. Assuming
+about three retained events per token (registration, resource link, resolver),
+a move of a registry tree holding 100,000 tokens needs at least 0.4 GB in that
+batch, and one the size of a million-name `.eth` at least 4 GB.
 
 Two partial expression indexes on
 `normalized_events` serve these reads for the ENSv1 families:

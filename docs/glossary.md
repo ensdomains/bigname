@@ -1708,9 +1708,21 @@ id and resource id from its labelhash by replacing only those bits
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/utils/LibLabel.sol:L15-16 @ ens_v2_sepolia_20260916@366de741),
 so one key covers a label across regenerations. `address:00000000` holds a
 registry's own parent claim, and `address:*` every event of that registry, which
-a batch loads only when the registry's name suffix moves. Each
+a batch loads only when the registry's [name suffix walk](#ensv2-name-suffix-walk)
+changes or the chain has no earlier ENSv2 names to compare with. Each
 retained ENSv2 event is filed under the keys of its emitter with the token,
 resource and labelhash it names; loading a key loads every event filed under it.
+
+## ENSv2 name suffix walk
+
+how Interpret finds the name an ENSv2 registry's tokens sit under: from the
+registry's parent claim (`ParentUpdated`) to the parent token, which must be live
+and point back at the registry with its subregistry pointer, then on up the same
+way until a registry whose suffix a manifest declares, such as `.eth`. Each
+token's name is its label followed by the labels the walk collects. When a batch
+touches a registry's claim or its parent token, Interpret compares the walk with
+the one from the previous name refresh; only a changed walk renames every token
+in the registry and in the registries beneath it. See [Interpret process memory](storage.md#interpret-process-memory).
 
 ## Interpreter state key
 

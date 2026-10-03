@@ -372,7 +372,12 @@ fn whole_registry_loads(
                 }
                 events += 1;
                 bytes += event.after_state.to_string().len();
-                tokens.extend(scope.nth(1).map(str::to_owned));
+                tokens.extend(
+                    scope
+                        .nth(1)
+                        .filter(|token| !matches!(*token, "" | "-"))
+                        .map(str::to_owned),
+                );
             }
             (registry.to_owned(), tokens.len(), events, bytes)
         })

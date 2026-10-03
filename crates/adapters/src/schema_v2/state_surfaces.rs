@@ -428,8 +428,7 @@ impl State {
             self.v1_names.insert(key.clone(), promoted.clone());
             self.v1_registry_authorities
                 .insert(key.clone(), promoted.clone());
-            self.active_resources
-                .insert(logical_name_id.to_owned(), promoted.resource_id);
+            self.activate_v1_resource(logical_name_id, promoted.resource_id);
             if let Some(anchor) = self.v1_registry_read_anchors.get_mut(&key) {
                 anchor.logical_name_id = logical_name_id.to_owned();
                 anchor.surface_known = true;
@@ -546,8 +545,7 @@ impl State {
             .get_mut(&key)
             .expect("current V1 authority")
             .surface_known = true;
-        self.active_resources
-            .insert(logical_name_id.clone(), resource_id);
+        self.activate_v1_resource(&logical_name_id, resource_id);
         if let Some(registrar) = self.v1_registrars.get_mut(&key)
             && registrar.resource_id == resource_id
         {

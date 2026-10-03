@@ -677,21 +677,6 @@ no-ops when the indexes already exist, and it ends with the same check, so
 `sqlx migrate run` stops without recording it if either index is missing,
 invalid, not ready, on another table, not an index, or has another definition.
 
-On a chain with an ENSv2 manifest, a batch reads a whole ENSv2 registry only
-when that registry's name suffix moves, for example when the token that gives it
-its parent name is pointed elsewhere, cleared or expires. Every name in the
-registry then changes, so the batch reads the registry's whole history and
-holds it in memory, and the runner logs the warning
-`interpret loaded every token of an ENSv2 registry to re-derive their names`
-with the registry, its token and event counts and the bytes of event state.
-Expect that warning rarely; frequent warnings for one registry mean its suffix
-keeps moving. Each one is a slower, larger batch, not a stuck one, and the
-memory it needs is described under
-[Interpret process memory](../storage.md#interpret-process-memory). The read
-uses `normalized_events_v2_key_probe_idx`: after a redo has rewritten much of
-`normalized_events`, run `ANALYZE bigname_phase.normalized_events`, or stale
-statistics can make it scan the table instead.
-
 The release containing `20260922010000_project_node_history_idx.sql`,
 `20260922010100_project_mirror_scope_indexes.sql` and
 `20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes
@@ -1330,6 +1315,26 @@ curl -fsS http://127.0.0.1:3000/v1/status
 also requires a current phase-runner heartbeat. Treat a stale phase heartbeat,
 failed phase state, pending invalidation, or generation mismatch as an indexing
 incident rather than masking it with an API restart.
+
+On a chain with an ENSv2 manifest, a batch reads a whole ENSv2 registry when
+that registry's [name suffix](../glossary.md#ensv2-name-suffix-walk) moves, for
+example when the token that gives it its parent name is pointed elsewhere,
+cleared or expires. Every name in the registry, and in the registries beneath
+it, then changes, so the batch reads each of those registries' whole history and
+holds it in memory, and once that read completes the runner logs the warning
+`interpret loaded every token of an ENSv2 registry to re-derive their names`
+for each registry with its token and event counts and the bytes of event state.
+A batch that fails afterwards and is retried logs it again. The first batch with ENSv2 events on a chain, including the first one of
+a redo from before ENSv2 history, has no earlier names to compare with, so it
+reads every registry it touches whole and logs the same warning, usually with
+few or zero events because the registries are new. Otherwise expect the
+warning rarely; frequent warnings for one registry mean its suffix keeps
+moving. Each one is a slower, larger batch, not a stuck one, and the memory it
+needs is described under
+[Interpret process memory](../storage.md#interpret-process-memory). The read
+uses `normalized_events_v2_key_probe_idx`: after a redo has rewritten much of
+`normalized_events`, run `ANALYZE bigname_phase.normalized_events`, or stale
+statistics can make it scan the table instead.
 
 ## Pause and resume indexing
 

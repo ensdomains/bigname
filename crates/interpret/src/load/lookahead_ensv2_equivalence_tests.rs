@@ -85,7 +85,7 @@ const OFFSETS: [i64; 9] = [
     10,                  // 1: alice renewed, disclosing her label; bob's expiry and address set
     500, // 2: alice moves from ENSv1 to ENSv2; a migration registry claims alice.eth
     1_000 + GRACE - 5, // 3: erin unregistered; sub registered in the migration registry
-    1_000 + GRACE + 1, // 4: quiet; carol's ENSv1 registration lapses
+    1_000 + GRACE + 1, // 4: alice renewed in ENSv1 after her move; carol's ENSv1 registration lapses
     1_000 + GRACE + 100, // 5: quiet; dave's ENSv2 registration has lapsed
     1_000 + GRACE + 200, // 6: alice gets a resolver, a text record, a new token id and a subregistry
     1_000 + GRACE + 300, // 7: bob transferred; a text record; alice's subregistry cleared
@@ -378,6 +378,19 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     seed.log(ETH_REGISTRY, unregistered.encode_log_data())
         .await?;
     seed.transfer_v2(v2_token("erin"), owner, Address::ZERO)
+        .await?;
+
+    // Anyone may renew an ENSv1 name, so alice's registration renews after she moved to ENSv2
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L367 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L167 @ ens_v1@91c966f).
+    // The renewal makes her ENSv1 resource current for alice.eth, and her ENSv2 token is
+    // refreshed at the batch end to elect its own resource again.
+    seed.block(FIRST_BLOCK + 4).await?;
+    let renewed_again = v1::registrar::NameRenewed {
+        id: token("alice"),
+        expires: U256::from(START + 30 * GRACE),
+    };
+    seed.log(BASE_REGISTRAR, renewed_again.encode_log_data())
         .await?;
 
     seed.block(FIRST_BLOCK + 6).await?;
