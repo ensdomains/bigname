@@ -170,9 +170,10 @@ fn migrated_v1_lease_expiry_does_not_reopen_after_v2_expiry() -> anyhow::Result<
     Ok(())
 }
 
-/// An ENSv1 renewal after the move keeps the ENSv2 resource current until the ENSv2 token
-/// expires in the same batch; the name then returns to the ENSv1 authority's resource, and
-/// `interpret_test_batch` checks the live session against a restore and the lookahead loader.
+/// An ENSv1 renewal after the move, then the ENSv2 registration's expiry, in one batch: the
+/// output matches the lookahead loader and a fresh restore. Within one batch the replayed
+/// session derives ENSv2 names only at the end, so this does not exercise the hand-back to
+/// ENSv1; the two-batch test below does.
 #[test]
 fn ensv1_renewal_after_the_move_outlives_the_ensv2_registration() -> anyhow::Result<()> {
     let mut input = migration_and_old_lease_expiry()?;

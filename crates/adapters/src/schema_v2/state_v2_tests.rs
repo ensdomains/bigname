@@ -242,6 +242,33 @@ fn v2_departure_hands_the_name_back_to_its_ensv1_authority() {
         );
     }
 }
+/// Releasing the last ENSv2 holder hands the name to its ENSv1 authority at once.
+#[test]
+fn v2_release_hands_the_name_back_to_its_ensv1_authority() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+    state.refresh_dirty_v2_names(1);
+    let name = name_id(&state, ROOT, "0x01");
+    let (_, namehash) = name.split_once(':').expect("logical name id");
+    state.observe_v1_name(
+        NAMESPACE,
+        namehash,
+        name.clone(),
+        true,
+        Uuid::from_u128(1),
+        None,
+        "ens_v1_registry_l1".to_owned(),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(2)));
+    state.release_v2_token(ROOT, "0x01");
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(1)));
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(1)));
+}
 #[test]
 fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
     let mut state = anchored_state();

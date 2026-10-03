@@ -41,6 +41,8 @@ impl State {
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
         let crossed = self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
         self.expand_dirty_v2_registries(at_unix_timestamp);
+        // A kept baseline shares nodes with the live maps, so each refresh write would copy them.
+        self.v2_topology_baseline = None;
         let keys = std::mem::take(&mut self.v2_dirty_tokens)
             .into_iter()
             .collect();
@@ -51,6 +53,7 @@ impl State {
 
     pub(super) fn refresh_all_v2_names(&mut self, at_unix_timestamp: i64) -> Vec<V2NameTransition> {
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
+        self.v2_topology_baseline = None;
         self.v2_dirty_tokens.clear();
         self.v2_dirty_registries.clear();
         let keys = self
@@ -164,6 +167,7 @@ impl State {
         at_unix_timestamp: i64,
         resource_retirements: &imbl::ordset::OrdSet<String>,
     ) -> Vec<V2NameTransition> {
+        debug_assert!(self.v2_topology_baseline.is_none());
         let mut transitions = Vec::new();
         let mut terminal_closure_hits = std::mem::take(&mut self.v2_terminal_closure_hits);
         let mut keys = keys.into_iter().collect::<imbl::ordset::OrdSet<String>>();
@@ -389,6 +393,7 @@ impl State {
         self.v2_active_resource_winner(logical_name_id).or_else(|| {
             let (namespace, namehash) = logical_name_id.split_once(':')?;
             self.v1_name(namespace, namehash)
+                // The exact spelling `activate_v1_resource` keyed the map under, as restore does.
                 .filter(|authority| {
                     authority.surface_known && authority.logical_name_id == logical_name_id
                 })
