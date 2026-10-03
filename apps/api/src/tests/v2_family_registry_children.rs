@@ -1520,7 +1520,7 @@ async fn v2_unnamed_lease_transfer_serves_the_child_from_its_registry_owner() ->
         "ens_v1_registrar_l1",
         232,
         0,
-        json!({"source_event": "Transfer", "namehash": node, "from": RC_OWNER,
+        json!({"source_event": "Transfer", "namehash": node, "token_id": labelhash,
                "to": RC_BUYER}),
     );
     transfer.namespace = "ens".to_owned();
@@ -1529,13 +1529,17 @@ async fn v2_unnamed_lease_transfer_serves_the_child_from_its_registry_owner() ->
 
     let indexed: Vec<String> = sqlx::query_scalar(
         "SELECT relation FROM project_address_name_index
-         WHERE address = $1 AND logical_name_id = $2",
+         WHERE address = $1 AND logical_name_id = $2 ORDER BY relation",
     )
     .bind(RC_BUYER)
     .bind(format!("ens:{node}"))
     .fetch_all(&database.pool)
     .await?;
-    assert!(!indexed.is_empty(), "the buyer is indexed under the lease's node id");
+    assert_eq!(
+        indexed,
+        ["effective_controller", "token_holder"],
+        "the buyer is a registry-child candidate under the lease's node id"
+    );
     for (relation, rows, total) in address_rows_by_relation(&database, RC_BUYER).await? {
         assert!(rows.is_empty(), "{relation}: {rows:#?}");
         assert_eq!(total, json!(0), "{relation}");
