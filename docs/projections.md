@@ -546,7 +546,13 @@ resource deduplication is explicit. These ordinary listings describe current
 relations. For a node an ENSv1 registry `NewOwner` created, the address index
 also holds, as `token_holder` and `effective_controller` under the node's `<namespace>:<node>` id,
 the node's registry owner facts and the owner each such `NewOwner` reported,
-whether or not a surface names the node. A candidate with no
+whether or not a surface names the node. Under the same id it holds the
+recipient of the latest registrar transfer of the node's `.eth` or Basenames
+lease, even when no surface names the lease: after a token transfer without
+`reclaim` that recipient holds the token while the previous holder keeps the
+registry record
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+A candidate with no
 [name surface](glossary.md#surface-name-surface) composes no name row; the read
 lists it only when the child relation below lists it under its parent and
 serves the requested address as its owner, with the child relation's name and
@@ -1667,7 +1673,7 @@ state: after every block and every undo they are derived again for the keys the
 block touched. A block that changes an ENSv1 registry node's owner row or one
 of its child edges touches the node's `<namespace>:<node>` name id, with or
 without a surface, so the index rows of a registry child follow its registry
-owner. Resolver classification classifies a resolver at the block that
+owner; a registrar transfer of the node's lease touches the same id. Resolver classification classifies a resolver at the block that
 changed its candidates, the pointers that name it, its proxy upgrades, a
 discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the

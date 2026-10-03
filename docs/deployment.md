@@ -2283,3 +2283,23 @@ its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
+
+### Token holder of a lease with no name surface in the address index
+
+The build that indexes the token holder of a `.eth` or Basenames lease with no
+[name surface](glossary.md#surface-name-surface) (TYR-201) changes
+`crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+A registrar `Transfer` of such a lease now writes its address fold row
+under the lease's `<namespace>:<namehash>` id, so the recipient, who holds the
+token while the previous holder keeps the registry record until `reclaim`
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+reaches the address index beside the registry owner. Normalized events do not
+change. Finish the full-history Interpret redo and the Project redo it installs
+before the matching API serves; in v0.4.0 it shares the release's one Interpret
+and Project redo pair with the other hash-rotating changes in the batch. Stamp no
+Ingest redo: it changes no manifest, watch set, start block, table or
+schema-migration, and Project reads only retained normalized events. It needs no
+environment change and no historical ingest fetch. On its own it changes no API
+response: the address-names and subnames readers still serve such a child for
+its registry owner under both `owner` and `manager`.
