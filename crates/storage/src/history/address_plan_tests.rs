@@ -437,8 +437,8 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
 /// family list proves that index's predicate), and the record-ID arm through the record-ID write
 /// and link indexes. Any other index, `normalized_events_projection_idx` above all, walks every
 /// write of the chain. The node history index spans every resolver family and the write index
-/// every record-ID write, so those two must be keyed by the pointer; on this small fixture the
-/// planner may read a single-family index or the link index whole.
+/// every record-ID write, so those two must be keyed by the pointer (`attribution_probe_is_keyed`);
+/// on this small fixture the planner may read a single-family index or the link index whole.
 fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
     const INDEXES: [&str; 5] = [
         "normalized_events_ens_v1_record_node_resolver_idx",
@@ -476,14 +476,8 @@ fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
         }
         for probe in &probes {
             let index = probe["Index Name"].as_str().unwrap_or("none");
-            let keyed = probe.get("Index Cond").is_some()
-                || !matches!(
-                    index,
-                    "normalized_events_project_node_history_idx"
-                        | "normalized_events_record_id_write_idx"
-                );
             ensure!(
-                INDEXES.contains(&index) && keyed,
+                INDEXES.contains(&index) && attribution_probe_is_keyed(probe),
                 "attribution reads {} through {index} without its keyed index: {node}\n{plan}",
                 node["Alias"],
             );
@@ -506,6 +500,48 @@ fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
         "attribution plan does not read {missing:?}: {plan}"
     );
     Ok(())
+}
+
+/// A node history probe's index condition binds the node, and a record-ID write probe's binds the
+/// resolver and the record id; a chain-only condition still reads every write of the chain.
+fn attribution_probe_is_keyed(probe: &Value) -> bool {
+    let keys: &[&str] = match probe["Index Name"].as_str() {
+        Some("normalized_events_project_node_history_idx") => &["(after_state ->> 'node'"],
+        Some("normalized_events_record_id_write_idx") => &[
+            "(after_state ->> 'resolver'",
+            "(after_state ->> 'resolver_record_id'",
+        ],
+        _ => return true,
+    };
+    probe["Index Cond"]
+        .as_str()
+        .is_some_and(|condition| keys.iter().all(|key| condition.contains(key)))
+}
+
+#[test]
+fn attribution_probes_are_keyed_only_by_the_pointer_keys() {
+    let probe = |index: &str, condition: &str| serde_json::json!({"Node Type": "Index Scan", "Index Name": index, "Index Cond": condition});
+    let node = "normalized_events_project_node_history_idx";
+    let write = "normalized_events_record_id_write_idx";
+    assert!(!attribution_probe_is_keyed(&probe(
+        node,
+        "(chain_id = pointer_2.chain_id)"
+    )));
+    assert!(attribution_probe_is_keyed(&probe(
+        node,
+        "((chain_id = pointer_2.chain_id) AND (lower((after_state ->> 'node'::text)) = pointer_2.namehash))",
+    )));
+    assert!(!attribution_probe_is_keyed(&probe(
+        write,
+        "((chain_id = selection.chain_id) AND (lower((after_state ->> 'resolver'::text)) = selection.resolver_address))",
+    )));
+    assert!(attribution_probe_is_keyed(&probe(
+        write,
+        "((chain_id = selection.chain_id) AND (lower((after_state ->> 'resolver'::text)) = selection.resolver_address) AND ((after_state ->> 'resolver_record_id'::text) = selection.record_id))",
+    )));
+    assert!(!attribution_probe_is_keyed(
+        &serde_json::json!({"Node Type": "Index Scan", "Index Name": write})
+    ));
 }
 
 /// The attachment probe reads `surface_bindings` through an index keyed by the name or the
