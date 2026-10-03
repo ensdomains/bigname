@@ -172,6 +172,113 @@ async fn global_winners_preserve_partitions_positions_and_canonical_hashes() -> 
     Ok(())
 }
 
+/// In each candidate arm (names, resources, ENSv2 state keys), a key seen only on an
+/// orphaned block restores nothing, and an orphaned latest event falls back to the older
+/// readable one.
+#[tokio::test]
+async fn keys_seen_only_on_orphaned_blocks_restore_nothing() -> Result {
+    let db = database().await?;
+    let resource = Uuid::from_u128(1);
+    let token = format!("0x{:064x}", 1u128 << 32);
+    for arm in ["name", "res", "v2"] {
+        for (event, block, state_key) in [
+            ("older", 1, "older"),
+            ("readable", 2, "readable"),
+            ("orphaned-latest", 4, "older"),
+            ("orphaned-only", 4, "orphaned-only"),
+        ] {
+            let (id, state_key) = (format!("{arm}-{event}"), format!("{arm}-{state_key}"));
+            if arm == "v2" {
+                sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','RegistrationGranted','ens_v2_registry_l1',1,$2,$3,'block-'||$3::text,'tx',jsonb_build_object($4::text,$5::text,$6::text,'0xreg:-:'||$7||':-:LabelRegistered'),'ens_v1_unwrapped_authority','canonical',jsonb_build_object('fixture_identity',$1))")
+                    .bind(&id).bind(CHAIN).bind(block).bind(INTERPRETER_STATE_KEY).bind(&state_key)
+                    .bind(super::STATE_SCOPE_KEY).bind(&token).execute(db.pool()).await?;
+                continue;
+            }
+            let (name, res) = if arm == "name" {
+                (Some("ens:a"), None)
+            } else {
+                (None, Some(resource))
+            };
+            seed(
+                db.pool(),
+                &id,
+                name,
+                res,
+                block,
+                None,
+                key(&state_key),
+                json!({}),
+            )
+            .await?;
+        }
+    }
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_hash='block-4'")
+        .bind(CHAIN).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'replacement-4',4,to_timestamp(4),'safe')")
+        .bind(CHAIN).execute(db.pool()).await?;
+    let mut connection = db.pool().acquire().await?;
+    let selected = super::ordered_events(
+        &mut connection,
+        CHAIN,
+        5,
+        &["ens:a".into()],
+        &[resource],
+        &[format!("0xreg:{token}")],
+    )
+    .await?
+    .into_iter()
+    .map(|ordered| ordered.event)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        identities(&selected),
+        [
+            "name-older",
+            "res-older",
+            "v2-older",
+            "name-readable",
+            "res-readable",
+            "v2-readable"
+        ]
+    );
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// A registry may emit `LabelRegistered` for one token under a second label. The adapter keys
+/// the token's state by (registry, token) with the token, not the labelhash, in the state scope,
+/// while `v2_keys.sql` also files each event under its labelhash. Requesting only the orphaned
+/// label's ENSv2 state key must not reach the older event.
+#[tokio::test]
+async fn an_ensv2_key_seen_only_under_an_orphaned_alias_restores_nothing() -> Result {
+    let db = database().await?;
+    let token = format!("0x{:064x}", 1u128 << 32);
+    let (alpha, beta) = (
+        format!("0x{}", "a".repeat(64)),
+        format!("0x{}", "b".repeat(64)),
+    );
+    for (id, block, labelhash) in [("alpha", 1, &alpha), ("beta", 4, &beta)] {
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','RegistrationGranted','ens_v2_registry_l1',1,$2,$3,'block-'||$3::text,'tx',jsonb_build_object($4::text,'registration',$5::text,'0xreg:-:'||$6||':-:LabelRegistered'),'ens_v1_unwrapped_authority','canonical',jsonb_build_object('fixture_identity',$1,'labelhash',$7))")
+            .bind(id).bind(CHAIN).bind(block).bind(INTERPRETER_STATE_KEY)
+            .bind(super::STATE_SCOPE_KEY).bind(&token).bind(labelhash).execute(db.pool()).await?;
+    }
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_hash='block-4'")
+        .bind(CHAIN).execute(db.pool()).await?;
+    let mut connection = db.pool().acquire().await?;
+    let routed = |labelhash: &str| format!("0xreg:{}00000000", &labelhash[..58]);
+    for (request, expected) in [(routed(&alpha), vec!["alpha"]), (routed(&beta), vec![])] {
+        let selected = super::ordered_events(&mut connection, CHAIN, 5, &[], &[], &[request])
+            .await?
+            .into_iter()
+            .map(|ordered| ordered.event)
+            .collect::<Vec<_>>();
+        assert_eq!(identities(&selected), expected);
+    }
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn unnamed_direct_facts_route_by_child_without_parent_descendant_expansion() -> Result {
     let db = database().await?;
@@ -480,6 +587,16 @@ fn index_names(plan: &Value, names: &mut Vec<String>) {
     }
 }
 
+fn relation_scans(plan: &Value, relation: &str) -> usize {
+    usize::from(plan["Relation Name"] == relation)
+        + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|child| relation_scans(child, relation))
+            .sum::<usize>()
+}
+
 /// The fixture database holds only the checked-in baseline schema, so this proves the
 /// baseline defines indexes whose expressions the lookahead queries can use, for the ENSv1,
 /// Basenames Base and ENSv2 families alike. A drifted expression or family predicate
@@ -589,6 +706,16 @@ async fn lookahead_sql_uses_baseline_indexes() -> Result {
                 assert!(
                     used.iter().any(|name| name == index),
                     "{mode} {name} plan must use {index}, used {used:?}"
+                );
+            }
+            // Two lineage probes per state key in `winners`, one for the restored event's
+            // timestamp and one in the ENSv2 key arm; a probe per candidate of a name or
+            // resource would scale with its history.
+            if name == "events" {
+                let probes = relation_scans(&plan[0]["Plan"], "chain_lineage");
+                assert!(
+                    probes <= 4,
+                    "{mode} events plan probes chain_lineage {probes} times"
                 );
             }
         }
