@@ -1160,13 +1160,27 @@ it for a token holder, so, as with its `ens_v1` lifecycle fields, it omits
 `manager` rather than serve the NameWrapper contract. The `manager` relation
 still lists that child for its registry owner (TYR-148).
 
-One known gap remains. A parent owner can reassign a wrapped child's registry
-record with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
+A name stops being served as wrapped once a registry write moves its record away
+from NameWrapper. A parent owner can reassign a wrapped child's registry record
+with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f),
 after which NameWrapper no longer treats the child as wrapped
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f);
-bigname keeps its wrapper state, so the field serves the old token holder while
-the `manager` relation follows the new registry owner (TYR-147). It is listed
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f).
+The child then serves its new registry owner as `owner` and `manager` and under
+both relations, or no owner when the parent set it to zero, carries no
+`ens_v1.wrapper_state`, and later transfers of the old token, or fuses its
+holder sets with NameWrapper's `setFuses`, change nothing.
+NameWrapper's own unwrap, including one to a controller the registry reports
+as no owner, keeps the name wrapped until its `NameUnwrapped`
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+NameWrapper's own `setRecord`, and its `setSubnodeRecord` over a wrapped child,
+write the record back to NameWrapper itself before moving the token, so the
+name stays wrapped
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L629 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637-L660 @ ens_v1@91c966f).
+A registry write back to NameWrapper without a wrap, after the record has left
+it, revives the old token on chain, but bigname keeps serving the NameWrapper
+contract as `owner` and `manager` until the next `NameWrapped`; this is listed
 under [known divergences](upstream.md#known-divergences).
 
 ## Status Vocabulary

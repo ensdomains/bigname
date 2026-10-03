@@ -1,7 +1,10 @@
 #[path = "session_interpret.rs"]
 mod interpret;
 use interpret::interpret_loaded;
+#[path = "session_transaction.rs"]
+mod transaction;
 use std::collections::{BTreeMap, BTreeSet};
+use transaction::TransactionIndex;
 
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
@@ -11,9 +14,6 @@ use super::{
     sourced_events::prepare_v1_state_derived_events as prepare_v1, state::State,
     state_residency::StateCacheCapacity,
 };
-
-type RegistrarRegistrySetupKey = (String, String, String, String);
-type RegistrarRegistrySetups = BTreeMap<RegistrarRegistrySetupKey, Vec<(i64, String)>>;
 
 /// Opaque retained adapter state that can be moved into the next batch for the same chain.
 #[derive(Debug, Eq, PartialEq)]
@@ -408,7 +408,7 @@ fn interpret_raw(
     state: &mut State,
     output: &mut BatchOutput,
     migration_observations: &mut Vec<super::protocol::MigrationObservation>,
-    registrar_registry_setups: &RegistrarRegistrySetups,
+    transactions: &TransactionIndex,
 ) -> anyhow::Result<bool> {
     let Some(selected) = catalog.select(raw)? else {
         return Ok(false);
@@ -416,25 +416,9 @@ fn interpret_raw(
     let mut registrar_context = super::migration::registrar_context(catalog, &selected, raw)?;
     registrar_context.registry_graveyard =
         super::protocol::v1::registry_graveyard(catalog, &selected, raw)?;
-    if let Some((namehash, owner)) =
-        super::protocol::v1::registrar_registration_namehash(&selected, raw)?
-    {
-        registrar_context.transaction_has_registry_setup = registrar_registry_setups
-            .get(&(
-                selected.source.namespace.clone(),
-                raw.block_hash.clone(),
-                raw.transaction_hash.clone(),
-                namehash,
-            ))
-            .is_some_and(|setups| {
-                setups
-                    .iter()
-                    .filter(|(log_index, _)| *log_index < raw.log_index)
-                    .max_by_key(|(log_index, _)| *log_index)
-                    .map(|(_, setup_owner)| setup_owner == &owner)
-                    .unwrap_or_else(|| setups.iter().any(|(_, setup_owner)| setup_owner == &owner))
-            });
-    }
+    registrar_context.wrapper_custody.name_wrapper =
+        super::protocol::v1::registry_name_wrapper(catalog, &selected)?;
+    transactions.apply(&selected, raw, &mut registrar_context)?;
     let registrar_migration_source = registrar_context
         .migration_enabled
         .then(|| catalog.source_for_family("ens_v2_migration_l1").cloned())
@@ -526,35 +510,6 @@ fn interpret_raw(
         migration_observations.extend(interpreted.migration_observations);
     }
     Ok(true)
-}
-
-fn registrar_registry_setups(
-    catalog: &Catalog,
-    raw_logs: &[RawLogInput],
-) -> anyhow::Result<RegistrarRegistrySetups> {
-    let mut setups = BTreeMap::<RegistrarRegistrySetupKey, Vec<(i64, String)>>::new();
-    for raw in raw_logs {
-        let Some(selected) = catalog.select(raw)? else {
-            continue;
-        };
-        if selected.source.source_family != "ens_v1_registry_l1" {
-            continue;
-        }
-        if let Some((namehash, owner)) =
-            super::protocol::v1::registry_registration_setup_namehash(&selected, raw)?
-        {
-            setups
-                .entry((
-                    selected.source.namespace,
-                    raw.block_hash.clone(),
-                    raw.transaction_hash.clone(),
-                    namehash,
-                ))
-                .or_default()
-                .push((raw.log_index, owner));
-        }
-    }
-    Ok(setups)
 }
 
 #[cfg(test)]

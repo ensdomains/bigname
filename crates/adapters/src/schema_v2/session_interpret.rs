@@ -56,7 +56,7 @@ fn interpret_once(
 ) -> anyhow::Result<BatchOutput> {
     let mut output = BatchOutput::default();
     let mut migration_observations = Vec::new();
-    let registrar_registry_setups = registrar_registry_setups(catalog, &raw_logs)?;
+    let transactions = TransactionIndex::build(catalog, &raw_logs)?;
     let mut raw_logs = raw_logs.into_iter().peekable();
     let mut committed_state = state.clone();
     committed_state.begin_batch();
@@ -84,7 +84,7 @@ fn interpret_once(
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
-                &registrar_registry_setups,
+                &transactions,
             )? {
                 deferred.push(block_raw_logs.len() - 1);
             }
@@ -103,7 +103,7 @@ fn interpret_once(
                 &mut block_state,
                 &mut block_output,
                 &mut migration_observations,
-                &registrar_registry_setups,
+                &transactions,
             )? {
                 unselected.push(raw.clone());
             }

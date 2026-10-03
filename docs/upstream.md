@@ -204,11 +204,7 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > NameWrapper token transfers of a subname wrapped without `PARENT_CANNOT_CONTROL`, whose token
 > outlives the clear. Superseded Sepolia Graveyards are not declared and are served as the chain
 > holds them. A live token sent to the Graveyard keeps its lease and is served as the chain holds
-> it. Known gap (TYR-100): other registry writes that move a wrapped subname away from the
-> NameWrapper still serve the stale token's holder. In its Graveyard variant, a holder who sends
-> the surviving wrapper token of a cleared subname (wrapped without `PARENT_CANNOT_CONTROL`) to
-> the Graveyard gets the Graveyard listed as that subname's `manager` in address lists, while its
-> served owner stays null. See [projections](projections.md).
+> it. See [projections](projections.md).
 > **Since**: `2026-09-29`
 
 > **NameWrapper `safeTransferFrom` self-transfer clears the token approval without a log** —
@@ -229,21 +225,20 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > interpreter does not do. The delegate row is served as still granted.
 > **Since**: `2026-09-13`
 
-> **A wrapped child keeps its wrapper state after its parent reassigns the registry record** —
-> the parent owner's registry `setSubnodeOwner` moves a wrapped child's registry
-> record away from NameWrapper without `NameUnwrapped`, after which NameWrapper
-> no longer treats it as wrapped, but bigname keeps serving it as wrapped:
-> `ens_v1.wrapper_state`, `owner` and `manager` still name the old token
-> holder.
-> **Upstream**: (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
-> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
-> **Our rule**: `docs/api-v1.md` § Manager.
-> **Why**: the ENSv1 registry adapter keeps the previous NameWrapper authority
-> when an authentic registry owner replaces it, so the composed row has no fact
-> that NameWrapper lost custody. The `manager` address relation follows the
-> registry owner, so the field and the relation disagree until the adapter
-> ends the wrapper authority (TYR-147).
-> **Since**: `2026-10-01`
+> **A registry write back to NameWrapper without a wrap keeps serving NameWrapper as owner** —
+> once a registry write moves a wrapped name's record away from NameWrapper, bigname ends the
+> NameWrapper authority. If the record is later written back to NameWrapper with
+> `ENSRegistry.setOwner` or `setSubnodeOwner` and no wrap follows, the old token is live again on
+> chain, because NameWrapper counts a name as wrapped whenever it holds the registry record and
+> the token has an owner, but bigname serves the NameWrapper contract as `owner` and `manager`
+> until the next `NameWrapped`.
+> **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
+> **Our rule**: `docs/api-v1.md` § Manager; [projections](projections.md).
+> **Why**: the parent's `setSubnodeOwner`, or `setOwner` by the record's owner, can move the
+> record back, but reopening the old token's authority would need retained NameWrapper authority
+> state that the interpreter does not keep.
+> **Since**: `2026-10-03`
 
 
 

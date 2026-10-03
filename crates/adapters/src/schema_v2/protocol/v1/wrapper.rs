@@ -83,7 +83,12 @@ pub(super) fn interpret(
                 decode_event_log::<FusesSet>(&raw.topics, &raw.data, "FusesSet log is malformed")?;
             ensure_declared(selected, &["PermissionScopeChanged"])?;
             let node = hex_string(event.node);
-            let linked = state.v1_name(&selected.source.namespace, &node);
+            // `setFuses` needs only the token owner, so a token that outlived its registry
+            // custody still emits it.
+            // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L435 @ ens_v1@91c966f)
+            let linked = state
+                .v1_name(&selected.source.namespace, &node)
+                .filter(|name| name.authority_source_family == selected.source.source_family);
             let transition =
                 state.set_v1_wrapper_fuses(&selected.source.namespace, &node, event.fuses);
             let previous = transition.map(|(previous, _)| previous);

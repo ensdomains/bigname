@@ -554,21 +554,29 @@ async fn assert_prior_owner_revocation_writes_and_projects(
     run_project(scratch.pool(), chain, 3, 3, 3).await?;
     assert_prior_owner_is_revoked(scratch.pool(), chain, registry_resource).await?;
     if final_registry_owner == WRAPPED_REGISTRY_OWNER {
-        assert_wrapped_owner_is_on_registration_epoch(
+        // Not an on-chain flow: with the lease live and NameWrapper holding the registrar
+        // token, the .eth parent cannot write the registry. The fixture pins only that a write
+        // moving the registry record off NameWrapper ends the wrapper binding and leaves the
+        // registration-epoch grant in place.
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+        assert_wrapped_owner_grant_is_on_registration_epoch(
             scratch.pool(),
-            chain,
             registrar_resource,
             registry_resource,
         )
         .await?;
-    } else {
-        let reminted_owner_powers =
-            resource_permission(scratch.pool(), registry_resource, REMINTED_REGISTRY_OWNER)
-                .await?
-                .context("reminted permission")?
-                .effective_powers;
-        assert_eq!(reminted_owner_powers, json!(["resource_control"]));
+        assert_eq!(
+            active_surface_resource(scratch.pool(), chain).await?,
+            registry_resource
+        );
     }
+    let reminted_owner_powers =
+        resource_permission(scratch.pool(), registry_resource, REMINTED_REGISTRY_OWNER)
+            .await?
+            .context("reminted permission")?
+            .effective_powers;
+    assert_eq!(reminted_owner_powers, json!(["resource_control"]));
 
     scratch.cleanup().await
 }
@@ -576,6 +584,35 @@ async fn assert_prior_owner_revocation_writes_and_projects(
 async fn assert_wrapped_owner_is_on_registration_epoch(
     pool: &PgPool,
     chain_id: &str,
+    registrar_resource: Uuid,
+    registry_resource: Uuid,
+) -> Result<()> {
+    assert_wrapped_owner_grant_is_on_registration_epoch(
+        pool,
+        registrar_resource,
+        registry_resource,
+    )
+    .await?;
+    let wrapper_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1
+           AND source_family = 'ens_v1_wrapper_l1'
+           AND event_kind = 'SurfaceBound'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .context("wrapped registration did not write a wrapper surface event")?;
+    assert_ne!(wrapper_resource, registrar_resource);
+    assert_eq!(
+        active_surface_resource(pool, chain_id).await?,
+        wrapper_resource
+    );
+    Ok(())
+}
+
+async fn assert_wrapped_owner_grant_is_on_registration_epoch(
+    pool: &PgPool,
     registrar_resource: Uuid,
     registry_resource: Uuid,
 ) -> Result<()> {
@@ -589,27 +626,18 @@ async fn assert_wrapped_owner_is_on_registration_epoch(
         .await?
         .is_some();
     assert!(!stale_active_row);
-    let wrapper_resource: Uuid = sqlx::query_scalar(
-        "SELECT resource_id FROM normalized_events
-         WHERE chain_id = $1
-           AND source_family = 'ens_v1_wrapper_l1'
-           AND event_kind = 'SurfaceBound'",
-    )
-    .bind(chain_id)
-    .fetch_one(pool)
-    .await
-    .context("wrapped registration did not write a wrapper surface event")?;
-    assert_ne!(wrapper_resource, registrar_resource);
-    let active_resource: Uuid = sqlx::query_scalar(
+    Ok(())
+}
+
+async fn active_surface_resource(pool: &PgPool, chain_id: &str) -> Result<Uuid> {
+    sqlx::query_scalar(
         "SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND active_to IS NULL AND canonicality_state = 'canonical'",
     )
     .bind(chain_id)
     .fetch_one(pool)
     .await
-    .context("wrapped registration has no active surface binding")?;
-    assert_eq!(active_resource, wrapper_resource);
-    Ok(())
+    .context("no active surface binding")
 }
 
 async fn assert_registrar_epoch_permission(pool: &PgPool, registrar_resource: Uuid) -> Result<()> {
