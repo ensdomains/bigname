@@ -431,8 +431,8 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     Ok(())
 }
 
-/// Block 8: the ETH registry's parent set again, which renames every token in it, so a later
-/// batch requests the registry whole.
+/// Block 8: the ETH registry's parent set again. The registry is a manifest-declared suffix
+/// anchor, so its walk ends at itself: this renames nothing and must not read it whole.
 async fn seed_reparent(seed: &mut Seeder<'_>) -> TestResult {
     seed.block(FIRST_BLOCK + 8).await?;
     let parent = v2::ParentUpdated {
