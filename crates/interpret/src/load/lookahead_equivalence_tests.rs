@@ -15,7 +15,7 @@ use crate::{BatchRequest, Engine, FullStateReason, Marker, RunMode, StateLoader,
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
-const CHAIN: &str = "ethereum-mainnet";
+pub(super) const CHAIN: &str = "ethereum-mainnet";
 pub(super) const FIRST_BLOCK: i64 = 17_000_000;
 pub(super) const START: i64 = 1_700_000_000;
 pub(super) const GRACE: i64 = 90 * 24 * 60 * 60;
@@ -76,7 +76,7 @@ const LAPSED_AT_BIRTH_OFFSETS: [i64; 2] = [0, 12];
 const EXPIRY_BOUNDARY_OFFSETS: [i64; 3] = [0, 12, 24];
 
 #[derive(Clone, Copy)]
-enum History {
+pub(super) enum History {
     /// Registrations, renewals, transfers, a subname, lapses, and a re-registration.
     Lifecycle,
     /// One registration whose expiry had already lapsed when it was recorded.
@@ -88,7 +88,7 @@ enum History {
 }
 
 impl History {
-    fn offsets(self) -> &'static [i64] {
+    pub(super) fn offsets(self) -> &'static [i64] {
         match self {
             Self::Lifecycle => &BLOCK_OFFSETS,
             Self::LapsedAtBirth | Self::DeepSubname => &LAPSED_AT_BIRTH_OFFSETS,
@@ -304,7 +304,7 @@ pub(super) async fn seed_lineage(pool: &PgPool, chain: &str, offsets: &[i64]) ->
     Ok(())
 }
 
-async fn seed_history(pool: &PgPool, history: History) -> TestResult {
+pub(super) async fn seed_history(pool: &PgPool, history: History) -> TestResult {
     seed_lineage(pool, CHAIN, history.offsets()).await?;
     let owner: Address = OWNER.parse()?;
     let second_owner: Address = SECOND_OWNER.parse()?;

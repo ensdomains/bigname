@@ -1702,7 +1702,10 @@ the batch's first block, so Interpret adds those names too; every earlier block
 boundary has already settled. Interpret then reads, in the batch's input
 snapshot, the latest readable event per interpreter state key among the events
 of those names and resources, adds the names and resources those events
-reference, and repeats until a round adds nothing. To find the state keys of the
+reference, and repeats until a round adds nothing. Each round reads only the
+names, resources and ENSv2 state keys the previous round added, and a retried
+attempt (below) reads only the names and keys it adds and what those link to, because in one snapshot the latest
+event of a key does not depend on which names, resources or keys asked for it. To find the state keys of the
 requested names and resources it reads every stored event of theirs marked
 canonical, safe or finalized, whether or not the event's block is still on the
 canonical lineage, and the restore then takes, for each key, the latest event on
