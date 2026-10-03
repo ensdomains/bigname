@@ -9704,14 +9704,16 @@ fn ownerless_registry_resolver_uses_retained_anchor_without_reopening_control() 
                 0,
                 REGISTRY,
             ),
+            // `_unwrap(node, registry)` writes the registry-self owner, then emits
+            // `NameUnwrapped` in the same transaction.
             raw_at(
                 NameUnwrapped {
                     node,
                     owner: OWNER.parse()?,
                 }
                 .encode_log_data(),
-                5,
-                0,
+                4,
+                1,
                 WRAPPER_ADDRESS,
             ),
         ],
@@ -9767,20 +9769,20 @@ fn ownerless_registry_resolver_uses_retained_anchor_without_reopening_control() 
         "registry-self transition: {:?}",
         self_transfer.after_state
     );
-    let block_five = first
+    let unwrap = first
         .normalized_events
         .iter()
-        .filter(|event| event.block_number == Some(5))
+        .filter(|event| event.block_number == Some(4) && event.log_index == Some(1))
         .collect::<Vec<_>>();
     assert!(
-        block_five
+        unwrap
             .iter()
             .any(|event| event.event_kind == "SurfaceUnbound"),
-        "block-five events: {block_five:?}"
+        "unwrap events: {unwrap:?}"
     );
     assert!(
         first.normalized_events.iter().all(|event| {
-            !(event.event_kind == "SurfaceBound" && event.block_number == Some(5))
+            !(event.event_kind == "SurfaceBound" && event.block_number == Some(4))
         })
     );
     assert!(first.normalized_events.iter().all(|event| {
