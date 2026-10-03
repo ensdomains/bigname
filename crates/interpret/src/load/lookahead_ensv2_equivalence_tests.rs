@@ -462,8 +462,10 @@ async fn seed_last_block(seed: &mut Seeder<'_>, hash: &str, text: &str) -> TestR
     seed.log(ETH_REGISTRY, transferred.encode_log_data())
         .await?;
     seed.text("bob", text).await?;
-    // A zero-address update clears the pointer and is retained beside the token's latest
-    // ordinary subregistry event.
+    // `setSubregistry` stores whatever registry it is given, so a zero-address update clears the
+    // pointer
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L147-L152 @ ens_v2_sepolia_20261001@07e55a05);
+    // it is retained beside the token's latest ordinary subregistry event.
     let cleared = v2::SubregistryUpdated {
         tokenId: v2_token_version("alice", 1),
         subregistry: Address::ZERO,
