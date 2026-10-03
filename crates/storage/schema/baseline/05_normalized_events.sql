@@ -509,7 +509,7 @@ CREATE INDEX IF NOT EXISTS normalized_events_basenames_record_node_resolver_idx
 
 -- The record-ID arm of history's record attribution (crates/storage/src/history/attribution):
 -- a selected record's writes by resolver and record id, and the record links on a pointer's
--- resolver.
+-- resolver at its node or the zero node.
 CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
     ON normalized_events (
         chain_id,
@@ -522,7 +522,11 @@ CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX IF NOT EXISTS normalized_events_record_id_link_idx
-    ON normalized_events (lower(after_state ->> 'resolver'), chain_id)
+    ON normalized_events (
+        chain_id,
+        lower(after_state ->> 'resolver'),
+        lower(after_state ->> 'node')
+    )
     WHERE event_kind = 'ResolverRecordLinked'
       AND after_state ->> 'storage_model' = 'resolver_record_id'
       AND consumer_visibility = 'activated'

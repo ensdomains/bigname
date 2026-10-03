@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=333
+expected_refusal_assertions=349
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=61
 refusal_probe_seconds=0
@@ -659,8 +659,9 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
             fi
-            emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -1131,9 +1132,7 @@ for migration_file in \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
-    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
-    "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
-    "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql"
+    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -2157,6 +2156,13 @@ check_lookahead_index_migration "$basenames_lookahead_migration" absent-from-fix
 check_lookahead_index_migration "$v2_lookahead_migration" absent-from-fixture 2 3 \
     normalized_events_v2_lookahead_probe_idx normalized_events_v2_direct_node_probe_idx \
     normalized_events_v2_key_probe_idx normalized_events_v2_due_probe_idx
+attribution_index_migration="$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql"
+attribution_index_names=(
+    normalized_events_record_id_write_idx
+    normalized_events_record_id_link_idx
+)
+check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 3 \
+    "${attribution_index_names[@]}"
 # The live prebuild in ops/v1-lookahead-indexes/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition, refuse
 # an invalid index, a valid index with other keys, a valid index whose JSON
@@ -2221,9 +2227,9 @@ assert_index_install_hint v1-lookahead-index-on-another-table-hint \
 # inside a transaction that rolls back, and require the schema-migration to
 # fail rather than record success. The expected definition it names must be how
 # the fresh-baseline index prints, read under search_path pg_catalog.
-v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
-for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
-    lookahead_migration="${lookahead_index_migration[$v1_lookahead_index_name]}"
+assert_reviewed_index_migration_refusals() {
+    local v1_lookahead_index_name="$1" lookahead_migration="$2" v1_lookahead_recovery="$3"
+    local v1_lookahead_reviewed_definition v1_lookahead_found_definition
     assert_migration_refusal "invalid-$v1_lookahead_index_name" \
         "$lookahead_migration" \
         "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
@@ -2294,7 +2300,7 @@ SQL
     # after_state ->> '<schema>.expiry' and the like, which is NULL for every
     # real row.
     if [ -n "${lookahead_index_json_key_literals[$v1_lookahead_index_name]:-}" ]; then
-        continue
+        return
     fi
     v1_lookahead_found_definition="${v1_lookahead_reviewed_definition//->> \'/->> \'$scratch_schema.}"
     if [ "$v1_lookahead_found_definition" = "$v1_lookahead_reviewed_definition" ]; then
@@ -2307,6 +2313,16 @@ SQL
 DROP INDEX $v1_lookahead_index_name;
 $v1_lookahead_found_definition;
 SQL
+}
+v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
+for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
+    assert_reviewed_index_migration_refusals "$v1_lookahead_index_name" \
+        "${lookahead_index_migration[$v1_lookahead_index_name]}" "$v1_lookahead_recovery"
+done
+for attribution_index_name in "${attribution_index_names[@]}"; do
+    assert_reviewed_index_migration_refusals "$attribution_index_name" \
+        "$attribution_index_migration" \
+        "follow the recovery steps in docs/deployment.md (History record attribution indexes), then run the schema-migrations again"
 done
 # Recreate the three address-history match indexes from their preceding schema
 # shape. Compare each resulting catalog definition to the fresh baseline, then
