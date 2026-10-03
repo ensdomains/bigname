@@ -191,7 +191,10 @@ const NAME_DELETE: &str = "/* project:families.derived.name_delete */
 /// `<namespace>:<node>` id indexes, as both relations, the owner facts of the node's F2c row and
 /// the owner and getter every such NewOwner reported, which are the edge's. A registrar
 /// transfer of the node's lease folds under the same id (addresses.rs `fold_key`), so its
-/// recipient, who holds the token while the seller keeps the registry record, is indexed too.
+/// recipient, who holds the token while the seller keeps the registry record until `reclaim`
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L330 @ basenames@1809bbc), is indexed
+/// too.
 const NAME_INSERT: &str = "/* project:families.derived.name_insert */
     WITH registry_children AS (
         SELECT touched.logical_name_id, created.namespace, created.node,
