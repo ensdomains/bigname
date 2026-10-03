@@ -2478,7 +2478,9 @@ with a live ENSv2 entry serves that entry's expiry and the ENSv2 grace, and a
 `.eth` name ENSv1 decides without one resolves to nothing
 ([Expiry and grace](api-v1.md#expiry-and-grace)). Sepolia cut over at block
 `11821680`, when the managed proxy moved to the 2026-10-01 redeploy's
-implementation; Mainnet has not.
+implementation; Mainnet has not. `GET /v1/namespaces/{namespace}` reports the
+state per network as `resolution`
+([namespace route](api-v1-routes.md#get-v1namespacesnamespace)).
 
 ## Verified lookup
 

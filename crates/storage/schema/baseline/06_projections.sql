@@ -682,6 +682,10 @@ CREATE INDEX IF NOT EXISTS project_lifecycle_event_unnamed_lease_idx
       AND original_logical_name_id IS NULL AND decoded_logical_name_id IS NULL;
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_decoded_name_idx
     ON project_lifecycle_event (chain_id, decoded_logical_name_id);
+-- The child reads' released-lease probe of a node with no name surface
+-- (crates/storage/src/families/topology/children_page.rs, RELEASED_LEASE).
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_namehash_idx
+    ON project_lifecycle_event (chain_id, namehash);
 
 -- The name summary writer's work list (crates/project families/derived/summary.rs).
 CREATE INDEX IF NOT EXISTS project_lifecycle_association_target_idx

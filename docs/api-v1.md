@@ -46,7 +46,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
 | `token_id` | decimal-string token id for tokenized registrations/names | `token_id` (unchanged; now defined consistently) |
-| `owner` | who holds the name: the token holder of a name that has a token (an ENSv1 BaseRegistrar lease, a NameWrapper token, including a wrapped subname's, or an ENSv2 registry token), otherwise the registry owner of its node (an unwrapped subname with only a registry record, a registry child with no name row). On a wrapped name it is the NameWrapper token holder, not the NameWrapper contract, and on an unwrapped `.eth` second-level name the BaseRegistrar token holder, not the registry controller. After an ENSv1 `.eth` token transfer without `reclaim`, `owner` is the new holder while `manager` stays the previous registry owner until the holder calls `reclaim` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f); being or becoming that registry owner adds no history under `relation=owner`, while history an address gained by holding the token or by owning a name with no token stays there; omitted on a released name, on an expired emancipated or locked wrapped name, whose owner NameWrapper clears (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L851 @ ens_v1@91c966f), and on a record the admitted Graveyard holds, even while a NameWrapper token of that cleared subname survives (see [upstream divergences](upstream.md)) | `token_holder`, `owner`, `owner_address`, `registry_owner`, `registrant` (removed in v0.3.0; its value is now `owner`) |
+| `owner` | who holds the name: the token holder of a name that has a token (an ENSv1 BaseRegistrar lease, a NameWrapper token, including a wrapped subname's, or an ENSv2 registry token), otherwise the registry owner of its node (an unwrapped subname with only a registry record, a registry child with no name row). On a wrapped name it is the NameWrapper token holder, not the NameWrapper contract, and on an unwrapped `.eth` second-level name the BaseRegistrar token holder, not the registry controller. After an ENSv1 `.eth` token transfer without `reclaim`, `owner` is the new holder while `manager` stays the previous registry owner until the holder calls `reclaim` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f); being or becoming that registry owner adds no history under `relation=owner`, while history an address gained by holding the token or by owning a name with no token stays there; omitted on a released name, including a `.eth` or Basenames registry child with no name row whose registrar lease bigname has released (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc) although its registry record survives: expiry never writes the registry, and the registrar writes it only on a registration other than `registerOnly` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc) or a `reclaim` by a live token's holder or an address it approved (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc), on an expired emancipated or locked wrapped name, whose owner NameWrapper clears (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L851 @ ens_v1@91c966f), on a record the admitted Graveyard holds, even while a NameWrapper token of that cleared subname survives (see [upstream divergences](upstream.md)), and on a registry child with no name row whose registry owner is the NameWrapper contract that named it under a label failing ENSIP-15 normalization: the NameWrapper holds that node for a token holder bigname cannot name (see [Manager](#manager)) | `token_holder`, `owner`, `owner_address`, `registry_owner`, `registrant` (removed in v0.3.0; its value is now `owner`) |
 | `manager` | the account that can change the name's registry record (see [Manager](#manager)) | `effective_controller`, `manager_address` |
 | `relation` | address-to-name relation filter: one or more of the authority relations `owner` (the address is the name's `owner`), `manager` (the address is the name's `manager`), and, on address names and address history, `role_holder` (the address holds an ENSv2 registry role on the name's current registration; not the manager) (comma-separated set); `any` = all authority relations supported on that route; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`), or, on its own and on `GET /v1/addresses/{address}/names` only, `former_owner` (released names whose ended registration the address last held; see [lapsed registration](#lapsed-registration)). `resolves_to` and `former_owner` are not part of `any` and cannot be combined with another relation. `registrant` and `former_registrant` were removed in v0.3.0 and are rejected like any unknown value | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress`; `registrant`; `former_registrant` |
 | `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `role_holder`, `resolves_to`, and `former_owner` values | `relation_facets`, role-specific match arrays |
@@ -60,7 +60,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `registered_at` | start of the current registration, as a decimal string of Unix seconds. A registration is one continuous holding of the name: renewals keep its start, and so does the ENSv1→ENSv2 migration, so a migrated `.eth` second-level name serves its ENSv1 lease's registration time, not `migrated_at`, and a `.eth` name that premigration reserved serves its ENSv1 lease's registration time before and after the [Universal Resolver cutover](glossary.md#universal-resolver-cutover). Only a release (an ENSv1 lease running out past its grace period, or an ENSv2 entry unregistered or expired) followed by a new registration starts a new one. A name with no ENSv1 registrar lease, such as a subname, has no registration time before ENSv2, so its migration's ENSv2 registration starts one | `registration_date` |
 | `created_at` | first observation of the name, as a decimal string of Unix seconds; served only for a name with a name row, so a registry child listed without one omits it | `created_at` (now defined and distinguished from `registered_at`) |
 | `registration_status` | registration/control lifecycle label: `active`, `wrapped`, `registered`, `released`, or `unregistered` | `ControlVector.status`, role-summary `status` |
-| `ens_v1` | on name-shaped rows (name detail, resolver `bound_names`, lookup `profile=detail`, address names, subnames, registry labels, `GET /v1/names` and search): what only ENSv1 holds about the name, `{expires_at, wrapper_state?, wrapper_fuses?}`. Present exactly while the name's `authority` is `ens_v1` or `ens_v0` and omitted otherwise, including on every `ens_v2` row; subname, registry-label, `GET /v1/names` and search rows follow the `authority` they carry. Lookup `profile=feed` records do not carry it | new in v2; replaces the earlier top-level `wrapper_state` and `wrapper_fuses` |
+| `ens_v1` | on name-shaped rows (name detail, resolver `bound_names`, lookup `profile=detail` and `profile=feed`, address names, subnames, registry labels, `GET /v1/names` and search): what only ENSv1 holds about the name, `{expires_at, wrapper_state?, wrapper_fuses?}`. Present exactly while the name's `authority` is `ens_v1` or `ens_v0` and omitted otherwise, including on every `ens_v2` row; subname, registry-label, `GET /v1/names` and search rows follow the `authority` they carry, and lookup `profile=feed` records follow the `authority` of the detail record for the same name, which they do not carry | new in v2; replaces the earlier top-level `wrapper_state` and `wrapper_fuses` |
 | `ens_v1.expires_at` | the name's ENSv1 BaseRegistrar lease expiry as a decimal string of Unix seconds (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L96-L98 @ ens_v1@91c966f), or `null` when the name has no lease, as for every name below a `.eth` second-level name, including a wrapped subname whose only expiry is its NameWrapper entry's. Before the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) it equals the top-level `expires_at` of a `.eth` second-level name; from the cutover a name with a live ENSv2 entry serves that entry's expiry at the top level and keeps the lease date here (see [Expiry and grace](#expiry-and-grace)). A lease has no sentinel expiry, so there is no reason field: `null` only means no lease. Values are exact up to `9223372036854775807` (`i64::MAX`); a lease expiry above it is served as `"9223372036854775807"`. The admitted Sepolia testnet premigration registrar takes a caller-chosen registration duration, so such a lease is reachable there (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L161-L165 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L214-L217 @ ens_v2_sepolia_20260916@366de741). There is no grace field: below `9223372036854775807` the lease's grace deadline is `ens_v1.expires_at` plus 90 days (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f). A saturated `"9223372036854775807"` no longer carries the lease's own expiry, so its grace deadline cannot be recovered from it. Premigration's 62-day continuity bonus makes that deadline equal the top-level `grace_ends_at` when the name is reserved (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/testnet/TestnetV1PremigrationRegistrar.sol:L38-L42 @ ens_v2_sepolia_20260916@366de741), but the alignment is not guaranteed: a reservation can be extended without the BaseRegistrar, for example by the admitted BatchRegistrar, and then the two deadlines differ (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L66-L70 @ ens_v2_sepolia_20260916@366de741) | new in v2 |
 | `wrapper_state` | inside `ens_v1`, and on permission rows and wrapper `restrictions`: bigname's current ENSv1 NameWrapper lifecycle value: [`wrapped`](glossary.md#wrapped-namewrapper-state), [`emancipated`](glossary.md#emancipated-namewrapper-state), or [`locked`](glossary.md#locked-namewrapper-state); omitted when the current name is not in one of those states | raw NameWrapper fuse bitmap |
 | `wrapper_fuses` | inside `ens_v1`, and on permission rows and wrapper `restrictions`: typed summary of the current [expiry-effective NameWrapper fuse word](glossary.md#expiry-effective-namewrapper-fuse-word); present exactly when `wrapper_state` is present | raw NameWrapper fuse bitmap |
@@ -124,6 +124,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
+| `resolution` | on a namespace network, the ENS protocol generation `.eth` resolution follows there: `protocol` is `ens_v2` past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) and `ens_v1` otherwise, with `since_block` the latest Universal Resolver `Upgraded` on the client-facing proxy's path, which dates the current implementation rather than the start of the current `protocol` | new in v2 |
 | `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
@@ -137,7 +138,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_timestamp` | inclusive upper Unix-seconds or RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
 | `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_after` (new) |
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` or `GET /v1/addresses/{address}/names?relation=former_owner` (Unix seconds or RFC 3339) | `expires_before` (new) |
-| `parent` (query) | `GET /v1/names` filter: only names exactly one label below the given name, matched on the normalized name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names stored with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
+| `parent` (query) | `GET /v1/names` and `GET /v1/addresses/{address}/names` filter: only names exactly one label below the given name, matched on the normalized name spelling rather than on the node or registry topology, so a bracketed labelhash label matches only names stored with that bracketed spelling, except the labelhashes of `eth` and `base`, which normalization spells as text. `parent=eth` selects the `.eth` second-level names, the registrar-governed set on both sides of the [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the ENSv1 BaseRegistrar leases labels one level below `eth` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L150 @ ens_v1@91c966f) and the ENSv2 `.eth` registrar registers labels in the `eth` registry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20260916@366de741), so the set holds ENSv1 leases and ENSv2 registrations alike and excludes every subname, wrapped or not. `parent=base.eth` with `namespace=basenames` selects the Basenames second-level names | new in v2 |
 | `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
@@ -679,7 +680,12 @@ sections or route-documented expensive metadata. No route supports
 
 `profile=feed` on `POST /v1/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
-the same name and type as its detail counterpart. Feed does not change reverse
+the same name, type and value as its detail counterpart. Beyond identity,
+`chain_id`, `network`, `status`, `subregistry` on name results, reverse
+`is_primary`/`relations` and `resolution` on `resolves_to` rows, feed carries `expires_at`,
+`expires_at_reason`, `grace_ends_at` and `ens_v1`, so a consumer can render
+expiry and grace without a second request; the other registration, resolver
+and record fields are detail-only. Feed does not change reverse
 lookup pagination semantics: `cursor`, `page_size`, `next_cursor`, and
 `has_more` mean the same thing as detail.
 
@@ -1151,14 +1157,38 @@ name and again when the grace period starts, so reads need no clock; the grace
 state itself is not served, and clients can place the window with `expires_at`
 and `grace_ends_at`.
 `manager` is omitted wherever the address it copies is omitted, such as on a
-released name, and on a wrapped name whose NameWrapper state is unknown (its
+released name, including a registry child with no name row whose registrar lease
+bigname has released. That child's last registry owner can still change its registry
+record
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f),
+but a released name serves no manager. It is
+also omitted on a wrapped name whose NameWrapper state is unknown (its
 fuses or expiry were never observed) or lapsed, where the `manager` relation
 does not list it either. A registry child with no name row serves its registry owner,
 except a child that a NameWrapper or registrar event named only under a label
 failing ENSIP-15 normalization: bigname cannot tell whether NameWrapper holds
 it for a token holder, so, as with its `ens_v1` lifecycle fields, it omits
-`manager` rather than serve the NameWrapper contract. The `manager` relation
-still lists that child for its registry owner (TYR-148).
+`manager` rather than serve the NameWrapper contract. When that child's
+registry owner is the NameWrapper contract that named it, which is what
+NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` leave for a child they
+create
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f),
+the child also omits `owner`, and neither the `owner` nor the `manager`
+relation lists it for the NameWrapper contract. Its token holder is not listed
+for it under either relation and gets no `manager` relation for it: bigname
+does not yet record who holds that token for a child with no name row. Once the
+child's registry record leaves the NameWrapper, as an unwrap returns it to the
+address the holder names
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+or a parent's registry `setSubnodeOwner` reassigns it, the child serves and is
+listed for its new registry owner. A child only a registrar event named is not
+hidden this way: it serves and is listed under both relations for its current
+registry owner, which is the registrant when the registration sets the registry
+record
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+until a `reclaim` or registry transfer moves it
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 
 A name stops being served as wrapped once a registry write moves its record away
 from NameWrapper. A parent owner can reassign a wrapped child's registry record
@@ -2523,7 +2553,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 
 ### LookupRecord
 
-Shared lookup feed/detail record. Detail adds supported registration and grouped resolver fields; reverse records additionally carry matching relations and primary-name information. Feed records omit manager with the other registration fields.
+Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `network`, status, `subregistry` on name results, reverse `is_primary`/`relations`, `resolution` on `resolves_to` rows, `expires_at`, `expires_at_reason`, `grace_ends_at` and `ens_v1` with the detail record's values; detail adds the other registration fields and the resolver and grouped record fields; reverse records additionally carry matching relations and primary-name information. Feed records omit owner, manager and the other registration fields.
 
 <!-- openapi:object LookupRecord -->
 | Field | Type | Presence | Description |
@@ -2555,7 +2585,7 @@ Shared lookup feed/detail record. Detail adds supported registration and grouped
 | `relations` | array of enum Relation | optional | Address-to-name relations that matched the row. |
 | `resolution` | object AddressNameResolution | optional | Single-coin resolver match; present on a decimal-coin `resolves_to` result. |
 | `authority` | enum Authority | optional | Selected authority arm; omitted when none is selected or for an ownerless registry row without a retained registrar binding. |
-| `ens_v1` | object EnsV1 | when ens_v1_authority | What only ENSv1 holds about the name, on `profile=detail` records only; present exactly while its authority is `ens_v1` or `ens_v0`. |
+| `ens_v1` | object EnsV1 | when ens_v1_authority | What only ENSv1 holds about the name, on `profile=detail` and `profile=feed` records alike; present exactly while its authority is `ens_v1` or `ens_v0`, which a feed record does not carry. |
 | `migrated_at` | string | optional | Decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
 | `status` | enum Status | always | Result status; the route defines which outcomes are possible. |
 | `unsupported_reason` | string | when status_unsupported | Open product reason vocabulary explaining an unsupported answer. |
@@ -2625,7 +2655,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `labelhash` | string | optional | Hexadecimal labelhash when the readable label is not known. |
-| `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. |
+| `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names, including a registry child with no name row whose registrar lease bigname has released, on expired emancipated or locked wrapped names, and on a registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization (see Manager). |
 | `manager` | string | optional | Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown. |
 | `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
 | `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
@@ -2648,7 +2678,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `permission_resource_id` | string | optional | Opaque handle for requesting the selected registration's permissions. |
-| `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. |
+| `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. A registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization is not listed for the NameWrapper contract or for its token holder (see Manager), and one whose registrar lease bigname has released is not listed at all. |
 | `manager` | string | optional | Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown. |
 | `registration_status` | enum RegistrationStatus | always | Current registration and control lifecycle label. |
 | `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
@@ -2862,6 +2892,15 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `network` | string | always | Display network slug. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
+| `resolution` | object NamespaceResolution | optional | ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (lookup and collection reads answer `409 stale`). |
+
+### NamespaceResolution
+
+<!-- openapi:object NamespaceResolution -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `protocol` | enum ResolutionProtocol | always | `ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`. |
+| `since_block` | nullable integer | always | Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed. |
 
 ### PermissionRow
 
@@ -3377,7 +3416,7 @@ Extends Envelope.
 | registration_held | The record is full and its registration_status is not unregistered. |
 | wrapper_backed | The name has a current NameWrapper lifecycle value under the expiry-effective fuse rule; wrapper_state and wrapper_fuses appear together. |
 | ens_v1_lifecycle | The row is not an ENSv1 registry child with no current name row that a NameWrapper or registrar event named only under a label failing ENSIP-15 normalization. Such a child's lease and NameWrapper state are kept without a name row, so its object carries no lifecycle fields: no expires_at and no wrapper fields. |
-| ens_v1_authority | The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records and lookup feed records. |
+| ens_v1_authority | The name's served authority is ens_v1 or ens_v0. The object is absent under ens_v2, with no authority, and on identity-only unsupported records. A lookup feed record follows the authority of the detail record for the same name. |
 | migration_proven | The full record selects authority ens_v2 and retains the block time of its latest activated MigrationApplied transition. |
 | name_counts_requested | The request to name detail carries include=counts and the record status is not unsupported. Counts are absent on every unsupported name-level record. |
 | null_expiry | The object contains expires_at with JSON null. Absent expires_at and finite strings do not satisfy this condition. |
@@ -3419,6 +3458,14 @@ vocabularies are marked at their existing canonical tables above.
 | Value |
 | --- |
 | `ens_v0` |
+| `ens_v1` |
+| `ens_v2` |
+
+### ResolutionProtocol
+
+<!-- openapi:enum ResolutionProtocol -->
+| Value |
+| --- |
 | `ens_v1` |
 | `ens_v2` |
 

@@ -183,6 +183,8 @@ fn row(child: FamilyChildRow) -> ChildrenCurrentRow {
         registrant: child.registrant,
         registry_authority: child.registry_authority,
         lifecycle_shadow: child.lifecycle_shadow,
+        wrapper_held: child.wrapper_held,
+        released_lease: child.released_lease,
         provenance: json!({}),
         chain_positions: json!({}),
         canonicality_summary: json!({}),

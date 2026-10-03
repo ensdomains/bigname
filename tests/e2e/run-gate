@@ -3,12 +3,12 @@ set -uo pipefail
 
 # Keep the inventory counts and assignments together. Test-list changes should
 # require edits only in this block; the checks below reject every other drift.
-expected_total=101
-expected_runnable=98
+expected_total=102
+expected_runnable=99
 expected_ignored=3
 shard_count=6
 # Per shard, in shard order.
-expected_shard_runnable=(16 16 16 17 16 17)
+expected_shard_runnable=(16 16 16 17 17 17)
 expected_shard_ignored=(1 1 1 0 0 0)
 
 expected_ignored_tests=(
@@ -102,6 +102,7 @@ shard_5_tests=(
     "harness::fault_proxy::tests::ordered_one_shot_faults_advance_one_response_at_a_time"
     "harness::pipeline::tests::process_log_files_are_unique_for_repeated_labels"
     "harness::pipeline::tests::timeout_configuration_requires_positive_integer_seconds"
+    "scenarios::address_parent::parent_eth_counts_the_eth_registrations_an_address_holds"
     "scenarios::basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones"
     "scenarios::cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage"
     "scenarios::lifecycle::renew_and_transfer_keep_identity"

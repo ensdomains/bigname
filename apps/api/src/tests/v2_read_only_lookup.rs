@@ -3,6 +3,13 @@ use super::*;
 const READ_ONLY_GUARD: &str = "bigname_phase.revalidate_resolution_lookup_state_read_only(text,bigint,text,jsonb,jsonb,uuid,text,text)";
 
 async fn read_only_pool(database: &TestDatabase) -> Result<(PgPool, String)> {
+    read_only_pool_with(database, 2).await
+}
+
+async fn read_only_pool_with(
+    database: &TestDatabase,
+    max_connections: u32,
+) -> Result<(PgPool, String)> {
     let role = format!("readonly_{}", database.database_name);
     sqlx::raw_sql(&format!(
         "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA bigname_phase TO {role};
@@ -14,7 +21,7 @@ async fn read_only_pool(database: &TestDatabase) -> Result<(PgPool, String)> {
     .await?;
     let set_role = format!("SET ROLE {role}");
     let pool = PgPoolOptions::new()
-        .max_connections(2)
+        .max_connections(max_connections)
         .after_connect(move |connection, _| {
             let set_role = set_role.clone();
             Box::pin(async move {
@@ -318,6 +325,41 @@ async fn read_only_connection_reports_misconfigured_non_api_writer() -> Result<(
     assert!(error.message().contains("read-only database"), "{error}");
     join_primary_name_mock_rpc_requests(handle).await?;
     drop(writer);
+    cleanup_role(&database, pool, role).await?;
+    database.cleanup().await
+}
+
+/// The namespace route's resolution read and its publication fence run in one read-only snapshot
+/// on a single connection.
+#[tokio::test]
+async fn read_only_namespace_reports_resolution_on_one_connection() -> Result<()> {
+    let database = TestDatabase::new(true).await?;
+    sync_checked_in_manifests(&database, "sepolia").await?;
+    for (block, upgrade) in [
+        (11821679, (RESOLUTION_TOP, RESOLUTION_MANAGED)),
+        (11821680, (RESOLUTION_MANAGED, RESOLUTION_ADMITTED)),
+    ] {
+        publish_resolution_block(&database.pool, "ethereum-sepolia", block, Some(upgrade)).await?;
+    }
+    let (pool, role) = read_only_pool_with(&database, 1).await?;
+    let state = AppState::new_with_rpc_urls(pool.clone(), bigname_lookup::ChainRpcUrls::default())
+        .with_public_namespaces_for_test(["ens"]);
+    let response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/namespaces/ens")
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{payload:#}");
+    assert_eq!(
+        payload["data"]["networks"],
+        sepolia_network(Some(
+            json!({ "protocol": "ens_v2", "since_block": 11821680 })
+        ))
+    );
     cleanup_role(&database, pool, role).await?;
     database.cleanup().await
 }

@@ -10,7 +10,8 @@
 //!
 //! The registration and expiry times the timestamp sorts and the fence use, the released
 //! status the fence checks and the owner the labels' owner filter reads are the child's name summary (`project_name_summary`), which the
-//! family step writes from the child's composed `declared_summary`.
+//! family step writes from the child's composed `declared_summary`; a child with no name surface
+//! is released when its node's registrar lease is ([`RELEASED_LEASE`]).
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -48,7 +49,39 @@ pub struct FamilyChildRow {
     /// row. A shadow only another observer wrote, such as a resolver `NameChanged`, does not
     /// count ([`LIFECYCLE_SHADOW`]).
     pub lifecycle_shadow: bool,
+    /// A lifecycle shadow whose registry owner is the NameWrapper that observed it: the wrapper
+    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`])
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+    pub wrapper_held: bool,
+    /// The child has no name surface and its node's registrar lease has been released
+    /// ([`RELEASED_LEASE`]).
+    pub released_lease: bool,
 }
+
+/// Whether the child has no name surface at the clock (the joined surface fails
+/// `registry_children::published_surface_exists`, whose canonicality tests
+/// [`CHILD_SURFACE_FILTER`] already applies) and the newest retained ENSv1 or Basenames
+/// registrar lifecycle event of its node at or below the clock is a `RegistrationReleased`.
+/// Interpret releases a lease at the first block past its grace, unnamed while no surface names
+/// the node (crates/adapters/src/schema_v2.rs, `settle_block_boundary`), and orders it before
+/// every transaction of that block, so a re-registration there is newer. A child with a name
+/// surface serves its name row's own registration. The probe reads
+/// `project_lifecycle_event_namehash_idx`.
+const RELEASED_LEASE: &str = "CASE WHEN child_surface.visibility_state = 'active'
+              AND child_surface.raw_name <> ''
+              AND child_surface.block_number <= clock.block_number THEN FALSE
+         ELSE COALESCE((
+             SELECT lease.event_kind = 'RegistrationReleased'
+             FROM bigname_phase.project_lifecycle_event lease
+             WHERE lease.chain_id = clock.chain_id
+               AND lease.namehash = lower(selected.namehash)
+               AND lease.state_kind = 'resource'
+               AND lease.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
+               AND lease.block_number <= clock.block_number
+             ORDER BY lease.block_number DESC, lease.transaction_index DESC NULLS LAST,
+                      lease.log_index DESC NULLS LAST, lease.event_identity COLLATE \"C\" DESC
+             LIMIT 1), FALSE)
+    END";
 
 /// Whether the child's only surface is a shadow one at or below the clock that a lifecycle
 /// observer named: the NameWrapper (`ens_v1_wrapper_l1`, `NameWrapped`) or the ENSv1 registrar
@@ -68,6 +101,27 @@ const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shado
                AND observed.event_kind = 'PreimageObserved'
                AND observed.consumer_visibility = 'activated'
                AND observed.source_family IN ('ens_v1_wrapper_l1', 'ens_v1_registrar_l1')),
+         FALSE)";
+
+/// Whether the child's only surface is a shadow one at or below the clock that a NameWrapper
+/// observed, and its served registry owner is that NameWrapper. NameWrapper takes the registry
+/// record of a child it creates or wraps
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f), and
+/// an unwrap or a parent's registry `setSubnodeOwner` moves it out again
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+const WRAPPER_HELD: &str = "COALESCE(child_surface.visibility_state = 'shadow'
+         AND child_surface.block_number <= clock.block_number
+         AND EXISTS (
+             SELECT 1 FROM bigname_phase.normalized_events observed
+             WHERE observed.logical_name_id = selected.child_logical_name_id
+               AND observed.chain_id = clock.chain_id
+               AND observed.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND observed.block_number <= clock.block_number
+               AND observed.event_kind = 'PreimageObserved'
+               AND observed.consumer_visibility = 'activated'
+               AND observed.source_family = 'ens_v1_wrapper_l1'
+               AND lower(observed.raw_fact_ref ->> 'emitting_address') = selected.owner),
          FALSE)";
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
@@ -335,7 +389,8 @@ pub(super) fn push_children<'a>(
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    selected.registry_authority,
-                   {LIFECYCLE_SHADOW} AS lifecycle_shadow,
+                   {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
+                   {RELEASED_LEASE} AS released_lease,
                    {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
@@ -370,10 +425,10 @@ pub(super) fn push_children<'a>(
     }
     if !filter.include_expired {
         // A child with no name summary, no registration or no expiry is not expired.
-        builder.push(
+        builder.push(format!(
             " AND COALESCE(summary.registration_status, '') <> 'released' \
-             AND COALESCE(summary.expires_at >= ",
-        );
+             AND NOT {RELEASED_LEASE} AND COALESCE(summary.expires_at >= "
+        ));
         match filter.evaluated_at {
             Some(evaluated_at) => {
                 builder.push_bind(UnixSeconds::from(evaluated_at));
@@ -403,6 +458,8 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             registrant: row.try_get("registrant")?,
             registry_authority: row.try_get("registry_authority")?,
             lifecycle_shadow: row.try_get("lifecycle_shadow")?,
+            wrapper_held: row.try_get("wrapper_held")?,
+            released_lease: row.try_get("released_lease")?,
         },
         row.try_get("sort_timestamp")?,
     )))

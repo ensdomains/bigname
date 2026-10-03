@@ -303,7 +303,23 @@ pub(crate) fn build_subname(
         Some(_) => ens_v1_of_row(name_row)?,
         None => ens_v1_of_registry_child(authority, row.lifecycle_shadow)?,
     };
-    // A child with no name row serves its registry owner, or an ENSv2 child its token holder.
+    // A child with no name row serves its registry owner, or an ENSv2 child its token holder,
+    // but not the NameWrapper holding it for a token holder bigname does not record
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
+    // and nobody once its lease is released, though expiry leaves the registry record in
+    // place: the registrar writes it only on a registration other than `registerOnly`
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc)
+    // or a `reclaim` by a live token's holder or an address it approved
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc).
     let (owner, manager) = match name_row {
         Some(name) => {
             let linked = registration
@@ -326,9 +342,13 @@ pub(crate) fn build_subname(
             });
             (registration.owner.or(linked), manager)
         }
+        None if row.released_lease => (None, None),
         None => {
             let owner = row.owner.clone().or_else(|| row.registrant.clone());
-            (owner.clone(), owner.filter(|_| !row.lifecycle_shadow))
+            (
+                owner.clone().filter(|_| !row.wrapper_held),
+                owner.filter(|_| !row.lifecycle_shadow),
+            )
         }
     };
 
@@ -340,7 +360,12 @@ pub(crate) fn build_subname(
         labelhash: row.labelhash.clone(),
         owner,
         manager,
-        registration_status: registration.registration_status,
+        // A child with no name row whose lease was released describes that lapsed registration.
+        registration_status: if name_row.is_none() && row.released_lease {
+            RegistrationStatus::Released
+        } else {
+            registration.registration_status
+        },
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,

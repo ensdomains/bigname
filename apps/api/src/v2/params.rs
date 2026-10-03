@@ -79,7 +79,8 @@ pub(crate) struct QueryParams {
     pub(crate) exclude_owner: Option<String>,
     pub(crate) relation: Option<RelationSet>,
     pub(crate) authority: Option<AuthoritySet>,
-    /// `GET /v1/names`'s `parent` as sent; the route normalizes it.
+    /// `parent` as sent; `GET /v1/names` and `GET /v1/addresses/{address}/names` normalize it
+    /// (`names::normalize_parent`).
     pub(crate) parent: Option<String>,
     pub(crate) is_migrated: Option<bool>,
     pub(crate) from_block: Option<i64>,

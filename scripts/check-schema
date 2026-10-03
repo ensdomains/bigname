@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=333
+expected_refusal_assertions=356
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=60
+expected_predecessor_shape_proof_count=62
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -657,6 +657,12 @@ check_served_projection_removal() {
             fi
             emit_phase_migration "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
+            fi
+            emit_phase_migration "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -784,7 +790,9 @@ for migration_file in \
     "$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql" \
     "$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql" \
     "$ROOT/migrations/20261001150000_lookup_guard_configured_publication_lag.sql" \
-    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql"
+    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
+    "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1126,7 +1134,9 @@ for migration_file in \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
-    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql"
+    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -2150,6 +2160,13 @@ check_lookahead_index_migration "$basenames_lookahead_migration" absent-from-fix
 check_lookahead_index_migration "$v2_lookahead_migration" absent-from-fixture 2 3 \
     normalized_events_v2_lookahead_probe_idx normalized_events_v2_direct_node_probe_idx \
     normalized_events_v2_key_probe_idx normalized_events_v2_due_probe_idx
+attribution_index_migration="$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql"
+attribution_index_names=(
+    normalized_events_record_id_write_idx
+    normalized_events_record_id_link_idx
+)
+check_lookahead_index_migration "$attribution_index_migration" absent-from-fixture 2 3 \
+    "${attribution_index_names[@]}"
 # The live prebuild in ops/v1-lookahead-indexes/install.sql builds all eight
 # indexes in one file. For each in turn it must build the baseline definition, refuse
 # an invalid index, a valid index with other keys, a valid index whose JSON
@@ -2214,9 +2231,9 @@ assert_index_install_hint v1-lookahead-index-on-another-table-hint \
 # inside a transaction that rolls back, and require the schema-migration to
 # fail rather than record success. The expected definition it names must be how
 # the fresh-baseline index prints, read under search_path pg_catalog.
-v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
-for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
-    lookahead_migration="${lookahead_index_migration[$v1_lookahead_index_name]}"
+assert_reviewed_index_migration_refusals() {
+    local v1_lookahead_index_name="$1" lookahead_migration="$2" v1_lookahead_recovery="$3"
+    local v1_lookahead_reviewed_definition v1_lookahead_found_definition
     assert_migration_refusal "invalid-$v1_lookahead_index_name" \
         "$lookahead_migration" \
         "$v1_lookahead_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $v1_lookahead_recovery" <<SQL
@@ -2287,7 +2304,7 @@ SQL
     # after_state ->> '<schema>.expiry' and the like, which is NULL for every
     # real row.
     if [ -n "${lookahead_index_json_key_literals[$v1_lookahead_index_name]:-}" ]; then
-        continue
+        return
     fi
     v1_lookahead_found_definition="${v1_lookahead_reviewed_definition//->> \'/->> \'$scratch_schema.}"
     if [ "$v1_lookahead_found_definition" = "$v1_lookahead_reviewed_definition" ]; then
@@ -2299,6 +2316,80 @@ SQL
         "$v1_lookahead_index_name exists but does not have the reviewed definition; found \"$v1_lookahead_found_definition\", expected \"$v1_lookahead_reviewed_definition\"; $v1_lookahead_recovery" <<SQL
 DROP INDEX $v1_lookahead_index_name;
 $v1_lookahead_found_definition;
+SQL
+}
+v1_lookahead_recovery="follow the recovery steps in $v1_lookahead_readme, then run the schema-migrations again"
+for v1_lookahead_index_name in "${v1_lookahead_index_names[@]}"; do
+    assert_reviewed_index_migration_refusals "$v1_lookahead_index_name" \
+        "${lookahead_index_migration[$v1_lookahead_index_name]}" "$v1_lookahead_recovery"
+done
+for attribution_index_name in "${attribution_index_names[@]}"; do
+    assert_reviewed_index_migration_refusals "$attribution_index_name" \
+        "$attribution_index_migration" \
+        "follow the recovery steps in docs/deployment.md (History record attribution indexes), then run the schema-migrations again"
+done
+# The released-lease probe index on project_lifecycle_event: dropped from the fresh
+# baseline, the schema-migration rebuilds the baseline definition and accepts it on a
+# rerun, and it refuses an invalid, unready, misplaced or differently defined relation
+# under its name.
+lifecycle_namehash_migration="$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
+lifecycle_namehash_index=project_lifecycle_event_namehash_idx
+lifecycle_namehash_recovery="follow the recovery steps in docs/deployment.md (Released registrar children), then run the schema-migrations again"
+lifecycle_namehash_unready="$lifecycle_namehash_index exists but is not a valid and ready index on $scratch_schema.project_lifecycle_event; $lifecycle_namehash_recovery"
+lifecycle_namehash_reviewed="CREATE INDEX $lifecycle_namehash_index ON $scratch_schema.project_lifecycle_event USING btree (chain_id, namehash)"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+CREATE TEMP TABLE expected_lifecycle_namehash_index AS
+SELECT pg_get_indexdef('$lifecycle_namehash_index'::regclass) AS definition;
+DROP INDEX $lifecycle_namehash_index;
+SQL
+    emit_phase_migration "$lifecycle_namehash_migration" preceding-shape
+    emit_phase_migration "$lifecycle_namehash_migration" baseline-first
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM expected_lifecycle_namehash_index expected
+        JOIN pg_index ON pg_index.indexrelid = '$lifecycle_namehash_index'::regclass
+        WHERE pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION '$(basename "$lifecycle_namehash_migration") upgrade differs from the baseline';
+    END IF;
+END \$\$;
+DROP TABLE expected_lifecycle_namehash_index;
+SQL
+} | run_psql
+for lifecycle_namehash_flag in indisvalid indisready; do
+    assert_migration_refusal "$lifecycle_namehash_flag-$lifecycle_namehash_index" \
+        "$lifecycle_namehash_migration" "$lifecycle_namehash_unready" <<SQL
+UPDATE pg_index SET $lifecycle_namehash_flag = false
+WHERE indexrelid = '$lifecycle_namehash_index'::regclass;
+SQL
+done
+for lifecycle_namehash_kind in table view; do
+    assert_migration_refusal "$lifecycle_namehash_kind-named-$lifecycle_namehash_index" \
+        "$lifecycle_namehash_migration" \
+        "$scratch_schema.$lifecycle_namehash_index is a $lifecycle_namehash_kind, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $lifecycle_namehash_index;
+CREATE $lifecycle_namehash_kind $lifecycle_namehash_index $( [ "$lifecycle_namehash_kind" = table ] && printf '()' || printf 'AS SELECT 1 AS occupied' );
+SQL
+done
+assert_migration_refusal "other-table-$lifecycle_namehash_index" \
+    "$lifecycle_namehash_migration" "$lifecycle_namehash_unready" <<SQL
+DROP INDEX $lifecycle_namehash_index;
+CREATE INDEX $lifecycle_namehash_index ON discovery_edges (chain_id);
+SQL
+for lifecycle_namehash_found in \
+    "CREATE INDEX $lifecycle_namehash_index ON $scratch_schema.project_lifecycle_event USING btree (namehash, chain_id)" \
+    "$lifecycle_namehash_reviewed WHERE (namehash IS NOT NULL)"
+do
+    assert_migration_refusal "wrong-definition-$lifecycle_namehash_index" \
+        "$lifecycle_namehash_migration" \
+        "$lifecycle_namehash_index exists but does not have the reviewed definition; found \"$lifecycle_namehash_found\", expected \"$lifecycle_namehash_reviewed\"; $lifecycle_namehash_recovery" <<SQL
+DROP INDEX $lifecycle_namehash_index;
+$lifecycle_namehash_found;
 SQL
 done
 # Recreate the three address-history match indexes from their preceding schema

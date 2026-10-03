@@ -338,7 +338,8 @@ async fn v2_namespace_ens_uses_the_checked_in_sepolia_capability_aggregate() -> 
     }
     assert_eq!(
         payload["data"]["networks"],
-        json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }])
+        json!([{ "network": "ethereum-sepolia", "chain_id": 11155111 }]),
+        "no family publication, so no resolution"
     );
     // The checked-in Sepolia profile declares the ENS execution entrypoint and the ENSv1
     // registry, so both verified capabilities turn on the moment a Sepolia provider is
@@ -512,6 +513,7 @@ include!("tests/v2_list_cursor.rs");
 include!("tests/v2_collection_cursor_completion.rs");
 include!("tests/v2_family_children.rs");
 include!("tests/v2_family_registry_children.rs");
+include!("tests/v2_address_names_parent.rs");
 include!("tests/v2_bracketed_labelhash_names.rs");
 include!("tests/v2_family_name_publication_changes.rs");
 include!("tests/v2_family_name_recompute.rs");
