@@ -648,7 +648,7 @@ text alone never authorizes that transition. This preserved evidence is
 diagnostic state, not permission to publish: policy-based Sepolia readiness
 requires both Ingest and Verify to remain completed.
 
-At runner startup, and before an explicit Ingest redo begins while a required Ingest
+At runner startup, and before a `--phase ingest` redo begins while a required Ingest
 redo is pending, a `running` or `paused` Interpret, Project, or Verify row with no
 explicit redo is resolved only while its advisory lock remains held. A required Ingest
 redo whose `last_error` begins with `required downstream redo active:` and outlived its

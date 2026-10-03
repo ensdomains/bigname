@@ -2297,7 +2297,9 @@ its Project or Interpret row `running`, and the
 `cannot start phase ingest ... while phase project is running`. On an older
 build, instead of editing `chain_phase_state` by hand, start the supervisor
 once from the same image that ran the refused redo, so that its start-up
-manifest synchronization changes nothing. Its start-up recovery settles the
-row, and the chain then stops on the required Ingest work. Any other configured
-chain keeps following, so stop the supervisor gracefully within its grace
-period, then rerun the same Ingest redo.
+manifest synchronization installs no new required work or authority marker.
+Its start-up recovery settles the row, and the chain then stops on the required
+Ingest work. Compose restarts an exited supervisor and other configured chains
+run their unattended work, so once that error is logged, stop the service with
+`docker compose stop phase-runner` within its grace period, then rerun the same
+Ingest redo.
