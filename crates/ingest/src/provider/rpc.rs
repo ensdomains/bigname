@@ -471,6 +471,9 @@ fn range_too_large(error: &anyhow::Error) -> bool {
         "block range exceeds",
         "exceeds server limit",
         "narrow your filter",
+        // "-32602: Logs request reads 99751 blocks without the log index, over the maximum of
+        // 10000 per request."
+        "without the log index",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -506,6 +509,9 @@ mod range_limit_tests {
             "provider returned JSON-RPC error for eth_getLogs: -32005: query returned more than 10000 results",
             "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 131072 exceeds the maximum of 10000 blocks per logs request. Use a narrower fromBlock/toBlock range or increase Receipt.MaxBlockDepth.",
             "provider returned JSON-RPC error for eth_getLogs: -32602: Block range 8192 exceeds the maximum of 1000 blocks per logs request.",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Logs request reads 99751 blocks without the log index, over the maximum of 10000 per request. Use a narrower fromBlock/toBlock range or increase Receipt.MaxBlockDepth.",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Logs request reads 41414 blocks without the log index, over the maximum of 10000 per request. Use a narrower fromBlock/toBlock range or increase Receipt.MaxBlockDepth.",
+            "provider returned JSON-RPC error for eth_getLogs: -32602: Logs request reads 49963 blocks without the log index, over the maximum of 10000 per request. Use a narrower fromBlock/toBlock range or increase Receipt.MaxBlockDepth.",
         ] {
             assert!(range_too_large(&anyhow::anyhow!(message)), "{message}");
         }
