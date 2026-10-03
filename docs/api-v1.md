@@ -1162,7 +1162,7 @@ registry owner is the NameWrapper contract that named it, which is what
 NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` leave for a child they
 create
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L621 @ ens_v1@91c966f),
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f),
 the child also omits `owner`, and neither the `owner` nor the `manager`
 relation lists it for the NameWrapper contract. Its token holder is not listed
 for it under either relation and gets no `manager` relation for it: bigname
@@ -1171,10 +1171,13 @@ child's registry record leaves the NameWrapper, as an unwrap returns it to the
 address the holder names
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 or a parent's registry `setSubnodeOwner` reassigns it, the child serves and is
-listed for its new registry owner. A child only a registrar event named keeps
-its registrant, who is its registry owner
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
-as `owner` and under both relations.
+listed for its new registry owner. A child only a registrar event named is not
+hidden this way: it serves and is listed under both relations for its current
+registry owner, which is the registrant when the registration sets the registry
+record
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+until a `reclaim` or registry transfer moves it
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 
 One known gap remains. A parent owner can reassign a wrapped child's registry
 record with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`

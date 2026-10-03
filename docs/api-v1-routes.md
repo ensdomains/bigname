@@ -1761,6 +1761,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   in the registry and give the token to a holder bigname does not record for a
   child with no name row
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
   (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
   owner and is listed only while it has a serving resource. An unmasked 2017
@@ -3392,8 +3393,13 @@ introduces it rebuilds Project from full history before serving the option; see
   contract that named it is not listed for the NameWrapper contract under any
   relation, and its token holder is not listed for it either; once its registry
   record leaves the NameWrapper it is listed for its new registry owner (see
-  [Manager](api-v1.md#manager)).
-  `relation=owner` and `relation=manager` each list it; `authority` matches
+  [Manager](api-v1.md#manager)). A known residual: a child the NameWrapper once
+  named whose registry record is later handed back to the NameWrapper address
+  by a plain registry `setOwner` or `setSubnodeOwner`, with no new wrap, also
+  stays unlisted for the NameWrapper contract, although no token exists for it
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
+  Every other registry child described here is listed under both
+  `relation=owner` and `relation=manager`; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A

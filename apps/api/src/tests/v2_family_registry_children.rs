@@ -4,10 +4,9 @@
 
 const RC_OWNER: &str = "0x00000000000000000000000000000000000000d1";
 const RC_BUYER: &str = "0x00000000000000000000000000000000000000d2";
-/// The NameWrapper, a registrar controller and a resolver, as the emitters of shadow observations.
+/// The NameWrapper and a registrar controller, as the emitters of shadow observations.
 const RC_WRAPPER: &str = "0x00000000000000000000000000000000000000d3";
 const RC_CONTROLLER: &str = "0x00000000000000000000000000000000000000d4";
-const RC_RESOLVER: &str = "0x00000000000000000000000000000000000000d5";
 
 /// A registry NewOwner under `parent` for `label` to `owner` at `block`, carrying the child
 /// node's registry-only resource as the adapter does. Returns the child node.
@@ -563,15 +562,17 @@ fn served_child<'a>(rows: &'a [Value], node: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("{node} is served: {rows:#?}"))
 }
 
-/// The address-names rows of `address` with no relation filter and under `relation=owner` and
-/// `relation=manager`, each with the `relations` a row listed for both would match.
+/// The address-names rows and `total_count` of `address` with no relation filter and under
+/// `relation=any`, `relation=owner` and `relation=manager`, each with the `relations` a row
+/// listed for both would match.
 async fn address_rows_by_relation(
     database: &TestDatabase,
     address: &str,
-) -> Result<Vec<(Value, Vec<Value>)>> {
+) -> Result<Vec<(Value, Vec<Value>, Value)>> {
     let mut by_relation = Vec::new();
     for (relation, matched) in [
         ("", json!(["owner", "manager"])),
+        ("&relation=any", json!(["owner", "manager"])),
         ("&relation=owner", json!(["owner"])),
         ("&relation=manager", json!(["manager"])),
     ] {
@@ -580,7 +581,7 @@ async fn address_rows_by_relation(
             &format!("/v1/addresses/{address}/names?namespace=ens&page_size=10{relation}"),
         )
         .await?;
-        by_relation.push((matched, rows_of(&pages)));
+        by_relation.push((matched, rows_of(&pages), pages[0]["total_count"].clone()));
     }
     Ok(by_relation)
 }
@@ -641,11 +642,12 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     // An admitted PublicResolver's `setName` takes any string for a node its caller controls
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f),
     // so a reverse record can name the registry child under a label that fails normalization.
+    // Its emitter is the child's registry owner: only a NameWrapper observation hides a child.
     insert_shadow_child_surface(
         &database,
         named,
         "Named",
-        ("ens_v1_resolver_l1", RC_RESOLVER),
+        ("ens_v1_resolver_l1", RC_OWNER),
         "NameChanged",
         203,
     )
@@ -696,8 +698,9 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     .await?;
     publish_test_families(&database, 240).await?;
 
-    for (relation, rows) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
         assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
     }
     let rows = rows_of(
         &read_family_pages(
@@ -781,7 +784,7 @@ async fn v2_registrar_shadow_child_stays_listed_for_its_registrant() -> Result<(
     .await?;
     publish_test_families(&database, 240).await?;
 
-    for (relation, rows) in address_rows_by_relation(&database, RC_OWNER).await? {
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_OWNER).await? {
         let row = served_child(&rows, &leased);
         assert_eq!(row["relations"], relation, "{row:#}");
         assert_eq!(row["owner"], json!(RC_OWNER), "{relation}: {row:#}");
@@ -852,10 +855,11 @@ async fn v2_wrapper_shadow_child_follows_its_registry_owner_out_of_the_wrapper()
     .await?;
     publish_test_families(&database, 240).await?;
 
-    for (relation, rows) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
         assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
     }
-    for (relation, rows) in address_rows_by_relation(&database, RC_BUYER).await? {
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_BUYER).await? {
         let row = served_child(&rows, &wrapped);
         assert_eq!(row["relations"], relation, "{row:#}");
         assert_eq!(row["owner"], json!(RC_BUYER), "{relation}: {row:#}");

@@ -78,7 +78,8 @@ const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shado
 /// record of a child it creates or wraps
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f), and
 /// an unwrap or a parent's registry `setSubnodeOwner` moves it out again
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
 const WRAPPER_HELD: &str = "COALESCE(child_surface.visibility_state = 'shadow'
          AND child_surface.block_number <= clock.block_number
          AND EXISTS (
