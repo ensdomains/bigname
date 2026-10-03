@@ -75,8 +75,11 @@ pub(super) async fn compose_registry_child_rows(
     }
     let mut rows = Vec::new();
     for (chain_id, (published_block, ids)) in by_chain {
-        let children =
+        let mut children =
             load_owned_registry_children(conn, &chain_id, address, &ids, published_block).await?;
+        // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
+        // address index does not record; the child is listed for neither.
+        children.retain(|child| !child.wrapper_held);
         if children.is_empty() {
             continue;
         }

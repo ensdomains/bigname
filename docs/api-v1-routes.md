@@ -1755,7 +1755,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry child with no current name row serves its node's current registry
   owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
-  `NewOwner` moves it. A child whose registry owner is the zero address, one
+  `NewOwner` moves it. A child whose registry owner is the NameWrapper
+  contract that named it under a label failing ENSIP-15 normalization omits
+  `owner`: NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take the node
+  in the registry and give the token to a holder bigname does not record for a
+  child with no name row
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+  (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
   owner and is listed only while it has a serving resource. An unmasked 2017
   registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
@@ -3382,8 +3388,11 @@ introduces it rebuilds Project from full history before serving the option; see
   fails ENSIP-15 normalization: its lease and NameWrapper state are projected
   without a name row, so, as the subnames route serves it, its `ens_v1` object
   carries no lifecycle fields, no `expires_at` and no wrapper fields, and the
-  row omits `manager` while still listing it with `relations: ["owner",
-  "manager"]` (see [Manager](api-v1.md#manager)).
+  row omits `manager`. Such a child whose registry owner is the NameWrapper
+  contract that named it is not listed for the NameWrapper contract under any
+  relation, and its token holder is not listed for it either; once its registry
+  record leaves the NameWrapper it is listed for its new registry owner (see
+  [Manager](api-v1.md#manager)).
   `relation=owner` and `relation=manager` each list it; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
