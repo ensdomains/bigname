@@ -26,6 +26,8 @@ pub(super) fn build_forward_detail_record(
     build_detail_record(record, "60", None, Vec::new())
 }
 
+/// A feed record: the identity fields plus the expiry fields and `ens_v1`, composed from the
+/// row exactly as the detail record and `GET /v1/names` compose them.
 pub(super) fn build_forward_feed_record(
     record: &bigname_storage::IdentityNameRecordRow,
 ) -> V2Result<LookupRecord> {
@@ -34,6 +36,8 @@ pub(super) fn build_forward_feed_record(
     if let Some(record) = authority_unsupported_record(record, status, unsupported_reason.clone()) {
         return Ok(record);
     }
+    let registration =
+        name_record::identity_name_registration_fields(Some(&record.row), &record.row.namespace);
     Ok(LookupRecord {
         name: record.row.normalized_name.clone(),
         display_name: record.row.canonical_display_name.clone(),
@@ -45,9 +49,9 @@ pub(super) fn build_forward_feed_record(
         manager: None,
         registered_at: None,
         created_at: None,
-        expires_at: None,
-        expires_at_reason: None,
-        grace_ends_at: None,
+        expires_at: registration.expires_at,
+        expires_at_reason: registration.expires_at_reason,
+        grace_ends_at: registration.grace_ends_at,
         registration_status: None,
         lapsed_registration: None,
         resolver: None,
@@ -66,7 +70,10 @@ pub(super) fn build_forward_feed_record(
         relations: Vec::new(),
         resolution: None,
         authority: None,
-        ens_v1: None,
+        ens_v1: name_record::ens_v1(
+            Authority::from_provenance(&record.row.provenance),
+            &record.row.declared_summary,
+        )?,
         migrated_at: None,
         status,
         unsupported_reason,
@@ -89,53 +96,12 @@ pub(super) fn build_reverse_detail_record(
 pub(super) fn build_reverse_feed_record(
     record: &bigname_storage::ReverseIdentityRecordRow,
 ) -> V2Result<LookupRecord> {
-    let status = identity_record_status(&record.name_record.row.coverage);
-    let unsupported_reason =
-        identity_record_unsupported_reason(&record.name_record.row.coverage, status)?;
-    if let Some(record) =
-        authority_unsupported_record(&record.name_record, status, unsupported_reason.clone())
-    {
-        return Ok(record);
+    let mut built = build_forward_feed_record(&record.name_record)?;
+    if built.status != Status::Unsupported {
+        built.is_primary = Some(reverse_identity_is_primary(record));
+        built.relations = lookup_relations(&record.relation_facets);
     }
-    Ok(LookupRecord {
-        name: record.name_record.row.normalized_name.clone(),
-        display_name: record.name_record.row.canonical_display_name.clone(),
-        namespace: record.name_record.row.namespace.clone(),
-        namehash: record.name_record.row.namehash.clone(),
-        registration_id: None,
-        token_id: None,
-        owner: None,
-        manager: None,
-        registered_at: None,
-        created_at: None,
-        expires_at: None,
-        expires_at_reason: None,
-        grace_ends_at: None,
-        registration_status: None,
-        lapsed_registration: None,
-        resolver: None,
-        unresolvable_reason: None,
-        subregistry: None,
-        records: None,
-        abi_source: None,
-        primary_name: None,
-        primary_address: None,
-        chain_id: chain_id_from_positions(&record.name_record.row.chain_positions),
-        network: Some(network_from_parts(
-            &record.name_record.row.namespace,
-            &record.name_record.row.chain_positions,
-        )),
-        is_primary: Some(reverse_identity_is_primary(record)),
-        relations: lookup_relations(&record.relation_facets),
-        resolution: None,
-        authority: None,
-        ens_v1: None,
-        migrated_at: None,
-        status,
-        unsupported_reason,
-        failure_reason: identity_record_failure_reason(&record.name_record.row.coverage, status)?,
-        unsupported_fields: Vec::new(),
-    })
+    Ok(built)
 }
 
 pub(super) fn lookup_address_status(records: &[LookupRecord]) -> Status {
