@@ -2298,8 +2298,10 @@ its Project or Interpret row `running`, and the
 build, instead of editing `chain_phase_state` by hand, start the supervisor
 once from the same image that ran the refused redo, so that its start-up
 manifest synchronization installs no new required work or authority marker.
-Its start-up recovery settles the row, and the chain then stops on the required
-Ingest work. Compose restarts an exited supervisor and other configured chains
-run their unattended work, so once that error is logged, stop the service with
-`docker compose stop phase-runner` within its grace period, then rerun the same
-Ingest redo.
+Its start-up recovery settles the row, and the chain then stops with the
+required Ingest error (`manifest watch plan widened over already-ingested
+blocks ...`). Compose restarts an exited supervisor and other configured chains
+run their unattended work, so once that error is logged, stop the
+`phase-runner` service with the runbook's `docker compose --env-file
+.env.server -f docker-compose.server.yml stop phase-runner` within its grace
+period, then rerun the same Ingest redo.
