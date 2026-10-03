@@ -721,6 +721,72 @@ async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() 
     Ok(())
 }
 
+/// The parent's owner deletes a subname wrapped without `PARENT_CANNOT_CONTROL` by setting its
+/// registry owner to zero. The NameWrapper no longer holds the record, so the name has no owner
+/// and the old token holder is listed under nothing, even after moving the stale token.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_parent_deleting_a_wrapped_subname_serves_no_owner() -> TestResult {
+    let database = family_database("interpret_wrapped_sub_deleted").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    insert_lineage(pool, LATER_BLOCK, MIGRATION_BLOCK + 1).await?;
+    insert_transaction(pool, LATER_BLOCK, OWNER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK,
+        0,
+        ENS_REGISTRY,
+        ens_registry::NewOwner {
+            node: fixture.namehash,
+            label: fixture.sub_label,
+            owner: Address::ZERO,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_lineage(pool, LATER_BLOCK + 1, MIGRATION_BLOCK + 2).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, NAME_WRAPPER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        NAME_WRAPPER,
+        TransferSingle {
+            operator: sub_owner,
+            from: sub_owner,
+            to: DAVE.parse::<Address>()?,
+            id: fixture.sub_token(),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    run(pool, SETUP_BLOCK, LATER_BLOCK + 1, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    for mode in [FamilyMode::Rebuild, FamilyMode::Normal] {
+        let run = format!("{mode:?}");
+        publish(pool, LATER_BLOCK + 1, mode).await?;
+        let served = summary(pool, &fixture.sub_id).await?;
+        assert_eq!(served["control"]["owner"], Value::Null, "{run}: {served:#}");
+        assert!(
+            !served.to_string().contains("wrapper_state"),
+            "{run}: {served:#}"
+        );
+        for holder in [SUB_OWNER, DAVE] {
+            let relations = address_relations(pool, holder, &fixture.sub_id).await?;
+            assert!(relations.is_empty(), "{run}: {holder}: {relations:?}");
+        }
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// A wrapped subname unwrapped to its holder, whose registry record that holder then gives to
 /// another owner, is owned by the new registry owner: the closed NameWrapper binding's token
 /// names no registrant of the registry-only binding that follows it.

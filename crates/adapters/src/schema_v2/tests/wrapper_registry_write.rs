@@ -434,3 +434,203 @@ fn name_wrapper_set_subnode_record_over_a_wrapped_child_keeps_the_wrapper() -> a
     assert_eq!(moved.after_state["to"], NEXT_HOLDER);
     Ok(())
 }
+
+#[test]
+fn a_parents_zero_owner_write_over_a_wrapped_child_ends_the_wrapper_authority() -> anyhow::Result<()>
+{
+    let mut logs = wrapped_child();
+    logs.push(parent_sets_owner(3, 0, ZERO_ADDRESS));
+    logs.push(token_transfer(4, 0, HOLDER, NEXT_HOLDER));
+    let events = interpret(logs)?;
+    let wrapper = wrapper_resource(&events);
+
+    let transferred =
+        find(&events, 3, 0, "AuthorityTransferred").expect("the parent's write clears the owner");
+    assert!(transferred.after_state["authority_kind"].is_null());
+    assert_eq!(
+        find(&events, 3, 0, "SurfaceUnbound").and_then(|event| event.resource_id),
+        Some(wrapper)
+    );
+    assert_eq!(
+        resource_control(&events, 3, wrapper, HOLDER),
+        Some(json!([]))
+    );
+    assert!(
+        in_block(&events, 4).is_empty(),
+        "the stale token's transfer moves nothing: {:#?}",
+        in_block(&events, 4)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_name_wrappers_unwrap_to_zero_keeps_the_wrapper_until_name_unwrapped() -> anyhow::Result<()> {
+    // `setRecord(node, 0, …)`: the record is rewritten to the NameWrapper, then `_unwrap(node, 0)`
+    // burns the token, clears the registry owner and emits `NameUnwrapped`.
+    let mut logs = wrapped_child();
+    logs.extend([
+        registry_transfer(3, 0, NAME_WRAPPER),
+        token_transfer(3, 1, HOLDER, ZERO_ADDRESS),
+        registry_transfer(3, 2, ZERO_ADDRESS),
+        name_unwrapped(3, 3, ZERO_ADDRESS),
+    ]);
+    let events = interpret(logs)?;
+
+    let epochs = in_block(&events, 3)
+        .into_iter()
+        .filter(|event| event.event_kind == "AuthorityEpochChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(epochs.len(), 1, "{epochs:#?}");
+    assert_eq!(epochs[0].log_index, Some(3));
+    assert_eq!(epochs[0].before_state["authority_kind"], "wrapper");
+    Ok(())
+}
+
+#[test]
+fn a_lapsed_wrapped_eth_name_registered_again_without_the_name_wrapper_drops_the_old_token()
+-> anyhow::Result<()> {
+    // `registerAndWrapETH2LD`, then a plain `register` once the lease is past grace: `_register`
+    // burns and mints the registrar token and writes the registry to the new owner.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+    const REGISTRAR_MANIFEST: i64 = 7403;
+    const REGISTRAR: &str = "0x00000000000000000000000000000000000000c3";
+    const EXPIRY: u64 = 10;
+    const GRACE_PERIOD: u64 = 90 * 24 * 60 * 60;
+    const REREGISTERED: i64 = 8_000_000;
+    let label = keccak256(b"alice");
+    let eth = super::common::namehash(&["eth".to_owned()]).parse::<B256>()?;
+    let node = super::common::namehash(&["alice".to_owned(), "eth".to_owned()]).parse::<B256>()?;
+    let lifecycle = &[
+        "RegistrationGranted",
+        "ExpiryChanged",
+        "PermissionChanged",
+        "SurfaceUnbound",
+        "SurfaceBound",
+        "AuthorityEpochChanged",
+        "ResolverChanged",
+        "RegistrationReleased",
+        "TokenControlTransferred",
+    ];
+    let mut manifests = manifests();
+    manifests.push(manifest_with_events(
+        REGISTRAR_MANIFEST,
+        "ens",
+        "ens_v1_registrar_l1",
+        &[
+            (
+                "NameRegistered",
+                "event NameRegistered(uint256 indexed id, address indexed owner, uint256 expires)",
+                &["registrar"],
+                lifecycle,
+            ),
+            (
+                "Transfer",
+                "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+                &["registrar"],
+                lifecycle,
+            ),
+        ],
+    ));
+    let mut admissions = admissions();
+    let mut registrar = admission(REGISTRAR_MANIFEST, "registrar");
+    registrar.address = REGISTRAR.to_owned();
+    admissions.push(registrar);
+    let token = U256::from_be_bytes(label.0);
+    let registrar_transfer = |block, log_index, from: &str, to: &str| {
+        raw_at(
+            v1_registrar::Transfer {
+                from: addr(from),
+                to: addr(to),
+                tokenId: token,
+            }
+            .encode_log_data(),
+            block,
+            log_index,
+            REGISTRAR,
+        )
+    };
+    let registered = |block, log_index, owner: &str, expires: u64| {
+        raw_at(
+            with_topic0(
+                v1_registrar::BaseNameRegistered {
+                    id: token,
+                    owner: addr(owner),
+                    expires: U256::from(expires),
+                }
+                .encode_log_data(),
+                keccak256(b"NameRegistered(uint256,address,uint256)"),
+            ),
+            block,
+            log_index,
+            REGISTRAR,
+        )
+    };
+    let registry_owner = |block, log_index, owner: &str| {
+        raw_at(
+            v1_registry::NewOwner {
+                node: eth,
+                label,
+                owner: addr(owner),
+            }
+            .encode_log_data(),
+            block,
+            log_index,
+            REGISTRY,
+        )
+    };
+    let raw_logs = vec![
+        registrar_transfer(1, 0, ZERO_ADDRESS, NAME_WRAPPER),
+        registry_owner(1, 1, NAME_WRAPPER),
+        registered(1, 2, NAME_WRAPPER, EXPIRY),
+        raw_at(
+            NameWrapped {
+                node,
+                name: b"\x05alice\x03eth\0".to_vec().into(),
+                owner: addr(HOLDER),
+                fuses: (1 << 16) | (1 << 17),
+                expiry: EXPIRY + GRACE_PERIOD,
+            }
+            .encode_log_data(),
+            1,
+            3,
+            NAME_WRAPPER,
+        ),
+        registrar_transfer(REREGISTERED, 0, NAME_WRAPPER, ZERO_ADDRESS),
+        registrar_transfer(REREGISTERED, 1, ZERO_ADDRESS, NEW_OWNER),
+        registry_owner(REREGISTERED, 2, NEW_OWNER),
+        registered(REREGISTERED, 3, NEW_OWNER, REREGISTERED as u64 + 1_000),
+        raw_at(
+            v2_registry::TransferSingle {
+                operator: addr(HOLDER),
+                from: addr(HOLDER),
+                to: addr(NEXT_HOLDER),
+                id: U256::from_be_bytes(node.0),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            REREGISTERED + 1,
+            0,
+            NAME_WRAPPER,
+        ),
+    ];
+    let events = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests,
+        discovery_rules: Vec::new(),
+        admissions,
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs,
+    })?
+    .normalized_events;
+
+    let transferred = find(&events, REREGISTERED, 2, "AuthorityTransferred")
+        .expect("the registration writes the registry owner");
+    assert_ne!(transferred.after_state["authority_kind"], "wrapper");
+    assert!(
+        in_block(&events, REREGISTERED + 1).is_empty(),
+        "the old token's transfer moves nothing: {:#?}",
+        in_block(&events, REREGISTERED + 1)
+    );
+    Ok(())
+}
