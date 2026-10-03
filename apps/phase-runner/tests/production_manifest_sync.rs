@@ -11,8 +11,10 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::ErrorKind,
     heads::BlockMarker,
     phase::{BlockRange, PhaseName, PhaseSet, RunMode},
+    phase_lock::PhaseLock,
     rewind::rewind_to_ancestor,
     runner::{PhaseRunner, RedoPhase},
     state::{PhaseStore, StartDisposition},
@@ -1283,6 +1285,123 @@ async fn widening_after_rewind_targets_the_readable_head_and_can_complete() -> R
         .await
         .context("Live must be able to republish the replacement suffix before derived redo")?;
     assert_eq!(disposition, StartDisposition::Started);
+    scratch.cleanup().await
+}
+
+// A supervisor killed mid-follow leaves Project `running` outside any redo; nothing settles the row
+// until a supervisor starts again, so a watch widening deployed meanwhile must not strand the
+// required Ingest redo behind it.
+async fn widen_behind_a_project_left_running(
+    scratch: &ScratchDatabase,
+    chain_id: &str,
+) -> Result<ChainConfig> {
+    let fixture = WatchManifestFixture::new(chain_id)?;
+    fixture.write(false, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    let chain = seed_completed_ingest_range(scratch, chain_id).await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = CASE phase_name WHEN 'project' THEN 'running' ELSE 'completed' END,
+             current_block_number = CASE phase_name WHEN 'project' THEN 0 ELSE 1 END,
+             current_block_hash = CASE phase_name WHEN 'project' THEN $3 ELSE $2 END,
+             target_block_number = 1, target_block_hash = $2, input_content_hash = $4,
+             started_at = now(),
+             finished_at = CASE phase_name WHEN 'project' THEN NULL ELSE now() END
+         WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
+    )
+    .bind(chain_id)
+    .bind(format!("{chain_id}-manifest-sync-head-1"))
+    .bind(format!("{chain_id}-manifest-sync-head-0"))
+    .bind(INTERPRETER_CONTENT_HASH)
+    .execute(scratch.pool())
+    .await?;
+    fixture.write(true, false)?;
+    sync_schema_v2_repository(scratch.pool(), &load_repository(&fixture.root)?).await?;
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+    Ok(chain)
+}
+
+async fn project_lifecycle(
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+) -> Result<(String, bool, Option<String>)> {
+    Ok(sqlx::query_as(
+        "SELECT phase_status, redo_in_progress, last_error
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn required_ingest_redo_settles_a_project_a_killed_supervisor_left_running() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_widening_stale_project").await?;
+    let chain_id = "manifest-widening-stale-project";
+    let chain = widen_behind_a_project_left_running(&scratch, chain_id).await?;
+
+    loopback_runner(&scratch, "manifest-widening-stale-project-redo")?
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .context("a Project row no writer holds must not block the required Ingest redo")?;
+    let ingest_redo_in_progress: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        !ingest_redo_in_progress,
+        "the required Ingest redo completed"
+    );
+    let (status, redo_in_progress, last_error) =
+        project_lifecycle(scratch.pool(), chain_id).await?;
+    assert_eq!((status.as_str(), redo_in_progress), ("failed", false));
+    assert!(
+        last_error.is_some_and(|error| error.contains("advisory lock was free")),
+        "the stopped Project is settled the way supervisor start-up settles it"
+    );
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn required_ingest_redo_still_waits_for_a_project_writer_holding_its_lock() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_manifest_widening_live_project").await?;
+    let chain_id = "manifest-widening-live-project";
+    let chain = widen_behind_a_project_left_running(&scratch, chain_id).await?;
+    let before = project_lifecycle(scratch.pool(), chain_id).await?;
+    let project_lock = PhaseLock::acquire(
+        scratch.writer_connect_options(),
+        chain_id,
+        PhaseName::Project,
+    )
+    .await?;
+
+    let error = loopback_runner(&scratch, "manifest-widening-live-project-redo")?
+        .redo(
+            &chain,
+            RedoPhase::Phase(PhaseName::Ingest),
+            BlockRange::new(0, 1)?,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a Project writer that still holds its lock blocks the Ingest redo");
+    assert_eq!(error.kind(), ErrorKind::LockHeld, "{error}");
+    assert_eq!(project_lifecycle(scratch.pool(), chain_id).await?, before);
+    assert_eq!(
+        required_ingest_redo(scratch.pool(), chain_id).await?,
+        Some((0, 1))
+    );
+    project_lock.release().await?;
     scratch.cleanup().await
 }
 
