@@ -6,10 +6,11 @@ SET lock_timeout = '0';
 SET statement_timeout = '1h';
 
 -- The indexes belong to the table, which every chain on this database shares. A chain may be
--- served when its Project has recorded progress or holds a live publication, which it commits
--- before it records progress, and its Interpret is not redoing. The check runs before and
--- after the drops and takes no phase lock, so run the script as the walk or redo starts, not
--- when Interpret may complete within the hour the drops can take.
+-- served, or Project may be reading these indexes, when its Project is running, has recorded
+-- progress or holds a live publication, which it commits before it records progress, and
+-- its Interpret is not redoing. The check runs before and after the drops and takes no phase
+-- lock, so run the script as the walk or redo starts. The one-hour timeout bounds each drop,
+-- not the script, so allow for all 33 before Interpret can complete.
 CREATE OR REPLACE FUNCTION pg_temp.walk_index_served_chains() RETURNS text
 LANGUAGE sql STABLE AS $$
     SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
@@ -17,7 +18,7 @@ LANGUAGE sql STABLE AS $$
         SELECT chain_id
         FROM bigname_phase.chain_phase_state
         WHERE phase_name = 'project'
-          AND current_block_number IS NOT NULL
+          AND (current_block_number IS NOT NULL OR phase_status = 'running')
         UNION
         SELECT chain_id
         FROM bigname_phase.project_family_marker

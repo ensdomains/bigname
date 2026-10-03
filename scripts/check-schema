@@ -547,6 +547,9 @@ cleanup() {
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
     fi
+    if [ -n "${walk_index_late_drop:-}" ]; then
+        rm -f -- "$walk_index_late_drop"
+    fi
     printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\nDROP SCHEMA IF EXISTS "%s_removal" CASCADE;\nDROP SCHEMA IF EXISTS "%s_fresh" CASCADE;\n' \
         "$scratch_schema" "$scratch_schema" "$scratch_schema" "$scratch_schema" \
         | run_psql >/dev/null 2>&1 || true
@@ -2534,7 +2537,7 @@ assert_index_install_hint address-match-index-on-another-table-hint \
     render_phase_migration "$address_match_install"
 } | run_psql >/dev/null
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
-# has a current block or a live family marker and its Interpret is not redoing,
+# is running, has a current block or a live family marker and its Interpret is not redoing,
 # including a marker committed before Project recorded progress, and must fail after
 # its drops when a chain became servable while they ran. With every chain in an
 # Interpret redo it must drop exactly its list and keep every other index, and a
@@ -2589,10 +2592,11 @@ assert_index_install_refusal walk-index-published-chain "$walk_index_drop" \
 DELETE FROM project_family_marker WHERE chain_id = 'walk-index-published';
 SQL
 } | run_psql >/dev/null
-# A chain that becomes servable while the drops run fails the check after them.
+# A fresh chain whose Project starts its first batch while the drops run fails the check
+# after them.
 walk_index_late_drop="$(mktemp "${TMPDIR:-/tmp}/walk-index-late-drop.XXXXXX")"
 awk '!done && /^DROP INDEX CONCURRENTLY/ {
-    print "INSERT INTO bigname_phase.chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash) VALUES ('"'"'walk-index-late'"'"', '"'"'project'"'"', 1, '"'"'walk-index-block'"'"');"
+    print "INSERT INTO bigname_phase.chain_phase_state (chain_id, phase_name, phase_status, started_at) VALUES ('"'"'walk-index-late'"'"', '"'"'project'"'"', '"'"'running'"'"', now());"
     done = 1
 } { print }' "$walk_index_drop" > "$walk_index_late_drop"
 assert_index_install_refusal walk-index-late-chain "$walk_index_late_drop" \

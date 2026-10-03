@@ -27,21 +27,25 @@ foreign key stay in place.
 ## When drop.sql may run
 
 The indexes belong to the table, which every chain on the database shares. `drop.sql` refuses
-while any chain may be served: a chain whose Project phase has a current block, or a live
-publication in `project_family_marker`, and whose Interpret phase has no redo in progress.
-Project commits a publication before it records its progress, so the marker covers a chain
-whose runner stopped between the two.
+while any chain may be served or read by Project: a chain whose Project phase is running, has
+a current block, or has a live publication in `project_family_marker`, and whose Interpret
+phase has no redo in progress. Project commits a publication before it records its progress,
+so the marker covers a chain whose runner stopped between the two. The check passes on a
+fresh database before its first walk, and once every chain whose Project has advanced is in
+an Interpret redo.
+
+On a database that holds two chains, such as Ethereum and Base, both chains' Interpret redos
+must be in progress before it runs, or run the walk with every index. A multi-chain `redo`
+command runs its chains one after another, so it does not meet that condition; a redo
+stopped part-way keeps `redo_in_progress`, so start and stop one chain's redo, then start
+the other's.
 
 The script checks this before the drops and again after them, and takes no phase lock, so
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
-starts, with Interpret's whole range still ahead, not when Interpret may complete within the
-hour the drops can take. If a chain became servable while they ran, the second check fails
-after the receipt, naming the chains, and `psql` exits non-zero: run `install.sql` at once. It passes on a fresh database before its first walk,
-and once every chain whose Project has advanced is in an Interpret redo. On a database that
-holds two chains, such as Ethereum and Base, both chains' Interpret redos must be in progress
-before it runs, or run the walk with every index. A multi-chain `redo` command runs its chains
-one after another, so it does not meet that condition; a redo stopped part-way keeps
-`redo_in_progress`, so start and stop one chain's redo, then start the other's.
+starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
+the script, so there is no fixed limit on the whole sequence; allow for all 33 drops before
+Interpret can complete. If a chain's Project started while they ran, the second check fails
+after the receipt, naming the chains, and `psql` exits non-zero: run `install.sql` at once.
 
 ## Running the scripts
 
@@ -52,7 +56,9 @@ psql -X -v ON_ERROR_STOP=1 -f ops/walk-index-set/drop.sql "$BIGNAME_DATABASE_URL
 psql -X -v ON_ERROR_STOP=1 -f ops/walk-index-set/install.sql "$BIGNAME_DATABASE_URL"
 ```
 
-Retain both outputs in the deployment receipt; each ends by printing the index rows.
+Retain each script's complete output and exit status in the deployment receipt. Both print
+the index rows, but `drop.sql` runs its second check after them, so the rows alone do not
+show that it succeeded.
 
 Run `drop.sql` as the walk or redo starts (see above). It can run while Interpret is
 processing batches. `DROP INDEX CONCURRENTLY` waits for
@@ -125,9 +131,10 @@ first.
 The runner never checks or recreates these indexes, so a restart while they are dropped
 resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
 `drop.sql` refuses a chain with Project progress and a chain with only a live publication,
-fails after its drops when a chain became servable while they ran, and drops exactly its list, and that `install.sql` rebuilds the fresh baseline's definitions
-and refuses an invalid index, an index with other keys or another definition, and a table
-under one of its names. A database test in
+fails after its drops when a fresh chain's Project started while they ran, and drops exactly
+its list, and that `install.sql` rebuilds the fresh baseline's definitions and refuses an
+invalid index, an index with other keys or another definition, and a table under one of its
+names. A database test in
 `crates/interpret` proves that the two lists together are every index the baseline defines
 on `normalized_events`, and that a walk, a full-history redo, a flag recompute and a runner
 restart's manifest sync, over ENSv1, Basenames and ENSv2 histories, scan `normalized_events`
