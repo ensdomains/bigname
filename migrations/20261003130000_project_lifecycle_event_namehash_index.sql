@@ -52,7 +52,7 @@ BEGIN
     WHERE oid = to_regclass('bigname_phase.' || checked_index);
     IF found_kind IS NULL THEN
         RAISE EXCEPTION
-            '% does not exist although bigname_phase.project_lifecycle_event does; build it as docs/deployment.md "Released registrar children" describes, then run the schema-migrations again',
+            '% does not exist although bigname_phase.project_lifecycle_event does; build it as docs/deployment.md (Released registrar children) describes, then run the schema-migrations again',
             checked_index;
     END IF;
     IF found_kind <> 'index' THEN
@@ -70,7 +70,7 @@ BEGIN
           AND indisready
     ) THEN
         RAISE EXCEPTION
-            '% exists but is not a valid and ready index on bigname_phase.project_lifecycle_event; follow the recovery steps in docs/deployment.md "Released registrar children", then run the schema-migrations again',
+            '% exists but is not a valid and ready index on bigname_phase.project_lifecycle_event; follow the recovery steps in docs/deployment.md (Released registrar children), then run the schema-migrations again',
             checked_index;
     END IF;
 
@@ -80,7 +80,7 @@ BEGIN
     WHERE indexrelid = to_regclass('bigname_phase.' || checked_index);
     IF found_definition <> expected_definition THEN
         RAISE EXCEPTION
-            '% exists but does not have the reviewed definition; found "%", expected "%"; follow the recovery steps in docs/deployment.md "Released registrar children", then run the schema-migrations again',
+            '% exists but does not have the reviewed definition; found "%", expected "%"; follow the recovery steps in docs/deployment.md (Released registrar children), then run the schema-migrations again',
             checked_index, found_definition, expected_definition;
     END IF;
 

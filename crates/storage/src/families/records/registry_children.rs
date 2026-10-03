@@ -80,8 +80,9 @@ pub(super) async fn compose_registry_child_rows(
         // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
         // address index does not record; the child is listed for neither
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
-        // A released lease leaves its registry record behind
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f),
+        // A released lease leaves its registry record behind: the registrar writes the
+        // registry only when it registers a name
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
         // and a released name has no owner or manager, so that child is listed for neither.
         children.retain(|child| !child.wrapper_held && !child.released_lease);
         if children.is_empty() {

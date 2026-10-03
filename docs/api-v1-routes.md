@@ -1775,14 +1775,21 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
   owner and is listed only while it has a serving resource. A `.eth` or Basenames
-  child with no current name row whose registrar lease bigname has released keeps its
-  registry record, because expiry only makes the token available again after the 90-day
-  grace
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f);
+  child with no current name row whose registrar lease bigname has released, past its
+  expiry and the 90-day grace
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f),
+  keeps its registry record, since the registrar writes the registry only when it
+  registers a name
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f);
   it is listed as `released` with no `owner` or `manager` and no `expires_at`,
   `grace_ends_at` or `lapsed_registration`, since its lease is projected without a name
   row, and `include_expired=false` omits it. A later registration of the label serves
-  its new registrant again. An unmasked 2017
+  its new registry owner again, which `register` sets to the registrant;
+  `registerOnly` leaves the registry record as it was
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f).
+  A known residual: a name migrated from ENSv1 to ENSv2 under a label that fails ENSIP-15
+  normalization is served from its ENSv1 registry record, and once its old ENSv1 lease
+  lapses it is served as `released` although its ENSv2 registration is live. An unmasked 2017
   registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
   labelhash but not the label, so two [non-name
   forms](glossary.md#non-name-form) are reachable here. A child whose label has
@@ -3419,12 +3426,15 @@ introduces it rebuilds Project from full history before serving the option; see
   token survives for it
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
-  A `.eth` child whose registrar lease bigname has released is listed for no
-  address under any relation, as a released name serves no owner or manager,
-  although its registry record survives the lapse
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f);
+  A `.eth` child whose registrar lease bigname has released
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  is listed for no address under any relation, as a released name serves no owner or
+  manager, although its registry record survives the lapse, since the registrar writes
+  the registry only when it registers a name
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f);
   its parent's subnames page lists it as `released`. A later registration of the
-  label lists it for its new registrant again. A known residual:
+  label lists it for its new registry owner again, which `register` sets to the
+  registrant. A known residual:
   `relation=former_owner` lists only names with a name row, so it never lists such
   a child for the registrant whose lease lapsed.
   Every other registry child described here is listed under both

@@ -2387,15 +2387,16 @@ proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": n
 
 ### Released registrar children
 
-The build that stops serving a released `.eth` or Basenames registry child with no name row
-(TYR-196, see [subnames](api-v1-routes.md#get-v1namesnamesubnames) and
+The build that stops serving an owner or manager for a released registry child with no name
+row (TYR-196, see [subnames](api-v1-routes.md#get-v1namesnamesubnames) and
 [names by address](api-v1-routes.md#get-v1addressesaddressnames)) changes only readers in
 `crates/storage/src/families`, the API, the projections baseline and one schema-migration, all
 outside the [interpreter content hash](glossary.md#interpreter-content-hash), so the hash does
 not rotate and it needs no redo, no manifest or environment change and no historical ingest
 fetch. Such a child's registrar lease is already projected without a name row; once it has been
-released, `GET /v1/addresses/{address}/names` stops listing the child for its surviving
-registry owner, and its parent's subnames page serves it as `released` with no `owner` or
+released, `GET /v1/addresses/{address}/names` stops listing an ENSv1 `.eth` child for its
+surviving registry owner (that route lists no Basenames child without a name row), and the
+parent's subnames page serves an ENSv1 or Basenames child as `released` with no `owner` or
 `manager`, omitted under `include_expired=false`.
 
 `20261003130000_project_lifecycle_event_namehash_index.sql` adds
@@ -2412,7 +2413,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS project_lifecycle_event_namehash_idx
 
 Then apply the schema-migrations with `--target-version 20261003130000` and the same
 `lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
-Without the prebuild, apply it with the phase runner, redo processes and API stopped.
+Without the prebuild, apply it with the phase runner and redo processes stopped.
 `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks that the
 name is an index on `project_lifecycle_event` that is `indisvalid` and `indisready` with the
 reviewed `pg_get_indexdef`, `(chain_id, namehash)` with no predicate, and fails without

@@ -1411,6 +1411,40 @@ async fn v2_re_registered_surface_less_child_lists_for_its_new_owner() -> Result
     database.cleanup().await
 }
 
+/// `registerOnly` grants a new lease without touching the registry
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f),
+/// so the release no longer applies and the child is served from its registry owner again: the
+/// old registry owner, not the new registrant.
+#[tokio::test]
+async fn v2_surface_less_child_registered_without_the_registry_serves_its_registry_owner()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_lapsed_registrar_child(&database).await?;
+    let lease = Uuid::from_u128(LAPSED_LEASE);
+    let mut events = vec![synthesised_release(
+        "rc-register-only-release",
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        230,
+        lease,
+    )];
+    events.extend(unnamed_lease_events(
+        "rc-register-only-grant",
+        &["RegistrationGranted", "ExpiryChanged"],
+        ("ens_v1_registrar_l1", "ens"),
+        (&node, &labelhash),
+        (RC_BUYER, 1_900_000_000),
+        230,
+        lease,
+    ));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_test_families(&database, 231).await?;
+
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+
+    database.cleanup().await
+}
+
 /// A renewal in grace keeps the lease, so the registry owner stays the child's owner and manager.
 #[tokio::test]
 async fn v2_renewed_surface_less_child_keeps_its_owner() -> Result<()> {
