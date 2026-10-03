@@ -1518,7 +1518,10 @@ async fn publish_base_families(database: &TestDatabase, target: i64) -> Result<(
 /// (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc)
 /// and expiry leaves the registry record, which only a registration or a `reclaim` writes
 /// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc)
-/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc).
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc).
 /// crates/adapters/src/schema_v2/protocol/v1.rs routes `basenames_base_registrar` to the same
 /// registrar adapter, so a released surface-less child of a Basenames parent loses its owner
 /// and manager on the subnames route too.

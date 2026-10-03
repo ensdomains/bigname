@@ -83,7 +83,9 @@ pub(super) async fn compose_registry_child_rows(
         // A released lease leaves its registry record behind: the registrar writes it only
         // on a registration or a live token's `reclaim`
         // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
-        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f)
+        // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f),
         // and a released name has no owner or manager, so that child is listed for neither.
         children.retain(|child| !child.wrapper_held && !child.released_lease);
         if children.is_empty() {
