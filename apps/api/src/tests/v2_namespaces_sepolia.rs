@@ -113,7 +113,44 @@ async fn publish_resolution_block(
         event.after_state = json!({"proxy_address": proxy, "implementation": implementation});
         bigname_storage::insert_normalized_event_fixtures(pool, &[event]).await?;
     }
+    // Name reads also require an Interpret phase that is not redoing.
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number,
+             current_block_hash, target_block_number, target_block_hash, input_content_hash,
+             started_at, finished_at)
+         VALUES ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash",
+    )
+    .bind(chain)
+    .bind(block)
+    .bind(&hash)
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
     publish_test_families_on(pool, chain, block).await
+}
+
+/// Puts `phase` into a redo from `from`, as the runner does.
+async fn start_resolution_redo(pool: &PgPool, chain: &str, phase: &str, from: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state SET redo_in_progress = true, redo_mode = 'redo',
+             redo_from_block_number = $3, redo_to_block_number = $3,
+             redo_previous_phase_status = phase_status,
+             redo_previous_started_at = started_at, redo_previous_finished_at = finished_at,
+             phase_status = 'running', started_at = now(), finished_at = NULL,
+             redo_attempt_generation = redo_attempt_generation + 1
+         WHERE chain_id = $1 AND phase_name = $2",
+    )
+    .bind(chain)
+    .bind(phase)
+    .bind(from)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn sepolia_network(resolution: Option<Value>) -> Value {
@@ -182,26 +219,30 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
         assert!(payload["meta"].get("as_of").is_none(), "{payload:#}");
     }
 
-    // A Project redo over the publication makes name reads stale; the field is withheld with it.
-    sqlx::query(
-        "UPDATE chain_phase_state SET redo_in_progress = true, redo_mode = 'redo',
-             redo_from_block_number = 11821683, redo_to_block_number = 11821683,
-             redo_previous_phase_status = phase_status,
-             redo_previous_started_at = started_at, redo_previous_finished_at = finished_at,
-             phase_status = 'running', started_at = now(), finished_at = NULL,
-             redo_attempt_generation = redo_attempt_generation + 1
-         WHERE chain_id = $1 AND phase_name = 'project'",
-    )
-    .bind(CHAIN)
-    .execute(&database.pool)
-    .await?;
-    let (status, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
-    assert_eq!(status, StatusCode::OK, "{payload:#}");
-    assert_eq!(payload["data"]["networks"], sepolia_network(None));
-    assert!(
-        payload["data"]["capabilities"]["name_profile"].is_object(),
-        "{payload:#}"
-    );
+    // Name reads refuse during any Interpret redo, and during a Project redo over the
+    // publication; the field is withheld with them while the rest of the answer is served.
+    for (phase, from) in [("interpret", 11821690), ("project", 11821683)] {
+        start_resolution_redo(&database.pool, CHAIN, phase, from).await?;
+        let (status, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
+        assert_eq!(status, StatusCode::OK, "{payload:#}");
+        assert_eq!(payload["data"]["networks"], sepolia_network(None), "{phase} redo");
+        assert!(
+            payload["data"]["capabilities"]["name_profile"].is_object(),
+            "{payload:#}"
+        );
+        sqlx::query(
+            "UPDATE chain_phase_state SET redo_in_progress = false, redo_mode = NULL,
+                 redo_from_block_number = NULL, redo_to_block_number = NULL,
+                 phase_status = redo_previous_phase_status, started_at = redo_previous_started_at,
+                 finished_at = redo_previous_finished_at, redo_previous_phase_status = NULL,
+                 redo_previous_started_at = NULL, redo_previous_finished_at = NULL
+             WHERE chain_id = $1 AND phase_name = $2",
+        )
+        .bind(CHAIN)
+        .bind(phase)
+        .execute(&database.pool)
+        .await?;
+    }
 
     database.cleanup().await
 }

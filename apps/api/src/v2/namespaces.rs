@@ -186,7 +186,7 @@ async fn load_resolutions(
             0,
             "",
             false,
-            false,
+            true,
             crate::state::publication_lag_tolerance_blocks(),
         )
         .await?;
