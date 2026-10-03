@@ -264,27 +264,37 @@ pub(crate) async fn load_address_names_page_from(
 }
 
 /// A surface-less registry child's `served_manager` from its composed relation rows, all of which
-/// carry the same one (`families::records::registry_children`). It rides beside the page query
-/// rather than through it: query.rs is an input of the interpreter content hash
-/// (crates/content-hash/src/compute.rs, `SEMANTIC_SOURCE_FILES`).
+/// carry the same one, its registry owner (`families::records::registry_children`). It rides
+/// beside the page query rather than through it: query.rs is an input of the interpreter content
+/// hash (crates/content-hash/src/compute.rs, `SEMANTIC_SOURCE_FILES`).
 fn attach_served_managers(entries: &mut [AddressNameCurrentEntry], source: RowSource<'_>) {
     let RowSource::Composed { rows, .. } = source;
-    let managers: BTreeMap<&str, &str> = rows
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|row| row["registry_child"] == true)
-        .filter_map(|row| {
-            Some((
-                row["logical_name_id"].as_str()?,
-                row["served_manager"].as_str()?,
-            ))
-        })
-        .collect();
+    let mut managers: BTreeMap<&str, &str> = BTreeMap::new();
+    for row in rows.as_array().into_iter().flatten() {
+        if row["registry_child"] != true {
+            continue;
+        }
+        let (Some(id), Some(manager)) = (
+            row["logical_name_id"].as_str(),
+            row["served_manager"].as_str(),
+        ) else {
+            continue;
+        };
+        let previous = managers.insert(id, manager);
+        debug_assert!(
+            previous.is_none_or(|previous| previous == manager),
+            "registry child {id} carries two served managers"
+        );
+    }
     for entry in entries.iter_mut().filter(|entry| entry.is_registry_child()) {
         entry.served_manager = managers
             .get(entry.logical_name_id.as_str())
             .map(|manager| (*manager).to_owned());
+        debug_assert!(
+            entry.served_manager.is_some(),
+            "registry child {} has no served manager",
+            entry.logical_name_id
+        );
     }
 }
 
@@ -488,3 +498,6 @@ async fn load_address_names_current_summary(
 
     decode_address_names_current_summary(row)
 }
+
+#[cfg(test)]
+mod served_manager_tests;
