@@ -7126,7 +7126,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names, on expired emancipated or locked wrapped names, and on a registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization (see Manager)."
           },
           "manager": {
             "type": "string",
@@ -7215,7 +7215,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. A registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization is not listed for the NameWrapper contract or for its token holder (see Manager)."
           },
           "manager": {
             "type": "string",
@@ -8251,7 +8251,7 @@
           },
           "owner": {
             "type": "string",
-            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names."
+            "description": "Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names, on expired emancipated or locked wrapped names, and on a registry child with no name row that the NameWrapper holds under a label failing ENSIP-15 normalization (see Manager)."
           },
           "manager": {
             "type": "string",

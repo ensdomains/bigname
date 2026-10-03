@@ -48,6 +48,10 @@ pub struct FamilyChildRow {
     /// row. A shadow only another observer wrote, such as a resolver `NameChanged`, does not
     /// count ([`LIFECYCLE_SHADOW`]).
     pub lifecycle_shadow: bool,
+    /// A lifecycle shadow whose registry owner is the NameWrapper that observed it: the wrapper
+    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`])
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+    pub wrapper_held: bool,
 }
 
 /// Whether the child's only surface is a shadow one at or below the clock that a lifecycle
@@ -68,6 +72,27 @@ const LIFECYCLE_SHADOW: &str = "COALESCE(child_surface.visibility_state = 'shado
                AND observed.event_kind = 'PreimageObserved'
                AND observed.consumer_visibility = 'activated'
                AND observed.source_family IN ('ens_v1_wrapper_l1', 'ens_v1_registrar_l1')),
+         FALSE)";
+
+/// Whether the child's only surface is a shadow one at or below the clock that a NameWrapper
+/// observed, and its served registry owner is that NameWrapper. NameWrapper takes the registry
+/// record of a child it creates or wraps
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f), and
+/// an unwrap or a parent's registry `setSubnodeOwner` moves it out again
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+const WRAPPER_HELD: &str = "COALESCE(child_surface.visibility_state = 'shadow'
+         AND child_surface.block_number <= clock.block_number
+         AND EXISTS (
+             SELECT 1 FROM bigname_phase.normalized_events observed
+             WHERE observed.logical_name_id = selected.child_logical_name_id
+               AND observed.chain_id = clock.chain_id
+               AND observed.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND observed.block_number <= clock.block_number
+               AND observed.event_kind = 'PreimageObserved'
+               AND observed.consumer_visibility = 'activated'
+               AND observed.source_family = 'ens_v1_wrapper_l1'
+               AND lower(observed.raw_fact_ref ->> 'emitting_address') = selected.owner),
          FALSE)";
 
 /// A registry's labels: the ENSv2 children whose registration `registry` emitted, narrowed by
@@ -335,7 +360,7 @@ pub(super) fn push_children<'a>(
                    selected.namespace, {CHILD_DISPLAY_NAME} AS canonical_display_name,
                    selected.namehash, selected.labelhash, selected.owner, selected.registrant,
                    selected.registry_authority,
-                   {LIFECYCLE_SHADOW} AS lifecycle_shadow,
+                   {LIFECYCLE_SHADOW} AS lifecycle_shadow, {WRAPPER_HELD} AS wrapper_held,
                    {sort_timestamp} AS sort_timestamp
             FROM selected
             JOIN parent ON parent.logical_name_id = selected.parent_logical_name_id
@@ -403,6 +428,7 @@ fn decode(row: &PgRow) -> Result<Option<(FamilyChildRow, Option<UnixSeconds>)>> 
             registrant: row.try_get("registrant")?,
             registry_authority: row.try_get("registry_authority")?,
             lifecycle_shadow: row.try_get("lifecycle_shadow")?,
+            wrapper_held: row.try_get("wrapper_held")?,
         },
         row.try_get("sort_timestamp")?,
     )))
