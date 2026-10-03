@@ -1,7 +1,8 @@
 //! F13 for ENSv1 registry children with no name surface: a node an `ens_v1_registry_l1`
 //! NewOwner created is indexed under its `<namespace>:<node>` id for its registry owner, a
 //! registry Transfer adds the new owner, a surface the child gains later adds the ordinary rows
-//! beside them, and undo and rebuild derive the same rows.
+//! beside them, and undo and rebuild derive the same rows. A registrar transfer of the child's
+//! lease with no name surface indexes its recipient under the same id.
 mod families_support;
 
 use anyhow::Result;
@@ -156,5 +157,146 @@ async fn a_surface_less_registry_child_indexes_its_registry_owner() -> Result<()
     );
     fixture.assert_undo_restores(13).await?;
     fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+/// The fold row of `logical_name_id` as (token holder, its block), if any.
+async fn fold_token_holder(fixture: &Fixture, logical_name_id: &str) -> Result<Option<Value>> {
+    Ok(fixture
+        .rows("project_address_name_fold")
+        .await?
+        .into_iter()
+        .find(|row| row["logical_name_id"] == json!(logical_name_id))
+        .map(|row| {
+            json!([
+                row["token_holder"],
+                row["token_holder_position"]["block_number"]
+            ])
+        }))
+}
+
+/// A NewOwner under node 1 creating node 9 for alice, and an unnamed `.eth` lease granted to
+/// alice in the same block, applied at 10.
+async fn surface_less_lease(fixture: &Fixture, lease: &str) -> Result<()> {
+    fixture
+        .write(
+            10,
+            1,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(9),
+                   "labelhash": node(99), "owner": ALICE, "owner_getter": ALICE,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            2,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            None,
+            Some(lease),
+            json!({"namehash": node(9), "registrant": ALICE, "surface_known": false}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await?;
+    Ok(())
+}
+
+// A BaseRegistrar Transfer without `reclaim` moves the token and leaves the registry record with
+// the seller, so the buyer is only reachable through the lease's transfer. The adapter emits it
+// unnamed when no surface carries the name; the fold keys it by the node's `<namespace>:<node>`
+// id, the id the name keeps once a surface names it.
+// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+#[tokio::test]
+async fn an_unnamed_lease_transfer_indexes_its_recipient_under_the_node_id() -> Result<()> {
+    let fixture = Fixture::new("families_registry_children_lease", 20).await?;
+    let lease = uuid(5);
+    let child = name(9);
+    surface_less_lease(&fixture, &lease).await?;
+    assert_eq!(indexed(&fixture, &child).await?, controllers(&[ALICE]));
+    fixture
+        .write(
+            11,
+            1,
+            "TokenControlTransferred",
+            "ens_v1_registrar_l1",
+            None,
+            Some(&lease),
+            json!({"source_event": "Transfer", "namehash": node(9), "to": BOB}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    assert_eq!(
+        fold_token_holder(&fixture, &child).await?,
+        Some(json!([BOB, 11])),
+        "the unnamed transfer is the node id's token holder"
+    );
+    assert_eq!(
+        indexed(&fixture, &child).await?,
+        controllers(&[ALICE, BOB]),
+        "the buyer is indexed beside the seller, who keeps the registry record"
+    );
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+
+    // The name gains a surface: the fold keeps the transfer it already holds, and the ordinary
+    // rows of the name are the same addresses.
+    fixture
+        .binding(&uuid(105), &child, &lease, "ens_v1", 12, 1, None)
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "SurfaceBound",
+            "ens_v1_registrar_l1",
+            Some(&child),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    assert_eq!(
+        fold_token_holder(&fixture, &child).await?,
+        Some(json!([BOB, 11]))
+    );
+    assert_eq!(indexed(&fixture, &child).await?, controllers(&[ALICE, BOB]));
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Only a registrar transfer falls back to the node id: an unnamed NameWrapper transfer writes no
+// fold row even though it carries the namehash. The adapter always names a wrapper transfer, so
+// this input is synthetic and guards the family check.
+#[tokio::test]
+async fn an_unnamed_wrapper_transfer_writes_no_fold_row() -> Result<()> {
+    let fixture = Fixture::new("families_registry_children_wrapper", 20).await?;
+    let child = name(9);
+    surface_less_lease(&fixture, &uuid(5)).await?;
+    fixture
+        .write(
+            11,
+            1,
+            "TokenControlTransferred",
+            "ens_v1_wrapper_l1",
+            None,
+            Some(&uuid(6)),
+            json!({"source_event": "TransferSingle", "operator": CAROL, "to": CAROL,
+                   "id": node(9), "namehash": node(9), "value": "1"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    assert_eq!(fold_token_holder(&fixture, &child).await?, None);
+    assert_eq!(indexed(&fixture, &child).await?, controllers(&[ALICE]));
     fixture.cleanup().await
 }

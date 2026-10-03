@@ -385,3 +385,53 @@ fn probe_fails_on_a_second_batch_mismatch() {
     );
     std::fs::remove_dir_all(baseline).ok();
 }
+
+#[test]
+fn whole_registry_warning_counts_tokens_not_registry_level_events() {
+    const REGISTRY: &str = "0x0000000000000000000000000000000000000771";
+    let event = |scope: &str| bigname_adapters::schema_v2::PriorEventInput {
+        retained_state_key: scope.to_owned(),
+        chain_id: "ethereum-sepolia".to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "RegistryParentChanged".to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        emitting_address: Some(REGISTRY.to_owned()),
+        state_scope: Some(scope.to_owned()),
+        block_timestamp: None,
+        write_position: None,
+        after_state: serde_json::json!({}),
+    };
+    let dependencies = bigname_adapters::schema_v2::V1BatchDependencies {
+        v2_keys: [format!("{REGISTRY}:*")].into(),
+        ..Default::default()
+    };
+    let parent = event(&format!("{REGISTRY}:-:-:-:ParentUpdated"));
+    let token = event(&format!("{REGISTRY}:-:0x01:-:LabelRegistered"));
+    let loads = |prior: &[_]| super::whole_registry_loads(prior, &dependencies);
+    assert_eq!(
+        loads(std::slice::from_ref(&parent)),
+        [(REGISTRY.to_owned(), 0, 1, 2)]
+    );
+    assert_eq!(
+        loads(&[parent.clone(), token]),
+        [(REGISTRY.to_owned(), 1, 2, 4)]
+    );
+    // A token's ids differ only in their low 32 bits, so its role change counts no new token.
+    let id = |version: &str| format!("0x{}{version}", "ab".repeat(28));
+    let registered = event(&format!(
+        "{REGISTRY}:-:{}:-:LabelRegistered",
+        id("00000000")
+    ));
+    let role = event(&format!(
+        "{REGISTRY}:-:{}:-:EACRolesChanged",
+        id("00000007")
+    ));
+    assert_eq!(
+        loads(&[parent, registered, role]),
+        [(REGISTRY.to_owned(), 1, 3, 6)]
+    );
+}

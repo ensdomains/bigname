@@ -383,9 +383,14 @@ fn v1_inner(state: &mut State, event: &PriorEventInput) {
                 return;
             }
             None => {
+                // A zero-owner write closes a registry-only or NameWrapper authority and keeps a
+                // registrar lease, which the arm above restores.
                 if state
                     .v1_name(&event.namespace, namehash)
-                    .is_some_and(|authority| authority.token_lineage_id.is_none())
+                    .is_some_and(|authority| {
+                        authority.token_lineage_id.is_none()
+                            || authority.authority_source_family == "ens_v1_wrapper_l1"
+                    })
                 {
                     state.release_v1_name(&event.namespace, namehash);
                 }

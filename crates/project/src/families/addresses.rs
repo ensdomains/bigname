@@ -4,7 +4,9 @@
 //! resource-scoped PermissionChanged sets it when its effective powers hold `resource_control`
 //! and otherwise revokes it from its subject only. The name also keeps its latest token holder,
 //! and its latest registrant as the retained F2a rows of the name give it (lifecycle.rs,
-//! `fold_registrants`).
+//! `fold_registrants`). A registrar transfer of a lease with no name surface
+//! (docs/glossary.md#surface-name-surface: no known name carries it yet) folds under the lease's
+//! `<namespace>:<namehash>` id, which is the name's id once a surface names it.
 //!
 //! The served fold runs over the admitted events only: the selected authority resource, the
 //! registry-only predecessor window (address_names.rs:115-211) and the resource equality of a
@@ -32,6 +34,7 @@ use crate::Result;
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 /// The adapter's `owner_getter_reason` for a registry write naming the admitted Graveyard.
 const GRAVEYARD_OWNER_REASON: &str = "graveyard";
+const REGISTRAR_FAMILIES: [&str; 2] = ["ens_v1_registrar_l1", "basenames_base_registrar"];
 
 /// The two controller actions, stored by their lower-cased names. The names are spelled through
 /// `Debug` because the statement guard reads any literal that starts with an SQL keyword, as
@@ -134,9 +137,24 @@ fn served_change(
     }
 }
 
+/// The fold row of the event's name. A registrar transfer the adapter emitted unnamed (a lease
+/// with no name surface) keys the `<namespace>:<namehash>` id every registrar name has, so the
+/// recipient is indexed before a surface names the row and the name keeps it after.
 fn fold_key(chain: &Value, event: &BlockEvent) -> Option<super::store::Row> {
-    change(event)?;
-    let name = event.logical_name_id.clone()?;
+    let change = change(event)?;
+    let name = match &event.logical_name_id {
+        Some(name) => name.clone(),
+        None if matches!(change, Change::TokenHolder(_))
+            && REGISTRAR_FAMILIES.contains(&event.source_family.as_str()) =>
+        {
+            format!(
+                "{}:{}",
+                event.namespace,
+                raw_lower(&event.after, "namehash")?
+            )
+        }
+        None => return None,
+    };
     Some(key_of(
         &tables::ADDRESS_NAME_FOLD,
         [chain.clone(), json!(name)],
@@ -272,7 +290,7 @@ pub(super) async fn apply(
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Change, graveyard_writes, served_change};
+    use super::{Change, fold_key, graveyard_writes, served_change};
     use crate::families::{input::BlockEvent, position::Position};
 
     const GRAVEYARD: &str = "0x950b93885b33ce4c7e8571be2c88a1aa93d82f49";
@@ -333,6 +351,57 @@ mod tests {
         assert_eq!(
             subjects,
             [ZERO, ZERO, GRAVEYARD, GRAVEYARD].map(|subject| Some(subject.to_owned()))
+        );
+    }
+
+    /// An unnamed transfer folds under `<namespace>:<namehash>` only from a registrar family; a
+    /// NameWrapper transfer, which carries the namehash too, and an unnamed controller event key
+    /// nothing.
+    #[test]
+    fn an_unnamed_registrar_transfer_keys_its_namespace_and_namehash() {
+        let keyed = |namespace: &str, family: &str, kind: &str, after: Value| {
+            let mut event = event(kind, 1, after);
+            event.namespace = namespace.to_owned();
+            event.source_family = family.to_owned();
+            event.logical_name_id = None;
+            fold_key(&json!("1"), &event).map(|key| key["logical_name_id"].clone())
+        };
+        let transfer = json!({"namehash": "0xAB", "node": "0xab", "to": GRAVEYARD});
+        assert_eq!(
+            keyed(
+                "ens",
+                "ens_v1_registrar_l1",
+                "TokenControlTransferred",
+                transfer.clone()
+            ),
+            Some(json!("ens:0xab"))
+        );
+        assert_eq!(
+            keyed(
+                "basenames",
+                "basenames_base_registrar",
+                "TokenControlTransferred",
+                transfer.clone()
+            ),
+            Some(json!("basenames:0xab"))
+        );
+        assert_eq!(
+            keyed(
+                "ens",
+                "ens_v1_wrapper_l1",
+                "TokenControlTransferred",
+                transfer
+            ),
+            None
+        );
+        assert_eq!(
+            keyed(
+                "ens",
+                "ens_v1_registrar_l1",
+                "AuthorityTransferred",
+                json!({"namehash": "0xab", "owner": GRAVEYARD})
+            ),
+            None
         );
     }
 }

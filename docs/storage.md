@@ -1751,7 +1751,64 @@ finite stored history, so the attempts end. A read under another spelling than
 the loaded one fails the batch only when that spelling is loaded too, so the
 adapter's state keys must match the keys its events are filed under. Only an attempt that read nothing unloaded is
 published. The
-session is discarded after the batch. Two partial expression indexes on
+session is discarded after the batch.
+
+A batch marks an ENSv2 registry for a name refresh when its parent claim
+changes, when a subregistry pointer to it is set or cleared, or when the token
+pointing at it is released, replaced, regenerated, or has its expiry changed or
+crossed. Interpret then walks the registry's
+[name suffix](glossary.md#ensv2-name-suffix-walk): its parent claim, the
+parent token's subregistry pointer and expiry, and so on up to a manifest-declared
+registry, whose suffix is fixed. It compares the result with the same walk over the
+registry-level state as it stood at the previous refresh, which the session keeps
+alongside its other state. That copy shares its unchanged parts with the current
+state, so it costs memory only for what events have changed since; Interpret drops
+it once the walks are compared, before refreshing names, so the refresh itself copies
+nothing for it, and keeps a new one afterwards. When the two walks agree, no token changes name
+because of the registry's suffix, so only the tokens the batch touches for their
+own reasons (a registration, renewal, expiry, release or replacement) are
+refreshed, and the lookahead loader reads only those and the rows the walk
+reads. An ENSv1 event that makes its resource current for a name an ENSv2 token
+also holds reads and refreshes that name's ENSv2 tokens as well. Of the ENSv2
+tokens holding the name with a registration and a resource, the one whose
+registry address and token id sort last stays current, immediately, as a full
+refresh does; the ENSv1 resource is current only when no such token exists, and
+becomes current again when the last one leaves the name. That holds for the session
+a batch commits, which is rebuilt by replaying the batch's events; while the batch is
+being interpreted, a token that a discovered registry registers again under another
+label can leave its old name pointing at its resource until that replay. This is the adapter's
+internal choice of which resource an ENSv2 resolver record attaches to, not the
+authority the API serves. For a name moved from ENSv1 to ENSv2, the leftover
+ENSv1 registration's resource can be attached again after the ENSv2 registration
+ends, as a restore of the same history also does; whether it should stay detached
+is open as TYR-206. When the two walks differ, both
+loaders refresh every retained token in the registry at the triggering event:
+each one whose registration is live takes the new name, or loses its name when
+the suffix is gone, and a token that had already expired stays unnamed. The same
+holds for every registry below it, whose suffixes move
+too. The lookahead loader then reads the whole
+history of each of those registries for that batch: the latest event per
+interpreter state key filed under each registry's `<registry>:*` key. The batch
+holds all of those events in memory at once, beside the rest of its input, so its
+size is set by the moved registry and every registry below it. Once the input is
+read, the runner logs one warning per registry with its token count, event
+count and the bytes of the events' serialized state; it marks a completed read,
+not a written batch, so a batch that fails later and is retried logs it again.
+The first batch with ENSv2 events on a chain has no earlier refresh to compare
+with, so it counts every dirty registry as moved and reads it whole, even a
+manifest-declared one; its registries are new, so those reads return few or no
+events. Apart from that batch, a manifest-declared registry, such as Sepolia's
+`.eth` registry, is never read whole, because its walk ends at itself; only a
+registry discovered through a subregistry pointer can move. No mainnet manifest
+declares an ENSv2 registry yet; once one declares mainnet's `.eth` registry,
+the same holds for it. Memory sizes here are estimates, not bounds: on a Sepolia
+staging copy, one discovered registry's 37,832 retained events averaged about
+1.4 KB of serialized state, and resident memory is higher than that. Assuming
+about three retained events per token (registration, resource link, resolver),
+a move of a registry tree holding 100,000 tokens needs at least 0.4 GB in that
+batch, and one the size of a million-name `.eth` at least 4 GB.
+
+Two partial expression indexes on
 `normalized_events` serve these reads for the ENSv1 families:
 `normalized_events_v1_direct_node_probe_idx` (events of one name) and
 `normalized_events_v1_due_probe_idx` (registrar expiry ranges); two more with the

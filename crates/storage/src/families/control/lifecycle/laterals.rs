@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::{
     NameFacts,
-    admission::{Authority, Probe, REGISTRAR, StagedName},
+    admission::{Authority, Probe, REGISTRAR, StagedName, WRAPPER},
     membership::merged_for,
     served::{Selected, Tagged, latest},
 };
@@ -205,6 +205,10 @@ pub(super) fn registrant(
         .filter(|tagged| {
             !custody(tagged.event)
                 && !released_under_wrapper(tagged.event)
+                // A registry-only binding means the NameWrapper no longer holds the registry
+                // record, so the token it replaced names no registrant.
+                // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+                && !(handoff.is_some() && tagged.event.source_family == WRAPPER)
                 && value(tagged.event).is_some()
         });
     latest(candidates, |tagged| &tagged.event.position)

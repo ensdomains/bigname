@@ -53,7 +53,9 @@ use std::{cell::RefCell, collections::BTreeSet};
 //   one whose restored `ParentChanged` or crossed expiry renames its tokens, without loading
 //   the whole registry: a token it did not load is not read by the batch, and if the batch
 //   does read it the retry loads it and restores again. A batch that marks a registry dirty
-//   reads every token in it, because each of them emits its new name.
+//   reads the registry-level rows of its suffix walk, and reads every token in it only when
+//   that walk changed since names were last refreshed, because each of them then emits its
+//   new name.
 // - Restore finish and `replace_v2_suffix_anchors` re-derive the name of every loaded token.
 //   Each derivation reads the token's ancestors through the reporting maps, and a token that
 //   is not loaded is not read by the batch.

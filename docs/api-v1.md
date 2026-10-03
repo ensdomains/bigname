@@ -1190,14 +1190,32 @@ record
 until a `reclaim` or registry transfer moves it
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 
-One known gap remains. A parent owner can reassign a wrapped child's registry
-record with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
+A name with a [name row](glossary.md#composed-name-row) stops being served as
+wrapped once a registry write moves its record away from NameWrapper; a child
+with no name row follows the paragraph above. A parent owner can reassign a
+wrapped child's registry record with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f),
 after which NameWrapper no longer treats the child as wrapped
-(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f);
-bigname keeps its wrapper state, so the field serves the old token holder while
-the `manager` relation follows the new registry owner (TYR-147). It is listed
-under [known divergences](upstream.md#known-divergences).
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f).
+The child then serves its new registry owner as `owner` and `manager` and under
+both relations, or no owner when the parent set it to zero, carries no
+`ens_v1.wrapper_state`, and later transfers of the old token, or fuses its
+holder sets with NameWrapper's `setFuses`, change nothing.
+NameWrapper's own unwrap, including one to a controller the registry reports
+as no owner, keeps the name wrapped until its `NameUnwrapped`
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+NameWrapper's own `setRecord`, and its `setSubnodeRecord` over a wrapped child,
+write the record back to NameWrapper itself before moving the token, so the
+name stays wrapped
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L629 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637-L660 @ ens_v1@91c966f).
+A registry write back to NameWrapper without a wrap, after the record has left
+it, revives the old token on chain, but bigname keeps serving the NameWrapper
+contract as `owner` and `manager` until the next `NameWrapped`. A child with no
+name row that the NameWrapper named is instead hidden again: it omits `owner`
+and `manager` and is listed for neither the NameWrapper contract nor its token
+holder. Both cases are listed under
+[known divergences](upstream.md#known-divergences).
 
 ## Status Vocabulary
 
@@ -1574,6 +1592,19 @@ diagnostics and product history. A cursor issued before that change has no
 continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
 continue normally.
+
+The interpreter change that files a role change on one ENSv2 registry token
+under that token's [ENSv2 state key](glossary.md#ensv2-state-key) (see
+[ENSv2 role changes filed under their token](deployment.md#ensv2-role-changes-filed-under-their-token))
+changes two attribution fields of diagnostic events and nothing else. On an
+ENSv2 registry or root registry `PermissionChanged` row,
+`raw_fact_ref.state_scope` names the role's resource id in its third segment
+instead of `-`, and `raw_fact_ref.interpreter_state_key` changes with it.
+`event_identity`, `logical_name_id`, `resource_id`, `before_state` and
+`after_state` stay fixed, and `RootPermissionChanged` rows and resolver
+permission rows do not change. Only `/v1/diagnostics/events` serves
+`raw_fact_ref`, so no product row changes, and diagnostic cursors continue
+under the re-walk rule above.
 
 A `record` row may also come from a node-keyed resolver observation that carries
 no logical name or resource of its own, such as an exact direct

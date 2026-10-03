@@ -115,10 +115,10 @@ pub(super) async fn fold_registrants(
             })
             .filter_map(|row| Some((Position::from_map(row)?, reported_registrant(row)?)))
             .max_by(|left, right| left.0.cmp(&right.0));
-        // The name's latest retained registrar transfer. One the adapter emitted unnamed reached
-        // no fold row on arrival (addresses.rs keys the fold by the event's own name), so a row
-        // named since is folded here: it becomes the token holder when it is later than the one
-        // the fold holds.
+        // The name's latest retained registrar transfer, folded here when it is later than the
+        // one the fold holds. A registrar transfer the adapter emitted unnamed already folded on
+        // arrival under the same `<namespace>:<namehash>` id (addresses.rs `fold_key`), so this
+        // finds it held; a row named since that reached no fold row is folded now.
         let transfer = current
             .values()
             .filter(|row| {

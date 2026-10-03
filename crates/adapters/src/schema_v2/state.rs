@@ -157,6 +157,7 @@ pub(super) struct State {
     v2_parent_claims: Covered<maps::RegistryClaim, String, (String, Vec<u8>)>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
     latest_v2_timestamp: Option<i64>,
+    v2_topology_baseline: Option<topology::V2TopologyBaseline>,
     pub(in crate::schema_v2) v2_resolver_arguments:
         Covered<maps::InstanceResource, (Uuid, String), Vec<u8>>,
     v2_resolver_hints: Covered<maps::AddressId, (String, String), (String, Value)>,
@@ -186,8 +187,7 @@ impl State {
         let key = v1_key(namespace, namehash);
         if surface_known {
             self.remember_known_surface(logical_name_id.clone());
-            self.active_resources
-                .insert(logical_name_id.clone(), resource_id);
+            self.activate_v1_resource(&logical_name_id, resource_id);
         }
         self.v1_names.insert(
             key,
@@ -230,8 +230,7 @@ impl State {
             self.remember_known_surface(logical_name_id.clone());
         }
         if make_current && surface_known {
-            self.active_resources
-                .insert(logical_name_id.clone(), resource_id);
+            self.activate_v1_resource(&logical_name_id, resource_id);
         }
         let key = v1_key(namespace, namehash);
         let value = V1NameState {
@@ -415,12 +414,31 @@ impl State {
         if let Some(mut authority) = authority {
             if self.promote_known_v1_authority(&key, &mut authority) {
                 self.remember_known_surface(authority.logical_name_id.clone());
-                self.active_resources
-                    .insert(authority.logical_name_id.clone(), authority.resource_id);
+                self.activate_v1_resource(&authority.logical_name_id, authority.resource_id);
             }
             self.v1_names.insert(key, authority);
         }
         previous
+    }
+
+    /// Makes an ENSv1 resource current for a name unless an ENSv2 token holding it wins,
+    /// immediately, as a full refresh does. Those tokens are refreshed too, so the result does
+    /// not depend on batch boundaries.
+    pub(super) fn activate_v1_resource(&mut self, logical_name_id: &str, resource_id: Uuid) {
+        let current = self
+            .v2_active_resource_winner(logical_name_id)
+            .unwrap_or(resource_id);
+        self.active_resources
+            .insert(logical_name_id.to_owned(), current);
+        if let Some(keys) = self
+            .v2_tokens_by_current_name_index
+            .get(logical_name_id)
+            .cloned()
+        {
+            for key in keys {
+                self.mark_v2_token_dirty(key);
+            }
+        }
     }
 
     pub(super) fn v1_is_migrated(&self, namespace: &str, namehash: &str) -> bool {
@@ -479,8 +497,7 @@ impl State {
         self.v1_names.insert(key, registrar.clone());
         if registrar.surface_known {
             self.remember_known_surface(registrar.logical_name_id.clone());
-            self.active_resources
-                .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+            self.activate_v1_resource(&registrar.logical_name_id, registrar.resource_id);
         }
         Some(registrar)
     }
@@ -505,8 +522,7 @@ impl State {
             .insert(v1_key(namespace, namehash), registrar.clone());
         if registrar.surface_known {
             self.remember_known_surface(registrar.logical_name_id.clone());
-            self.active_resources
-                .insert(registrar.logical_name_id.clone(), registrar.resource_id);
+            self.activate_v1_resource(&registrar.logical_name_id, registrar.resource_id);
         }
         Some(registrar)
     }

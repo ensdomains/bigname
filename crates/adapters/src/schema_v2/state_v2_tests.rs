@@ -181,6 +181,94 @@ fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl F
     assert_eq!(targeted, full_walk);
     assert_v2_indexes_are_derived(&targeted);
 }
+/// An ENSv1 authority that becomes current for a name an ENSv2 token holds yields to the ENSv2
+/// winner immediately, as a full refresh does, whether or not the token's registry was dirtied
+/// in the batch.
+#[test]
+fn v2_refresh_after_an_ensv1_activation_matches_the_full_walk() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+    assert_targeted_refresh_matches_full_walk(state, |state| {
+        let name = name_id(state, ROOT, "0x01");
+        let (_, namehash) = name.split_once(':').expect("logical name id");
+        state.observe_v1_name(
+            NAMESPACE,
+            namehash,
+            name.clone(),
+            true,
+            Uuid::from_u128(1),
+            None,
+            "ens_v1_registry_l1".to_owned(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(2)));
+    });
+}
+/// When the last ENSv2 holder of a name leaves, a live ENSv1 authority's resource becomes
+/// current, as a restore of the same history ends, whether it leaves in the batch of the ENSv1
+/// activation or later.
+#[test]
+fn v2_departure_hands_the_name_back_to_its_ensv1_authority() {
+    for refreshed_between in [false, true] {
+        let mut state = anchored_state();
+        install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+        state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+        state.refresh_dirty_v2_names(1);
+        let name = name_id(&state, ROOT, "0x01");
+        let (_, namehash) = name.split_once(':').expect("logical name id");
+        state.observe_v1_name(
+            NAMESPACE,
+            namehash,
+            name.clone(),
+            true,
+            Uuid::from_u128(1),
+            None,
+            "ens_v1_registry_l1".to_owned(),
+            None,
+            None,
+            None,
+        );
+        if refreshed_between {
+            state.refresh_dirty_v2_names(50);
+        }
+        state.refresh_dirty_v2_names(150);
+        assert_eq!(
+            state.active_resources.get(&name),
+            Some(&Uuid::from_u128(1)),
+            "refreshed between: {refreshed_between}"
+        );
+    }
+}
+/// Releasing the last ENSv2 holder hands the name to its ENSv1 authority at once.
+#[test]
+fn v2_release_hands_the_name_back_to_its_ensv1_authority() {
+    let mut state = anchored_state();
+    install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+    state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+    state.refresh_dirty_v2_names(1);
+    let name = name_id(&state, ROOT, "0x01");
+    let (_, namehash) = name.split_once(':').expect("logical name id");
+    state.observe_v1_name(
+        NAMESPACE,
+        namehash,
+        name.clone(),
+        true,
+        Uuid::from_u128(1),
+        None,
+        "ens_v1_registry_l1".to_owned(),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(2)));
+    state.release_v2_token(ROOT, "0x01");
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(1)));
+    state.refresh_dirty_v2_names(2);
+    assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(1)));
+}
 #[test]
 fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
     let mut state = anchored_state();
@@ -193,6 +281,66 @@ fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
         .map(|transition| format!("{}:{}", transition.registry, transition.token_id))
         .collect::<Vec<_>>();
     assert_eq!(keys, [format!("{ROOT}:0x01"), format!("{ROOT}:0x02")]);
+}
+/// A registry whose suffix walk is unchanged holds no token whose name changed, so a renewal or
+/// a restated pointer on its parent token refreshes only that token; clearing the pointer moves
+/// the suffix and refreshes the registry's tokens.
+#[test]
+fn v2_registry_tokens_refresh_only_when_its_suffix_walk_changes() {
+    let mut state = nested_state(100);
+    state.refresh_dirty_v2_names(1);
+    for spurious in [
+        |state: &mut State| state.set_v2_expiry(ROOT, "0x01", 200),
+        |state: &mut State| state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned())),
+    ] {
+        spurious(&mut state);
+        super::reset_v2_refresh_visits();
+        assert!(state.refresh_dirty_v2_names(2).is_empty());
+        assert_eq!(super::v2_refresh_visits(), 1);
+    }
+    let leaf = name_id(&state, CHILD, "0x02");
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    super::reset_v2_refresh_visits();
+    let transitions = state.refresh_dirty_v2_names(3);
+    assert_eq!(super::v2_refresh_visits(), 2);
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == CHILD
+            && transition
+                .previous
+                .as_ref()
+                .map(|name| &name.logical_name_id)
+                == Some(&leaf)
+            && transition.current.is_none()
+    }));
+}
+/// A suffix move renames the registry's own subregistries too, and a pointer cleared and set
+/// again before names are refreshed leaves every suffix where it was.
+#[test]
+fn v2_suffix_moves_reach_grandchildren_and_a_restored_pointer_moves_nothing() {
+    let mut state = nested_state(100);
+    state.set_v2_subregistry(CHILD, "0x02", Some(THIRD.to_owned()));
+    state.set_v2_parent_claim(THIRD, Some(CHILD.to_owned()), b"leaf");
+    install_token(&mut state, THIRD, "0x03", b"deep", 100);
+    state.refresh_dirty_v2_names(1);
+    let deep = name_id(&state, THIRD, "0x03");
+
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned()));
+    super::reset_v2_refresh_visits();
+    assert!(state.refresh_dirty_v2_names(2).is_empty());
+    assert_eq!(super::v2_refresh_visits(), 1);
+
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    let transitions = state.refresh_dirty_v2_names(3);
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == THIRD
+            && transition
+                .previous
+                .as_ref()
+                .map(|name| &name.logical_name_id)
+                == Some(&deep)
+            && transition.current.is_none()
+    }));
 }
 #[test]
 fn v2_expiry_crossing_refreshes_descendants_without_a_token_event() {
