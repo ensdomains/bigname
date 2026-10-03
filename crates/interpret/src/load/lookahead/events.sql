@@ -1,5 +1,7 @@
--- Keep lineage validation parameterized by each selected event. A normal join can
--- hash all 25M+ lineage rows when per-name/resource history fanout is overestimated.
+-- Candidates only list state keys. Lineage is checked where a row is selected: in `winners`
+-- once per key, and for each restored event's timestamp. A key whose candidates all sit on
+-- orphaned blocks has no readable event, so `winners` returns nothing for it. Each probe stays
+-- parameterized by its event: a normal join can hash all 25M+ lineage rows.
 -- LIMIT prevents lateral pull-up. It cannot discard a matching lineage row because
 -- (chain_id, block_hash) is the chain_lineage primary key; exact height is also checked.
 WITH candidates AS MATERIALIZED (
@@ -35,13 +37,6 @@ WITH candidates AS MATERIALIZED (
           AND event.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0)
     ) event ON TRUE
-    JOIN LATERAL (
-        SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
-        LIMIT 1
-    ) readable ON TRUE
     UNION ALL
     SELECT event.normalized_event_id,
            event.raw_fact_ref ? '{state_key}',
@@ -58,13 +53,6 @@ WITH candidates AS MATERIALIZED (
           AND event.canonicality_state IN ('canonical','safe','finalized')
         OFFSET 0
     ) event ON TRUE
-    JOIN LATERAL (
-        SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
-        LIMIT 1
-    ) readable ON TRUE
     UNION ALL
     -- ENSv2 events filed under a requested ENSv2 state key. The array must stay identical to
     -- normalized_events_v2_key_probe_idx and to `v2_event_keys` in the adapter crate.
@@ -73,13 +61,6 @@ WITH candidates AS MATERIALIZED (
            COALESCE(event.raw_fact_ref ->> '{state_key}', event.event_identity),
            event.after_state ? '{clear_marker}'
     FROM normalized_events event
-    JOIN LATERAL (
-        SELECT 1 FROM chain_lineage lineage
-        WHERE lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
-          AND lineage.canonicality_state IN ('canonical','safe','finalized')
-        LIMIT 1
-    ) readable ON TRUE
     WHERE {v2_keys} && $5::text[]
       AND event.chain_id = $1 AND event.block_number < $2
       AND event.source_family LIKE 'ens\_v2\_%'

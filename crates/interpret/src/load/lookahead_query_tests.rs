@@ -172,6 +172,64 @@ async fn global_winners_preserve_partitions_positions_and_canonical_hashes() -> 
     Ok(())
 }
 
+/// Candidates on an orphaned block still name their state keys; only `winners` checks
+/// lineage. Covers each candidate arm: names, resources and ENSv2 state keys.
+#[tokio::test]
+async fn keys_seen_only_on_orphaned_blocks_restore_nothing() -> Result {
+    let db = database().await?;
+    let resource = Uuid::from_u128(1);
+    for (id, name, res, block, state_key) in [
+        ("older-readable", Some("ens:a"), None, 1, "older"),
+        ("readable", Some("ens:a"), None, 2, "readable"),
+        ("orphaned-latest", Some("ens:a"), None, 4, "older"),
+        ("orphaned-only", Some("ens:a"), None, 4, "orphaned-only"),
+        ("res-readable", None, Some(resource), 2, "res-readable"),
+        ("res-orphaned", None, Some(resource), 4, "res-orphaned"),
+    ] {
+        seed(
+            db.pool(),
+            id,
+            name,
+            res,
+            block,
+            None,
+            key(state_key),
+            json!({}),
+        )
+        .await?;
+    }
+    let token = format!("0x{:064x}", 1u128 << 32);
+    for (id, block) in [("v2-readable", 2), ("v2-orphaned", 4)] {
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','RegistrationGranted','ens_v2_registry_l1',1,$2,$3,'block-'||$3::text,'tx',jsonb_build_object($4::text,$1,$5::text,'0xreg:-:'||$6||':-:LabelRegistered'),'ens_v1_unwrapped_authority','canonical',jsonb_build_object('fixture_identity',$1))")
+            .bind(id).bind(CHAIN).bind(block).bind(INTERPRETER_STATE_KEY)
+            .bind(super::STATE_SCOPE_KEY).bind(&token).execute(db.pool()).await?;
+    }
+    sqlx::query("UPDATE chain_lineage SET canonicality_state='orphaned' WHERE chain_id=$1 AND block_hash='block-4'")
+        .bind(CHAIN).execute(db.pool()).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,'replacement-4',4,to_timestamp(4),'safe')")
+        .bind(CHAIN).execute(db.pool()).await?;
+    let mut connection = db.pool().acquire().await?;
+    let selected = super::ordered_events(
+        &mut connection,
+        CHAIN,
+        5,
+        &["ens:a".into()],
+        &[resource],
+        &[format!("0xreg:{token}")],
+    )
+    .await?
+    .into_iter()
+    .map(|ordered| ordered.event)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        identities(&selected),
+        ["older-readable", "readable", "res-readable", "v2-readable"]
+    );
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn unnamed_direct_facts_route_by_child_without_parent_descendant_expansion() -> Result {
     let db = database().await?;
@@ -480,6 +538,16 @@ fn index_names(plan: &Value, names: &mut Vec<String>) {
     }
 }
 
+fn relation_scans(plan: &Value, relation: &str) -> usize {
+    usize::from(plan["Relation Name"] == relation)
+        + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|child| relation_scans(child, relation))
+            .sum::<usize>()
+}
+
 /// The fixture database holds only the checked-in baseline schema, so this proves the
 /// baseline defines indexes whose expressions the lookahead queries can use, for the ENSv1,
 /// Basenames Base and ENSv2 families alike. A drifted expression or family predicate
@@ -589,6 +657,15 @@ async fn lookahead_sql_uses_baseline_indexes() -> Result {
                 assert!(
                     used.iter().any(|name| name == index),
                     "{mode} {name} plan must use {index}, used {used:?}"
+                );
+            }
+            // Two lineage probes per state key in `winners`, one for the restored event's
+            // timestamp; a probe per historical candidate would scale with name history.
+            if name == "events" {
+                let probes = relation_scans(&plan[0]["Plan"], "chain_lineage");
+                assert!(
+                    probes <= 3,
+                    "{mode} events plan probes chain_lineage {probes} times"
                 );
             }
         }
