@@ -2309,3 +2309,19 @@ token is no longer listed as its manager. The Project redo also recomposes a
 subname that was unwrapped and whose registry record was later given to
 another owner: it now serves that registry owner as `owner`, not the holder it
 was unwrapped to.
+
+### ENSv2 registries read whole only when their suffix moves
+
+The build that stops the lookahead loader from reading a whole ENSv2 registry
+for a batch that leaves the registry's name suffix unchanged (TYR-202, see
+[Interpret process memory](storage.md#interpret-process-memory)) changes the
+ENSv2 name refresh in `crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Stored output does not change: a registry whose suffix walk is unchanged
+holds no token whose name changes, and both loaders apply the same rule. It adds
+no schema-migration, table, index, manifest or setting, so stamp no Ingest redo.
+In v0.4.0 it shares the release's one Interpret and Project redo pair with the
+other hash-rotating changes in the bundle. On Sepolia the redo no longer reads
+the 2026-09-15 deployment's registry whole on every batch from block 10,890,000
+on. A batch whose registry suffix does move still reads that registry whole and
+logs a warning; see the runbook's lookahead section.

@@ -1700,7 +1700,34 @@ finite stored history, so the attempts end. A read under another spelling than
 the loaded one fails the batch only when that spelling is loaded too, so the
 adapter's state keys must match the keys its events are filed under. Only an attempt that read nothing unloaded is
 published. The
-session is discarded after the batch. Two partial expression indexes on
+session is discarded after the batch.
+
+A batch marks an ENSv2 registry for a name refresh when its parent claim
+changes, when a subregistry pointer to it is set or cleared, or when the token
+pointing at it is released, replaced, regenerated, or has its expiry changed or
+crossed. Interpret then walks the registry's name suffix: its parent claim, the
+parent token's subregistry pointer and expiry, and so on up to a manifest-declared
+registry, whose suffix is fixed. It compares the result with the same walk over the
+registry-level state as it stood at the previous refresh, which the session keeps
+alongside its other state. When the two walks agree, no token in the registry
+changes name, so only the tokens the batch already touches are refreshed and the
+lookahead loader reads only the rows the walk reads. When they differ, every
+token in the registry takes a new name, with its old binding closed and a new one
+granted at the triggering event, so both loaders refresh every token and the
+lookahead loader reads the whole registry's history for that batch: the latest
+event per interpreter state key filed under the registry's `<registry>:*` key.
+That batch holds the registry in memory at roughly 1.4 KB of event state per
+retained event, about three per token, and the runner logs a warning naming the
+registry with its token count, event count and bytes. A manifest-declared
+registry, such as Sepolia's `.eth` registry, never moves, because its walk
+ends at itself; only a registry discovered through a subregistry pointer can.
+No mainnet manifest declares an ENSv2 registry yet. When one declares mainnet's
+`.eth` registry, it never takes this path either; a registry of that size that
+did would need about 4 GB per million tokens in one batch. A discovered
+registry's cost is bounded by its own tokens: one of 100,000 tokens takes about
+0.4 GB in that batch.
+
+Two partial expression indexes on
 `normalized_events` serve these reads for the ENSv1 families:
 `normalized_events_v1_direct_node_probe_idx` (events of one name) and
 `normalized_events_v1_due_probe_idx` (registrar expiry ranges); two more with the

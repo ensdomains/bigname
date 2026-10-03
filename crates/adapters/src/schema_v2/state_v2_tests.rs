@@ -194,6 +194,37 @@ fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
         .collect::<Vec<_>>();
     assert_eq!(keys, [format!("{ROOT}:0x01"), format!("{ROOT}:0x02")]);
 }
+/// A registry whose suffix walk is unchanged holds no token whose name changed, so a renewal or
+/// a restated pointer on its parent token refreshes only that token; clearing the pointer moves
+/// the suffix and refreshes the registry's tokens.
+#[test]
+fn v2_registry_tokens_refresh_only_when_its_suffix_walk_changes() {
+    let mut state = nested_state(100);
+    state.refresh_dirty_v2_names(1);
+    for spurious in [
+        |state: &mut State| state.set_v2_expiry(ROOT, "0x01", 200),
+        |state: &mut State| state.set_v2_subregistry(ROOT, "0x01", Some(CHILD.to_owned())),
+    ] {
+        spurious(&mut state);
+        super::reset_v2_refresh_visits();
+        assert!(state.refresh_dirty_v2_names(2).is_empty());
+        assert_eq!(super::v2_refresh_visits(), 1);
+    }
+    let leaf = name_id(&state, CHILD, "0x02");
+    state.set_v2_subregistry(ROOT, "0x01", None);
+    super::reset_v2_refresh_visits();
+    let transitions = state.refresh_dirty_v2_names(3);
+    assert_eq!(super::v2_refresh_visits(), 2);
+    assert!(transitions.iter().any(|transition| {
+        transition.registry == CHILD
+            && transition
+                .previous
+                .as_ref()
+                .map(|name| &name.logical_name_id)
+                == Some(&leaf)
+            && transition.current.is_none()
+    }));
+}
 #[test]
 fn v2_expiry_crossing_refreshes_descendants_without_a_token_event() {
     let mut state = nested_state(10);

@@ -2,10 +2,10 @@
 //! names, resources and [ENSv2 state keys](../../../../docs/glossary.md#ensv2-state-key) the
 //! batch touches. Canonical history remains the sole durable state.
 use bigname_adapters::schema_v2::{
-    BatchInput, ManifestInput, StateCacheCapacity, UnloadedKeys, V1BatchDependencies,
-    V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance, collect_v1_batch_dependencies,
-    prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
-    v1_lookahead_supports_family, v2_key_loaded,
+    BatchInput, ManifestInput, PriorEventInput, StateCacheCapacity, UnloadedKeys,
+    V1BatchDependencies, V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance,
+    collect_v1_batch_dependencies, prepare_schema_v2_batch_lookahead,
+    restore_schema_v2_lookahead_session, v1_lookahead_supports_family, v2_key_loaded,
 };
 use sqlx::PgPool;
 
@@ -131,9 +131,10 @@ pub(crate) async fn batch_input(
             .extend(lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?);
     }
     dependencies.v2_due_window = Some(window);
-    let (prepared, restored_event_count) = loop {
+    let (prepared, restored_event_count, whole_registries) = loop {
         let prior = load_closure(&mut tx, chain_id, from_block, &mut dependencies).await?;
         let restored_event_count = prior.len();
+        let whole_registries = whole_registry_loads(&prior, &dependencies);
         let restore = begin_schema_v2_adapter_restore_with_provenance(
             chain_id.to_owned(),
             input.manifests.clone(),
@@ -168,7 +169,7 @@ pub(crate) async fn batch_input(
             )
         });
         match attempt {
-            Ok(prepared) => break (prepared, restored_event_count),
+            Ok(prepared) => break (prepared, restored_event_count, whole_registries),
             Err(error) => match error.downcast_ref::<UnloadedKeys>() {
                 Some(unloaded)
                     if unloaded.names.is_disjoint(&dependencies.nodes)
@@ -206,6 +207,17 @@ pub(crate) async fn batch_input(
     tx.commit().await.map_err(|error| {
         InterpretError::database("failed to commit lookahead input snapshot", error)
     })?;
+    for (registry, tokens, events, bytes) in whole_registries {
+        tracing::warn!(
+            chain_id,
+            from_block,
+            registry,
+            tokens,
+            events,
+            bytes,
+            "interpret loaded every token of an ENSv2 registry to re-derive their names"
+        );
+    }
     Ok(Attempt::Loaded(Box::new(LoadedBatch {
         input,
         provenance_manifests: provenance,
@@ -333,6 +345,38 @@ async fn retained_family_reason(
         source_family,
         rollout_status,
     }))
+}
+
+/// For each whole registry the batch read, its tokens, its restored events and the bytes of
+/// those events' state.
+fn whole_registry_loads(
+    prior: &[PriorEventInput],
+    dependencies: &V1BatchDependencies,
+) -> Vec<(String, usize, usize, usize)> {
+    let whole = dependencies
+        .v2_keys
+        .iter()
+        .filter_map(|key| key.strip_suffix(":*"));
+    whole
+        .map(|registry| {
+            let mut tokens = std::collections::BTreeSet::new();
+            let (mut events, mut bytes) = (0, 0);
+            for event in prior {
+                // `<registry>:-:<token id>:-:<source event>`, as `lookahead/v2_keys.sql` reads it.
+                let mut scope = event.state_scope.as_deref().unwrap_or_default().split(':');
+                if !scope
+                    .next()
+                    .is_some_and(|emitter| emitter.eq_ignore_ascii_case(registry))
+                {
+                    continue;
+                }
+                events += 1;
+                bytes += event.after_state.to_string().len();
+                tokens.extend(scope.nth(1).map(str::to_owned));
+            }
+            (registry.to_owned(), tokens.len(), events, bytes)
+        })
+        .collect()
 }
 
 fn validate_dependencies(dependencies: &V1BatchDependencies) -> Result<()> {

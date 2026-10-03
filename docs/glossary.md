@@ -1707,7 +1707,8 @@ low 32 bits zeroed. An ENSv2 registry derives every version of a label's token
 id and resource id from its labelhash by replacing only those bits
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/utils/LibLabel.sol:L15-16 @ ens_v2_sepolia_20260916@366de741),
 so one key covers a label across regenerations. `address:00000000` holds a
-registry's own parent claim, and `address:*` every event of that registry. Each
+registry's own parent claim, and `address:*` every event of that registry, which
+a batch loads only when the registry's name suffix moves. Each
 retained ENSv2 event is filed under the keys of its emitter with the token,
 resource and labelhash it names; loading a key loads every event filed under it.
 

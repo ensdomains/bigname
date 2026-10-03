@@ -157,6 +157,7 @@ pub(super) struct State {
     v2_parent_claims: Covered<maps::RegistryClaim, String, (String, Vec<u8>)>,
     v2_suffix_anchors: OrdMap<String, (String, Vec<String>)>,
     latest_v2_timestamp: Option<i64>,
+    v2_topology_baseline: Option<topology::V2TopologyBaseline>,
     pub(in crate::schema_v2) v2_resolver_arguments:
         Covered<maps::InstanceResource, (Uuid, String), Vec<u8>>,
     v2_resolver_hints: Covered<maps::AddressId, (String, String), (String, Value)>,
