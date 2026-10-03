@@ -2283,3 +2283,29 @@ its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
+
+### NameWrapper authority ends when the registry record leaves NameWrapper
+
+The build that ends a wrapped name's NameWrapper authority once a registry
+write moves its record away from NameWrapper (TYR-147 and TYR-100, see
+[Manager](api-v1.md#manager)) changes the ENSv1 registry adapter in
+`crates/adapters/src` and the registrant composition in
+`crates/storage/src/families`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+Normalized events change for every wrapped name whose registry record was
+written to an owner other than NameWrapper without a following unwrap, such as
+a parent owner's `setSubnodeOwner` over a wrapped child or the Graveyard
+clearing a wrapped subname. Finish the full-history Interpret redo and the
+Project redo it installs before the matching API serves. Stamp no Ingest redo:
+the build changes no manifest, watch set, start block, table or
+schema-migration, and the adapter reads only the logs of the batch it
+interprets, so no historical ingest fetch is needed. In v0.4.0 it shares the
+release's one Interpret and Project redo pair with the other hash-rotating
+changes in the bundle: run one pair under a binary that holds all of them.
+After the redo such a name serves its registry owner as `owner` and `manager`,
+carries no `ens_v1.wrapper_state`, and is listed under its registry owner
+instead of the old token holder; a Graveyard sent a cleared subname's surviving
+token is no longer listed as its manager. The Project redo also recomposes a
+subname that was unwrapped and whose registry record was later given to
+another owner: it now serves that registry owner as `owner`, not the holder it
+was unwrapped to.

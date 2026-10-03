@@ -14,7 +14,7 @@ use crate::families::control::{
 use super::AuthoritySelection;
 
 pub(crate) const REGISTRAR: &str = "ens_v1_registrar_l1";
-const WRAPPER: &str = "ens_v1_wrapper_l1";
+pub(super) const WRAPPER: &str = "ens_v1_wrapper_l1";
 /// The registrar lifecycle kinds staging names.
 const STAGED_KINDS: [&str; 5] = [
     "RegistrationGranted",
