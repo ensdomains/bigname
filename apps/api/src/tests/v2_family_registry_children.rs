@@ -737,10 +737,10 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
 /// A child an ENSv1 registrar controller registered under a label that fails normalization: the
 /// legacy controller accepts any label of three or more characters
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191-L193 @ ens_v1@91c966f)
-/// and the registrant is the registry owner
+/// and the registration sets the registrant as registry owner
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
-/// so the registrant stays listed as owner and manager of the shadow child and its subname keeps
-/// `owner`. Only its `manager` field is withheld, as for every lifecycle shadow. The fixture puts
+/// so, until a `reclaim` or registry transfer moves the record, the registrant stays listed as
+/// owner and manager of the shadow child and its subname keeps `owner`. Only its `manager` field is withheld, as for every lifecycle shadow. The fixture puts
 /// the child under alpha.eth: which observer emitted the shadow is all that decides the listing.
 #[tokio::test]
 async fn v2_registrar_shadow_child_stays_listed_for_its_registrant() -> Result<()> {

@@ -3378,7 +3378,8 @@ introduces it rebuilds Project from full history before serving the option; see
   Such an ENSv1 registry child is listed for its current registry owner — the
   node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
   `relations: ["owner", "manager"]`, exactly while its parent's
-  `GET /v1/names/{name}/subnames` lists it, and as that route serves it:
+  `GET /v1/names/{name}/subnames` lists it, except the NameWrapper-held child
+  below, and as that route serves it:
   `name` and `display_name` carry the proven, normalization-verified label
   preimage under the parent, else a [non-name form](glossary.md#non-name-form);
   `namehash` is the child node, `owner` the registry owner, and
@@ -3406,8 +3407,10 @@ introduces it rebuilds Project from full history before serving the option; see
   [Manager](api-v1.md#manager)). A known residual: a child the NameWrapper once
   named whose registry record is later handed back to the NameWrapper address
   by a plain registry `setOwner` or `setSubnodeOwner`, with no new wrap, also
-  stays unlisted for the NameWrapper contract, although no token exists for it
-  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f).
+  stays unlisted for the NameWrapper contract, whether or not a NameWrapper
+  token survives for it
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
   Every other registry child described here is listed under both
   `relation=owner` and `relation=manager`; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
