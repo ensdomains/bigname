@@ -280,11 +280,13 @@ Family indexes serve these concrete readers:
   parents through `project_child_edge_candidate_child_idx`, by chain, namespace and child
   node, and find a registry instance's ENSv2 registrations through
   `project_child_registration_state_registry_idx`; both primary keys lead with a column
-  those lookups do not bind.
+  those lookups do not bind. The registry children an address owns read their edges through
+  the same index by their candidate nodes, so they never enumerate a parent's children.
 - The same child reads, and the registry children an address owns, find the registrar lease
   events of a child with no name surface through `project_lifecycle_event_namehash_idx`, by
-  chain and the child node, to tell whether its lease has been released; the primary key leads
-  with the lease's resource, which the child does not know. Children with a surface never probe.
+  chain and the child node, to tell whether its lease has been released and who holds it; the
+  primary key leads with the lease's resource, which the child does not know. Children with a
+  surface never probe, and the child counts read neither probe.
 - The name-ordered walks (`storage:families.name.search_candidates` and
   `storage:families.name.bound_candidates`) can read `name_surfaces_name_order_idx` in page
   order, `(raw_name, namespace, namehash, logical_name_id)` over active, readable surfaces, with
