@@ -5,8 +5,10 @@ adds each new row to every index on that table whose predicate the row matches. 
 indexes serve the API's history and event pages or Project's reads, and nothing reads them
 while Interpret walks the chain: Project starts only after Interpret completes, and the API
 refuses the routes that read them while an Interpret redo is in progress. The event audit,
-`GET /v1/diagnostics/events`, stays available during a redo; while the set is dropped it
-returns the same rows, only slower. On a large database
+`GET /v1/diagnostics/events`, stays available during a redo. Its record attribution reads six
+of the dropped indexes, so while the set is dropped it reads without them and, on a large
+database, may exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
+`install.sql` has run. On a large database
 their upkeep is a large share of each insert, because their keys (block hashes, nodes, names,
 addresses) arrive in random order and each new entry lands on a different index page.
 
@@ -65,8 +67,10 @@ For a full-history Interpret redo run with the one-shot `phase-runner redo` comm
 For a from-zero walk under the long-running runner, run `drop.sql` after `init-schema` and
 before the first start. Project starts on its own once Interpret completes, so stop the
 runner while Interpret's last batches run, run `install.sql`, then start it again. A missed
-stop is never wrong, only slow: Project and the API then read without these indexes, through
-sequential scans, until `install.sql` finishes, and it can run while they do.
+stop never changes a row, but until `install.sql` finishes Project reads without these
+indexes, through sequential scans, and an API read that needs one may exceed the API's
+statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) on a large database. The script can
+run while they do.
 
 The set is shared, so on a database with two chains run `install.sql` before the first chain
 to finish its Interpret redo starts Project.

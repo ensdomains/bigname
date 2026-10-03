@@ -2454,4 +2454,5 @@ reviewed definitions and analyzes the table before Project runs. `drop.sql` refu
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
 [production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
-describes. Without the rebuild Project and the API read the same rows, only slower.
+describes. Without the rebuild no row changes, but Project reads more slowly and an API read
+that needs a dropped index may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.

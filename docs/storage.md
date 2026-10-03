@@ -1992,9 +1992,13 @@ authoritative. The rule that splits the indexes:
   Interpret completes, and the API refuses the routes that read them while an Interpret redo
   is in progress (the public namespace snapshot and the composed name reads require each
   served chain's Interpret not to be in a redo). The one exception is the event audit,
-  `GET /v1/diagnostics/events`, which stays available during a redo by design: its record
-  attribution reads the record, pointer and Project node indexes among them, so while they
-  are dropped it returns the same rows, only slower.
+  `GET /v1/diagnostics/events`, which stays available during a redo by design. Its record
+  attribution reads six of the dropped indexes (the ENSv1 and Basenames record node indexes,
+  the two record-ID indexes, `normalized_events_project_node_history_idx` and
+  `normalized_events_project_v1_pointer_addressed_node_idx`), so while they are dropped it
+  reads without them and, on a large database, may exceed the API's statement timeout
+  (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`, [production settings](production.md)) until
+  `install.sql` has run.
 
 The 16 kept indexes and the statements that read them:
 

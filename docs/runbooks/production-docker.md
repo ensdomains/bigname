@@ -393,8 +393,8 @@ A from-zero walk on a large database may run with only the
 before the first start. Project starts on its own once Interpret completes, so stop the
 runner while Interpret's last batches run, run `ops/walk-index-set/install.sql`, record its
 output in the walk log, and start the runner again. If the stop is missed, run
-`install.sql` at once: Project and the API read the same rows without those indexes, only
-slower, until it finishes.
+`install.sql` at once: until it finishes, Project reads without those indexes, more slowly,
+and an API read that needs one may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
 
 ## Planned migration and fingerprint boundary
 
