@@ -2559,8 +2559,8 @@ child's lease, its `owner` is the lease's holder, the recipient of its latest to
 `Transfer` or else its registrant, and its `manager` stays its registry owner: after a
 token transfer without `reclaim`
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f),
-`GET /v1/addresses/{address}/names` lists the child for the buyer under `owner` and for the
-seller under `manager` only, and
+`GET /v1/addresses/{address}/names`, which lists ENSv1 `.eth` children only, lists the child for
+the buyer under `owner` and for the seller under `manager` only, and
 `relation=owner&parent=eth&dedupe=registration` counts it for the buyer and not for the
 seller. The parent's subnames page serves the buyer as `owner` and the seller as `manager`,
 with the same rows and counts. The change is breaking for clients that relied on the seller

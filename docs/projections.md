@@ -642,8 +642,8 @@ child's display owner, as the fallback registry's typed read returns it
 ([architecture](architecture.md)); it still names no control owner. A child with no
 owner, or whose name summary records a zero-owner transfer, publishes a relation
 only while it has a serving resource. The readers serve that owner as the child's `manager`,
-and as its `owner` only when the registrar retains no live lease at the node; a child with no
-name surface whose node's lease the registrar retains serves the lease's holder as `owner`.
+and as its `owner` when no nonzero holder of a lease the registrar retains at the node is
+known; otherwise a child with no name surface serves that lease's holder as `owner`.
 A child with no name surface serves that owner only
 while its node's ENSv1 or Basenames registrar lease, if it has one, is not released: the
 readers serve a released one with no owner, although its registry record survives: expiry

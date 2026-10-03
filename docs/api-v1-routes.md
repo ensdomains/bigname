@@ -1775,9 +1775,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry child with no current name row serves its node's current registry
   owner, `owner(node)`, as `manager`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
-  `NewOwner` moves it. Its `owner` is the holder of its `.eth` or Basenames
-  lease while the registrar retains one, the recipient of the lease's latest
-  token `Transfer` or else its registrant, and otherwise the registry owner: the
+  `NewOwner` moves it. Its `owner` is the known holder of the `.eth` or Basenames
+  lease the registrar retains on its node, the recipient of the lease's latest
+  token `Transfer` or else its registrant, and the registry owner when no nonzero
+  holder is known (no lease, or a lease known only from a renewal): the
   token moves without the registry record until `reclaim`
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc)
@@ -3104,7 +3105,11 @@ introduces it rebuilds Project from full history before serving the option; see
   `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1`
   returns a `page.total_count` with one entry per `.eth` registration the
   address holds, a wrapped `.eth` name once, and no subname;
-  `parent=base.eth&namespace=basenames` counts Basenames registrations. A name
+  `parent=base.eth&namespace=basenames` counts Basenames registrations. The count
+  covers the registrations this route lists: it misses a `.eth` name with no name
+  surface that `registerOnly` granted onto a registry record another address owns
+  (a known residual below), and it lists no Basenames registry child without a name
+  row. A name
   count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.

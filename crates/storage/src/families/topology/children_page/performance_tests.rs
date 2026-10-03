@@ -468,12 +468,20 @@ async fn owned_registry_children_read_only_their_candidates() -> Result<()> {
                 }),
                 "{mode}: no edge scan by candidate node: {plan}"
             );
+            // Rows a scan examined: those it emitted and those its filter or recheck dropped.
             for scan in scans {
-                let rows = scan["Actual Rows"].as_f64().unwrap_or_default()
+                let examined = [
+                    "Actual Rows",
+                    "Rows Removed by Filter",
+                    "Rows Removed by Index Recheck",
+                ]
+                .iter()
+                .map(|key| scan[*key].as_f64().unwrap_or_default())
+                .sum::<f64>()
                     * scan["Actual Loops"].as_f64().unwrap_or_default();
                 ensure!(
-                    rows <= candidates.len() as f64,
-                    "{mode}: an edge scan reads more than the candidates: {scan}"
+                    examined <= candidates.len() as f64,
+                    "{mode}: an edge scan examines more rows than the candidates: {scan}"
                 );
             }
         }
