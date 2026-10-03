@@ -340,7 +340,8 @@ collection route carry neither header.
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO. A feed record
   carries the identity fields, `chain_id`, `network`, `status` and its
-  reasons, `is_primary` and `relations` on reverse rows, and the expiry fields
+  reasons, `subregistry` on name results, `is_primary` and `relations` on
+  reverse rows, `resolution` on `resolves_to` rows, and the expiry fields
   `expires_at`, `expires_at_reason` and `grace_ends_at` with the `ens_v1`
   object, each with the value and presence it has on the `profile=detail`
   record for the same name, which are those of name detail and
