@@ -242,13 +242,16 @@ fn subname_cursor_ignores_legacy_snapshot_component() {
 /// A child with no name row serves its registry owner, or an ENSv2 child its token holder, as
 /// both `owner` and `manager`: such a name has no NameWrapper state. A shadow child serves no
 /// manager, and one the NameWrapper holds no owner either. One whose lease was released serves
-/// neither and is `released`.
+/// neither and is `released`. The holder of a retained `.eth` lease is its `owner`, and the
+/// registry owner stays its `manager`, under the same masks.
 #[test]
 fn a_child_without_a_name_row_is_managed_by_its_owner() {
     let holder = "0x00000000000000000000000000000000000000cd".to_owned();
     let wrapper = "0x00000000000000000000000000000000000000ce".to_owned();
+    let buyer = "0x00000000000000000000000000000000000000cf".to_owned();
     let child = |owner: Option<&str>,
                  registrant: Option<&str>,
+                 token_holder: Option<&str>,
                  (lifecycle_shadow, wrapper_held, released_lease)| {
         bigname_storage::ChildrenCurrentRow {
             parent_logical_name_id: "ens:parent".into(),
@@ -265,6 +268,7 @@ fn a_child_without_a_name_row_is_managed_by_its_owner() {
             lifecycle_shadow,
             wrapper_held,
             released_lease,
+            token_holder: token_holder.map(str::to_owned),
             provenance: serde_json::json!({}),
             chain_positions: serde_json::json!({}),
             canonicality_summary: serde_json::json!({}),
@@ -275,31 +279,55 @@ fn a_child_without_a_name_row_is_managed_by_its_owner() {
     let live = RegistrationStatus::Unregistered;
     for (row, owner, manager, status) in [
         (
-            child(None, Some(&holder), (false, false, false)),
+            child(None, Some(&holder), None, (false, false, false)),
             Some(&holder),
             Some(&holder),
             live,
         ),
         (
-            child(Some(&holder), None, (false, false, false)),
+            child(Some(&holder), None, None, (false, false, false)),
             Some(&holder),
             Some(&holder),
             live,
         ),
         (
-            child(Some(&holder), None, (true, false, false)),
+            child(Some(&holder), None, None, (true, false, false)),
             Some(&holder),
             None,
             live,
         ),
         (
-            child(Some(&wrapper), None, (true, true, false)),
+            child(Some(&wrapper), None, None, (true, true, false)),
             None,
             None,
             live,
         ),
         (
-            child(Some(&holder), None, (false, false, true)),
+            child(Some(&holder), None, None, (false, false, true)),
+            None,
+            None,
+            RegistrationStatus::Released,
+        ),
+        (
+            child(Some(&holder), None, Some(&buyer), (false, false, false)),
+            Some(&buyer),
+            Some(&holder),
+            live,
+        ),
+        (
+            child(Some(&wrapper), None, Some(&buyer), (true, true, false)),
+            None,
+            None,
+            live,
+        ),
+        (
+            child(Some(&holder), None, Some(&buyer), (true, false, false)),
+            Some(&buyer),
+            None,
+            live,
+        ),
+        (
+            child(Some(&holder), None, Some(&buyer), (false, false, true)),
             None,
             None,
             RegistrationStatus::Released,

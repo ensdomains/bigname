@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 
@@ -9,10 +11,10 @@ use super::{
     },
     source::RowSource,
     types::{
-        AddressNameRelation, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
-        AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentSort,
-        AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedPage, AddressNamesCurrentSummary,
-        NameQuery,
+        AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentCursor,
+        AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
+        AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedPage,
+        AddressNamesCurrentSummary, NameQuery,
     },
 };
 mod cursor;
@@ -251,13 +253,39 @@ pub(crate) async fn load_address_names_page_from(
     let (rows, next_cursor) = split_keyset_page(rows, page_size, |row| {
         address_names_current_sorted_cursor_from_entry(row, sort)
     });
-    let entries = rows.into_iter().map(|row| row.entry).collect();
+    let mut entries: Vec<AddressNameCurrentEntry> = rows.into_iter().map(|row| row.entry).collect();
+    attach_served_managers(&mut entries, source);
 
     Ok(AddressNamesCurrentSortedPage {
         entries,
         next_cursor,
         summary,
     })
+}
+
+/// A surface-less registry child's `served_manager` from its composed relation rows, all of which
+/// carry the same one (`families::records::registry_children`). It rides beside the page query
+/// rather than through it: query.rs is an input of the interpreter content hash
+/// (crates/content-hash/src/compute.rs, `SEMANTIC_SOURCE_FILES`).
+fn attach_served_managers(entries: &mut [AddressNameCurrentEntry], source: RowSource<'_>) {
+    let RowSource::Composed { rows, .. } = source;
+    let managers: BTreeMap<&str, &str> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["registry_child"] == true)
+        .filter_map(|row| {
+            Some((
+                row["logical_name_id"].as_str()?,
+                row["served_manager"].as_str()?,
+            ))
+        })
+        .collect();
+    for entry in entries.iter_mut().filter(|entry| entry.is_registry_child()) {
+        entry.served_manager = managers
+            .get(entry.logical_name_id.as_str())
+            .map(|manager| (*manager).to_owned());
+    }
 }
 
 fn load_context_parts(

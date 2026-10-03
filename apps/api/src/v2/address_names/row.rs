@@ -21,9 +21,10 @@ pub(crate) fn build_address_name(
     let registration = name_registration_fields(name_row, &entry.namespace);
 
     // A surface-less ENSv1 registry child has no name row: it serves what its parent's subnames
-    // route serves for it (`subnames::build_subname` with no name row), its registry owner and
-    // the registration fields of no name row, on its registry-only resource, with the authority of
-    // the registry that owns its node.
+    // route serves for it (`subnames::build_subname` with no name row), its lease's holder or
+    // registry owner as owner, its registry owner as manager and the registration fields of no
+    // name row, on its registry-only resource, with the authority of the registry that owns its
+    // node.
     let authority = match name_row {
         Some(row) => Authority::from_provenance(&row.provenance),
         None => entry
@@ -41,7 +42,10 @@ pub(crate) fn build_address_name(
         .or_else(|| entry.served_owner.clone());
     let manager = match name_row {
         Some(_) => registration.manager,
-        None => owner.clone().filter(|_| !entry.served_lifecycle_shadow),
+        None => entry
+            .served_manager
+            .clone()
+            .filter(|_| !entry.served_lifecycle_shadow),
     };
     Ok(AddressName {
         name: entry.normalized_name.clone(),

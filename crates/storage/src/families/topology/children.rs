@@ -56,11 +56,15 @@ pub(super) enum Parents<'a> {
 /// registration event as `registry_address`, others null. For a registry's labels, `registry`
 /// keeps the ENSv2 candidates of a parent whose current subregistry it is, and the other arms'
 /// candidates only for those children: no other child can be a label, and another arm only
-/// decides the arm of a child it shares.
+/// decides the arm of a child it shares. `children`, the child nodes a read wants (lowercase, no
+/// namespace), keeps both arms' candidates of only those children, read by child node rather
+/// than by enumerating the parent's edges; the windows below partition by child, so whole
+/// children in or out leave every rank unchanged.
 pub(super) fn push_selected<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parents: Parents<'a>,
     registry: Option<&'a str>,
+    children: Option<&'a [String]>,
 ) {
     builder.push(
         "parent_surface AS (
@@ -224,6 +228,11 @@ pub(super) fn push_selected<'a>(
         builder.push(" AND subregistry.subregistry_address = ");
         builder.push_bind(registry);
     }
+    if let Some(children) = children {
+        builder.push(" AND lower(child.namehash) = ANY(");
+        builder.push_bind(children);
+        builder.push(")");
+    }
     builder.push(format!(
         "
         ), v1_edges AS (
@@ -282,6 +291,12 @@ pub(super) fn push_selected<'a>(
     if registry.is_some() {
         // Another arm decides only children that also have an ENSv2 candidate here.
         builder.push(" AND edge.child_node IN (SELECT lower(v2.namehash) FROM v2_candidates v2)");
+    }
+    if let Some(children) = children {
+        // `project_child_edge_candidate_child_idx` serves this by chain, namespace and node.
+        builder.push(" AND edge.child_node = ANY(");
+        builder.push_bind(children);
+        builder.push(")");
     }
     builder.push(format!(
         "
