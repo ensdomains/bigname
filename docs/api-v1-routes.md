@@ -3061,7 +3061,8 @@ introduces it rebuilds Project from full history before serving the option; see
   known exception: a `.eth` name with no name surface, listed as a registry
   child below, is counted for its current registry owner whatever its registration
   state: when another address holds the registration, after it is released,
-  or when it has none. A name count uses `dedupe=name`.
+  or when it has none, except a NameWrapper-held child, which is counted for
+  no address. A name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
