@@ -45,6 +45,7 @@ pub async fn load_family_resolves_to_page(
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<crate::NameQuery<'_>>,
     authority: Option<&[&str]>,
+    parent: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -62,6 +63,7 @@ pub async fn load_family_resolves_to_page(
         RowSource::Composed {
             rows: &rows,
             names: &names,
+            parent,
         },
         address,
         coin_type,
@@ -88,6 +90,7 @@ pub async fn load_family_resolves_to_evm_page(
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<crate::NameQuery<'_>>,
     authority: Option<&[&str]>,
+    parent: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -114,6 +117,7 @@ pub async fn load_family_resolves_to_evm_page(
         RowSource::Composed {
             rows: &rows,
             names: &names,
+            parent,
         },
         address,
         namespaces,

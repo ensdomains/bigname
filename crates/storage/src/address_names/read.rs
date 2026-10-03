@@ -182,6 +182,7 @@ pub(crate) fn push_address_names_current_query<'a>(
     super::RowSource::Composed {
         rows: composed,
         names: composed,
+        parent: None,
     }
     .push_address_names(builder);
     builder.push(" LEFT JOIN bigname_phase.normalized_events history_event ON history_event.chain_id = anc.provenance ->> 'chain_id' AND history_event.event_identity = anc.provenance ->> 'event_identity'");

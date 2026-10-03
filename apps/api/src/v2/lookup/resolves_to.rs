@@ -69,6 +69,7 @@ pub(super) async fn render_resolves_to_lookup_results(
             AddressNamesCurrentDedupe::Surface,
             None,
             None,
+            None,
             AddressNamesCurrentSort::Name,
             AddressNamesCurrentOrder::Asc,
             input.resolves_to_cursor.as_ref(),
