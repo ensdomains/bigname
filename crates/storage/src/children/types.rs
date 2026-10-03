@@ -25,6 +25,7 @@ pub struct ChildrenCurrentRow {
     pub lifecycle_shadow: bool,
     /// The child is a lifecycle shadow whose registry owner is the NameWrapper that observed it,
     /// holding the node for a token holder bigname does not record
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
     /// (`families::topology::FamilyChildRow::wrapper_held`).
     pub wrapper_held: bool,
     pub provenance: Value,

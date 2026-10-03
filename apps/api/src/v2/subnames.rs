@@ -304,7 +304,8 @@ pub(crate) fn build_subname(
         None => ens_v1_of_registry_child(authority, row.lifecycle_shadow)?,
     };
     // A child with no name row serves its registry owner, or an ENSv2 child its token holder,
-    // but not the NameWrapper holding it for a token holder bigname does not record.
+    // but not the NameWrapper holding it for a token holder bigname does not record
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
     let (owner, manager) = match name_row {
         Some(name) => {
             let linked = registration

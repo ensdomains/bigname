@@ -49,7 +49,8 @@ pub struct FamilyChildRow {
     /// count ([`LIFECYCLE_SHADOW`]).
     pub lifecycle_shadow: bool,
     /// A lifecycle shadow whose registry owner is the NameWrapper that observed it: the wrapper
-    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`]).
+    /// holds the node for a token holder bigname does not record ([`WRAPPER_HELD`])
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
     pub wrapper_held: bool,
 }
 
