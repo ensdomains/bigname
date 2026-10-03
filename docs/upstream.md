@@ -248,8 +248,9 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > **A registry child the NameWrapper holds under a label failing normalization is served with no owner** —
 > NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` accept a label that
 > fails ENSIP-15 normalization, take the child's registry record and mint the
-> token to a holder. bigname composes no name row for such a child, so it
-> omits `owner` on its parent's subnames page and does not list it for the
+> token to a holder. bigname composes no
+> [name row](glossary.md#composed-name-row) for such a child, so it omits
+> `owner` and `manager` on its parent's subnames page and does not list it for the
 > NameWrapper contract under any relation; it does not list the token holder
 > either. A child the NameWrapper once named whose record is handed back to the
 > NameWrapper address by a plain registry `setOwner` or `setSubnodeOwner`, with
