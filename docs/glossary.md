@@ -2470,8 +2470,8 @@ live/indexed comparison in the [resolution divergence ledger](#resolution-diverg
 
 the indexes on `normalized_events` that Interpret reads, kept while the
 others are dropped for a from-zero walk or a full-history Interpret redo so each
-inserted event updates fewer indexes. The others serve only Project and the API
-and are rebuilt before Project runs. [`docs/storage.md`](storage.md#walk-index-set)
+inserted event updates fewer indexes. The others serve only Project, the API and
+operator inspection, and are rebuilt before Project runs. [`docs/storage.md`](storage.md#walk-index-set)
 lists both sets; [`ops/walk-index-set`](../ops/walk-index-set/README.md) holds the
 drop and rebuild scripts.
 

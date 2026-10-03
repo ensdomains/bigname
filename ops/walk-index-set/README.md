@@ -1,16 +1,19 @@
 # Walk index set
 
 Every Interpret batch inserts its normalized events into `normalized_events`, and PostgreSQL
-adds each new row to every index on that table whose predicate the row matches. Most of those
-indexes serve the API's history and event pages or Project's reads, and nothing reads them
-while Interpret walks the chain: Project starts only after Interpret completes, and the API
-refuses the routes that read them while an Interpret redo is in progress. The event audit,
-`GET /v1/diagnostics/events`, stays available during a redo. Its record attribution reads six
-of the dropped indexes, so while the set is dropped it reads without them and, on a large
-database, may exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
-`install.sql` has run. On a large database
-their upkeep is a large share of each insert, because their keys (block hashes, nodes, names,
-addresses) arrive in random order and each new entry lands on a different index page.
+adds each new row to every index on that table whose predicate the row matches. On a large
+database that upkeep is a large share of each insert, because the keys (block hashes, nodes,
+names, addresses) arrive in random order and each new entry lands on a different index page.
+Most of those indexes serve the API's history and event pages or Project's reads, and nothing
+reads them while Interpret walks the chain: Project starts only after Interpret completes, and
+the API refuses the routes that read them while an Interpret redo is in progress.
+
+Two readers stay available while the set is dropped and read without it, so on a large
+database they read far more of the table. The event audit, `GET /v1/diagnostics/events`, stays
+available during a redo; its record attribution reads six of the dropped indexes and may
+exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
+`install.sql` has run. The operator's `phase-runner inspect` block and raw-event windows count
+and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
 The [walk index set](../../docs/glossary.md#walk-index-set) is the 16 indexes Interpret keeps.
 `drop.sql` drops the other 33 before a from-zero walk or a full-history Interpret redo, and
@@ -24,11 +27,15 @@ foreign key stay in place.
 ## When drop.sql may run
 
 The indexes belong to the table, which every chain on the database shares. `drop.sql` refuses
-while any chain may be served: a chain whose Project phase has a current block and whose
-Interpret phase has no redo in progress. It passes on a fresh database before its first walk,
+while any chain may be served: a chain whose Project phase has a current block, or a live
+publication in `project_family_marker`, and whose Interpret phase has no redo in progress.
+Project commits a publication before it records its progress, so the marker covers a chain
+whose runner stopped between the two. It passes on a fresh database before its first walk,
 and once every chain whose Project has advanced is in an Interpret redo. On a database that
-holds two chains, such as Ethereum and Base, start both chains' Interpret redos before
-running it, or run the walk with every index.
+holds two chains, such as Ethereum and Base, both chains' Interpret redos must be in progress
+before it runs, or run the walk with every index. A multi-chain `redo` command runs its chains
+one after another, so it does not meet that condition; a redo stopped part-way keeps
+`redo_in_progress`, so start and stop one chain's redo, then start the other's.
 
 ## Running the scripts
 
@@ -54,26 +61,36 @@ built and builds only the missing ones.
 
 ## Sequence
 
-For a full-history Interpret redo run with the one-shot `phase-runner redo` commands (the
-[planned boundary](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)):
+For a full-history Interpret redo run with the one-shot `phase-runner redo` command (the
+[planned boundary](../../docs/runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)),
+note that the command need not stop between the phases: when Interpret completes on a chain
+whose Interpret had completed before the redo, the usual case, the same command runs the
+Project redo that completion stamps before it exits. Rebuild while Interpret is still
+incomplete:
 
 1. start the Interpret redo, and once the chain's `interpret` row in `chain_phase_state` shows
    `redo_in_progress`, run `drop.sql`;
-2. let the Interpret redo complete;
-3. run `install.sql` before starting the Project redo; the Interpret redo installs that redo
-   on completion, but with the supervisor stopped nothing runs it until its command does;
-4. run the Project redo.
+2. while Interpret's last batches run, stop the command with SIGTERM or Ctrl-C, wait for it
+   to exit, and check that the `interpret` row still shows `redo_in_progress`;
+3. run `install.sql`;
+4. rerun the same command, with the same chain, range and flags. It resumes Interpret from
+   its recorded block, finishes it with every index in place; the Project redo then runs
+   with them too, from this command or from its own.
+
+If Interpret completed before the stop, the Project redo has already started without the
+indexes: let it run, or stop it, run `install.sql`, and rerun its command.
 
 For a from-zero walk under the long-running runner, run `drop.sql` after `init-schema` and
 before the first start. Project starts on its own once Interpret completes, so stop the
-runner while Interpret's last batches run, run `install.sql`, then start it again. A missed
-stop never changes a row, but until `install.sql` finishes Project reads without these
-indexes, through sequential scans, and an API read that needs one may exceed the API's
-statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) on a large database. The script can
-run while they do.
+runner while Interpret's last batches run, run `install.sql`, then start it again. In either
+sequence a missed stop never changes a row, but until `install.sql` finishes Project reads
+without these indexes, through sequential scans, and an API read that needs one may exceed
+the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) on a large database. The
+script can run while they do.
 
-The set is shared, so on a database with two chains run `install.sql` before the first chain
-to finish its Interpret redo starts Project.
+The set is shared, so on a database with two chains run `install.sql` before either chain's
+Interpret completes: stop each chain's redo before its last batch, run `install.sql`, then
+rerun each command.
 
 ## Checks and recovery
 
@@ -97,8 +114,10 @@ first.
 
 The runner never checks or recreates these indexes, so a restart while they are dropped
 resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
-`drop.sql` refuses a served chain and drops exactly its list, and that `install.sql` rebuilds
-the fresh baseline's definitions and refuses each bad name above. A database test in
+`drop.sql` refuses a chain with Project progress and a chain with only a live publication,
+and drops exactly its list, and that `install.sql` rebuilds the fresh baseline's definitions
+and refuses an invalid index, an index with other keys or another definition, and a table
+under one of its names. A database test in
 `crates/interpret` proves that the two lists together are every index the baseline defines
 on `normalized_events`, and that a walk, a full-history redo, a flag recompute and a runner
 restart's manifest sync, over ENSv1, Basenames and ENSv2 histories, scan `normalized_events`

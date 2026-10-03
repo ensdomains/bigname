@@ -6,23 +6,32 @@ SET lock_timeout = '0';
 SET statement_timeout = '1h';
 
 -- The indexes belong to the table, which every chain on this database shares. Refuse while
--- any chain may be served: its Project has advanced and its Interpret is not redoing.
+-- any chain may be served: its Project has recorded progress or holds a live publication,
+-- which it commits before it records progress, and its Interpret is not redoing.
 DO $$
 DECLARE
     served text;
 BEGIN
-    SELECT string_agg(project.chain_id, ', ' ORDER BY project.chain_id)
+    SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
     INTO served
-    FROM bigname_phase.chain_phase_state project
-    WHERE project.phase_name = 'project'
-      AND project.current_block_number IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM bigname_phase.chain_phase_state interpret
-          WHERE interpret.chain_id = project.chain_id
-            AND interpret.phase_name = 'interpret'
-            AND interpret.redo_in_progress
-      );
+    FROM (
+        SELECT chain_id
+        FROM bigname_phase.chain_phase_state
+        WHERE phase_name = 'project'
+          AND current_block_number IS NOT NULL
+        UNION
+        SELECT chain_id
+        FROM bigname_phase.project_family_marker
+        WHERE state = 'live'
+          AND current_block_number IS NOT NULL
+    ) projected
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM bigname_phase.chain_phase_state interpret
+        WHERE interpret.chain_id = projected.chain_id
+          AND interpret.phase_name = 'interpret'
+          AND interpret.redo_in_progress
+    );
     IF served IS NOT NULL THEN
         RAISE EXCEPTION
             'chains % have projected data and no Interpret redo in progress, so they may be served; follow ops/walk-index-set/README.md before retrying',

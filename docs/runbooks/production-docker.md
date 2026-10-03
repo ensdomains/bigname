@@ -1207,8 +1207,12 @@ in the same step.
    `redo_in_progress` on its `interpret` row, run
    [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) so the redo
    writes only the [walk index set](../glossary.md#walk-index-set); it refuses while
-   any chain may still be served. If it ran, run `ops/walk-index-set/install.sql`
-   after the Interpret redo completes and before step 8, and record both outputs.
+   any chain may still be served. If it ran, rebuild before Interpret completes,
+   because when Interpret had completed before the redo the same command goes straight on
+   to the Project redo: while
+   Interpret's last batches run, stop the command, confirm the `interpret` row still shows
+   `redo_in_progress`, run `ops/walk-index-set/install.sql`, then rerun the same command,
+   which resumes Interpret from its recorded block. Record both outputs.
    If the previous release had started a Project redo and left it unfinished,
    for example killed mid-way before this deploy, the Interpret redo that starts
    the new interpreter content hash supersedes it: that Project redo's progress
