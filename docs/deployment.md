@@ -2484,8 +2484,10 @@ Ingest redo: it changes no manifest, watch set, start block, table or
 schema-migration, and Project reads only retained normalized events. It needs no
 environment change and no historical ingest fetch. On its own it changes no API
 response: the address-names and subnames readers still serve a surface-less
-ENSv1 registry child for its registry owner under both `owner` and `manager`,
-and the address-names reader lists no surface-less Basenames child, so the new
+ENSv1 registry child for its registry owner, never for the token holder these
+rows add, and for no one once its lease is released
+([released registrar children](#released-registrar-children)); the
+address-names reader lists no surface-less Basenames child, so the new
 Basenames index rows list nothing.
 
 ### ENSv2 registries read whole only when their suffix moves
@@ -2517,3 +2519,33 @@ whole registry's, so a lookahead redo no longer reads a busy registry whole on
 nearly every batch. A batch whose registry suffix does move, or the
 first batch with ENSv2 events on a chain, still reads the registry whole and
 logs a warning; see [Verify health](runbooks/production-docker.md#verify-health).
+
+### v0.4.0 rollout
+
+v0.4.0 carries the three hash-rotating builds above, the end of NameWrapper
+authority when the registry record leaves NameWrapper (TYR-147 and TYR-100),
+the token-holder index for leases with no name surface (TYR-201) and the ENSv2
+suffix-walk reads (TYR-202), on top of v0.3.1, whose builds from
+[Ingest redo after a killed supervisor](#ingest-redo-after-a-killed-supervisor)
+through [released registrar children](#released-registrar-children) rotate
+nothing. Deploy it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary):
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+  once for every chain. Run one full-history Interpret redo and the Project redo
+  it installs under the v0.4.0 binary before the API serves, and record the new
+  hash in the release record.
+- Stamp no Ingest redo. No build in the release changes a manifest, watch set or
+  start block, so manifest synchronization records no
+  [manifest-authority marker](glossary.md#manifest-authority-marker) and no
+  historical ingest fetch is needed.
+- A database upgraded from v0.3.0 without v0.3.1 applies v0.3.1's two
+  schema-migrations,
+  `20261003120000_normalized_events_record_id_attribution_indexes.sql` and
+  `20261003130000_project_lifecycle_event_namehash_index.sql`, in step 4. On a
+  large initialized database, prebuild their indexes concurrently first, as
+  [history record attribution indexes](#history-record-attribution-indexes) and
+  [released registrar children](#released-registrar-children) describe; without
+  the prebuild, the plain builds block Interpret's and Project's writes until
+  they commit. A database already on v0.3.1 has recorded both. The v0.4.0 builds
+  add no schema-migration.
