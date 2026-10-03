@@ -1207,8 +1207,8 @@ in the same step.
    `redo_in_progress` on its `interpret` row, run
    [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) so the redo
    writes only the [walk index set](../glossary.md#walk-index-set); it refuses while
-   any chain may still be served, and fails after its drops if a chain's Project started while
-   they ran; then run `install.sql` at once. Start it with Interpret's whole range still
+   any chain may still be served, and fails after its drops if a chain meets that condition by
+   then, for example a Project that started while they ran; then run `install.sql` at once. Start it with Interpret's whole range still
    ahead: its one-hour timeout bounds each drop, not the whole script. If it ran, rebuild before Interpret completes,
    because when Interpret had completed before the redo the same command goes straight on
    to the Project redo: while

@@ -44,8 +44,10 @@ The script checks this before the drops and again after them, and takes no phase
 nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
 starts, with Interpret's whole range still ahead. The one-hour timeout bounds each drop, not
 the script, so there is no fixed limit on the whole sequence; allow for all 33 drops before
-Interpret can complete. If a chain's Project started while they ran, the second check fails
-after the receipt, naming the chains, and `psql` exits non-zero: run `install.sql` at once.
+Interpret can complete. The second check sees only the state when it runs: if a chain meets
+the condition then, for example because its Project started during the drops and is still
+running, it fails after the receipt, naming the chains, and `psql` exits non-zero; run
+`install.sql` at once.
 
 ## Running the scripts
 
@@ -131,7 +133,7 @@ first.
 The runner never checks or recreates these indexes, so a restart while they are dropped
 resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
 `drop.sql` refuses a chain with Project progress and a chain with only a live publication,
-fails after its drops when a fresh chain's Project started while they ran, and drops exactly
+fails after its drops when a fresh chain's Project is running by then, and drops exactly
 its list, and that `install.sql` rebuilds the fresh baseline's definitions and refuses an
 invalid index, an index with other keys or another definition, and a table under one of its
 names. A database test in
