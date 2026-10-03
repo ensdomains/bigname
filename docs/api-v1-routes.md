@@ -4641,9 +4641,10 @@ For a registrar lease first identified by a later readable observation, registra
 - Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
   value is `{completeness, unsupported_reason?, chains?}` using the common
-  completeness vocabulary. `networks` is an array of `{network, chain_id?}`
-  entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`.
+  completeness vocabulary. `networks` is an array of
+  `{network, chain_id?, resolution?}` entries when the namespace has public
+  chain mappings. Control-plane metadata omits `meta.as_of` and
+  `meta.as_of_token`.
 - `subnames` aggregates the active manifests' `declared_children` flags:
   `full` when every declaring manifest is supported, `partial` when some are,
   otherwise `unsupported` with `unsupported_reason=not_supported_for_namespace`.
@@ -4688,6 +4689,48 @@ For a registrar lease first identified by a later readable observation, registra
     "completeness": "full",
     "chains": { "11155111": { "completeness": "full" } }
   }
+  ```
+- Resolution protocol per network: `resolution` is `{protocol, since_block}`
+  and says which ENS protocol generation `.eth` resolution follows on that
+  network now. It is present on each network where the namespace has an ENS
+  execution entrypoint, an `active` or `shadow` `ens_execution` manifest for
+  that chain (ENS on Ethereum Mainnet or Sepolia), and absent elsewhere,
+  including every Basenames network, which has no ENSv1/ENSv2 split. It is
+  also absent while that network's projected data is not servable under the
+  publication fence the lookup and collection reads apply, when those reads
+  answer `409 stale`: before Project's first publication under the running
+  build, while the publication trails the head by more than the configured lag
+  tolerance, while Interpret is redoing, while a Project redo overlaps it, or
+  after a reorg orphans its block. The rest of the answer is still served.
+  `protocol` is `ens_v2` past the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
+  path from the client-facing Universal Resolver proxy, through the declared
+  proxies it points at, ends at an implementation `ens_execution` lists in
+  `universal_resolver_implementations`. It is `ens_v1` otherwise: before the
+  cutover, after an upgrade to an implementation the manifest does not list,
+  and while a proxy on that path has no `Upgraded` yet. This is the decision name reads apply to `.eth`
+  expiry, grace and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
+  `since_block` is the latest `Upgraded` block among the proxies on the
+  client-facing proxy's path, the block from which clients have resolved
+  through the current implementation. Upgrades of declared proxies off that
+  path do not move it; every upgrade on it does, including one from one
+  listed implementation to another, so it dates the current implementation,
+  not an unbroken run of the same `protocol`; earlier states are not reported.
+  It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
+  client-facing proxy has been observed, as on Mainnet today. The fence check
+  and the proxy read share one snapshot of the projected proxy state name reads
+  also use, and the answer carries no `meta.as_of`. Example shape under the Sepolia
+  profile, with an illustrative block; there `since_block` is the Sepolia
+  cutover block:
+
+  ```json
+  "networks": [
+    {
+      "network": "ethereum-sepolia",
+      "chain_id": 11155111,
+      "resolution": { "protocol": "ens_v2", "since_block": 12345678 }
+    }
+  ]
   ```
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.

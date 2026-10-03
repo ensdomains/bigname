@@ -2363,6 +2363,27 @@ it), rebuild it with the statement above and apply the schema-migrations again. 
 prebuild, apply the schema-migration with the phase runner and redo processes stopped. API
 standbys receive the indexes through replication.
 
+### Resolution protocol on the namespace route
+
+The build that adds `resolution` to each network on
+[`GET /v1/namespaces/{namespace}`](api-v1-routes.md#get-v1namespacesnamespace)
+(TYR-184) changes only the API and `crates/storage/src/resolution_state.rs`, a
+read-only query outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate. It needs no schema-migration, no manifest or environment
+change, no redo and no historical ingest fetch. The field is additive. The
+phase-runner's Universal Resolver warning shares the read, so its `block` now
+names the latest `Upgraded` on the client-facing proxy's path rather than the
+block of the row the path ends at. After deploy, with the
+[Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
+in place, `GET /v1/namespaces/ens` on Sepolia serves `resolution` with
+`protocol` `ens_v2` and `since_block` equal to the Sepolia
+[Universal Resolver cutover](glossary.md#universal-resolver-cutover) block,
+when the managed proxy moved to the listed UniversalResolverV2
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05).
+On Mainnet the `ens_execution` manifest declares no `Upgraded` event, so no
+proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": null}`.
+
 ### Parent filter on names by address
 
 The build that adds `parent` to
