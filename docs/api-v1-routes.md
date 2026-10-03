@@ -1775,7 +1775,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry child with no current name row serves its node's current registry
   owner, `owner(node)`, as `manager`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
-  `NewOwner` moves it. Its `owner` is the known holder of the `.eth` or Basenames
+  `NewOwner` moves it. A listed child's `owner` is the known holder of the `.eth` or Basenames
   lease the registrar retains on its node, the recipient of the lease's latest
   token `Transfer` or else its registrant, and the registry owner when no nonzero
   holder is known (no lease, or a lease known only from a renewal): the
@@ -1792,7 +1792,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
   (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
-  owner and is listed only while it has a serving resource. A `.eth` or Basenames
+  owner and is listed only while it has a serving resource, even when bigname knows
+  the holder of a lease the registrar retains on its node. A `.eth` or Basenames
   child with no current name row whose registrar lease bigname has released, past its
   expiry and the 90-day grace
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
