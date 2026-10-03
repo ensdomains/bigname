@@ -7,7 +7,7 @@ use bigname_adapters::schema_v2::{
     BatchInput, ManifestInput, PriorEventInput, StateCacheCapacity, UnloadedKeys,
     V1BatchDependencies, V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance,
     collect_v1_batch_dependencies, prepare_schema_v2_batch_lookahead,
-    restore_schema_v2_lookahead_session, v1_lookahead_supports_family, v2_key_loaded,
+    restore_schema_v2_lookahead_session, v1_lookahead_supports_family, v2_key, v2_key_loaded,
 };
 use sqlx::{PgPool, types::Uuid};
 
@@ -135,7 +135,7 @@ pub(crate) async fn batch_input(
     dependencies.v2_due_window = Some(window);
     // Shared by every attempt: a retry reads only the keys it adds and what they link to.
     let mut fetched = Fetched::default();
-    let (prepared, restored_event_count) = loop {
+    let (prepared, restored_event_count, whole_registries) = loop {
         let prior = load_closure(
             &mut tx,
             chain_id,
@@ -145,6 +145,10 @@ pub(crate) async fn batch_input(
         )
         .await?;
         let restored_event_count = prior.len();
+        #[cfg(test)]
+        let restored_kinds: Vec<String> =
+            prior.iter().map(|event| event.event_kind.clone()).collect();
+        let whole_registries = whole_registry_loads(&prior, &dependencies);
         #[cfg(test)]
         CLOSURES.with_borrow_mut(|closure| {
             if let Some(closure) = closure {
@@ -185,7 +189,13 @@ pub(crate) async fn batch_input(
             )
         });
         match attempt {
-            Ok(prepared) => break (prepared, restored_event_count),
+            Ok(prepared) => {
+                #[cfg(test)]
+                LOADED_BATCHES.with_borrow_mut(|batches| {
+                    batches.insert(from_block, (dependencies.v2_keys.clone(), restored_kinds))
+                });
+                break (prepared, restored_event_count, whole_registries);
+            }
             Err(error) => match error.downcast_ref::<UnloadedKeys>() {
                 Some(unloaded)
                     if unloaded.names.is_disjoint(&dependencies.nodes)
@@ -223,6 +233,17 @@ pub(crate) async fn batch_input(
     tx.commit().await.map_err(|error| {
         InterpretError::database("failed to commit lookahead input snapshot", error)
     })?;
+    for (registry, tokens, events, bytes) in whole_registries {
+        tracing::warn!(
+            chain_id,
+            from_block,
+            registry,
+            tokens,
+            events,
+            bytes,
+            "interpret loaded every token of an ENSv2 registry to re-derive their names"
+        );
+    }
     Ok(Attempt::Loaded(Box::new(LoadedBatch {
         input,
         provenance_manifests: provenance,
@@ -387,6 +408,52 @@ async fn retained_family_reason(
     }))
 }
 
+/// For each whole registry the batch read, its tokens, its restored events and the bytes of
+/// those events' state, in one pass over the restored events.
+fn whole_registry_loads(
+    prior: &[PriorEventInput],
+    dependencies: &V1BatchDependencies,
+) -> Vec<(String, usize, usize, usize)> {
+    let mut whole = dependencies
+        .v2_keys
+        .iter()
+        .filter_map(|key| key.strip_suffix(":*"))
+        .map(|registry| {
+            (
+                registry.to_ascii_lowercase(),
+                (std::collections::BTreeSet::new(), 0, 0),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if whole.is_empty() {
+        return Vec::new();
+    }
+    for event in prior {
+        // `<registry>:-:<token or resource id>:-:<source event>`, as `lookahead/v2_keys.sql`
+        // reads it. A token's ids share one key, so the key counts the token.
+        let mut scope = event.state_scope.as_deref().unwrap_or_default().split(':');
+        let Some((emitter, (tokens, events, bytes))) = scope.next().and_then(|emitter| {
+            whole
+                .get_mut(&emitter.to_ascii_lowercase())
+                .map(|loads| (emitter, loads))
+        }) else {
+            continue;
+        };
+        *events += 1;
+        *bytes += event.after_state.to_string().len();
+        tokens.extend(
+            scope
+                .nth(1)
+                .filter(|token| !matches!(*token, "" | "-"))
+                .map(|token| v2_key(emitter, token)),
+        );
+    }
+    whole
+        .into_iter()
+        .map(|(registry, (tokens, events, bytes))| (registry, tokens.len(), events, bytes))
+        .collect()
+}
+
 fn validate_dependencies(dependencies: &V1BatchDependencies) -> Result<()> {
     if !dependencies.unsupported.is_empty() {
         // The loader was chosen because every manifest family is covered, and the prior-event
@@ -404,12 +471,19 @@ fn invalid_dependencies(operation: &str, error: anyhow::Error) -> InterpretError
 }
 
 #[cfg(test)]
+type LoadedBatchKeys = (std::collections::BTreeSet<String>, Vec<String>);
+
+#[cfg(test)]
 thread_local! {
     /// Lookahead attempts discarded because they read an unloaded key, on this thread.
     pub(super) static RETRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The batches, by first block, that loaded a whole ENSv2 registry, and its key.
     pub(super) static WHOLE_REGISTRY_BATCHES: std::cell::RefCell<std::collections::BTreeSet<(i64, String)>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// For each batch, by first block, the ENSv2 state keys its accepted attempt loaded and the
+    /// kinds of the events it restored.
+    pub(super) static LOADED_BATCHES: std::cell::RefCell<std::collections::BTreeMap<i64, LoadedBatchKeys>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     /// Records `batch_input`'s closure on this thread while a test sets it to `Some`. It
     /// stays `None` otherwise, so no other test's timing or memory includes the recording.
     pub(super) static CLOSURES: std::cell::RefCell<Option<Closure>> =

@@ -31,6 +31,7 @@ use crate::schema_v2::{
 pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
 pub(super) mod surface;
+pub(in crate::schema_v2) mod wrapper_custody;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
     event Transfer(bytes32 indexed node, address owner);
@@ -43,7 +44,7 @@ pub(super) fn interpret(
     selected: &Selected,
     raw: &RawLogInput,
     state: &mut State,
-    graveyard: Option<alloy_primitives::Address>,
+    context: crate::schema_v2::migration::RegistrarContext,
 ) -> anyhow::Result<Interpreted> {
     // Only ENSv1 admits the LLL-era unmasked-word tolerance (#361).
     let tolerate_unmasked_words = selected.source.source_family == "ens_v1_registry_l1";
@@ -139,9 +140,10 @@ pub(super) fn interpret(
     });
     // The registry getter's view of the owner word, `owner(node)`, and why it differs from it.
     let getter_view = owner_view.as_ref().and_then(|view| match view {
-        RegistryOwnerView::Authentic { owner } => {
-            Some((owner.clone(), graveyard::owner_reason(graveyard, owner)))
-        }
+        RegistryOwnerView::Authentic { owner } => Some((
+            owner.clone(),
+            graveyard::owner_reason(context.registry_graveyard, owner),
+        )),
         RegistryOwnerView::ZeroEquivalent { reason } => {
             Some((ZERO_ADDRESS.to_owned(), Some(reason.as_str().to_owned())))
         }
@@ -261,20 +263,15 @@ pub(super) fn interpret(
         });
         match owner_view.as_ref() {
             Some(RegistryOwnerView::ZeroEquivalent { .. }) => {
-                if previous
-                    .as_ref()
-                    .is_some_and(|authority| authority.token_lineage_id.is_none())
-                {
+                if wrapper_custody::zero_write_closes(previous.as_ref(), context) {
                     state.activate_v1_authority(&selected.source.namespace, &affected_node, None);
                     None
                 } else {
                     previous.clone()
                 }
             }
-            Some(RegistryOwnerView::Authentic { .. })
-                if previous.as_ref().is_some_and(|authority| {
-                    authority.authority_source_family == "ens_v1_wrapper_l1"
-                }) =>
+            Some(RegistryOwnerView::Authentic { owner })
+                if wrapper_custody::keeps_authority(previous.as_ref(), owner, context) =>
             {
                 previous.clone()
             }

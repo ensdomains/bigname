@@ -1342,6 +1342,30 @@ also requires a current phase-runner heartbeat. Treat a stale phase heartbeat,
 failed phase state, pending invalidation, or generation mismatch as an indexing
 incident rather than masking it with an API restart.
 
+On a chain with an ENSv2 manifest whose batches the
+[lookahead loader](../glossary.md#lookahead-loader) reads, a batch reads a whole
+ENSv2 registry when that registry's [name suffix](../glossary.md#ensv2-name-suffix-walk) moves, for
+example when the token that gives it its parent name is pointed elsewhere,
+cleared or expires. Every name in the registry, and in the registries beneath
+it, then changes, so the batch reads each of those registries' whole history and
+holds it in memory, and once that read completes the runner logs the warning
+`interpret loaded every token of an ENSv2 registry to re-derive their names`
+for each registry with its token and event counts and the bytes of event state.
+A batch that fails afterwards and is retried logs it again. The first batch with ENSv2 events on a chain, including the first one of
+a redo from before ENSv2 history, has no earlier names to compare with, so it
+reads whole every registry it marks for a name refresh and logs the same
+warning, usually with few or zero events because the registries are new. Otherwise expect the
+warning rarely; frequent warnings for one registry mean its suffix keeps
+moving. A batch the full-state loader reads (`BIGNAME_INTERPRET_FORCE_FULL_STATE_LOADER=true`, or a chain
+that retains a source family the lookahead loader does not support) already holds
+every event, so a suffix move there needs no extra read and logs no warning.
+Each warning is a slower, larger batch, not a stuck one, and the memory it
+needs is described under
+[Interpret process memory](../storage.md#interpret-process-memory). The read
+uses `normalized_events_v2_key_probe_idx`: after a redo has rewritten much of
+`normalized_events`, run `ANALYZE bigname_phase.normalized_events`, or stale
+statistics can make it scan the table instead.
+
 ## Pause and resume indexing
 
 Pause the phase runner without stopping PostgreSQL or the API:

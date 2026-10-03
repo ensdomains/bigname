@@ -88,6 +88,7 @@ impl State {
                 })
                 .collect(),
             latest_v2_timestamp: None,
+            v2_topology_baseline: None,
         };
         state.restore_prior_events(prior);
         state

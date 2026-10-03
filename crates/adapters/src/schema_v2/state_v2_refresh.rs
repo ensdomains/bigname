@@ -40,15 +40,21 @@ impl State {
         let previous_timestamp = self.latest_v2_timestamp;
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
         let crossed = self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
-        self.expand_dirty_v2_registries();
+        self.expand_dirty_v2_registries(at_unix_timestamp);
+        // A kept baseline shares nodes with the live maps, so a refresh's first write to each
+        // would copy it.
+        self.v2_topology_baseline = None;
         let keys = std::mem::take(&mut self.v2_dirty_tokens)
             .into_iter()
             .collect();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp, &crossed)
+        let transitions = self.refresh_v2_name_keys(keys, at_unix_timestamp, &crossed);
+        self.remember_v2_topology(at_unix_timestamp);
+        transitions
     }
 
     pub(super) fn refresh_all_v2_names(&mut self, at_unix_timestamp: i64) -> Vec<V2NameTransition> {
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
+        self.v2_topology_baseline = None;
         self.v2_dirty_tokens.clear();
         self.v2_dirty_registries.clear();
         let keys = self
@@ -56,7 +62,10 @@ impl State {
             .loaded()
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        self.refresh_v2_name_keys(keys, at_unix_timestamp, &imbl::ordset::OrdSet::new())
+        let transitions =
+            self.refresh_v2_name_keys(keys, at_unix_timestamp, &imbl::ordset::OrdSet::new());
+        self.remember_v2_topology(at_unix_timestamp);
+        transitions
     }
 
     pub(super) fn mark_v2_token_dirty(&mut self, token_key: impl Into<String>) {
@@ -119,13 +128,19 @@ impl State {
         crossed
     }
 
-    fn expand_dirty_v2_registries(&mut self) {
+    /// Dirties every token of each dirty registry whose suffix walk changed since names were
+    /// last refreshed, and of the registries their tokens give a parent. A registry whose walk
+    /// is unchanged holds no token whose name changed, so its tokens are not read: a
+    /// lookahead batch then needs only the registry-level rows the walk reads.
+    fn expand_dirty_v2_registries(&mut self, at_unix_timestamp: i64) {
         let mut pending = std::mem::take(&mut self.v2_dirty_registries)
             .into_iter()
             .collect::<Vec<_>>();
         let mut visited = imbl::ordset::OrdSet::new();
         while let Some(registry) = pending.pop() {
-            if visited.insert(registry.clone()).is_some() {
+            if visited.insert(registry.clone()).is_some()
+                || !self.v2_registry_walk_changed(&registry, at_unix_timestamp)
+            {
                 continue;
             }
             for key in self.v2_tokens.registry_keys(&registry) {
@@ -153,6 +168,7 @@ impl State {
         at_unix_timestamp: i64,
         resource_retirements: &imbl::ordset::OrdSet<String>,
     ) -> Vec<V2NameTransition> {
+        debug_assert!(self.v2_topology_baseline.is_none());
         let mut transitions = Vec::new();
         let mut terminal_closure_hits = std::mem::take(&mut self.v2_terminal_closure_hits);
         let mut keys = keys.into_iter().collect::<imbl::ordset::OrdSet<String>>();
@@ -222,6 +238,7 @@ impl State {
                 .then_some(token.resource_id)
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
+            let mut departed = false;
             let resource_retirement = resource_retirements.contains(&key)
                 && token.resource_id.is_some()
                 && !token.expiry_retirement_emitted
@@ -251,6 +268,7 @@ impl State {
                     })
                 {
                     self.active_resources.remove(&previous.logical_name_id);
+                    departed = true;
                 }
                 transitions.push(V2NameTransition {
                     registry: emitter.to_owned(),
@@ -284,7 +302,11 @@ impl State {
             }
             if changed
                 && let Some(previous) = previous.as_ref()
-                && let Some(resource_id) = self.v2_active_resource_winner(&previous.logical_name_id)
+                && let Some(resource_id) = if departed {
+                    self.v2_departure_successor(&previous.logical_name_id)
+                } else {
+                    self.v2_active_resource_winner(&previous.logical_name_id)
+                }
             {
                 self.active_resources
                     .insert(previous.logical_name_id.clone(), resource_id);
@@ -351,10 +373,33 @@ impl State {
     /// holders that carry a registration and a linked resource — the winner an unconditional
     /// re-assert produces on a full ascending walk — so a refresh elects the same resource for
     /// any dirty set that closes over the surface's contention.
-    fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+    pub(super) fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
         self.v2_active_resource_winner_key(logical_name_id)
             .and_then(|token_key| self.v2_tokens.get(&token_key))
             .and_then(|token| token.resource_id)
+    }
+
+    /// Takes a departing ENSv2 holder's resource off a name and makes its successor current.
+    pub(super) fn hand_over_v2_active_resource(&mut self, logical_name_id: &str) {
+        self.active_resources.remove(logical_name_id);
+        if let Some(successor) = self.v2_departure_successor(logical_name_id) {
+            self.active_resources
+                .insert(logical_name_id.to_owned(), successor);
+        }
+    }
+
+    /// The resource current for a name once an ENSv2 holder has left it: the next ENSv2
+    /// winner, else the name's ENSv1 authority's, as a restore of the same history ends.
+    pub(super) fn v2_departure_successor(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+        self.v2_active_resource_winner(logical_name_id).or_else(|| {
+            let (namespace, namehash) = logical_name_id.split_once(':')?;
+            self.v1_name(namespace, namehash)
+                // The exact spelling `activate_v1_resource` keyed the map under, as restore does.
+                .filter(|authority| {
+                    authority.surface_known && authority.logical_name_id == logical_name_id
+                })
+                .map(|authority| authority.resource_id)
+        })
     }
 
     fn v2_active_resource_winner_key(&self, logical_name_id: &str) -> Option<String> {

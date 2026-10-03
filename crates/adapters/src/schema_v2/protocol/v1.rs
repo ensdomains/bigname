@@ -5,6 +5,9 @@ mod registrar_surface;
 pub(in crate::schema_v2) use registrar_surface::materialize as materialize_registrar_surface;
 mod registry;
 pub(in crate::schema_v2) use registry::graveyard::admitted as registry_graveyard;
+pub(in crate::schema_v2) use registry::wrapper_custody::{
+    WrapperCustody, admitted as registry_name_wrapper,
+};
 mod resolver;
 pub(super) use resolver::interpret as interpret_node_resolver;
 mod reverse;
@@ -106,7 +109,7 @@ pub(super) fn interpret(
             registrar::interpret(selected, raw, state, registrar_context)
         }
         "ens_v1_registry_l1" | "basenames_base_registry" => {
-            registry::interpret(selected, raw, state, registrar_context.registry_graveyard)
+            registry::interpret(selected, raw, state, registrar_context)
         }
         "ens_v1_resolver_l1" | "basenames_base_resolver" => {
             resolver::interpret(selected, raw, state)

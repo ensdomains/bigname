@@ -34,6 +34,7 @@ pub(super) struct RegistrarContext {
     pub(super) graveyard_cleanup: bool,
     pub(super) transaction_has_registry_setup: bool,
     pub(super) registry_graveyard: Option<alloy_primitives::Address>,
+    pub(super) wrapper_custody: super::protocol::v1::WrapperCustody,
 }
 
 pub(super) fn registrar_context(

@@ -2438,6 +2438,161 @@ running, then `DROP INDEX CONCURRENTLY` it), rebuild it with the statement above
 schema-migrations again. An API started before the index exists serves the same rows, only
 slower. API standbys receive the index through replication.
 
+### NameWrapper authority ends when the registry record leaves NameWrapper
+
+The build that ends a wrapped name's NameWrapper authority once a registry
+write moves its record away from NameWrapper (TYR-147 and TYR-100, see
+[Manager](api-v1.md#manager)) changes the ENSv1 registry adapter in
+`crates/adapters/src` and the registrant composition in
+`crates/storage/src/families`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+Normalized events change for every wrapped name whose registry record was
+written to an owner other than NameWrapper without a following unwrap, such as
+a parent owner's `setSubnodeOwner` over a wrapped child or the Graveyard
+clearing a wrapped subname. Finish the full-history Interpret redo and the
+Project redo it installs before the matching API serves. Stamp no Ingest redo:
+the build changes no manifest, watch set, start block, table or
+schema-migration, and the adapter reads only the logs of the batch it
+interprets, so no historical ingest fetch is needed. In v0.4.0 it shares the
+release's one Interpret and Project redo pair with the other hash-rotating
+changes in the bundle: run one pair under a binary that holds all of them.
+After the redo such a name serves its registry owner as `owner` and `manager`,
+or no owner when the parent set it to zero, carries no `ens_v1.wrapper_state`, and is listed under its registry owner
+instead of the old token holder; a Graveyard sent a cleared subname's surviving
+token is no longer listed as its manager. The Project redo also recomposes a
+subname that was unwrapped and whose registry record was later given to
+another owner: it now serves that registry owner as `owner`, not the holder it
+was unwrapped to.
+
+### Token holder of a lease with no name surface in the address index
+
+The build that indexes the token holder of a `.eth` or Basenames lease with no
+[name surface](glossary.md#surface-name-surface) (TYR-201) changes
+`crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every chain.
+A registrar `Transfer` of such a lease now writes its row in
+`project_address_name_fold` (the per-name summary of the addresses that hold or
+control a name) under the lease's `<namespace>:<namehash>` id, so the recipient, who holds the
+token while the previous holder keeps the registry record until `reclaim`
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f)
+(upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L319-L330 @ basenames@1809bbc),
+reaches the address index beside the registry owner. Normalized events do not
+change. Finish the full-history Interpret redo and the Project redo it installs
+before the matching API serves; in v0.4.0 it shares the release's one Interpret
+and Project redo pair with the other hash-rotating changes in the batch. Stamp no
+Ingest redo: it changes no manifest, watch set, start block, table or
+schema-migration, and Project reads only retained normalized events. It needs no
+environment change and no historical ingest fetch. On its own it changes no API
+response: the address-names and subnames readers still serve a surface-less
+ENSv1 registry child for its registry owner, never for the token holder these
+rows add, and for no one once its lease is released
+([released registrar children](#released-registrar-children)) or while the
+NameWrapper that named it holds its registry record ([Manager](api-v1.md#manager)); the
+address-names reader lists no surface-less Basenames child, so the new
+Basenames index rows list nothing.
+
+### ENSv2 registries read whole only when their suffix moves
+
+The build that stops the lookahead loader from reading a whole ENSv2 registry
+for a batch that leaves the registry's
+[name suffix](glossary.md#ensv2-name-suffix-walk) unchanged (TYR-202, see
+[Interpret process memory](storage.md#interpret-process-memory)) changes the
+ENSv2 name refresh in `crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Names do not change: a token whose registry's suffix walk is unchanged
+keeps its name unless the batch touches it for its own reasons, such as its
+expiry, release or replacement, which still refresh it, and both loaders apply
+the same rule. The build also
+fixes which resource is current for a name that both an ENSv1 registration and
+an ENSv2 token hold, such as a name moved to ENSv2 whose ENSv1 registration is
+renewed afterwards. Before, an ENSv1 event could make the ENSv1 resource current
+and the ENSv2 token's resource came back only if a name refresh happened to
+reach that token, which depended on batch boundaries and on unrelated registry
+changes. Now the ENSv2 token's resource stays current immediately, as a full
+refresh of every name elects, so the result no longer depends on how the history
+was batched. No stored event reads this choice today; it keeps the state
+consistent for any that will. It adds no schema-migration, table, index,
+manifest or setting, so stamp no Ingest redo. In v0.4.0 it shares the release's
+one Interpret and Project redo pair with the other hash-rotating changes in the
+bundle. A batch that touches an ENSv2 registry without moving its name suffix
+now reads only the history of the names and tokens it touches instead of the
+whole registry's, so a lookahead redo no longer reads a busy registry whole on
+nearly every batch. A batch whose registry suffix does move, or the
+first batch with ENSv2 events on a chain, still reads the registry whole and
+logs a warning; see [Verify health](runbooks/production-docker.md#verify-health).
+
+### ENSv2 role changes filed under their token
+
+The build that files a role change on one ENSv2 registry token under that
+token's [ENSv2 state key](glossary.md#ensv2-state-key) instead of the
+registry-level key (TYR-213) changes `crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. A registry builds a token's access-control resource id from the same
+labelhash as its token id, replacing only the low 32 bits
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2_sepolia_20261001@07e55a05),
+so the role change now lands on the token's own key. Before, a token's role
+changes sat under the registry-level key, so a lookahead batch touching one
+token of a registry could read other tokens' role changes and then those
+tokens' histories, and through their subregistries the tokens beneath them. Now such a batch reads the tokens it touches and the registry's
+own rows: its creation, upgrades, parent claim and role changes on its root
+resource. Stored events change only on ENSv2 registry and root registry
+`PermissionChanged` rows, whose `raw_fact_ref.state_scope` and
+`raw_fact_ref.interpreter_state_key` change; `/v1/diagnostics/events` shows
+those two fields and no product row changes (see
+[Cursors And Pagination](api-v1.md#cursors-and-pagination)). It adds no
+schema-migration, table, index, manifest or setting, so stamp no Ingest redo. In v0.4.0 it shares the release's
+one Interpret and Project redo pair with the other hash-rotating changes in the
+bundle. The whole-registry warning now counts a token once under all of its
+ids, so its token count no longer includes resource ids.
+
+### v0.4.0 rollout
+
+v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority
+when the registry record leaves NameWrapper (TYR-147 and TYR-100), the
+token-holder index for leases with no name surface (TYR-201), the ENSv2
+suffix-walk reads (TYR-202) and
+[ENSv2 role changes filed under their token](#ensv2-role-changes-filed-under-their-token)
+(TYR-213). The last changes stored events only in two `raw_fact_ref` fields of
+ENSv2 registry and root registry `PermissionChanged` rows, which
+`/v1/diagnostics/events` shows; no product row changes. It also carries the builds from
+[Ingest redo after a killed supervisor](#ingest-redo-after-a-killed-supervisor)
+through [released registrar children](#released-registrar-children) and the
+lookahead loader's read-path changes, none of which rotates the hash. Deploy
+it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+From v0.3.0:
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+  once for every chain. Run one full-history Interpret redo and the Project redo
+  it installs under the v0.4.0 binary before the API serves, and record the new
+  hash in the release record.
+- Stamp no Ingest redo. No build since v0.3.0 changes a manifest, watch set or
+  start block, so manifest synchronization records no
+  [manifest-authority marker](glossary.md#manifest-authority-marker) and no
+  historical ingest fetch is needed.
+- Apply two schema-migrations in step 4,
+  `20261003120000_normalized_events_record_id_attribution_indexes.sql` and
+  `20261003130000_project_lifecycle_event_namehash_index.sql`. On a large
+  initialized database, prebuild their indexes concurrently first, as
+  [history record attribution indexes](#history-record-attribution-indexes) and
+  [released registrar children](#released-registrar-children) describe; without
+  the prebuild, the plain builds block Interpret's and Project's writes until
+  they commit. The four hash-rotating builds add no schema-migration.
+- From a build before v0.3.0, the deploy also carries v0.3.0's requirements
+  and every earlier section's since that build: their schema-migrations and
+  index prebuilds, including the
+  [retired resolver alias path](#retired-resolver-alias-path)'s refusal to drop
+  a table that still has rows; the manifest-authority markers that the
+  [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01),
+  [resolver implementation start blocks](#resolver-implementation-start-blocks)
+  and [default reverse names](#default-reverse-names) record; and the required
+  Ingest redos the redeploy and default reverse names stamp. Complete every
+  stamped Ingest redo first, sized from the ranges `chain_phase_state` records
+  after the first start. One full-history Interpret redo with
+  `--attest-watch-set-coverage` under the v0.4.0 binary, and the Project redo it
+  installs, then discharge every rotation and marker in between.
+
 ### Walk index set
 
 The build that adds [`ops/walk-index-set`](../ops/walk-index-set/README.md) (TYR-209, see
