@@ -205,3 +205,69 @@ fn ensv1_renewal_after_the_move_outlives_the_ensv2_registration() -> anyhow::Res
     }));
     Ok(())
 }
+
+/// A batch after the move in which the ENSv2 registration expires and the still-renewable ENSv1
+/// lease is renewed in the same block. The carried session replays that batch over names derived
+/// before it, so the expired ENSv2 token is still listed under the name when the renewal is
+/// replayed; it must still end with the same state as a fresh restore of the whole history.
+#[test]
+fn carried_session_matches_a_restore_when_ensv2_expires_beside_an_ensv1_renewal()
+-> anyhow::Result<()> {
+    let mut prefix = migration_and_old_lease_expiry()?;
+    let renewal_block = prefix.blocks.last().unwrap().block_number;
+    prefix
+        .raw_logs
+        .retain(|raw| raw.block_number < renewal_block - 1);
+    prefix
+        .blocks
+        .retain(|block| block.block_number < renewal_block - 1);
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let expiry = scenario["stored_expiry"].as_i64().unwrap();
+    let block = RawBlockInput {
+        chain_id: prefix.chain_id.clone(),
+        block_hash: "after-ensv2-expiry".to_owned(),
+        block_number: renewal_block,
+        block_timestamp: time::OffsetDateTime::from_unix_timestamp(expiry + 86400)?,
+        canonicality_state: "canonical".to_owned(),
+    };
+    let mut renewal = raw_at_transaction(
+        with_topic0(
+            BaseNameRenewed {
+                id: decimal_u256(&scenario["base_token_id"])?,
+                expires: U256::from(expiry + 2 * 365 * 86400),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+        renewal_block,
+        0,
+        0,
+        fixture["addresses"]["base_registrar"].as_str().unwrap(),
+    );
+    renewal.block_hash = block.block_hash.clone();
+    renewal.block_timestamp = block.block_timestamp;
+    let mut suffix = prefix.clone();
+    suffix.raw_logs = vec![renewal];
+    suffix.blocks = vec![block.clone()];
+
+    let (first, session) = interpret_test_batch_incremental(prefix.clone(), None)?;
+    let (second, carried) = interpret_test_batch_incremental(suffix.clone(), Some(session))?;
+    let mut restore = suffix;
+    restore.raw_logs.clear();
+    let mut history = prefix.blocks.clone();
+    history.push(block);
+    restore.prior_events = super::super::super::seam::fold_prior_events(
+        Vec::new(),
+        &first
+            .normalized_events
+            .iter()
+            .chain(&second.normalized_events)
+            .cloned()
+            .collect::<Vec<_>>(),
+        &history,
+    )?;
+    let (_, restored) = interpret_test_batch_incremental(restore, None)?;
+    assert_eq!(carried, restored);
+    Ok(())
+}
