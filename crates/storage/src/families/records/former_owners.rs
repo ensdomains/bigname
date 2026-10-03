@@ -26,6 +26,7 @@ use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentRow,
     UnixSeconds,
     families::name::{CoverageShape, load_composed, servable_publication},
+    name_current::parent_like_patterns,
 };
 
 /// What a former-owner page selects besides its order and position.
@@ -37,6 +38,8 @@ pub struct FormerOwnerFilter<'a> {
     pub expires_after: Option<UnixSeconds>,
     /// Exclusive upper bound on the served expiry.
     pub expires_before: Option<UnixSeconds>,
+    /// A normalized name: only names exactly one label below it.
+    pub parent: Option<&'a str>,
 }
 
 /// One page of former-owner rows and the position after its last row, when more follow.
@@ -104,6 +107,9 @@ pub async fn load_family_former_owner_page(
 ) -> Result<FormerOwnerPage> {
     let after = cursor.map(cursor_key).transpose()?;
     let address = filter.address.to_ascii_lowercase();
+    // A served name composes from an active surface, whose stored spelling is normalized, so
+    // `parent` can match it in the index query.
+    let parent = filter.parent.map(parent_like_patterns);
     let mut snapshot = db.into().snapshot().await?;
     let indexed: Vec<(String, String)> = sqlx::query_as(
         "/* storage:families.records.former_owner_index */
@@ -113,10 +119,17 @@ pub async fn load_family_former_owner_page(
            AND ($2::text IS NULL OR EXISTS (
                SELECT 1 FROM bigname_phase.name_surfaces surface
                WHERE surface.logical_name_id = indexed.logical_name_id
-                 AND surface.namespace = $2))",
+                 AND surface.namespace = $2))
+           AND ($3::text IS NULL OR EXISTS (
+               SELECT 1 FROM bigname_phase.name_surfaces surface
+               WHERE surface.logical_name_id = indexed.logical_name_id
+                 AND surface.raw_name LIKE $3 ESCAPE '\\'
+                 AND surface.raw_name NOT LIKE $4 ESCAPE '\\'))",
     )
     .bind(&address)
     .bind(filter.namespace)
+    .bind(parent.as_ref().map(|(one_below, _)| one_below.as_str()))
+    .bind(parent.as_ref().map(|(_, deeper)| deeper.as_str()))
     .fetch_all(&mut *snapshot)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;

@@ -28,7 +28,7 @@ use crate::v2::{
 
 use super::cursor::{
     ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, authority_filter_value, cursor_last_item,
-    cursor_sort_value, insert_match_filter, option_filter,
+    cursor_sort_value, insert_match_filter, insert_parent_filter, option_filter,
 };
 use super::resolves_to_evm::{
     ResolvesToCoins, ResolvesToMatches, ResolvesToRow, evm_primary_flags, parse_resolves_to_coins,
@@ -86,6 +86,7 @@ pub(super) async fn get_address_resolves_to(
     state: &AppState,
     normalized_address: &str,
     params: &QueryParams,
+    parent: Option<&str>,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     let coins = parse_resolves_to_coins(params.coin_type.as_deref())?;
     if params.is_migrated.is_some() {
@@ -118,6 +119,7 @@ pub(super) async fn get_address_resolves_to(
         q: normalized_q.as_deref(),
         name_match: params.name_match,
         authority: params.authority.as_ref(),
+        parent,
         sort: params.sort,
         order,
     };
@@ -152,6 +154,7 @@ pub(super) async fn get_address_resolves_to(
                 dedupe_to_storage(params.dedupe),
                 storage_q,
                 authorities.as_deref(),
+                parent,
                 sort_to_storage(params.sort),
                 order_to_storage(order),
                 storage_cursor.as_ref(),
@@ -173,6 +176,7 @@ pub(super) async fn get_address_resolves_to(
                 dedupe_to_storage(params.dedupe),
                 storage_q,
                 authorities.as_deref(),
+                parent,
                 sort_to_storage(params.sort),
                 order_to_storage(order),
                 storage_cursor.as_ref(),
@@ -451,6 +455,7 @@ pub(crate) struct ResolvesToCursorBinding<'a> {
     pub(crate) q: Option<&'a str>,
     pub(crate) name_match: NameMatch,
     pub(crate) authority: Option<&'a AuthoritySet>,
+    pub(crate) parent: Option<&'a str>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
 }
@@ -485,6 +490,7 @@ fn cursor_filters(binding: &ResolvesToCursorBinding<'_>) -> BTreeMap<String, Str
         ),
     ]);
     insert_match_filter(&mut filters, binding.q, binding.name_match);
+    insert_parent_filter(&mut filters, binding.parent);
     filters
 }
 

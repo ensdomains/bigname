@@ -199,8 +199,8 @@ fn order_to_storage(order: SortOrder) -> NameCurrentListOrder {
 }
 
 /// A name in its normalized form, as name routes normalize a path name; blank or invalid is
-/// refused.
-fn normalize_parent(value: &str) -> V2Result<String> {
+/// refused. `GET /v1/addresses/{address}/names` takes the same `parent`.
+pub(crate) fn normalize_parent(value: &str) -> V2Result<String> {
     normalize_inferred_route_name(value)
         .map(|name| name.normalized_name)
         .map_err(|error| {

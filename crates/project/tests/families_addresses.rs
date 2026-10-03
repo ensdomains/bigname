@@ -885,6 +885,7 @@ async fn served_addresses(fixture: &Fixture, target: i64) -> Result<Vec<Value>> 
         AddressNamesCurrentDedupe::Surface,
         None,
         None,
+        None,
         AddressNamesCurrentSort::Name,
         AddressNamesCurrentOrder::Asc,
         None,

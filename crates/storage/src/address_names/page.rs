@@ -83,14 +83,15 @@ pub async fn load_address_names_current_page_sorted_for_relations(
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     load_address_names_current_page_filtered(
-        pool, address, namespace, relations, dedupe_by, q, authority, None, sort, order, cursor,
-        page_size,
+        pool, address, namespace, relations, dedupe_by, q, authority, None, None, sort, order,
+        cursor, page_size,
     )
     .await
 }
 
 /// The page is read from the owned key families. A cursor holds a sort position; its
-/// original row need not still exist in the current collection.
+/// original row need not still exist in the current collection. `parent`, a normalized name,
+/// keeps only names exactly one label below it.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_address_names_current_page_filtered(
     db: impl Into<crate::ReadDb<'_>>,
@@ -101,6 +102,7 @@ pub async fn load_address_names_current_page_filtered(
     q: Option<NameQuery<'_>>,
     authority: Option<&[&str]>,
     is_migrated: Option<bool>,
+    parent: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -115,6 +117,7 @@ pub async fn load_address_names_current_page_filtered(
         q,
         authority,
         is_migrated,
+        parent,
         sort,
         order,
         cursor,
