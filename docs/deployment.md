@@ -2437,3 +2437,21 @@ build leaves an invalid index: confirm in `pg_stat_progress_create_index` that n
 running, then `DROP INDEX CONCURRENTLY` it), rebuild it with the statement above and apply the
 schema-migrations again. An API started before the index exists serves the same rows, only
 slower. API standbys receive the index through replication.
+
+### Walk index set
+
+The build that adds [`ops/walk-index-set`](../ops/walk-index-set/README.md) (TYR-209, see
+[walk index set](storage.md#walk-index-set)) adds two operator scripts, documentation and
+tests. It changes no file the [interpreter content hash](glossary.md#interpreter-content-hash)
+covers, so the hash does not rotate, and it adds no schema-migration, environment setting or
+runner behavior, so it needs no redo and no historical ingest fetch. Deploying it changes
+nothing until an operator runs the scripts.
+
+The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
+`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so each inserted
+event updates 16 indexes instead of 49, and `install.sql` rebuilds them concurrently with their
+reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
+chain on the database may be served. Rebuilding takes a pass over the table per index; on a
+large database, schedule it before Project starts, as the
+[production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
+describes. Without the rebuild Project and the API read the same rows, only slower.

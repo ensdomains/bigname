@@ -1976,6 +1976,75 @@ the new hash's Interpret redo starts, in the same transaction, and stamped again
 when that redo completes. Moving a covered semantic source without updating the covered set
 fails the build rather than silently narrowing the fingerprint.
 
+### Walk index set
+
+An operator may drop the `normalized_events` indexes Interpret does not read for the length
+of a from-zero walk or a full-history Interpret redo, and rebuild them before Project runs,
+with [`ops/walk-index-set`](../ops/walk-index-set/README.md). The indexes Interpret keeps are
+the [walk index set](glossary.md#walk-index-set). Indexes are access paths, not hash inputs:
+dropping or rebuilding one changes no stored row and leaves the primary key, the
+`event_identity` unique key and every foreign key in place, so database constraints stay
+authoritative. The rule that splits the indexes:
+
+- An index is kept when a statement Interpret runs can read it: its loaders, its writer, the
+  redo-range preparation, the flag recompute, or the manifest sync a runner start performs.
+- Every other index is a read path for Project or the API. Project starts only after
+  Interpret completes, and the API refuses the routes that read them while an Interpret redo
+  is in progress (the public namespace snapshot requires each served chain's Interpret not to
+  be in a redo), so none of them is read while it is dropped.
+
+The 16 kept indexes and the statements that read them:
+
+| Index | Read by |
+| --- | --- |
+| `normalized_events_pkey` | the lookahead loader's final join (`load/lookahead/events.sql`), the full-state restore's payload read |
+| `normalized_events_event_identity_key` | the writer's `ON CONFLICT (event_identity)` and identity transitions |
+| `normalized_events_interpreter_state_history_idx` | prior-state value reads and the full-state restore (`load/prior.rs`) |
+| `normalized_events_resource_history_idx` | the lookahead loader's resource arm, registrar transition evidence |
+| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) and the flag recompute's raw-label fallback (`recompute.rs`), which look a name's events up by name alone |
+| `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
+| `normalized_events_projection_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start |
+| `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
+
+The other 33 serve Project or the API only, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_v1_subregistry_after_node_scope_idx`,
+`normalized_events_v1_subregistry_after_child_scope_idx`,
+`normalized_events_v1_subregistry_before_node_scope_idx`,
+`normalized_events_v2_subregistry_pointer_scope_idx`,
+`normalized_events_v1_subregistry_before_child_scope_idx`, `normalized_events_block_idx`,
+`normalized_events_emitter_history_idx`, `normalized_events_v2_expiry_scope_idx`,
+`normalized_events_ens_v1_record_node_resolver_idx`,
+`normalized_events_basenames_record_node_resolver_idx`,
+`normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
+`normalized_events_resolver_alias_history_idx`,
+`normalized_events_resolver_upgrade_history_idx`,
+`normalized_events_pointer_after_resolver_history_idx`,
+`normalized_events_pointer_before_resolver_history_idx`,
+`normalized_events_permission_after_resolver_history_idx`,
+`normalized_events_permission_before_resolver_history_idx`,
+`normalized_events_subregistry_registration_history_idx`,
+`normalized_events_project_name_node_idx`, `normalized_events_project_name_child_idx`,
+`normalized_events_project_name_after_target_idx`,
+`normalized_events_project_name_before_target_idx`,
+`normalized_events_project_primary_after_idx`, `normalized_events_project_primary_before_idx`,
+`normalized_events_project_primary_after_source_idx`,
+`normalized_events_project_primary_before_source_idx`,
+`normalized_events_address_registrant_match_idx`,
+`normalized_events_address_token_holder_match_idx`,
+`normalized_events_address_registry_owner_match_idx`,
+`normalized_events_project_node_history_idx`, `normalized_events_project_v1_pointer_node_idx`
+and `normalized_events_project_v1_pointer_addressed_node_idx`.
+
+A new index on `normalized_events` joins one list in the change that adds it: the drop list
+when only Project or the API reads it, the kept set when Interpret does.
+`crates/interpret/src/load/walk_index_set_tests.rs` fails until the two lists together are
+every index the baseline defines on the table, and proves that Interpret, over ENSv1,
+Basenames and ENSv2 histories through either loader, scans `normalized_events` sequentially
+nowhere without the drop list and stores the same rows. That test shows each statement keeps
+an index path, not that the path is keyed: a name-only read falls back to a range of
+`normalized_events_chain_block_number_idx`, which is why `normalized_events_name_history_idx`
+stays although the ENSv1-only Mainnet walk never read it.
+
 ## Projection publication
 
 Project is the only projection writer. A normal follow block atomically commits

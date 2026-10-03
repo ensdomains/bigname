@@ -375,3 +375,7 @@ mod basenames_equivalence_tests;
 #[cfg(test)]
 #[path = "lookahead_ensv2_equivalence_tests.rs"]
 mod ensv2_equivalence_tests;
+
+#[cfg(test)]
+#[path = "walk_index_set_tests.rs"]
+mod walk_index_set_tests;

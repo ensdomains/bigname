@@ -387,6 +387,15 @@ or within 3 minutes after the third. Normal Ingest source movement, one Project
 boundary replay, caught-up Live polling that reports no movement from the
 starting durable cursor, no-head completion, capacity pause, and completed Verify revalidation do not page.
 
+A from-zero walk on a large database may run with only the
+[walk index set](../glossary.md#walk-index-set) on `normalized_events`. Run
+[`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) after `init-schema` and
+before the first start. Project starts on its own once Interpret completes, so stop the
+runner while Interpret's last batches run, run `ops/walk-index-set/install.sql`, record its
+output in the walk log, and start the runner again. If the stop is missed, run
+`install.sql` at once: Project and the API read the same rows without those indexes, only
+slower, until it finishes.
+
 ## Planned migration and fingerprint boundary
 
 The image has no generic `migrate` command, so migrations are an operator step
@@ -1194,6 +1203,12 @@ in the same step.
    redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or
    use one for another redo. Do not use the unattended `run` path for an attestation.
+   Optionally, once every chain on the database whose Project has advanced shows
+   `redo_in_progress` on its `interpret` row, run
+   [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) so the redo
+   writes only the [walk index set](../glossary.md#walk-index-set); it refuses while
+   any chain may still be served. If it ran, run `ops/walk-index-set/install.sql`
+   after the Interpret redo completes and before step 8, and record both outputs.
    If the previous release had started a Project redo and left it unfinished,
    for example killed mid-way before this deploy, the Interpret redo that starts
    the new interpreter content hash supersedes it: that Project redo's progress

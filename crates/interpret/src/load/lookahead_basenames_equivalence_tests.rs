@@ -15,7 +15,7 @@ use crate::{BatchRequest, Engine, Marker, RunMode, StateLoader};
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
-const CHAIN: &str = "base-mainnet";
+pub(super) const CHAIN: &str = "base-mainnet";
 const REGISTRY: &str = "0xb94704422c2a1e396835a571837aa5ae53285a95";
 const REGISTRAR: &str = "0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a";
 const CONTROLLER: &str = "0x4ccb0bb02fcaba27e82a56646e81d8c5bc4119a5";
@@ -57,7 +57,7 @@ mod resolver {
 
 /// Seconds after `START` at which each block is mined. Expiry plus grace falls strictly
 /// between two blocks for alice and exactly on one for carol.
-const OFFSETS: [i64; 10] = [
+pub(super) const OFFSETS: [i64; 10] = [
     0,   // 0: alice, bob and carol registered
     10,  // 1: bob renewed far ahead; carol's token transferred and approved
     500, // 2: alice gets a subname, a resolver, an address and primary names;
@@ -127,7 +127,7 @@ impl Seeder<'_> {
 }
 
 /// The raw logs of the whole history, and canonical lineage for the blocks `lineage` times.
-async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
+pub(super) async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     seed_lineage(pool, CHAIN, lineage).await?;
     let owner: Address = OWNER.parse()?;
     let second_owner: Address = SECOND_OWNER.parse()?;

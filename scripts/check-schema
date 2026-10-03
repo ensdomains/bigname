@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=356
+expected_refusal_assertions=361
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=62
 refusal_probe_seconds=0
@@ -2533,6 +2533,94 @@ assert_index_install_hint address-match-index-on-another-table-hint \
     printf '%s\n' "DROP INDEX $address_match_first_index;"
     render_phase_migration "$address_match_install"
 } | run_psql >/dev/null
+# ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
+# has a current block and its Interpret is not redoing. With that chain in an
+# Interpret redo it must drop exactly its list and keep every other index, and a
+# rerun must be a no-op. install.sql must then rebuild the fresh baseline's
+# definitions, rerun as a no-op, and refuse each bad name as the other installers do.
+walk_index_drop="$ROOT/ops/walk-index-set/drop.sql"
+walk_index_install="$ROOT/ops/walk-index-set/install.sql"
+walk_index_readme=ops/walk-index-set/README.md
+walk_index_dropped="$(
+    sed -n 's/^DROP INDEX CONCURRENTLY IF EXISTS bigname_phase\.\([a-z0-9_]*\);$/\1/p' \
+        "$walk_index_drop" | paste -sd, - | sed "s/[a-z0-9_][a-z0-9_]*/'&'/g"
+)"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+CREATE TABLE walk_index_baseline AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass;
+DO \$\$
+BEGIN
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 33 THEN
+        RAISE EXCEPTION 'drop.sql does not list 33 baseline indexes on normalized_events';
+    END IF;
+END \$\$;
+INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
+VALUES ('walk-index-served', 'project', 1, 'walk-index-block');
+SQL
+} | run_psql >/dev/null
+assert_index_install_refusal walk-index-served-chain "$walk_index_drop" \
+    "chains walk-index-served have projected data and no Interpret redo in progress, so they may be served; follow $walk_index_readme before retrying"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+INSERT INTO chain_phase_state (
+    chain_id, phase_name, phase_status, started_at, redo_in_progress, redo_mode,
+    redo_previous_phase_status, redo_from_block_number, redo_to_block_number
+) VALUES (
+    'walk-index-served', 'interpret', 'running', now(), true, 'redo', 'idle', 0, 1
+);
+SQL
+    render_phase_migration "$walk_index_drop"
+    render_phase_migration "$walk_index_drop"
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM walk_index_baseline expected
+        WHERE (to_regclass(expected.index_name) IS NULL) <> (expected.index_name IN ($walk_index_dropped))
+    ) OR (
+        SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
+    ) <> 16 THEN
+        RAISE EXCEPTION 'walk index set drop did not leave exactly the kept indexes';
+    END IF;
+END \$\$;
+SQL
+    render_phase_migration "$walk_index_install"
+    render_phase_migration "$walk_index_install"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM walk_index_baseline expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> (SELECT count(*) FROM walk_index_baseline)
+    OR (
+        SELECT count(*) FROM pg_index WHERE indrelid = 'normalized_events'::regclass
+    ) <> (SELECT count(*) FROM walk_index_baseline) THEN
+        RAISE EXCEPTION 'walk index set install differs from the baseline';
+    END IF;
+END $$;
+DELETE FROM chain_phase_state WHERE chain_id = 'walk-index-served';
+DROP TABLE walk_index_baseline;
+SQL
+} | run_psql >/dev/null
+assert_concurrent_index_installer walk-index-set \
+    normalized_events_emitter_history_idx \
+    "$walk_index_install" \
+    "$walk_index_readme" \
+    normalized_events \
+    "block_number, chain_id"
 # Put each index in turn into every shape CREATE INDEX IF NOT EXISTS skips,
 # inside a transaction that rolls back, and require the schema-migration to
 # fail rather than record success. The expected definition it names must be how
