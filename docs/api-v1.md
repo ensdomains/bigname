@@ -1167,8 +1167,8 @@ with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
 after which NameWrapper no longer treats the child as wrapped
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f).
 The child then serves its new registry owner as `owner` and `manager` and under
-both relations, carries no `ens_v1.wrapper_state`, and later transfers of the old
-token change nothing. NameWrapper's own `setRecord`, and its `setSubnodeRecord`
+both relations, or no owner when the parent set it to zero, carries no
+`ens_v1.wrapper_state`, and later transfers of the old token change nothing. NameWrapper's own `setRecord`, and its `setSubnodeRecord`
 over a wrapped child, write the record back to NameWrapper itself before moving
 the token, so the name stays wrapped
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L629 @ ens_v1@91c966f)

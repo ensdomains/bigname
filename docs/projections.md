@@ -892,8 +892,8 @@ A NameWrapper authority stays selected only while the NameWrapper holds the node
 record. A current-registry `NewOwner` or `Transfer` naming any other owner ends it, as a parent
 owner's `setSubnodeOwner` over a wrapped child does without the NameWrapper's consent: the name
 falls back to its registry-only authority, or to a live registrar lease its new owner holds,
-starting a new [authority epoch](glossary.md#authority-epoch), and later transfers of the old
-token change nothing. Two writes keep it. The NameWrapper's own unwrap writes the new controller
+starting a new [authority epoch](glossary.md#authority-epoch), or, for a zero owner, keeps no
+authority; later transfers of the old token change nothing. Two writes keep it. The NameWrapper's own unwrap writes the new controller
 just before the `NameUnwrapped` that releases the authority; the adapter recognizes it by a
 `NameUnwrapped` for the node from the admitted NameWrapper later in the same transaction. A
 write naming the admitted NameWrapper itself, which `setRecord` and `setSubnodeRecord` over a

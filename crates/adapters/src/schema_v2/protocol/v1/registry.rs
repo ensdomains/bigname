@@ -263,10 +263,7 @@ pub(super) fn interpret(
         });
         match owner_view.as_ref() {
             Some(RegistryOwnerView::ZeroEquivalent { .. }) => {
-                if previous
-                    .as_ref()
-                    .is_some_and(|authority| authority.token_lineage_id.is_none())
-                {
+                if wrapper_custody::zero_write_closes(previous.as_ref(), context) {
                     state.activate_v1_authority(&selected.source.namespace, &affected_node, None);
                     None
                 } else {

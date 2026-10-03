@@ -74,3 +74,13 @@ pub(super) fn keeps_authority(
                 .name_wrapper
                 .is_some_and(|wrapper| owner.parse::<Address>().ok() == Some(wrapper)))
 }
+
+/// Whether a zero-equivalent registry owner write closes the active authority: a registry-only
+/// one always, a NameWrapper one unless the NameWrapper's own `_unwrap(node, 0)` wrote it.
+pub(super) fn zero_write_closes(previous: Option<&V1NameState>, context: RegistrarContext) -> bool {
+    previous.is_some_and(|authority| {
+        authority.token_lineage_id.is_none()
+            || (authority.authority_source_family == WRAPPER_FAMILY
+                && !context.wrapper_custody.unwrap_follows)
+    })
+}
