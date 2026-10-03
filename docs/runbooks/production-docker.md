@@ -1171,10 +1171,10 @@ in the same step.
    --to-block <to> --source <source> --metrics-bind-addr 0.0.0.0:9465`. Repeat
    `--source` for every configured intake-capable source key; the exact persisted
    cursor-key set is required.
-   If the stopped supervisor was killed and left a phase `running`, this redo
-   settles that row under its advisory lock first when a required Ingest redo
-   is pending, as supervisor start-up does;
-   do not edit `chain_phase_state` by hand. It refuses while another process
+   If the stopped supervisor was killed and left a phase `running` outside a
+   redo, this redo settles that row under its advisory lock first when a
+   required Ingest redo is pending, as supervisor start-up does; do not edit
+   `chain_phase_state` by hand. It refuses while another process
    still holds that phase's lock.
    The CLI refuses an ingest redo without a source, and every redo requires the
    explicit block range. These recovery commands override redo's ephemeral

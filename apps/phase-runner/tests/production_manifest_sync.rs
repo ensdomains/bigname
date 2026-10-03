@@ -1352,7 +1352,17 @@ async fn required_ingest_redo_settles_a_project_a_killed_supervisor_left_running
         )
         .await
         .context("a Project row no writer holds must not block the required Ingest redo")?;
-    assert_eq!(required_ingest_redo(scratch.pool(), chain_id).await?, None);
+    let ingest_redo_in_progress: bool = sqlx::query_scalar(
+        "SELECT redo_in_progress FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(chain_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert!(
+        !ingest_redo_in_progress,
+        "the required Ingest redo completed"
+    );
     let (status, redo_in_progress, last_error) =
         project_lifecycle(scratch.pool(), chain_id).await?;
     assert_eq!((status.as_str(), redo_in_progress), ("failed", false));

@@ -79,7 +79,8 @@ and retained evidence pass the same checks as an already-completed Verify row.
 A held lock still stops a second runner. An explicit Ingest redo started while
 a required Ingest redo is pending runs the same settlement first. A supervisor
 killed before a deploy that widens the watch plan therefore leaves no `running`
-row that blocks that redo, and a lock still held refuses it. The state update uses the same database
+row outside a redo that blocks that redo, and a lock still held refuses it. A
+redo the supervisor interrupted keeps its state and is not settled. The state update uses the same database
 connection that holds the lock. If that connection is lost, the runner stops
 and the next start reads the durable phase state again; this covers the case
 where the client cannot tell whether PostgreSQL committed the update before the
