@@ -226,3 +226,95 @@ async fn child_arm_selection_and_a_later_edge_under_another_parent_are_preserved
     database.cleanup().await?;
     result
 }
+
+/// The released-lease probe of a child with no name surface enters
+/// `project_lifecycle_event_namehash_idx` by chain and child node, never by chain alone, and
+/// reads the newest lease event: a release, then a later grant.
+#[tokio::test]
+async fn the_released_lease_probe_reads_the_namehash_index() -> Result<()> {
+    let database = TestDatabase::create(
+        TestDatabaseConfig::new("children_released_lease_plan").pool_max_connections(1),
+    )
+    .await?;
+    let result = async {
+        let mut conn = database.pool().acquire().await?;
+        install(&mut conn).await?;
+        let child = child_id(1);
+        let node = child.strip_prefix("ens:").unwrap();
+        let lease = |identity: &str, kind: &str, block: i64, position: &str| {
+            format!(
+                "INSERT INTO project_lifecycle_event(chain_id, state_kind, state_key,
+                     block_number, transaction_index, log_index, event_identity, event_kind,
+                     source_family, namehash)
+                 VALUES ('{CHAIN}', 'resource', 'lease', {block}, {position}, '{identity}',
+                     '{kind}', 'ens_v1_registrar_l1', '{node}');"
+            )
+        };
+        raw_sql(&format!(
+            "{}{}
+             INSERT INTO project_lifecycle_event(chain_id, state_kind, state_key, block_number,
+                 event_identity, event_kind, source_family, namehash)
+             SELECT '{CHAIN}', 'resource', 'other:' || n, 90, 'other:' || n,
+                 'RegistrationReleased', 'ens_v1_registrar_l1', '0x' || lpad(to_hex(n), 64, '0')
+             FROM generate_series(2, {CHILDREN}) n;
+             ANALYZE project_lifecycle_event; SET enable_seqscan = off;",
+            lease("grant", "RegistrationGranted", 90, "0, 0"),
+            lease("release", "RegistrationReleased", 100, "NULL, NULL"),
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let filter = ChildrenCurrentPageFilter::default();
+        let query = page_query(PARENT, &filter, None, None, 6);
+        raw_sql(&format!(
+            "PREPARE children (text, text, bigint) AS {}",
+            query.sql()
+        ))
+        .execute(&mut *conn)
+        .await?;
+        let plan: Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (FORMAT JSON) EXECUTE children ('{PARENT}', '{}', 6)",
+            bigname_content_hash::INTERPRETER_CONTENT_HASH
+        ))
+        .fetch_one(&mut *conn)
+        .await?;
+        let probes = lifecycle_scans(&plan[0]["Plan"]);
+        ensure!(!probes.is_empty(), "no lifecycle probe: {plan}");
+        for probe in probes {
+            let condition = probe["Index Cond"].as_str().unwrap_or_default();
+            ensure!(
+                probe["Index Name"] == "project_lifecycle_event_namehash_idx"
+                    && condition.contains("chain_id")
+                    && condition.contains("namehash"),
+                "the probe does not enter the namehash index by chain and node: {probe}"
+            );
+        }
+        let released = |page: &FamilyChildrenPage| {
+            page.rows
+                .iter()
+                .find(|row| row.child_logical_name_id == child)
+                .map(|row| row.released_lease)
+        };
+        let first = page(&mut conn, PARENT, &filter, None, None, 5).await?;
+        ensure!(released(&first) == Some(true), "{first:?}");
+        raw_sql(&lease("again", "RegistrationGranted", 100, "0, 0"))
+            .execute(&mut *conn)
+            .await?;
+        let again = page(&mut conn, PARENT, &filter, None, None, 5).await?;
+        ensure!(released(&again) == Some(false), "{again:?}");
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+fn lifecycle_scans(plan: &Value) -> Vec<&Value> {
+    let mut scans: Vec<&Value> = Vec::new();
+    if plan["Relation Name"] == "project_lifecycle_event" {
+        scans.push(plan);
+    }
+    for child in plan["Plans"].as_array().into_iter().flatten() {
+        scans.extend(lifecycle_scans(child));
+    }
+    scans
+}

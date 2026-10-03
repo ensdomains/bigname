@@ -305,7 +305,9 @@ pub(crate) fn build_subname(
     };
     // A child with no name row serves its registry owner, or an ENSv2 child its token holder,
     // but not the NameWrapper holding it for a token holder bigname does not record
-    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
+    // and nobody once its lease is released, though the registry record survives
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f).
     let (owner, manager) = match name_row {
         Some(name) => {
             let linked = registration
@@ -328,6 +330,7 @@ pub(crate) fn build_subname(
             });
             (registration.owner.or(linked), manager)
         }
+        None if row.released_lease => (None, None),
         None => {
             let owner = row.owner.clone().or_else(|| row.registrant.clone());
             (
@@ -345,7 +348,12 @@ pub(crate) fn build_subname(
         labelhash: row.labelhash.clone(),
         owner,
         manager,
-        registration_status: registration.registration_status,
+        // A child with no name row whose lease was released describes that lapsed registration.
+        registration_status: if name_row.is_none() && row.released_lease {
+            RegistrationStatus::Released
+        } else {
+            registration.registration_status
+        },
         registered_at: registration.registered_at,
         created_at: registration.created_at,
         expires_at: registration.expires_at,

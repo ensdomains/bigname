@@ -662,6 +662,7 @@ check_served_projection_removal() {
             else
                 emit_phase_migration "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" baseline-first
             fi
+            emit_phase_migration "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -790,7 +791,8 @@ for migration_file in \
     "$ROOT/migrations/20261001130000_normalized_events_v2_lookahead_indexes.sql" \
     "$ROOT/migrations/20261001150000_lookup_guard_configured_publication_lag.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
-    "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql"
+    "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1132,7 +1134,9 @@ for migration_file in \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
-    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql"
+    "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

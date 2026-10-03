@@ -630,7 +630,9 @@ zero. An unmasked 2017 registry owner word serves its low 20 bytes as the
 child's display owner, as the fallback registry's typed read returns it
 ([architecture](architecture.md)); it still names no control owner. A child with no
 owner, or whose name summary records a zero-owner transfer, publishes a relation
-only while it has a serving resource.
+only while it has a serving resource. A child with no name surface serves that owner only
+while its node's ENSv1 or Basenames registrar lease, if it has one, is not released: the
+readers serve a released one with no owner, although its registry record survives.
 For registry
 events that expose only a labelhash, The reader composes the child name from a
 verified label preimage when one exists and its normalization verdict is true,
