@@ -1559,6 +1559,19 @@ continuation guarantee and may be rejected. Consumers must discard
 pre-#348/#529 cursors and restart from the first page; fresh post-publication cursors
 continue normally.
 
+The interpreter change that files a role change on one ENSv2 registry token
+under that token's [ENSv2 state key](glossary.md#ensv2-state-key) (see
+[ENSv2 role changes filed under their token](deployment.md#ensv2-role-changes-filed-under-their-token))
+changes two attribution fields of diagnostic events and nothing else. On an
+ENSv2 registry or root registry `PermissionChanged` row,
+`raw_fact_ref.state_scope` names the role's resource id in its third segment
+instead of `-`, and `raw_fact_ref.interpreter_state_key` changes with it.
+`event_identity`, `logical_name_id`, `resource_id`, `before_state` and
+`after_state` stay fixed, and `RootPermissionChanged` rows and resolver
+permission rows do not change. Only `/v1/diagnostics/events` serves
+`raw_fact_ref`, so no product row changes, and diagnostic cursors continue
+under the re-walk rule above.
+
 A `record` row may also come from a node-keyed resolver observation that carries
 no logical name or resource of its own, such as an exact direct
 `public_resolver_v2` write. Project attributes that observation to a registration

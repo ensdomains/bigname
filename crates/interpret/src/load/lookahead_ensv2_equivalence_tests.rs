@@ -161,6 +161,56 @@ impl Seeder<'_> {
         sender: &str,
         roles: &str,
     ) -> TestResult {
+        self.register_v2_with_resource(registry, label, v2_token(label), expiry, sender, roles)
+            .await
+    }
+
+    /// `count` labels `<prefix><i>` registered in `registry`, each with an access-control
+    /// resource whose low 32 bits differ from its token id's: the registry versions the two
+    /// separately in those bits
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L35-L37 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05).
+    async fn register_v2_labels(
+        &mut self,
+        registry: &str,
+        prefix: &str,
+        count: usize,
+    ) -> TestResult {
+        for index in 0..count {
+            let label = format!("{prefix}{index}");
+            self.register_v2_with_resource(
+                registry,
+                &label,
+                v2_token_version(&label, 1),
+                START + 10 * GRACE,
+                OWNER,
+                MIGRATED_ROLES,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// A role granted on the ETH registry's root resource: registry-level, not any token's.
+    async fn grant_root_role(&mut self) -> TestResult {
+        let granted = v2::EACRolesChanged {
+            resource: U256::ZERO,
+            account: SECOND_OWNER.parse()?,
+            oldRoleBitmap: U256::ZERO,
+            newRoleBitmap: MIGRATED_ROLES.parse()?,
+        };
+        self.log(ETH_REGISTRY, granted.encode_log_data()).await
+    }
+
+    async fn register_v2_with_resource(
+        &mut self,
+        registry: &str,
+        label: &str,
+        resource: U256,
+        expiry: i64,
+        sender: &str,
+        roles: &str,
+    ) -> TestResult {
         let owner: Address = OWNER.parse()?;
         let sender: Address = sender.parse()?;
         let registered = v2::LabelRegistered {
@@ -180,13 +230,13 @@ impl Seeder<'_> {
             value: U256::from(1_u64),
         };
         self.log(registry, minted.encode_log_data()).await?;
-        let resource = v2::TokenResource {
+        let linked = v2::TokenResource {
             tokenId: v2_token(label),
-            resource: v2_token(label),
+            resource,
         };
-        self.log(registry, resource.encode_log_data()).await?;
+        self.log(registry, linked.encode_log_data()).await?;
         let granted = v2::EACRolesChanged {
-            resource: v2_token(label),
+            resource,
             account: owner,
             oldRoleBitmap: U256::ZERO,
             newRoleBitmap: roles.parse()?,
@@ -257,6 +307,9 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
         sender: owner,
     };
     seed.log(ETH_REGISTRY, parent.encode_log_data()).await?;
+    seed.grant_root_role().await?;
+    // Tokens no later log touches but member0's resolver update at block 6.
+    seed.register_v2_labels(ETH_REGISTRY, "member", 4).await?;
     seed.register_v1("alice", START + 10 * GRACE).await?;
     seed.register_v1("carol", START + 1_000).await?;
     seed.register_v2("bob", START + 2_000, OWNER, MIGRATED_ROLES)
@@ -394,6 +447,7 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
         .await?;
 
     seed.block(FIRST_BLOCK + 6).await?;
+    seed.set_v2_resolver("member0").await?;
     seed.set_v2_resolver("alice").await?;
     seed.text("alice", "0x06").await?;
     // Revoking a role regenerates the token: burn, TokenRegenerated, mint under the next version
@@ -491,6 +545,7 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         stamp_interpreter_hash(database.pool()).await?;
         super::RETRIES.set(0);
         super::WHOLE_REGISTRY_BATCHES.take();
+        super::LOADED_BATCHES.take();
         let walk = walk_seeded(
             database.pool(),
             CHAIN,
@@ -521,6 +576,15 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
             ]),
             "batches that loaded a whole ENSv2 registry at {blocks_per_batch} blocks per batch"
         );
+        // One batch over the whole history restores nothing.
+        let restored_root = super::LOADED_BATCHES
+            .take()
+            .values()
+            .any(|(_, restored)| restored.iter().any(|kind| kind == "RootPermissionChanged"));
+        assert!(
+            restored_root || blocks_per_batch == 500,
+            "no lookahead batch restored the root role change at {blocks_per_batch} blocks per batch"
+        );
         assert!(
             super::RETRIES.get() > 0,
             "no lookahead attempt was retried for {blocks_per_batch} blocks per batch"
@@ -550,6 +614,8 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         ("ens_v2_registry_l1", "SubregistryChanged"),
         ("ens_v2_registry_l1", "TokenRegenerated"),
         ("ens_v2_registry_l1", "RegistrationReleased"),
+        ("ens_v2_registry_l1", "PermissionChanged"),
+        ("ens_v2_registry_l1", "RootPermissionChanged"),
         (
             "ens_v2_registry_l1",
             bigname_adapters::schema_v2::seam::TOKEN_CONTROL_TRANSFERRED_EVENT_KIND,
@@ -587,6 +653,89 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
             "stored events differ for {blocks_per_batch} blocks per batch"
         );
     }
+    Ok(())
+}
+
+const SUBREGISTRY: &str = "0x0000000000000000000000000000000000000772";
+const FAN_OUT_OFFSETS: [i64; 3] = [0, 10, 20];
+
+/// Block 0: `n` tokens and a token `parent` in the ETH registry, with a root role and
+/// `parent` pointing at a subregistry. Block 1: `m` tokens in that subregistry. Block 2: a
+/// resolver update on `tok0` alone.
+async fn seed_fan_out(pool: &PgPool, n: usize, m: usize) -> TestResult {
+    seed_lineage(pool, CHAIN, &FAN_OUT_OFFSETS).await?;
+    let owner: Address = OWNER.parse()?;
+    let mut seed = seeder(pool);
+    seed.block(FIRST_BLOCK).await?;
+    let parent = v2::ParentUpdated {
+        parent: ROOT_REGISTRY.parse()?,
+        label: "eth".to_owned(),
+        sender: owner,
+    };
+    seed.log(ETH_REGISTRY, parent.encode_log_data()).await?;
+    seed.grant_root_role().await?;
+    seed.register_v2_labels(ETH_REGISTRY, "tok", n).await?;
+    seed.register_v2("parent", START + 10 * GRACE, OWNER, MIGRATED_ROLES)
+        .await?;
+    let pointed = v2::SubregistryUpdated {
+        tokenId: v2_token("parent"),
+        subregistry: SUBREGISTRY.parse()?,
+        sender: owner,
+    };
+    seed.log(ETH_REGISTRY, pointed.encode_log_data()).await?;
+
+    seed.block(FIRST_BLOCK + 1).await?;
+    seed.log(SUBREGISTRY, v2::RegistryCreated {}.encode_log_data())
+        .await?;
+    let claimed = v2::ParentUpdated {
+        parent: ETH_REGISTRY.parse()?,
+        label: "parent".to_owned(),
+        sender: owner,
+    };
+    seed.log(SUBREGISTRY, claimed.encode_log_data()).await?;
+    seed.register_v2_labels(SUBREGISTRY, "leaf", m).await?;
+
+    seed.block(FIRST_BLOCK + 2).await?;
+    seed.set_v2_resolver("tok0").await
+}
+
+/// A batch that touches one ENSv2 token loads that token and the registry-level rows, not
+/// the other tokens whose roles the registry recorded, nor, through a sibling token's
+/// subregistry, that subregistry's tokens: what it restores grows with neither count.
+#[tokio::test]
+async fn a_batch_touching_one_token_loads_only_that_token() -> TestResult {
+    let touched = FIRST_BLOCK + 2;
+    let token_key = |registry: &str, label: &str| format!("{registry}:{:#066x}", v2_token(label));
+    let mut restored = Vec::new();
+    for (n, m) in [(5, 0), (25, 0), (5, 5), (5, 25)] {
+        let database =
+            database_with_manifests("interpret_lookahead_ensv2_fan_out", "sepolia").await?;
+        seed_fan_out(database.pool(), n, m).await?;
+        stamp_interpreter_hash(database.pool()).await?;
+        super::LOADED_BATCHES.take();
+        walk_seeded(database.pool(), CHAIN, &FAN_OUT_OFFSETS, 1, false).await?;
+        database.cleanup().await?;
+        let (keys, kinds) = super::LOADED_BATCHES
+            .take()
+            .remove(&touched)
+            .expect("the touched batch loads through lookahead");
+        assert!(keys.contains(&token_key(ETH_REGISTRY, "tok0")));
+        let untouched = (1..n)
+            .map(|index| token_key(ETH_REGISTRY, &format!("tok{index}")))
+            .chain([token_key(ETH_REGISTRY, "parent")])
+            .chain((0..m).map(|index| token_key(SUBREGISTRY, &format!("leaf{index}"))))
+            .filter(|key| keys.contains(key))
+            .collect::<Vec<_>>();
+        assert!(
+            untouched.is_empty(),
+            "n={n} m={m}: the batch touching tok0 loaded {untouched:?}"
+        );
+        restored.push(((n, m), kinds.len()));
+    }
+    assert!(
+        restored.iter().all(|(_, count)| *count == restored[0].1),
+        "restored events per (n, m): {restored:?}"
+    );
     Ok(())
 }
 
