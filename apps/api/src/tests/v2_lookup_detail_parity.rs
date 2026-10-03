@@ -446,3 +446,147 @@ async fn lookup_detail_records_keep_text_keys_with_spaces_and_commas() -> Result
     assert_eq!(records["texts"], json!({}), "{detail}");
     database.cleanup().await
 }
+
+// TYR-192: a feed record carries the expiry fields and `ens_v1` of the detail record, and no
+// other registration field.
+const FEED_EXPIRY_FIELDS: &[&str] = &["expires_at", "expires_at_reason", "grace_ends_at", "ens_v1"];
+
+const DETAIL_ONLY_FIELDS: &[&str] = &[
+    "registration_id",
+    "token_id",
+    "owner",
+    "manager",
+    "registered_at",
+    "created_at",
+    "registration_status",
+    "lapsed_registration",
+    "resolver",
+    "unresolvable_reason",
+    "records",
+    "primary_address",
+    "primary_name",
+    "authority",
+    "migrated_at",
+];
+
+fn assert_feed_expiry_fields(feed: &Value, detail: &Value, context: &str) {
+    for field in FEED_EXPIRY_FIELDS {
+        assert_eq!(
+            feed.get(*field),
+            detail.get(*field),
+            "{context}: `{field}` differs\nfeed: {feed}\ndetail: {detail}"
+        );
+    }
+    for field in DETAIL_ONLY_FIELDS {
+        assert!(feed.get(*field).is_none(), "{context}: feed carries `{field}`: {feed}");
+    }
+}
+
+async fn assert_feed_expiry_matches_detail(database: &TestDatabase, name: &str) -> Result<Value> {
+    let detail = v2_name_record_payload_for_database(database, &format!("/v1/names/{name}")).await?;
+    let lookup = |profile: &str| {
+        v2_lookup_json(database, json!({"profile": profile, "inputs": [{"name": name}]}))
+    };
+    let feed = lookup("feed").await?["data"][0]["record"].clone();
+    let lookup_detail = lookup("detail").await?["data"][0]["record"].clone();
+    assert_feed_expiry_fields(&feed, &lookup_detail, &format!("{name} lookup detail"));
+    assert_feed_expiry_fields(&feed, &detail["data"], &format!("{name} name detail"));
+    Ok(feed)
+}
+
+#[tokio::test]
+async fn lookup_feed_serves_the_detail_expiry_of_a_live_a_grace_and_a_released_lease() -> Result<()> {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    let database = TestDatabase::new_migrated().await?;
+    let released = seed_names_registration(
+        &database, "ens", "lapsed-feed.eth", 91, "2023-02-02T00:00:00Z", 1_700_000_000, HOLDER,
+        HOLDER,
+    )
+    .await?;
+    seed_names_registration(
+        &database, "ens", "live-feed.eth", 92, "2024-02-02T00:00:00Z", 1_900_000_000, HOLDER,
+        HOLDER,
+    )
+    .await?;
+    // The published head is 2026-06-10 (1781049600): this lease expired twelve days before it
+    // and is in its registrar grace period.
+    seed_names_registration(
+        &database, "ens", "grace-feed.eth", 93, "2024-02-05T00:00:00Z", 1_780_000_000, HOLDER,
+        HOLDER,
+    )
+    .await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block("ethereum-mainnet", "0xfeed-released", None, 94, 1_707_776_000)],
+    )
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET active_to=to_timestamp(1707776000) WHERE resource_id=$1")
+        .bind(released)
+        .execute(&database.pool)
+        .await?;
+    let mut release = history_event(
+        "feed-lapsed-release",
+        Some(&bigname_storage::logical_name_id_for_name("ens", "lapsed-feed.eth")),
+        Some(released),
+        Some("ethereum-mainnet"),
+        Some(94),
+        Some("0xfeed-released"),
+        Some("0xrelease"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    release.event_kind = "RegistrationReleased".into();
+    release.source_family = "ens_v1_registrar_l1".into();
+    release.before_state = json!({"registrant":HOLDER,"authority_kind":"registrar","authority_key":"registrar:lapsed"});
+    release.after_state = json!({"expiry":1700000000,"released_at":1707776000});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release]).await?;
+    publish_v2_names_fixture(&database).await?;
+
+    for (name, expires_at, grace_ends_at) in [
+        ("live-feed.eth", "1900000000", "1907776000"),
+        ("grace-feed.eth", "1780000000", "1787776000"),
+        ("lapsed-feed.eth", "1700000000", "1707776000"),
+    ] {
+        let feed = assert_feed_expiry_matches_detail(&database, name).await?;
+        assert_eq!(feed["expires_at"], json!(expires_at), "{name}: {feed}");
+        assert_eq!(feed["grace_ends_at"], json!(grace_ends_at), "{name}: {feed}");
+        assert_eq!(feed["ens_v1"], json!({"expires_at": expires_at}), "{name}: {feed}");
+        assert!(feed.get("expires_at_reason").is_none(), "{name}: {feed}");
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn lookup_feed_serves_the_detail_expiry_of_an_ens_v2_registration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_state_inputs(&database, AliceInputState::Registry).await?;
+    let feed = assert_feed_expiry_matches_detail(&database, "alice.eth").await?;
+    assert_eq!(feed["expires_at"], json!("4000000000"), "{feed}");
+    assert!(feed.get("ens_v1").is_none(), "{feed}");
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn lookup_reverse_feed_rows_serve_the_detail_expiry() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    seed_v2_lookup_reverse_fixture(&database, address).await?;
+    let rows = |profile: &str| {
+        v2_lookup_json(
+            &database,
+            json!({"profile": profile, "inputs": [{"address": address, "relation": "any"}]}),
+        )
+    };
+    let feed = rows("feed").await?["data"][0]["records"].clone();
+    let detail = rows("detail").await?["data"][0]["records"].clone();
+    let (feed, detail) = (feed.as_array().unwrap(), detail.as_array().unwrap());
+    assert!(!feed.is_empty(), "{feed:?}");
+    assert_eq!(feed.len(), detail.len());
+    for (feed, detail) in feed.iter().zip(detail) {
+        assert_feed_expiry_fields(feed, detail, "reverse");
+        assert_eq!(feed["is_primary"], detail["is_primary"], "{feed}");
+        assert_eq!(feed["relations"], detail["relations"], "{feed}");
+        assert!(feed["expires_at"].is_string(), "{feed}");
+    }
+    database.cleanup().await
+}

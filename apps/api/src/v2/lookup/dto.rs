@@ -152,7 +152,7 @@ pub(crate) struct LookupRecord {
     pub(crate) resolution: Option<AddressNameResolution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
-    /// Present on `profile=detail` records whose authority is `ens_v1` or `ens_v0`.
+    /// Present on records of either profile whose authority is `ens_v1` or `ens_v0`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ens_v1: Option<EnsV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
