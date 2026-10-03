@@ -680,7 +680,8 @@ sections or route-documented expensive metadata. No route supports
 `profile=feed` on `POST /v1/lookup` is a field budget over the same record
 shape used by `profile=detail`. Feed returns fewer fields; every feed field has
 the same name, type and value as its detail counterpart. Beyond identity,
-`status` and reverse `is_primary`/`relations`, feed carries `expires_at`,
+`chain_id`, `network`, `status`, `subregistry` on name results, reverse
+`is_primary`/`relations` and `resolution` on `resolves_to` rows, feed carries `expires_at`,
 `expires_at_reason`, `grace_ends_at` and `ens_v1`, so a consumer can render
 expiry and grace without a second request; the other registration, resolver
 and record fields are detail-only. Feed does not change reverse
@@ -2513,7 +2514,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 
 ### LookupRecord
 
-Shared lookup feed/detail record. Feed records carry identity, status, `expires_at`, `expires_at_reason`, `grace_ends_at` and `ens_v1` with the detail record's values; detail adds the other registration fields and the resolver and grouped record fields; reverse records additionally carry matching relations and primary-name information. Feed records omit owner, manager and the other registration fields.
+Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `network`, status, `subregistry` on name results, reverse `is_primary`/`relations`, `resolution` on `resolves_to` rows, `expires_at`, `expires_at_reason`, `grace_ends_at` and `ens_v1` with the detail record's values; detail adds the other registration fields and the resolver and grouped record fields; reverse records additionally carry matching relations and primary-name information. Feed records omit owner, manager and the other registration fields.
 
 <!-- openapi:object LookupRecord -->
 | Field | Type | Presence | Description |
