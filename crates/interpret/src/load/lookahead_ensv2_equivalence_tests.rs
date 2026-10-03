@@ -153,23 +153,7 @@ impl Seeder<'_> {
             .await
     }
 
-    async fn register_v2_in(
-        &mut self,
-        registry: &str,
-        label: &str,
-        expiry: i64,
-        sender: &str,
-        roles: &str,
-    ) -> TestResult {
-        self.register_v2_with_resource(registry, label, v2_token(label), expiry, sender, roles)
-            .await
-    }
-
-    /// `count` labels `<prefix><i>` registered in `registry`, each with an access-control
-    /// resource whose low 32 bits differ from its token id's: the registry versions the two
-    /// separately in those bits
-    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L35-L37 @ ens_v2_sepolia_20261001@07e55a05)
-    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05).
+    /// `count` fresh labels `<prefix><i>` registered in `registry`.
     async fn register_v2_labels(
         &mut self,
         registry: &str,
@@ -178,15 +162,8 @@ impl Seeder<'_> {
     ) -> TestResult {
         for index in 0..count {
             let label = format!("{prefix}{index}");
-            self.register_v2_with_resource(
-                registry,
-                &label,
-                v2_token_version(&label, 1),
-                START + 10 * GRACE,
-                OWNER,
-                MIGRATED_ROLES,
-            )
-            .await?;
+            self.register_v2_in(registry, &label, START + 10 * GRACE, OWNER, MIGRATED_ROLES)
+                .await?;
         }
         Ok(())
     }
@@ -202,11 +179,10 @@ impl Seeder<'_> {
         self.log(ETH_REGISTRY, granted.encode_log_data()).await
     }
 
-    async fn register_v2_with_resource(
+    async fn register_v2_in(
         &mut self,
         registry: &str,
         label: &str,
-        resource: U256,
         expiry: i64,
         sender: &str,
         roles: &str,
@@ -230,13 +206,13 @@ impl Seeder<'_> {
             value: U256::from(1_u64),
         };
         self.log(registry, minted.encode_log_data()).await?;
-        let linked = v2::TokenResource {
+        let resource = v2::TokenResource {
             tokenId: v2_token(label),
-            resource,
+            resource: v2_token(label),
         };
-        self.log(registry, linked.encode_log_data()).await?;
+        self.log(registry, resource.encode_log_data()).await?;
         let granted = v2::EACRolesChanged {
-            resource,
+            resource: v2_token(label),
             account: owner,
             oldRoleBitmap: U256::ZERO,
             newRoleBitmap: roles.parse()?,
@@ -525,7 +501,29 @@ async fn seed_last_block(seed: &mut Seeder<'_>, hash: &str, text: &str) -> TestR
         subregistry: Address::ZERO,
         sender: OWNER.parse()?,
     };
-    seed.log(ETH_REGISTRY, cleared.encode_log_data()).await
+    seed.log(ETH_REGISTRY, cleared.encode_log_data()).await?;
+    // A grant on alice's resource, still at version 0 while her token is at version 1, and the
+    // regeneration it triggers: a role change filed under a token id it does not equal
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L549-L561 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05).
+    let granted = v2::EACRolesChanged {
+        resource: v2_token("alice"),
+        account: SECOND_OWNER.parse()?,
+        oldRoleBitmap: U256::ZERO,
+        newRoleBitmap: MIGRATED_ROLES.parse()?,
+    };
+    seed.log(ETH_REGISTRY, granted.encode_log_data()).await?;
+    let owner: Address = OWNER.parse()?;
+    seed.transfer_v2(v2_token_version("alice", 1), owner, Address::ZERO)
+        .await?;
+    let regenerated = v2::TokenRegenerated {
+        oldTokenId: v2_token_version("alice", 1),
+        newTokenId: v2_token_version("alice", 2),
+    };
+    seed.log(ETH_REGISTRY, regenerated.encode_log_data())
+        .await?;
+    seed.transfer_v2(v2_token_version("alice", 2), Address::ZERO, owner)
+        .await
 }
 
 fn name(label: &str) -> String {
@@ -628,6 +626,16 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
             "the history must exercise {family} {kind}"
         );
     }
+    let alice_resource = format!("{:#066x}", v2_token("alice"));
+    assert!(
+        rows.iter().any(|row| row["block_number"] == FIRST_BLOCK + 7
+            && row["event_kind"] == "PermissionChanged"
+            && row["raw_fact_ref"][bigname_adapters::schema_v2::seam::STATE_SCOPE_KEY]
+                .as_str()
+                .and_then(|scope| scope.split(':').nth(2))
+                == Some(alice_resource.as_str())),
+        "alice's role change after her regeneration is scoped to her resource id"
+    );
     assert!(
         rows.iter().any(|row| row["block_number"] == FIRST_BLOCK + 3
             && row["event_kind"] == "RegistrationReleased"

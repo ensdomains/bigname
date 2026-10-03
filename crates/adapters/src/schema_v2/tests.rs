@@ -6834,7 +6834,8 @@ fn registry_permission_adapter_selects_one_root_event() -> anyhow::Result<()> {
 
 /// A role change on one token's resource is filed under that token's ENSv2 state key, so
 /// loading a registry's own rows (`<registry>:00000000`) does not load every token's roles. A
-/// root role change stays registry-level.
+/// root role change stays registry-level. The resource's low 32 bits are synthetic: any version
+/// lands on the same key.
 #[test]
 fn ensv2_role_change_is_filed_under_its_token() -> anyhow::Result<()> {
     let mut label_id = keccak256(b"alice").0;

@@ -2374,11 +2374,10 @@ chain. A registry builds a token's access-control resource id from the same
 labelhash as its token id, replacing only the low 32 bits
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2_sepolia_20261001@07e55a05),
-so the role change now lands on the token's own key. Before, every
-registration's role grant sat under the registry-level key, and a lookahead
-batch touching any token of a registry read the role changes of all its tokens
-and then those tokens' histories, and through their subregistries the tokens
-beneath them. Now such a batch reads the tokens it touches and the registry's
+so the role change now lands on the token's own key. Before, a token's role
+changes sat under the registry-level key, so a lookahead batch touching one
+token of a registry could read other tokens' role changes and then those
+tokens' histories, and through their subregistries the tokens beneath them. Now such a batch reads the tokens it touches and the registry's
 own rows: its creation, upgrades, parent claim and role changes on its root
 resource. Stored events change only on ENSv2 registry and root registry
 `PermissionChanged` rows, whose `raw_fact_ref.state_scope` and
