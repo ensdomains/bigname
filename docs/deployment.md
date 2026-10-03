@@ -2283,3 +2283,20 @@ its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
+
+### Resolution protocol on the namespace route
+
+The build that adds `resolution` to each network on
+[`GET /v1/namespaces/{namespace}`](api-v1-routes.md#get-v1namespacesnamespace)
+(TYR-184) changes only the API and `crates/storage/src/resolution_state.rs`, a
+read-only query outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate. It needs no schema-migration, no manifest or environment
+change, no redo and no historical ingest fetch. The field is additive. The
+phase-runner's Universal Resolver warning shares the read, so its `block` now
+names the latest `Upgraded` on the client-facing chain rather than the block of
+the row the chain ends at. After deploy, with the
+[Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
+in place, `GET /v1/namespaces/ens` on Sepolia serves
+`resolution` `{"protocol": "ens_v2", "since_block": 11821680}`, and on Mainnet
+`{"protocol": "ens_v1", "since_block": null}`.

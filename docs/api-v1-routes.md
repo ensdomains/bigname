@@ -4608,9 +4608,10 @@ For a registrar lease first identified by a later readable observation, registra
 - Response shape: `data` is `{namespace, capabilities, networks}`.
   `capabilities` is a product-facing object keyed by capability name; each
   value is `{completeness, unsupported_reason?, chains?}` using the common
-  completeness vocabulary. `networks` is an array of `{network, chain_id?}`
-  entries when the namespace has public chain mappings. Control-plane metadata
-  omits `meta.as_of` and `meta.as_of_token`.
+  completeness vocabulary. `networks` is an array of
+  `{network, chain_id?, resolution?}` entries when the namespace has public
+  chain mappings. Control-plane metadata omits `meta.as_of` and
+  `meta.as_of_token`.
 - `subnames` aggregates the active manifests' `declared_children` flags:
   `full` when every declaring manifest is supported, `partial` when some are,
   otherwise `unsupported` with `unsupported_reason=not_supported_for_namespace`.
@@ -4655,6 +4656,39 @@ For a registrar lease first identified by a later readable observation, registra
     "completeness": "full",
     "chains": { "11155111": { "completeness": "full" } }
   }
+  ```
+- Resolution protocol per network: `resolution` is `{protocol, since_block}`
+  and says which ENS protocol generation `.eth` resolution follows on that
+  network now. It is present on each network where the namespace has an ENS
+  execution entrypoint, an `active` or `shadow` `ens_execution` manifest for
+  that chain (ENS on Ethereum Mainnet or Sepolia), and absent elsewhere,
+  including every Basenames network, which has no ENSv1/ENSv2 split.
+  `protocol` is `ens_v2` past the
+  [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
+  client-facing Universal Resolver proxy's chain of implementations ends at an
+  implementation `ens_execution` lists in `universal_resolver_implementations`.
+  It is `ens_v1` otherwise: before the cutover, after an upgrade to an
+  implementation the manifest does not list, and while a proxy on that chain
+  has no `Upgraded` yet. This is the decision name reads apply to `.eth`
+  expiry, grace and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
+  `since_block` is the latest `Upgraded` block among the proxies on that
+  chain, the block from which clients have resolved through the current
+  implementation. Every upgrade on the chain moves it, including one from one
+  listed implementation to another, so it dates the current implementation,
+  not an unbroken run of the same `protocol`; earlier states are not reported.
+  It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
+  client-facing proxy has been observed, as on Mainnet today. The value is
+  read from the same projected proxy state current name reads use, so it has
+  no `meta.as_of` of its own. Example under the Sepolia profile:
+
+  ```json
+  "networks": [
+    {
+      "network": "ethereum-sepolia",
+      "chain_id": 11155111,
+      "resolution": { "protocol": "ens_v2", "since_block": 11821680 }
+    }
+  ]
   ```
 - Pagination behavior: none.
 - Status semantics: unsupported public namespaces return `404 not_found`.

@@ -124,6 +124,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `role_summary` | grouped permission powers for dashboard-style name rows | `role_summary` (unchanged; rewritten to dictionary field names inside) |
 | `authority_context` | required permission-row marker from the [per-name ownership rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership); [`current_for_name`](glossary.md#current-for-name-authority-context) means a `name` filter selected the current registration, while [`resource_audit`](glossary.md#resource-audit-context) makes no current-name claim | new in v2 |
 | `capabilities` | product-facing summary of supported namespace capabilities; `verified_records` and `verified_primary_name` carry a `chains` object keyed by numeric chain id with per-chain `{completeness, unsupported_reason?}` | capability flag summaries when exposed to product routes |
+| `resolution` | on a namespace network, the ENS protocol generation `.eth` resolution follows there: `protocol` is `ens_v2` past the [Universal Resolver cutover](glossary.md#universal-resolver-cutover) and `ens_v1` otherwise, with `since_block` the block from which that holds | new in v2 |
 | `type` | product event category label; as a history filter, one label or a comma-separated set | `event_kind`, compact event `type` aliases |
 | `by_type` | map of product event `type` values to counts | event summary `by_kind` maps keyed by raw event kind |
 | `block_number` | EVM block number | block-number fields inside chain-position objects |
@@ -2848,6 +2849,15 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `network` | string | always | Display network slug. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
+| `resolution` | object NamespaceResolution | optional | ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it. |
+
+### NamespaceResolution
+
+<!-- openapi:object NamespaceResolution -->
+| Field | Type | Presence | Description |
+| --- | --- | --- | --- |
+| `protocol` | enum ResolutionProtocol | always | `ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`. |
+| `since_block` | nullable integer | always | Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed. |
 
 ### PermissionRow
 
@@ -3405,6 +3415,14 @@ vocabularies are marked at their existing canonical tables above.
 | Value |
 | --- |
 | `ens_v0` |
+| `ens_v1` |
+| `ens_v2` |
+
+### ResolutionProtocol
+
+<!-- openapi:enum ResolutionProtocol -->
+| Value |
+| --- |
 | `ens_v1` |
 | `ens_v2` |
 
