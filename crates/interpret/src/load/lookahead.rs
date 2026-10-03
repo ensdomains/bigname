@@ -1,13 +1,15 @@
 //! Per-batch ENSv1, ENSv2 and Basenames Base state loading: restore only the history of the
 //! names, resources and [ENSv2 state keys](../../../../docs/glossary.md#ensv2-state-key) the
 //! batch touches. Canonical history remains the sole durable state.
+use std::collections::{BTreeMap, BTreeSet};
+
 use bigname_adapters::schema_v2::{
-    BatchInput, ManifestInput, StateCacheCapacity, UnloadedKeys, V1BatchDependencies,
-    V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance, collect_v1_batch_dependencies,
-    prepare_schema_v2_batch_lookahead, restore_schema_v2_lookahead_session,
-    v1_lookahead_supports_family, v2_key_loaded,
+    BatchInput, ManifestInput, PriorEventInput, StateCacheCapacity, UnloadedKeys,
+    V1BatchDependencies, V1NodeRequest, begin_schema_v2_adapter_restore_with_provenance,
+    collect_v1_batch_dependencies, prepare_schema_v2_batch_lookahead,
+    restore_schema_v2_lookahead_session, v1_lookahead_supports_family, v2_key_loaded,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
 
 use super::{LoadedBatch, cache, lookahead_query, manifests, migration, resume};
 use crate::{FullStateReason, InterpretError, Result, StateLoader};
@@ -131,9 +133,24 @@ pub(crate) async fn batch_input(
             .extend(lookahead_query::v2_due_keys(&mut tx, chain_id, from_block, window).await?);
     }
     dependencies.v2_due_window = Some(window);
+    // Shared by every attempt: a retry reads only the keys it adds and what they link to.
+    let mut fetched = Fetched::default();
     let (prepared, restored_event_count) = loop {
-        let prior = load_closure(&mut tx, chain_id, from_block, &mut dependencies).await?;
+        let prior = load_closure(
+            &mut tx,
+            chain_id,
+            from_block,
+            &mut dependencies,
+            &mut fetched,
+        )
+        .await?;
         let restored_event_count = prior.len();
+        #[cfg(test)]
+        CLOSURES.with_borrow_mut(|closure| {
+            if let Some(closure) = closure {
+                closure.attempts.push((prior.clone(), dependencies.clone()));
+            }
+        });
         let restore = begin_schema_v2_adapter_restore_with_provenance(
             chain_id.to_owned(),
             input.manifests.clone(),
@@ -217,6 +234,16 @@ pub(crate) async fn batch_input(
     })))
 }
 
+/// What the batch's closure has already read in its snapshot: the names, resources and ENSv2
+/// state keys queried, and the events those queries returned, keyed by restore order.
+#[derive(Default)]
+struct Fetched {
+    names: BTreeSet<V1NodeRequest>,
+    resources: BTreeSet<Uuid>,
+    v2_keys: BTreeSet<String>,
+    events: BTreeMap<(i64, i64), PriorEventInput>,
+}
+
 /// Load the events of the requested names, resources and ENSv2 state keys, add the ones those
 /// events link to, and repeat until a round adds nothing. There is no round limit: every round
 /// that continues adds at least one name, resource or ENSv2 state key that occurs in the
@@ -225,43 +252,68 @@ pub(crate) async fn batch_input(
 /// set stops growing after finitely many rounds. A subname many labels deep costs one round
 /// per label, because each stored `NewOwner` links a name to its parent, and each stored ENSv2
 /// `ParentChanged` a registry to its parent token. Returns the loaded events in restore order.
+///
+/// Each round queries only what `fetched` has not: every query side is a union over its
+/// requested elements and the latest event of a state key does not depend on the request, so
+/// in one snapshot the rounds' rows together are what one query over the final set returns.
 async fn load_closure(
     connection: &mut sqlx::PgConnection,
     chain_id: &str,
     from_block: i64,
     dependencies: &mut V1BatchDependencies,
-) -> Result<Vec<bigname_adapters::schema_v2::PriorEventInput>> {
+    fetched: &mut Fetched,
+) -> Result<Vec<PriorEventInput>> {
     loop {
         validate_dependencies(dependencies)?;
-        let size = |dependencies: &V1BatchDependencies| {
-            (
-                dependencies.nodes.len(),
-                dependencies.resource_ids.len(),
-                dependencies.v2_keys.len(),
-            )
-        };
-        let previous = size(dependencies);
-        let names: Vec<_> = dependencies
+        let nodes: Vec<_> = dependencies
             .nodes
+            .difference(&fetched.names)
+            .cloned()
+            .collect();
+        let resources: Vec<_> = dependencies
+            .resource_ids
+            .difference(&fetched.resources)
+            .copied()
+            .collect();
+        let v2_keys: Vec<_> = dependencies
+            .v2_keys
+            .difference(&fetched.v2_keys)
+            .cloned()
+            .collect();
+        if nodes.is_empty() && resources.is_empty() && v2_keys.is_empty() {
+            return Ok(fetched.events.values().cloned().collect());
+        }
+        let names: Vec<_> = nodes
             .iter()
             .map(|request| format!("{}:{}", request.namespace, request.node))
             .collect();
-        let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-        let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
-        let mut events = lookahead_query::ordered_events(
+        #[cfg(test)]
+        CLOSURES.with_borrow_mut(|closure| {
+            if let Some(closure) = closure {
+                closure
+                    .requests
+                    .push((names.clone(), resources.clone(), v2_keys.clone()));
+            }
+        });
+        let events = lookahead_query::ordered_events(
             connection, chain_id, from_block, &names, &resources, &v2_keys,
         )
         .await?;
+        fetched.names.extend(nodes);
+        fetched.resources.extend(resources);
+        fetched.v2_keys.extend(v2_keys);
+        let new: Vec<_> = events
+            .into_iter()
+            .filter(|ordered| !fetched.events.contains_key(&ordered.order))
+            .collect();
         dependencies
-            .include_prior_events(events.iter().map(|ordered| &ordered.event))
+            .include_prior_events(new.iter().map(|ordered| &ordered.event))
             .map_err(|error| invalid_dependencies("expand prior links", error))?;
         dependencies.include_registry_only_resources(chain_id);
-        validate_dependencies(dependencies)?;
-        if previous == size(dependencies) {
-            events.sort_by_key(|ordered| ordered.order);
-            return Ok(events.into_iter().map(|ordered| ordered.event).collect());
-        }
-        // Discard this partial fetch before querying the expanded set.
+        fetched.events.extend(
+            new.into_iter()
+                .map(|ordered| (ordered.order, ordered.event)),
+        );
     }
 }
 
@@ -358,11 +410,28 @@ thread_local! {
     /// The batches, by first block, that loaded a whole ENSv2 registry, and its key.
     pub(super) static WHOLE_REGISTRY_BATCHES: std::cell::RefCell<std::collections::BTreeSet<(i64, String)>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// Records `batch_input`'s closure on this thread while a test sets it to `Some`. It
+    /// stays `None` otherwise, so no other test's timing or memory includes the recording.
+    pub(super) static CLOSURES: std::cell::RefCell<Option<Closure>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct Closure {
+    /// The names, resources and ENSv2 state keys of each prior-event query.
+    pub(super) requests: Vec<(Vec<String>, Vec<Uuid>, Vec<String>)>,
+    /// Each attempt's restore input and the dependencies it was loaded for.
+    pub(super) attempts: Vec<(Vec<PriorEventInput>, V1BatchDependencies)>,
 }
 
 #[cfg(test)]
 #[path = "lookahead_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lookahead_closure_tests.rs"]
+mod closure_tests;
 
 #[cfg(test)]
 #[path = "lookahead_equivalence_tests.rs"]
