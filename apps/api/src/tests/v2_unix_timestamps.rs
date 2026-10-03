@@ -464,6 +464,12 @@ async fn v2_unix_timestamps_wrapper_keeps_finite_values_and_classifies_sentinels
         assert_eq!(record["expires_at_reason"], json!(reason), "{body:#}");
         // The wrapper expiry is the subname's only expiry; it has no lease date.
         assert_eq!(record["ens_v1"].get("expires_at"), Some(&Value::Null), "{body:#}");
+        let feed = v2_lookup_json(
+            &database,
+            json!({"profile": "feed", "inputs": [{"name": name}]}),
+        )
+        .await?;
+        assert_feed_expiry_fields(&feed["data"][0]["record"], record, "wrapper lookup feed");
         let permissions = v2_permissions_payload_for_database(
             &database,
             &format!("/v1/permissions?registration_id={wrapper}"),
