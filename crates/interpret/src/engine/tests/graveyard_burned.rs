@@ -42,6 +42,7 @@ mod name_wrapper {
 
     sol! {
         event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
+        event FusesSet(bytes32 indexed node, uint32 fuses);
     }
 }
 
@@ -635,7 +636,7 @@ async fn a_surviving_wrapper_token_sent_to_the_graveyard_does_not_list_it_as_man
 /// registry's `setSubnodeOwner`. No `NameUnwrapped` follows and the token is not burned, but the
 /// NameWrapper no longer holds the registry record, so the name is no longer wrapped: owner,
 /// manager and both relations follow the new registry owner, and later transfers of the stale
-/// token move nothing.
+/// token, or its holder's `setFuses`, change nothing.
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
 #[tokio::test]
@@ -686,6 +687,20 @@ async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() 
         .encode_log_data(),
     )
     .await?;
+    // `setFuses` checks only the surviving token's owner, not registry custody.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L435 @ ens_v1@91c966f)
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        1,
+        NAME_WRAPPER,
+        name_wrapper::FusesSet {
+            node: fixture.sub_node,
+            fuses: 0,
+        }
+        .encode_log_data(),
+    )
+    .await?;
     let mut resume = MIGRATION_BLOCK;
     for block in [LATER_BLOCK, LATER_BLOCK + 1] {
         run(pool, block, block, Some(resume)).await?;
@@ -699,10 +714,12 @@ async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() 
                 "{run}: {served:#}"
             );
             assert_eq!(served["control"]["owner"], CAROL, "{run}: {served:#}");
-            assert!(
-                !served.to_string().contains("wrapper_state"),
-                "{run}: {served:#}"
-            );
+            for wrapper_field in ["wrapper_state", "wrapper_masked"] {
+                assert!(
+                    !served.to_string().contains(wrapper_field),
+                    "{run}: {served:#}"
+                );
+            }
             let relations = address_relations(pool, CAROL, &fixture.sub_id).await?;
             for relation in [
                 bigname_storage::AddressNameRelation::TokenHolder,

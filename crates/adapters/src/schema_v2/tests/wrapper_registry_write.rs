@@ -64,6 +64,12 @@ fn manifests() -> Vec<ManifestInput> {
                     &["TokenControlTransferred", "PermissionChanged"],
                 ),
                 (
+                    "FusesSet",
+                    "event FusesSet(bytes32 indexed node, uint32 fuses)",
+                    &["name_wrapper"],
+                    &["PermissionScopeChanged"],
+                ),
+                (
                     "NameUnwrapped",
                     "event NameUnwrapped(bytes32 indexed node, address owner)",
                     &["name_wrapper"],
@@ -163,6 +169,19 @@ fn name_unwrapped(block: i64, log_index: i64, owner: &str) -> RawLogInput {
         NameUnwrapped {
             node: child(),
             owner: addr(owner),
+        }
+        .encode_log_data(),
+        block,
+        log_index,
+        NAME_WRAPPER,
+    )
+}
+
+fn fuses_set(block: i64, log_index: i64) -> RawLogInput {
+    raw_at(
+        FusesSet {
+            node: child(),
+            fuses: 0,
         }
         .encode_log_data(),
         block,
@@ -281,6 +300,22 @@ fn parent_registry_write_over_a_wrapped_child_ends_the_wrapper_authority() -> an
         "the stale token's transfer moves nothing: {:#?}",
         in_block(&events, 4)
     );
+    Ok(())
+}
+
+#[test]
+fn the_old_holders_set_fuses_after_the_parents_write_changes_no_resource() -> anyhow::Result<()> {
+    // `setFuses` checks only the surviving token's owner, not registry custody, so the old
+    // holder can still emit `FusesSet` after the parent's write.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L435 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1034-L1042 @ ens_v1@91c966f)
+    let mut logs = wrapped_child();
+    logs.extend([parent_sets_owner(3, 0, NEW_OWNER), fuses_set(4, 0)]);
+    let events = interpret(logs)?;
+
+    let fuses = find(&events, 4, 0, "PermissionScopeChanged").expect("FusesSet is recorded");
+    assert_eq!(fuses.resource_id, None);
+    assert_eq!(fuses.logical_name_id, None);
     Ok(())
 }
 
@@ -598,6 +633,7 @@ fn a_lapsed_wrapped_eth_name_registered_again_without_the_name_wrapper_drops_the
         registrar_transfer(REREGISTERED, 1, ZERO_ADDRESS, NEW_OWNER),
         registry_owner(REREGISTERED, 2, NEW_OWNER),
         registered(REREGISTERED, 3, NEW_OWNER, REREGISTERED as u64 + 1_000),
+        // Robustness input, not a chain flow: the expired token has no holder to transfer it.
         raw_at(
             v2_registry::TransferSingle {
                 operator: addr(HOLDER),
