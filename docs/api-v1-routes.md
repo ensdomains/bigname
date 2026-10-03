@@ -3052,8 +3052,9 @@ introduces it rebuilds Project from full history before serving the option; see
   address holds, a wrapped `.eth` name once, and no subname;
   `parent=base.eth&namespace=basenames` counts Basenames registrations. One
   known exception: a `.eth` name with no name surface, listed as a registry
-  child below, is counted for its registry owner rather than for the holder of
-  its registration, and stays counted after it is released. A name count uses `dedupe=name`.
+  child below, is counted for its current registry owner whatever its registration
+  state: when another address holds the registration, after it is released,
+  or when it has none. A name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
