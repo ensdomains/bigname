@@ -893,20 +893,21 @@ record. A current-registry `NewOwner` or `Transfer` naming any other owner ends 
 owner's `setSubnodeOwner` over a wrapped child does without the NameWrapper's consent: the name
 falls back to its registry-only authority, or to a live registrar lease its new owner holds,
 starting a new [authority epoch](glossary.md#authority-epoch), or, for a zero owner, keeps no
-authority; later transfers of the old token change nothing. Two writes keep it. The
-NameWrapper's own unwrap writes the new controller, including a zero or registry-self
-controller, just before the `NameUnwrapped` that releases the authority; the adapter
-recognizes it as the last registry write for the node ahead of a `NameUnwrapped` for the node
-from the admitted NameWrapper in the same transaction. A write naming the admitted NameWrapper
-itself, which `setRecord` and `setSubnodeRecord` over a
-wrapped child make before moving the token, leaves the name wrapped. A write back to the
-NameWrapper after the authority ended does not reopen it until the next `NameWrapped`
-([known divergences](upstream.md#known-divergences)).
+authority; later transfers of the old token, or fuses its holder sets with `setFuses`, which
+checks only the token owner, change nothing. Two writes keep it. The NameWrapper's own unwrap
+writes the new controller, including a zero or registry-self controller, just before the
+`NameUnwrapped` that releases the authority; the adapter recognizes it as the last registry
+write for the node ahead of a `NameUnwrapped` for the node from the admitted NameWrapper in the
+same transaction. A write naming the admitted NameWrapper itself, which `setRecord` and
+`setSubnodeRecord` over a wrapped child make before moving the token, leaves the name wrapped.
+A write back to the NameWrapper after the authority ended does not reopen it until the next
+`NameWrapped` ([known divergences](upstream.md#known-divergences)).
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L629 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637-L660 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421-L435 @ ens_v1@91c966f)
 
 A registry owner write is read as the registry getter's view, `owner(node)`: the event's
 `owner_getter`, which is zero for a literal zero and, on a registry whose getter maps its own

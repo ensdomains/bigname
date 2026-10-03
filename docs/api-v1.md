@@ -1168,7 +1168,8 @@ after which NameWrapper no longer treats the child as wrapped
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f).
 The child then serves its new registry owner as `owner` and `manager` and under
 both relations, or no owner when the parent set it to zero, carries no
-`ens_v1.wrapper_state`, and later transfers of the old token change nothing.
+`ens_v1.wrapper_state`, and later transfers of the old token, or fuses its
+holder sets with NameWrapper's `setFuses`, change nothing.
 NameWrapper's own unwrap, including one to a zero or registry-self controller,
 keeps the name wrapped until its `NameUnwrapped`
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
