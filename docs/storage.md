@@ -331,6 +331,15 @@ row:
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates` and `storage:families.name.bound_candidates`: readable surfaces in name order after the keyset cursor |
 
+History's record attribution (`crates/storage/src/history/attribution`) adds two read-only
+indexes on `normalized_events`, installed by the normalized-events baseline and
+`20261003120000_normalized_events_record_id_attribution_indexes.sql` and changing no row:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
+| `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -486,16 +495,26 @@ the field out. The inventory reads behind `GET /v1/names/{name}`, `GET /v1/names
 unsupported mirror row attributes nothing, so under `Load` and `Given` it carries an empty list. No response, guard or comparison reads the field, and on a resolver with
 many writes the reader costs seconds per resource. Reads without publication bounds (the unbounded storage loaders and diagnostics reads
 that pass none) evaluate every readable pointer and write. The ENSv1 and Basenames node-keyed arms
-use the node and resolver expression indexes on `normalized_events`. Two paths have no
-supporting index and read through the broad `normalized_events_projection_idx` or a block-range
-index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes) and the
-`ResolverRecordLinked` scan for record-ID link spans. Both are reached only by Sepolia deployments
-today. The mirror lookup of the ENSv1 registry pointer by addressed node uses
+use the node and resolver expression indexes on `normalized_events`. The ENSv2 declared-resolver
+arm reads its writes through `normalized_events_project_node_history_idx`, keyed by chain and
+node: its family comes from the resolver's classification at run time, so the arm also names the
+two families it admits literally, which lets the planner prove that index's partial predicate.
+The record-ID arm reads a selected record's writes through `normalized_events_record_id_write_idx`
+and the record links on the pointer's resolver, at the pointer's node or the zero node (the
+resolver's default link), through `normalized_events_record_id_link_idx`.
+Without these, the declared-resolver arm read every `RecordChanged` and `RecordVersionChanged`
+row of the chain, the record-ID arm every `RecordChanged` row and the `links` CTE every
+`ResolverRecordLinked` row, through the broad
+`normalized_events_projection_idx`. The mirror lookup of the ENSv1 registry pointer by addressed node uses
 `normalized_events_project_v1_pointer_addressed_node_idx`
 ([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
 the declaring manifest also reads through the projection index, on every deployment. Plan tests
 in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
-sequentially, and that the mirror lookup, run over a non-empty walk, reads registry pointers
+sequentially, that every record write and record link the attribution reads goes through one of
+the five indexes above, that the plan reads `normalized_events_project_node_history_idx`,
+`normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, each probe
+keyed by the pointer (its node, its resolver and record id, or its resolver and node), and that
+the mirror lookup, run over a non-empty walk, reads registry pointers
 through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
