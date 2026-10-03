@@ -11,7 +11,9 @@ use bigname_manifests::{
     NamespaceManifestSnapshot, load_execution_manifests_for_namespace,
     load_namespace_manifest_snapshot,
 };
-use bigname_storage::{Protocol, load_resolution_state_on};
+use bigname_storage::{
+    Protocol, begin_read_snapshot, load_resolution_state_on, load_served_project_generation,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::error;
@@ -158,8 +160,9 @@ pub(crate) async fn get_namespace(
     }))
 }
 
-/// Per chain with an ENS execution entrypoint, keyed by chain slug. A chain with no client-facing
-/// proxy row has observed no `Upgraded`, so ENSv1 governs with no known start.
+/// Per chain with an ENS execution entrypoint and a servable family publication, keyed by chain
+/// slug. A chain with no client-facing proxy row has observed no `Upgraded`, so ENSv1 governs
+/// with no known start.
 async fn load_resolutions(
     pool: &PgPool,
     execution_manifests: &[ExecutionManifestVersion],
@@ -173,9 +176,24 @@ async fn load_resolutions(
     if chains.is_empty() {
         return Ok(resolutions);
     }
-    let mut conn = pool.acquire().await?;
+    let mut snapshot = begin_read_snapshot(pool).await?;
     for chain in chains {
-        let resolution = match load_resolution_state_on(&mut conn, chain).await? {
+        // The publication fence name reads apply: a bootstrapping, lagging, redoing or orphaned
+        // publication holds proxy rows name reads would refuse to serve.
+        let servable = load_served_project_generation(
+            &mut *snapshot,
+            chain,
+            0,
+            "",
+            false,
+            false,
+            crate::state::publication_lag_tolerance_blocks(),
+        )
+        .await?;
+        if servable.is_none() {
+            continue;
+        }
+        let resolution = match load_resolution_state_on(&mut snapshot, chain).await? {
             Some(state) => NamespaceResolution {
                 protocol: match state.protocol {
                     Protocol::EnsV1 => ResolutionProtocol::EnsV1,
@@ -190,6 +208,7 @@ async fn load_resolutions(
         };
         resolutions.insert(chain.to_owned(), resolution);
     }
+    snapshot.commit().await?;
     Ok(resolutions)
 }
 

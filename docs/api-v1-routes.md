@@ -4662,24 +4662,30 @@ For a registrar lease first identified by a later readable observation, registra
   network now. It is present on each network where the namespace has an ENS
   execution entrypoint, an `active` or `shadow` `ens_execution` manifest for
   that chain (ENS on Ethereum Mainnet or Sepolia), and absent elsewhere,
-  including every Basenames network, which has no ENSv1/ENSv2 split.
+  including every Basenames network, which has no ENSv1/ENSv2 split. It is
+  also absent while that network's projected data is not servable, when name
+  reads answer `409 stale`: before Project's first publication under the
+  running build, while the publication trails the head by more than the
+  configured lag tolerance, while an Interpret or Project redo overlaps it, or
+  after a reorg orphans its block. The rest of the answer is still served.
   `protocol` is `ens_v2` past the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
-  client-facing Universal Resolver proxy's chain of implementations ends at an
-  implementation `ens_execution` lists in `universal_resolver_implementations`.
-  It is `ens_v1` otherwise: before the cutover, after an upgrade to an
-  implementation the manifest does not list, and while a proxy on that chain
-  has no `Upgraded` yet. This is the decision name reads apply to `.eth`
+  path from the client-facing Universal Resolver proxy, through the declared
+  proxies it points at, ends at an implementation `ens_execution` lists in
+  `universal_resolver_implementations`. It is `ens_v1` otherwise: before the
+  cutover, after an upgrade to an implementation the manifest does not list,
+  and while a proxy on that path has no `Upgraded` yet. This is the decision name reads apply to `.eth`
   expiry, grace and resolvability ([Expiry and grace](api-v1.md#expiry-and-grace)).
-  `since_block` is the latest `Upgraded` block among the proxies on that
-  chain, the block from which clients have resolved through the current
-  implementation. Every upgrade on the chain moves it, including one from one
+  `since_block` is the latest `Upgraded` block among the proxies on the
+  client-facing proxy's path, the block from which clients have resolved
+  through the current implementation. Upgrades of declared proxies off that
+  path do not move it; every upgrade on it does, including one from one
   listed implementation to another, so it dates the current implementation,
   not an unbroken run of the same `protocol`; earlier states are not reported.
   It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
   client-facing proxy has been observed, as on Mainnet today. The value is
-  read from the same projected proxy state current name reads use, so it has
-  no `meta.as_of` of its own. Example under the Sepolia profile:
+  read from the servable publication current name reads use, in one snapshot,
+  and the answer carries no `meta.as_of`. Example under the Sepolia profile:
 
   ```json
   "networks": [

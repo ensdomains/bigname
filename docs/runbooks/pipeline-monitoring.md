@@ -320,7 +320,9 @@ and 30) and for no Project redo to be running
 (`phase_runner_redo_in_progress{phase="project"}` at `0`): a redo undoes block
 by block while its publication stays readable, so a shallow one can replay a
 state the head no longer has. The warning has no such gate. Its block is the
-terminal proxy's latest `Upgraded`, not the block being served, so it can be old
+latest `Upgraded` among the proxies on the client-facing proxy's path, which
+can be an earlier proxy's repoint rather than the terminal proxy's upgrade, and
+not the block being served, so it can be old
 for a long-standing state, for example on the first refresh after a restart. Tell
 a warning from replayed history by `phase_runner_redo_in_progress` and
 `phase_runner_served_lag_blocks` at the time it was logged.

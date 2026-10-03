@@ -2294,9 +2294,17 @@ read-only query outside the
 does not rotate. It needs no schema-migration, no manifest or environment
 change, no redo and no historical ingest fetch. The field is additive. The
 phase-runner's Universal Resolver warning shares the read, so its `block` now
-names the latest `Upgraded` on the client-facing chain rather than the block of
-the row the chain ends at. After deploy, with the
+names the latest `Upgraded` on the client-facing proxy's path rather than the
+block of the row the path ends at. After deploy, with the
 [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01)
 in place, `GET /v1/namespaces/ens` on Sepolia serves
-`resolution` `{"protocol": "ens_v2", "since_block": 11821680}`, and on Mainnet
-`{"protocol": "ens_v1", "since_block": null}`.
+`resolution` `{"protocol": "ens_v2", "since_block": 11821680}`: the managed
+proxy's move to the listed UniversalResolverV2
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+at block `11821680` is the latest `Upgraded` on that path. The pinned
+artifacts carry no receipts, so that block and the client-facing proxy's
+earlier repoint at `10928435` rest on the chain logs recorded under
+"Sepolia Universal Resolver proxies admitted from chain evidence" in
+[Known divergences](upstream.md#known-divergences). On Mainnet the
+`ens_execution` manifest declares no `Upgraded` event, so no proxy row exists
+and the network serves `{"protocol": "ens_v1", "since_block": null}`.
