@@ -2284,6 +2284,28 @@ under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
 
+### Ingest redo after a killed supervisor
+
+The build that lets a required Ingest redo settle phases a killed supervisor
+left `running` (TYR-106, see
+[chain intake](chain-intake.md#implemented-phase-boundary)) edits no file
+the [interpreter content hash](glossary.md#interpreter-content-hash) covers and
+adds no schema-migration, so it needs no redo and no historical ingest fetch.
+Before it, a supervisor killed before a deploy that widens the watch plan left
+its Project or Interpret row `running`, and the
+[runbook's](runbooks/production-docker.md) one-shot Ingest redo refused with
+`cannot start phase ingest ... while phase project is running`. On an older
+build, instead of editing `chain_phase_state` by hand, start the supervisor
+once from the same image that ran the refused redo, so that its start-up
+manifest synchronization installs no new required work or authority marker.
+Its start-up recovery settles the row, and the chain then stops with the
+required Ingest error (`manifest watch plan widened over already-ingested
+blocks ...`). Compose restarts an exited supervisor and other configured chains
+run their unattended work, so once that error is logged, stop the
+`phase-runner` service with the runbook's `docker compose --env-file
+.env.server -f docker-compose.server.yml stop phase-runner` within its grace
+period, then rerun the same Ingest redo.
+
 ### Parent filter on names by address
 
 The build that adds `parent` to
