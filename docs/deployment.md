@@ -2548,30 +2548,47 @@ ids, so its token count no longer includes resource ids.
 
 ### v0.4.0 rollout
 
-v0.4.0 carries the three hash-rotating builds above, the end of NameWrapper
-authority when the registry record leaves NameWrapper (TYR-147 and TYR-100),
-the token-holder index for leases with no name surface (TYR-201) and the ENSv2
-suffix-walk reads (TYR-202), on top of v0.3.1, whose builds from
+v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority
+when the registry record leaves NameWrapper (TYR-147 and TYR-100), the
+token-holder index for leases with no name surface (TYR-201), the ENSv2
+suffix-walk reads (TYR-202) and
+[ENSv2 role changes filed under their token](#ensv2-role-changes-filed-under-their-token)
+(TYR-213). The last changes stored events only in two `raw_fact_ref` fields of
+ENSv2 registry and root registry `PermissionChanged` rows, which
+`/v1/diagnostics/events` shows; no product row changes. It also carries the builds from
 [Ingest redo after a killed supervisor](#ingest-redo-after-a-killed-supervisor)
-through [released registrar children](#released-registrar-children) rotate
-nothing. Deploy it with the
-[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary):
+through [released registrar children](#released-registrar-children) and the
+lookahead loader's read-path changes, none of which rotates the hash. Deploy
+it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+From v0.3.0:
 
 - The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
   once for every chain. Run one full-history Interpret redo and the Project redo
   it installs under the v0.4.0 binary before the API serves, and record the new
   hash in the release record.
-- Stamp no Ingest redo. No build in the release changes a manifest, watch set or
+- Stamp no Ingest redo. No build since v0.3.0 changes a manifest, watch set or
   start block, so manifest synchronization records no
   [manifest-authority marker](glossary.md#manifest-authority-marker) and no
   historical ingest fetch is needed.
-- A database upgraded from v0.3.0 without v0.3.1 applies v0.3.1's two
-  schema-migrations,
+- Apply two schema-migrations in step 4,
   `20261003120000_normalized_events_record_id_attribution_indexes.sql` and
-  `20261003130000_project_lifecycle_event_namehash_index.sql`, in step 4. On a
-  large initialized database, prebuild their indexes concurrently first, as
+  `20261003130000_project_lifecycle_event_namehash_index.sql`. On a large
+  initialized database, prebuild their indexes concurrently first, as
   [history record attribution indexes](#history-record-attribution-indexes) and
   [released registrar children](#released-registrar-children) describe; without
   the prebuild, the plain builds block Interpret's and Project's writes until
-  they commit. A database already on v0.3.1 has recorded both. The v0.4.0 builds
-  add no schema-migration.
+  they commit. The four hash-rotating builds add no schema-migration.
+- From a build before v0.3.0, the deploy also carries v0.3.0's requirements
+  and every earlier section's since that build: their schema-migrations and
+  index prebuilds, including the
+  [retired resolver alias path](#retired-resolver-alias-path)'s refusal to drop
+  a table that still has rows; the manifest-authority markers that the
+  [Sepolia ENSv2 redeploy of 2026-10-01](#sepolia-ensv2-redeploy-of-2026-10-01),
+  [resolver implementation start blocks](#resolver-implementation-start-blocks)
+  and [default reverse names](#default-reverse-names) record; and the required
+  Ingest redos the redeploy and default reverse names stamp. Complete every
+  stamped Ingest redo first, sized from the ranges `chain_phase_state` records
+  after the first start. One full-history Interpret redo with
+  `--attest-watch-set-coverage` under the v0.4.0 binary, and the Project redo it
+  installs, then discharge every rotation and marker in between.
