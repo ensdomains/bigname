@@ -84,6 +84,17 @@ impl PhaseRunner {
             self.store.initialize_chain(chain_id).await?;
             if reject_pending_ingest {
                 self.reject_pending_required_ingest(chain_id).await?;
+            } else if phase == PhaseName::Ingest
+                && self
+                    .store
+                    .required_redo_range(chain_id, PhaseName::Ingest)
+                    .await?
+                    .is_some()
+            {
+                // A killed supervisor leaves its phases `running` until a supervisor starts again,
+                // and a supervisor only refuses this pending work. Settle them as supervisor
+                // start-up does: under each phase's advisory lock, refused while a writer holds it.
+                self.recover_stopped_phases(chain).await?;
             }
             self.require_readable_redo_end(chain_id, range).await
         })

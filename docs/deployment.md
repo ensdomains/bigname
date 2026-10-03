@@ -2283,3 +2283,18 @@ its registry record left in place now carries `lapsed_registration`, so it lists
 under `relation=former_owner`. The API change is breaking
 for clients of `owner`, `registrant`, `relation=registrant`,
 `relation=former_registrant` and `lapsed_registration.registrant`.
+
+### Ingest redo after a killed supervisor
+
+The build that lets a required Ingest redo settle phases a killed supervisor
+left `running` (TYR-106, see
+[chain intake](chain-intake.md#implemented-phase-boundary)) edits no file
+the [interpreter content hash](glossary.md#interpreter-content-hash) covers and
+adds no schema-migration, so it needs no redo and no historical ingest fetch.
+Before it, a supervisor killed before a deploy that widens the watch plan left
+its Project or Interpret row `running`, and the
+[runbook's](runbooks/production-docker.md) one-shot Ingest redo refused with
+`cannot start phase ingest ... while phase project is running`. On an older
+build, start the supervisor once instead of editing `chain_phase_state` by
+hand: its start-up recovery settles the row and then stops on the required
+Ingest work, after which the same Ingest redo runs.
