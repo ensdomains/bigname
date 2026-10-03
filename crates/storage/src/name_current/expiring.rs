@@ -40,7 +40,7 @@ pub struct NameCurrentExpiringFilter {
 
 /// The `LIKE` patterns of the names exactly one label below `parent`: a name matches the first
 /// and not the second. Normalized labels hold no `.`.
-pub(crate) fn parent_like_patterns(parent: &str) -> (String, String) {
+fn parent_like_patterns(parent: &str) -> (String, String) {
     let parent = escape_like_pattern(parent);
     (format!("_%.{parent}"), format!("%.%.{parent}"))
 }

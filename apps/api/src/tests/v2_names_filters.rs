@@ -181,6 +181,30 @@ async fn v2_get_names_serves_authority_and_filters_by_authority_and_parent() -> 
     database.cleanup().await
 }
 
+/// `parent` compares the composed name's normalized spelling, so a name whose stored surface
+/// spelling is not normalized is still listed below its parent.
+#[tokio::test]
+async fn v2_get_names_parent_matches_the_normalized_spelling() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_filter_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces SET raw_name = 'wrapped.Lease.eth'
+         WHERE raw_name = 'wrapped.lease.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    publish_v2_names_fixture(&database).await?;
+
+    for parent in ["lease.eth", "Lease.eth"] {
+        let uri = v2_names_filter_uri(&format!("&parent={parent}"));
+        let payload = v2_names_payload(&database, &uri).await?;
+        assert_eq!(v2_names_listed(&payload), ["wrapped.lease.eth"], "{uri}");
+    }
+    let eth = v2_names_payload(&database, &v2_names_filter_uri("&parent=eth")).await?;
+    assert_eq!(v2_names_listed(&eth), ["lease.eth", "fresh.eth"]);
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_names_cursor_binds_authority_and_parent() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
