@@ -337,8 +337,8 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 
 | Index | Serves |
 | --- | --- |
-| `normalized_events_record_id_write_idx` | the record-ID arm: a selected record's `RecordChanged` writes by chain, resolver and record id |
-| `normalized_events_record_id_link_idx` | the record-ID arm's `links`: the `ResolverRecordLinked` rows on a pointer's resolver |
+| `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
+| `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's resolver |
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -501,15 +501,17 @@ node: its family comes from the resolver's classification at run time, so the ar
 two families it admits literally, which lets the planner prove that index's partial predicate.
 The record-ID arm reads a selected record's writes through `normalized_events_record_id_write_idx`
 and the record links on the pointer's resolver through `normalized_events_record_id_link_idx`.
-Without these, each of the two arms read every `RecordChanged` row of the chain through the broad
+Without these, the declared-resolver arm and the record-ID arm read every `RecordChanged` row of
+the chain, and the `links` CTE every `ResolverRecordLinked` row, through the broad
 `normalized_events_projection_idx`. The mirror lookup of the ENSv1 registry pointer by addressed node uses
 `normalized_events_project_v1_pointer_addressed_node_idx`
 ([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
 the declaring manifest also reads through the projection index, on every deployment. Plan tests
 in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
 sequentially, that every record write and record link the attribution reads goes through one of
-the five indexes above, with the node history and record-ID write probes keyed by the pointer,
-and that the mirror lookup, run over a non-empty walk, reads registry pointers
+the five indexes above, that the declared-resolver and record-ID arms read the three this
+paragraph names, with the node history and record-ID write probes keyed by the pointer, and that
+the mirror lookup, run over a non-empty walk, reads registry pointers
 through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 History loaders called with `canonical_only=false` also return rows of activated losing

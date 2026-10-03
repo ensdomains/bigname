@@ -495,7 +495,9 @@ fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
             node["Alias"]
         );
     }
-    let missing = INDEXES
+    // The ENSv1 and Basenames arms may also prove the node history index, so only the three
+    // indexes the declared-resolver and record-ID arms need are required.
+    let missing = INDEXES[2..]
         .iter()
         .filter(|index| !used.contains(*index))
         .collect::<Vec<_>>();

@@ -2292,8 +2292,9 @@ normalized-events baseline and one schema-migration, all outside the
 [interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
 and it needs no redo, no manifest or environment change and no historical ingest fetch. It
 speeds up `GET /v1/names/{name}/history` with `scope=registration` or `scope=both` and
-`GET /v1/events?registration_id=` for names whose resolver is an ENSv2-declared or record-ID
-resolver; responses do not change.
+`GET /v1/events?registration_id=` on every chain that holds writes with
+[storage model](glossary.md#storage-model) `resolver_record_id` (Sepolia today), and for names
+whose resolver is an ENSv2-declared resolver; responses do not change.
 
 `20261003120000_normalized_events_record_id_attribution_indexes.sql` adds
 `normalized_events_record_id_write_idx` and `normalized_events_record_id_link_idx`, partial on
