@@ -1705,11 +1705,15 @@ registry, resolver and permission state that is not filed under a name:
 contract instance) and the id is a token id, resource id or labelhash with its
 low 32 bits zeroed. An ENSv2 registry derives every version of a label's token
 id and resource id from its labelhash by replacing only those bits
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/utils/LibLabel.sol:L15-16 @ ens_v2_sepolia_20260916@366de741),
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05),
 so one key covers a label across regenerations. `address:00000000` holds a
-registry's own parent claim, and `address:*` every event of that registry, which
-a batch loads only when the registry's [name suffix walk](#ensv2-name-suffix-walk)
-changes or the chain has no earlier ENSv2 names to compare with. Each
+registry's own parent claim and its other registry-level rows (creation,
+upgrades, role changes on the registry's root resource); a role change on one
+token's resource is filed under that token's key. `address:*` holds every
+event of that registry, which a batch loads only when the registry's
+[name suffix walk](#ensv2-name-suffix-walk) changes or the chain has no earlier
+ENSv2 names to compare with. Each
 retained ENSv2 event is filed under the keys of its emitter with the token,
 resource and labelhash it names; loading a key loads every event filed under it.
 

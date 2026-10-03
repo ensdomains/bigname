@@ -182,6 +182,16 @@ outstanding cursor has no continuation guarantee across this behavior-changing
 boundary and may be rejected. Consumers must discard pre-#348/#529 cursors and
 restart from the first page; fresh post-publication cursors continue normally.
 
+The change that files a role change on one ENSv2 registry token under that
+token's [ENSv2 state key](glossary.md#ensv2-state-key) has a diagnostics-only
+delta: an ENSv2 registry or root registry `PermissionChanged` row keeps its
+`event_identity`, `logical_name_id`, `resource_id`, `before_state` and
+`after_state`, while `raw_fact_ref.state_scope` names the role's resource id in
+its third segment instead of `-` and `raw_fact_ref.interpreter_state_key`
+changes with it. `RootPermissionChanged` and resolver permission rows do not
+change, no product route serves `raw_fact_ref`, and existing diagnostic cursors
+continue.
+
 The [#613](https://github.com/ensdomains/bigname/issues/613) interpreter change
 keeps the original [pre-surface](glossary.md#pre-surface) ENSv1 registry `ResolverChanged` row unchanged,
 then adds a name- and resource-linked, [state-derived](glossary.md#state-derived-normalized-event) `ResolverChanged` when the
@@ -5018,7 +5028,11 @@ so there is no persisted artifact to explain. See
   `RecordChanged` and
   `RecordVersionChanged` can gain `logical_name_id`, keep `resource_id=null`,
   update `raw_fact_ref.interpreter_state_key`, and rethread `before_state` on
-  the same resolver event identity.
+  the same resolver event identity. The change that files a role change on one
+  ENSv2 registry token under that token's
+  [ENSv2 state key](glossary.md#ensv2-state-key) is a second exception: an
+  ENSv2 registry or root registry `PermissionChanged` row changes only
+  `raw_fact_ref.state_scope` and `raw_fact_ref.interpreter_state_key`.
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state, but their
   `migration_associations` are the raw lineage evidence described above, not

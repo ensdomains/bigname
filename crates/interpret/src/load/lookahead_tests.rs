@@ -416,5 +416,22 @@ fn whole_registry_warning_counts_tokens_not_registry_level_events() {
         loads(std::slice::from_ref(&parent)),
         [(REGISTRY.to_owned(), 0, 1, 2)]
     );
-    assert_eq!(loads(&[parent, token]), [(REGISTRY.to_owned(), 1, 2, 4)]);
+    assert_eq!(
+        loads(&[parent.clone(), token]),
+        [(REGISTRY.to_owned(), 1, 2, 4)]
+    );
+    // A token's ids differ only in their low 32 bits, so its role change counts no new token.
+    let id = |version: &str| format!("0x{}{version}", "ab".repeat(28));
+    let registered = event(&format!(
+        "{REGISTRY}:-:{}:-:LabelRegistered",
+        id("00000000")
+    ));
+    let role = event(&format!(
+        "{REGISTRY}:-:{}:-:EACRolesChanged",
+        id("00000007")
+    ));
+    assert_eq!(
+        loads(&[parent, registered, role]),
+        [(REGISTRY.to_owned(), 1, 3, 6)]
+    );
 }

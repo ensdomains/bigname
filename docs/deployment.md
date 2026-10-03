@@ -2521,6 +2521,31 @@ nearly every batch. A batch whose registry suffix does move, or the
 first batch with ENSv2 events on a chain, still reads the registry whole and
 logs a warning; see [Verify health](runbooks/production-docker.md#verify-health).
 
+### ENSv2 role changes filed under their token
+
+The build that files a role change on one ENSv2 registry token under that
+token's [ENSv2 state key](glossary.md#ensv2-state-key) instead of the
+registry-level key (TYR-213) changes `crates/adapters/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. A registry builds a token's access-control resource id from the same
+labelhash as its token id, replacing only the low 32 bits
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2_sepolia_20261001@07e55a05),
+so the role change now lands on the token's own key. Before, a token's role
+changes sat under the registry-level key, so a lookahead batch touching one
+token of a registry could read other tokens' role changes and then those
+tokens' histories, and through their subregistries the tokens beneath them. Now such a batch reads the tokens it touches and the registry's
+own rows: its creation, upgrades, parent claim and role changes on its root
+resource. Stored events change only on ENSv2 registry and root registry
+`PermissionChanged` rows, whose `raw_fact_ref.state_scope` and
+`raw_fact_ref.interpreter_state_key` change; `/v1/diagnostics/events` shows
+those two fields and no product row changes (see
+[Cursors And Pagination](api-v1.md#cursors-and-pagination)). It adds no
+schema-migration, table, index, manifest or setting, so stamp no Ingest redo. In v0.4.0 it shares the release's
+one Interpret and Project redo pair with the other hash-rotating changes in the
+bundle. The whole-registry warning now counts a token once under all of its
+ids, so its token count no longer includes resource ids.
+
 ### v0.4.0 rollout
 
 v0.4.0 carries the three hash-rotating builds above, the end of NameWrapper

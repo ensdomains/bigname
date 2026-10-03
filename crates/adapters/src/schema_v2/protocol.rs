@@ -313,6 +313,7 @@ fn state_scope(selected: &Selected, raw: &RawLogInput, event: &EventDraft) -> St
         .get("token_id")
         .or_else(|| after.get("current_token_id"))
         .or_else(|| after.get("old_token_id"))
+        .or_else(|| permissions::registry_role_token(selected, event))
         .and_then(Value::as_str)
         .unwrap_or("-");
     let source_event = after

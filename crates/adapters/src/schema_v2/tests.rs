@@ -6832,6 +6832,93 @@ fn registry_permission_adapter_selects_one_root_event() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A role change on one token's resource is filed under that token's ENSv2 state key, so
+/// loading a registry's own rows (`<registry>:00000000`) does not load every token's roles. A
+/// root role change stays registry-level. The resource's low 32 bits are synthetic: any version
+/// lands on the same key.
+#[test]
+fn ensv2_role_change_is_filed_under_its_token() -> anyhow::Result<()> {
+    let mut label_id = keccak256(b"alice").0;
+    label_id[28..].copy_from_slice(&7_u32.to_be_bytes());
+    let resource = U256::from_be_bytes(label_id);
+    let roles = |resource| {
+        Ok::<_, anyhow::Error>(
+            EACRolesChanged {
+                resource,
+                account: CONTRACT.parse::<Address>()?,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(1),
+            }
+            .encode_log_data(),
+        )
+    };
+    let output = interpret_test_batch(BatchInput {
+        chain_id: CHAIN.to_owned(),
+        manifests: vec![manifest(
+            3,
+            "ens_v2_registry_l1",
+            "EACRolesChanged",
+            "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+            &["registry"],
+            &["PermissionChanged", "RootPermissionChanged"],
+        )],
+        discovery_rules: Vec::new(),
+        admissions: vec![admission(3, "registry")],
+        prior_events: Vec::new(),
+        blocks: Vec::new(),
+        raw_logs: vec![
+            raw_at(roles(resource)?, 1, 0, CONTRACT),
+            raw_at(roles(U256::ZERO)?, 1, 1, CONTRACT),
+        ],
+    })?;
+    let event = |kind: &str| {
+        output
+            .normalized_events
+            .iter()
+            .find(|event| event.event_kind == kind)
+            .map(prior_event)
+            .expect("permission event")
+    };
+    let upstream = format!("{resource:#066x}");
+    let token_key = format!("{CONTRACT}:{}00000000", &upstream[..upstream.len() - 8]);
+    let registry_key = format!("{CONTRACT}:00000000");
+    let whole_registry = format!("{CONTRACT}:*");
+
+    let token = event("PermissionChanged");
+    assert_eq!(token.after_state["upstream_resource"], json!(upstream));
+    assert_eq!(
+        token
+            .state_scope
+            .as_deref()
+            .and_then(|scope| scope.split(':').nth(2)),
+        Some(upstream.as_str())
+    );
+    let keys = v2_event_keys(&token)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from([token_key, whole_registry.clone()])
+    );
+
+    let root = event("RootPermissionChanged");
+    assert_eq!(
+        root.state_scope
+            .as_deref()
+            .and_then(|scope| scope.split(':').nth(2)),
+        Some("-")
+    );
+    let keys = v2_event_keys(&root)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let root_resource = format!("{CONTRACT}:{:#066x}", U256::ZERO);
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from([registry_key, root_resource, whole_registry])
+    );
+    Ok(())
+}
+
 #[test]
 fn registrar_transfer_reuses_and_materializes_the_registration_resource() -> anyhow::Result<()> {
     let labelhash = keccak256(b"alice");

@@ -1,7 +1,27 @@
 use alloy_primitives::U256;
 use serde_json::{Value, json};
 
+use super::EventDraft;
 use crate::schema_v2::{catalog::Selected, model::RawLogInput};
+
+/// The token a registry role change on one token's resource is filed under: its resource id,
+/// which shares the token id's [ENSv2 state key](../../../../../docs/glossary.md#ensv2-state-key)
+/// because a registry builds both from the labelhash and replaces only the low 32 bits
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L678-L694 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2_sepolia_20261001@07e55a05).
+/// A root role change stays registry-level.
+pub(super) fn registry_role_token<'a>(
+    selected: &Selected,
+    event: &'a EventDraft,
+) -> Option<&'a Value> {
+    (event.event_kind == "PermissionChanged"
+        && matches!(
+            selected.source.source_family.as_str(),
+            "ens_v2_registry_l1" | "ens_v2_root_l1"
+        ))
+    .then(|| event.after_state.get("upstream_resource"))
+    .flatten()
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum V2Vocabulary {
