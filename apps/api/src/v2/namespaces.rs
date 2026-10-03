@@ -4,13 +4,18 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use bigname_domain::vocabulary::SourceFamily;
 use bigname_lookup::ChainRpcUrls;
 use bigname_manifests::{
     ActiveManifestVersion, CapabilitySupportStatus, ExecutionManifestVersion,
     NamespaceManifestSnapshot, load_execution_manifests_for_namespace,
     load_namespace_manifest_snapshot,
 };
+use bigname_storage::{
+    Protocol, begin_read_snapshot, load_resolution_state_on, load_served_project_generation,
+};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tracing::error;
 
 use super::support::ensure_public_namespace;
@@ -76,6 +81,21 @@ pub(crate) struct NamespaceNetwork {
     pub(crate) network: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) chain_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution: Option<NamespaceResolution>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct NamespaceResolution {
+    pub(crate) protocol: ResolutionProtocol,
+    pub(crate) since_block: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResolutionProtocol {
+    EnsV1,
+    EnsV2,
 }
 
 pub(crate) async fn get_namespace(
@@ -113,11 +133,26 @@ pub(crate) async fn get_namespace(
             ))
         })?;
 
+    let resolutions = load_resolutions(&state.pool, &execution_manifests)
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                namespace = %namespace,
+                error = ?load_error,
+                "failed to load v2 namespace resolution state"
+            );
+            V2Error::internal_error(format!(
+                "failed to load namespace metadata for namespace {namespace}"
+            ))
+        })?;
+
     Ok(Json(Envelope {
         data: build_namespace(
             namespace,
             snapshot,
             &execution_manifests,
+            &resolutions,
             &state.lookup_chain_rpc_urls,
         )?,
         page: None,
@@ -125,10 +160,63 @@ pub(crate) async fn get_namespace(
     }))
 }
 
+/// Per chain with an ENS execution entrypoint and a servable family publication, keyed by chain
+/// slug. A chain with no client-facing proxy row has observed no `Upgraded`, so ENSv1 governs
+/// with no known start.
+async fn load_resolutions(
+    pool: &PgPool,
+    execution_manifests: &[ExecutionManifestVersion],
+) -> anyhow::Result<BTreeMap<String, NamespaceResolution>> {
+    let chains: BTreeSet<&str> = execution_manifests
+        .iter()
+        .filter(|manifest| manifest.source_family == SourceFamily::EnsExecution.as_str())
+        .map(|manifest| manifest.chain.as_str())
+        .collect();
+    let mut resolutions = BTreeMap::new();
+    if chains.is_empty() {
+        return Ok(resolutions);
+    }
+    let mut snapshot = begin_read_snapshot(pool).await?;
+    for chain in chains {
+        // The publication fence name reads apply: a bootstrapping, lagging, redoing or orphaned
+        // publication holds proxy rows name reads would refuse to serve.
+        let servable = load_served_project_generation(
+            &mut *snapshot,
+            chain,
+            0,
+            "",
+            false,
+            true,
+            crate::state::publication_lag_tolerance_blocks(),
+        )
+        .await?;
+        if servable.is_none() {
+            continue;
+        }
+        let resolution = match load_resolution_state_on(&mut snapshot, chain).await? {
+            Some(state) => NamespaceResolution {
+                protocol: match state.protocol {
+                    Protocol::EnsV1 => ResolutionProtocol::EnsV1,
+                    Protocol::EnsV2 => ResolutionProtocol::EnsV2,
+                },
+                since_block: Some(state.since_block),
+            },
+            None => NamespaceResolution {
+                protocol: ResolutionProtocol::EnsV1,
+                since_block: None,
+            },
+        };
+        resolutions.insert(chain.to_owned(), resolution);
+    }
+    snapshot.commit().await?;
+    Ok(resolutions)
+}
+
 fn build_namespace(
     namespace: String,
     snapshot: NamespaceManifestSnapshot,
     execution_manifests: &[ExecutionManifestVersion],
+    resolutions: &BTreeMap<String, NamespaceResolution>,
     rpc_urls: &ChainRpcUrls,
 ) -> V2Result<Namespace> {
     let mut capabilities = aggregate_capabilities(&snapshot.manifests)?;
@@ -141,7 +229,7 @@ fn build_namespace(
     Ok(Namespace {
         namespace,
         capabilities,
-        networks: namespace_networks(&snapshot.manifests),
+        networks: namespace_networks(&snapshot.manifests, resolutions),
     })
 }
 
@@ -216,23 +304,27 @@ fn product_capability_name(raw_name: &str) -> V2Result<&'static str> {
     }
 }
 
-fn namespace_networks(manifests: &[ActiveManifestVersion]) -> Vec<NamespaceNetwork> {
+fn namespace_networks(
+    manifests: &[ActiveManifestVersion],
+    resolutions: &BTreeMap<String, NamespaceResolution>,
+) -> Vec<NamespaceNetwork> {
     manifests
         .iter()
         .map(|manifest| manifest.chain.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(namespace_network)
+        .map(|chain| namespace_network(chain, resolutions.get(chain).cloned()))
         .collect()
 }
 
-fn namespace_network(chain: &str) -> NamespaceNetwork {
+fn namespace_network(chain: &str, resolution: Option<NamespaceResolution>) -> NamespaceNetwork {
     let chain_id = slug_to_numeric(chain);
     let canonical_slug = chain_id.and_then(numeric_to_slug).unwrap_or(chain);
 
     NamespaceNetwork {
         network: display_network_slug(canonical_slug).to_owned(),
         chain_id,
+        resolution,
     }
 }
 
@@ -337,20 +429,29 @@ mod tests {
             manifest("unknown_registry", "future-testnet", []),
         ];
 
+        let v1 = NamespaceResolution {
+            protocol: ResolutionProtocol::EnsV1,
+            since_block: None,
+        };
+        let resolutions = BTreeMap::from([("ethereum-mainnet".to_owned(), v1.clone())]);
+
         assert_eq!(
-            namespace_networks(&manifests),
+            namespace_networks(&manifests, &resolutions),
             vec![
                 NamespaceNetwork {
                     network: "base".to_owned(),
                     chain_id: Some(8453),
+                    resolution: None,
                 },
                 NamespaceNetwork {
                     network: "ethereum".to_owned(),
                     chain_id: Some(1),
+                    resolution: Some(v1),
                 },
                 NamespaceNetwork {
                     network: "future-testnet".to_owned(),
                     chain_id: None,
+                    resolution: None,
                 },
             ]
         );
