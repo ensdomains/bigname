@@ -30,7 +30,12 @@ The indexes belong to the table, which every chain on the database shares. `drop
 while any chain may be served: a chain whose Project phase has a current block, or a live
 publication in `project_family_marker`, and whose Interpret phase has no redo in progress.
 Project commits a publication before it records its progress, so the marker covers a chain
-whose runner stopped between the two. It passes on a fresh database before its first walk,
+whose runner stopped between the two.
+
+The check runs once, when the script starts, and holds nothing against an Interpret redo
+completing while the drops run. Run it as soon as the redo starts, with Interpret's whole
+range still ahead: the drops take minutes, each waiting only for the batch in flight. If
+Interpret completes before `drop.sql` has printed its receipt, run `install.sql` at once. It passes on a fresh database before its first walk,
 and once every chain whose Project has advanced is in an Interpret redo. On a database that
 holds two chains, such as Ethereum and Base, both chains' Interpret redos must be in progress
 before it runs, or run the walk with every index. A multi-chain `redo` command runs its chains

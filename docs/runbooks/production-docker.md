@@ -1203,7 +1203,7 @@ in the same step.
    redo complete. Include `--metrics-bind-addr 0.0.0.0:9465` on this and the
    matching Project redo. Never invent a token, reuse one after completion, or
    use one for another redo. Do not use the unattended `run` path for an attestation.
-   Optionally, once every chain on the database whose Project has advanced shows
+   Optionally, as soon as every chain on the database whose Project has advanced shows
    `redo_in_progress` on its `interpret` row, run
    [`ops/walk-index-set/drop.sql`](../../ops/walk-index-set/README.md) so the redo
    writes only the [walk index set](../glossary.md#walk-index-set); it refuses while
