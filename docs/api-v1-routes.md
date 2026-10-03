@@ -1777,16 +1777,20 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   owner and is listed only while it has a serving resource. A `.eth` or Basenames
   child with no current name row whose registrar lease bigname has released, past its
   expiry and the 90-day grace
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f),
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/util/Constants.sol:L15 @ basenames@1809bbc),
   keeps its registry record, since the registrar writes the registry only when it
   registers a name
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f);
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc);
   it is listed as `released` with no `owner` or `manager` and no `expires_at`,
   `grace_ends_at` or `lapsed_registration`, since its lease is projected without a name
   row, and `include_expired=false` omits it. A later registration of the label serves
   its new registry owner again, which `register` sets to the registrant;
   `registerOnly` leaves the registry record as it was
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f).
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc).
   A known residual: a name migrated from ENSv1 to ENSv2 under a label that fails ENSIP-15
   normalization is served from its ENSv1 registry record, and once its old ENSv1 lease
   lapses it is served as `released` although its ENSv2 registration is live. An unmasked 2017
