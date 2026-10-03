@@ -76,7 +76,11 @@ Project final checkpoint is recorded as `completed`; an earlier checkpoint is
 marked `failed` and resumes through the ordinary phase path. A saved Verify
 final checkpoint remains `failed` until the current verification configuration
 and retained evidence pass the same checks as an already-completed Verify row.
-A held lock still stops a second runner. The state update uses the same database
+A held lock still stops a second runner. A `--phase ingest` redo started while
+a required Ingest redo is pending runs the same settlement first. A supervisor
+killed before a deploy that widens the watch plan therefore leaves no `running`
+row outside a redo that blocks that redo, and a lock still held refuses it. A
+redo the supervisor interrupted keeps its state and is not settled. The state update uses the same database
 connection that holds the lock. If that connection is lost, the runner stops
 and the next start reads the durable phase state again; this covers the case
 where the client cannot tell whether PostgreSQL committed the update before the
