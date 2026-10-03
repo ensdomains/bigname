@@ -214,10 +214,10 @@ async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
 
 /// The bounded attribution reader's two statements: the pointer-window attribution for the
 /// target's resource, and the mirror substitution with an empty walk (no mirror pointer, the
-/// common case on Mainnet). Neither may read `normalized_events` sequentially. The ENSv2
-/// declared-resolver arm and the `ResolverRecordLinked` scan have no dedicated index
-/// (docs/storage.md), so this checks only that each read is an index read. The mirror registry
-/// lookup, which an empty walk never runs, is checked by `check_mirror_registry_probe_plan`.
+/// common case on Mainnet). Neither may read `normalized_events` sequentially, and every record
+/// write and record link the attribution reads is keyed by the pointer
+/// (`assert_attribution_reads_are_keyed`). The mirror registry lookup, which an empty walk never
+/// runs, is checked by `check_mirror_registry_probe_plan`.
 async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
     let resource_ids: &'static [Uuid] = Box::leak(Box::new([target_resource()]));
     let published =
@@ -227,7 +227,9 @@ async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
         push_pointer_window_attribution_for_test(builder, resource_ids, Some(&published));
     };
     for plan in explain_both(connection, push_attribution).await? {
-        if let Err(error) = assert_no_event_seq_scan("attribution", &plan) {
+        if let Err(error) = assert_no_event_seq_scan("attribution", &plan)
+            .and_then(|()| assert_attribution_reads_are_keyed(&plan))
+        {
             plan_failures.push(error.to_string());
         }
     }
@@ -425,6 +427,81 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
         plan_failures.is_empty(),
         "bounded current relation plans:\n{}",
         plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// Each arm of the pointer-window attribution reads its record writes and record links through
+/// its own index: the ENSv1 and Basenames arms through their node and resolver indexes, the
+/// ENSv2 declared-resolver arm through `normalized_events_project_node_history_idx` (its literal
+/// family list proves that index's predicate), and the record-ID arm through the record-ID write
+/// and link indexes. Any other index, `normalized_events_projection_idx` above all, walks every
+/// write of the chain. The node history index spans every resolver family and the write index
+/// every record-ID write, so those two must be keyed by the pointer; on this small fixture the
+/// planner may read a single-family index or the link index whole.
+fn assert_attribution_reads_are_keyed(plan: &Value) -> Result<()> {
+    const INDEXES: [&str; 5] = [
+        "normalized_events_ens_v1_record_node_resolver_idx",
+        "normalized_events_basenames_record_node_resolver_idx",
+        "normalized_events_project_node_history_idx",
+        "normalized_events_record_id_write_idx",
+        "normalized_events_record_id_link_idx",
+    ];
+    fn walk<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+        output.push(node);
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            walk(child, output);
+        }
+    }
+    let mut nodes = Vec::new();
+    walk(&plan[0]["Plan"], &mut nodes);
+    let mut used = BTreeSet::new();
+    for node in nodes.iter().filter(|node| {
+        node["Relation Name"] == "normalized_events"
+            && node["Alias"]
+                .as_str()
+                .is_some_and(|alias| alias.starts_with("record") || alias.starts_with("link"))
+    }) {
+        let mut probes = Vec::new();
+        if node["Node Type"] == "Bitmap Heap Scan" {
+            let mut bitmap_nodes = Vec::new();
+            walk(node, &mut bitmap_nodes);
+            probes.extend(
+                bitmap_nodes
+                    .into_iter()
+                    .filter(|child| child["Node Type"] == "Bitmap Index Scan"),
+            );
+        } else {
+            probes.push(node);
+        }
+        for probe in &probes {
+            let index = probe["Index Name"].as_str().unwrap_or("none");
+            let keyed = probe.get("Index Cond").is_some()
+                || !matches!(
+                    index,
+                    "normalized_events_project_node_history_idx"
+                        | "normalized_events_record_id_write_idx"
+                );
+            ensure!(
+                INDEXES.contains(&index) && keyed,
+                "attribution reads {} through {index} without its keyed index: {node}\n{plan}",
+                node["Alias"],
+            );
+            used.insert(index);
+        }
+        ensure!(
+            !probes.is_empty(),
+            "attribution reads {} unkeyed: {node}",
+            node["Alias"]
+        );
+    }
+    let missing = INDEXES
+        .iter()
+        .filter(|index| !used.contains(*index))
+        .collect::<Vec<_>>();
+    ensure!(
+        missing.is_empty(),
+        "attribution plan does not read {missing:?}: {plan}"
     );
     Ok(())
 }
