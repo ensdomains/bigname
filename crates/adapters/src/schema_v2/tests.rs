@@ -31,6 +31,9 @@ mod v1_wrapped_registration_resolver;
 #[path = "tests/wrapper_permissions.rs"]
 mod wrapper_permissions;
 
+#[path = "tests/wrapper_registry_write.rs"]
+mod wrapper_registry_write;
+
 const CHAIN: &str = "adapter-test";
 const CONTRACT: &str = "0x0000000000000000000000000000000000000042";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";

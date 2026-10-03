@@ -578,17 +578,15 @@ pub(super) async fn owner_history(
         .collect())
 }
 
-/// Known gap, deferred to TYR-100 (a registry write away from the NameWrapper keeps the wrapper
-/// authority). The Graveyard clears the registry record of a subname wrapped without
+/// The Graveyard clears the registry record of a subname wrapped without
 /// `PARENT_CANNOT_CONTROL`, and the holder then sends the surviving token to the Graveyard, which
-/// accepts ERC1155 tokens. The binding stays the NameWrapper's, so the holder grant lists the
-/// Graveyard as the subname's manager (effective controller) while its served owner stays null.
-/// This pins today's behaviour: the TYR-100 fix should make the Graveyard not a manager here and
-/// flip the second assertion.
+/// accepts ERC1155 tokens. The registry write already ended the NameWrapper authority, so the
+/// stale token's transfer lists the Graveyard as nothing.
 /// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/migration/Graveyard.sol:L25 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
 #[tokio::test]
-async fn known_gap_tyr100_a_surviving_wrapper_token_sent_to_the_graveyard_lists_it_as_manager()
--> TestResult {
+async fn a_surviving_wrapper_token_sent_to_the_graveyard_does_not_list_it_as_manager() -> TestResult
+{
     let database = family_database("interpret_graveyard_token_back").await?;
     let pool = database.pool();
     sync_sepolia_manifests(pool).await?;
@@ -626,11 +624,97 @@ async fn known_gap_tyr100_a_surviving_wrapper_token_sent_to_the_graveyard_lists_
             "{run}: {served:#}"
         );
         let relations = address_relations(pool, GRAVEYARD, &fixture.sub_id).await?;
-        assert!(
-            relations.contains(&bigname_storage::AddressNameRelation::EffectiveController),
-            "{run}: known gap TYR-100 no longer lists the Graveyard as manager; flip this \
-             assertion to its absence: {relations:?}"
-        );
+        assert!(relations.is_empty(), "{run}: {relations:?}");
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The parent's owner reassigns a subname wrapped without `PARENT_CANNOT_CONTROL` with the
+/// registry's `setSubnodeOwner`. No `NameUnwrapped` follows and the token is not burned, but the
+/// NameWrapper no longer holds the registry record, so the name is no longer wrapped: owner,
+/// manager and both relations follow the new registry owner, and later transfers of the stale
+/// token move nothing.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f)
+#[tokio::test]
+async fn a_parent_reassigning_a_wrapped_subname_serves_the_new_registry_owner() -> TestResult {
+    let database = family_database("interpret_wrapped_sub_reassigned").await?;
+    let pool = database.pool();
+    sync_sepolia_manifests(pool).await?;
+    let fixture = ClearedSubname::seed(pool).await?;
+    fixture.wrap(pool, MIGRATION_BLOCK).await?;
+    run(pool, SETUP_BLOCK, MIGRATION_BLOCK, None).await?;
+    stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
+    publish(pool, MIGRATION_BLOCK, FamilyMode::Rebuild).await?;
+    let wrapped = summary(pool, &fixture.sub_id).await?;
+    assert_eq!(wrapped["control"]["owner"], SUB_OWNER, "{wrapped:#}");
+    assert!(wrapped.to_string().contains("wrapper_state"), "{wrapped:#}");
+
+    let carol = CAROL.parse::<Address>()?;
+    let sub_owner = SUB_OWNER.parse::<Address>()?;
+    insert_lineage(pool, LATER_BLOCK, MIGRATION_BLOCK + 1).await?;
+    insert_transaction(pool, LATER_BLOCK, OWNER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK,
+        0,
+        ENS_REGISTRY,
+        ens_registry::NewOwner {
+            node: fixture.namehash,
+            label: fixture.sub_label,
+            owner: carol,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_lineage(pool, LATER_BLOCK + 1, MIGRATION_BLOCK + 2).await?;
+    insert_transaction(pool, LATER_BLOCK + 1, NAME_WRAPPER).await?;
+    insert_log(
+        pool,
+        LATER_BLOCK + 1,
+        0,
+        NAME_WRAPPER,
+        TransferSingle {
+            operator: sub_owner,
+            from: sub_owner,
+            to: DAVE.parse::<Address>()?,
+            id: fixture.sub_token(),
+            value: U256::from(1),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    let mut resume = MIGRATION_BLOCK;
+    for block in [LATER_BLOCK, LATER_BLOCK + 1] {
+        run(pool, block, block, Some(resume)).await?;
+        resume = block;
+        for mode in [FamilyMode::Normal, FamilyMode::Rebuild] {
+            let run = format!("block {block} {mode:?}");
+            publish(pool, block, mode).await?;
+            let served = summary(pool, &fixture.sub_id).await?;
+            assert_eq!(
+                served["control"]["registry_owner"], CAROL,
+                "{run}: {served:#}"
+            );
+            assert_eq!(served["control"]["owner"], CAROL, "{run}: {served:#}");
+            assert!(
+                !served.to_string().contains("wrapper_state"),
+                "{run}: {served:#}"
+            );
+            let relations = address_relations(pool, CAROL, &fixture.sub_id).await?;
+            for relation in [
+                bigname_storage::AddressNameRelation::TokenHolder,
+                bigname_storage::AddressNameRelation::EffectiveController,
+            ] {
+                assert!(relations.contains(&relation), "{run}: {relations:?}");
+            }
+            for holder in [SUB_OWNER, DAVE] {
+                let relations = address_relations(pool, holder, &fixture.sub_id).await?;
+                assert!(relations.is_empty(), "{run}: {holder}: {relations:?}");
+            }
+        }
     }
 
     database.cleanup().await?;
