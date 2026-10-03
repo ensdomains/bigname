@@ -4663,10 +4663,11 @@ For a registrar lease first identified by a later readable observation, registra
   execution entrypoint, an `active` or `shadow` `ens_execution` manifest for
   that chain (ENS on Ethereum Mainnet or Sepolia), and absent elsewhere,
   including every Basenames network, which has no ENSv1/ENSv2 split. It is
-  also absent while that network's projected data is not servable, when name
-  reads answer `409 stale`: before Project's first publication under the
-  running build, while the publication trails the head by more than the
-  configured lag tolerance, while an Interpret or Project redo overlaps it, or
+  also absent while that network's projected data is not servable under the
+  publication fence the lookup and collection reads apply, when those reads
+  answer `409 stale`: before Project's first publication under the running
+  build, while the publication trails the head by more than the configured lag
+  tolerance, while Interpret is redoing, while a Project redo overlaps it, or
   after a reorg orphans its block. The rest of the answer is still served.
   `protocol` is `ens_v2` past the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover): the
@@ -4683,16 +4684,18 @@ For a registrar lease first identified by a later readable observation, registra
   listed implementation to another, so it dates the current implementation,
   not an unbroken run of the same `protocol`; earlier states are not reported.
   It is `null`, with `protocol` `ens_v1`, when no `Upgraded` of the
-  client-facing proxy has been observed, as on Mainnet today. The value is
-  read from the servable publication current name reads use, in one snapshot,
-  and the answer carries no `meta.as_of`. Example under the Sepolia profile:
+  client-facing proxy has been observed, as on Mainnet today. The fence check
+  and the proxy read share one snapshot of the projected proxy state name reads
+  also use, and the answer carries no `meta.as_of`. Example shape under the Sepolia
+  profile, with an illustrative block; there `since_block` is the Sepolia
+  cutover block:
 
   ```json
   "networks": [
     {
       "network": "ethereum-sepolia",
       "chain_id": 11155111,
-      "resolution": { "protocol": "ens_v2", "since_block": 11821680 }
+      "resolution": { "protocol": "ens_v2", "since_block": 12345678 }
     }
   ]
   ```

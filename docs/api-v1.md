@@ -2849,7 +2849,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 | --- | --- | --- | --- |
 | `network` | string | always | Display network slug. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
-| `resolution` | object NamespaceResolution | optional | ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (name reads answer `409 stale`). |
+| `resolution` | object NamespaceResolution | optional | ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (lookup and collection reads answer `409 stale`). |
 
 ### NamespaceResolution
 

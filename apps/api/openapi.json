@@ -7926,7 +7926,7 @@
           },
           "resolution": {
             "$ref": "#/components/schemas/NamespaceResolution",
-            "description": "ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (name reads answer `409 stale`)."
+            "description": "ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (lookup and collection reads answer `409 stale`)."
           }
         },
         "additionalProperties": false,

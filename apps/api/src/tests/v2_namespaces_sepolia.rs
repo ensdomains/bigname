@@ -219,9 +219,28 @@ async fn v2_namespace_ens_reports_the_resolution_protocol_across_sepolia_upgrade
         assert!(payload["meta"].get("as_of").is_none(), "{payload:#}");
     }
 
-    // Name reads refuse during any Interpret redo, and during a Project redo over the
-    // publication; the field is withheld with them while the rest of the answer is served.
-    for (phase, from) in [("interpret", 11821690), ("project", 11821683)] {
+    // Interpret moves one block past the publication, still within the lag tolerance.
+    seed_schema_v2_lookup_head(&database.pool, CHAIN, 11821684, "0xresolution11821684", "2026-10-01T00:00:00Z")
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_number = 11821684,
+             current_block_hash = '0xresolution11821684', target_block_number = 11821684,
+             target_block_hash = '0xresolution11821684'
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(CHAIN)
+    .execute(&database.pool)
+    .await?;
+    let (_, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
+    assert_eq!(
+        payload["data"]["networks"],
+        sepolia_network(Some(json!({ "protocol": "ens_v2", "since_block": 11821683 })))
+    );
+
+    // Lookup and collection reads refuse during any Interpret redo, including one past the
+    // publication, and during a Project redo over it; the field is withheld with them while the
+    // rest of the answer is served.
+    for (phase, from) in [("interpret", 11821684), ("project", 11821683)] {
         start_resolution_redo(&database.pool, CHAIN, phase, from).await?;
         let (status, payload) = read_family_response(&database, "/v1/namespaces/ens").await?;
         assert_eq!(status, StatusCode::OK, "{payload:#}");
