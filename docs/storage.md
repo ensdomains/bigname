@@ -1702,10 +1702,21 @@ the batch's first block, so Interpret adds those names too; every earlier block
 boundary has already settled. Interpret then reads, in the batch's input
 snapshot, the latest readable event per interpreter state key among the events
 of those names and resources, adds the names and resources those events
-reference, and repeats until a round adds nothing. It finds the state keys from
-every stored event of those names and resources but checks canonical lineage
-only on the event it selects for each key, so a key whose events all lie on
-orphaned blocks restores nothing. There is no round limit: each
+reference, and repeats until a round adds nothing. To find the state keys of the
+requested names and resources it reads every stored event of theirs marked
+canonical, safe or finalized, whether or not the event's block is still on the
+canonical lineage; the restore then takes, for each key, the latest event whose
+block is. This returns the same events as checking every scanned event, for two
+reasons. No batch reads an event before its first block that lies on an orphaned
+block: orphaning a block Interpret has passed stamps an Interpret redo that
+deletes those events before any later batch reads them, and every Interpret write
+rechecks that no orphaning happened since its batch read. And an interpreter
+state key includes the event's logical name and resource, so these reads never
+reach one key through two names or resources. The read by
+[ENSv2 state key](glossary.md#ensv2-state-key) below still checks the lineage of
+every event it scans, because a relabelled ENSv2 registry token keeps its
+interpreter state key but is filed under the new label's ENSv2 state key too, so
+one interpreter state key can be reached under several ENSv2 state keys. There is no round limit: each
 continuing round adds a name, resource or ENSv2 state key from a finite set (the
 names, resources and keys the batch's logs and the chain's stored history
 reference or derive, and the registry-only resource of each of those names), so the
@@ -1741,7 +1752,7 @@ expiry falls in a batch, and `normalized_events_v2_lookahead_probe_idx`, keyed
 by chain and block, finds the latest ENSv2 registry event before it. An ENSv2
 read of an unloaded state key is retried like an unloaded name. The loader is an access path, not a semantic: it must produce the same
 normalized events, identity rows and discovery edges as the full-state loader,
-and it is covered by the same interpreter content hash. The loader choice
+and it is bound by the same interpreter content hash. The loader choice
 therefore looks past the manifests the batch interprets: the full-state loader
 restores every retained row regardless of family and lookahead reads only the
 ENSv1, ENSv2 and Basenames Base families, so `normalized_events` history of a family lookahead does not cover,

@@ -1,7 +1,14 @@
--- Candidates only list state keys. Lineage is checked where a row is selected: in `winners`
--- once per key, and for each restored event's timestamp. A key whose candidates all sit on
--- orphaned blocks has no readable event, so `winners` returns nothing for it. Each probe stays
--- parameterized by its event: a normal join can hash all 25M+ lineage rows.
+-- Lineage is checked where a row is selected: twice per key in `winners`, and for each restored
+-- event's timestamp. `winners` matches a key across the whole chain, so a key with no readable
+-- event on the chain returns nothing. The name and resource arms of `candidates` skip the check
+-- and only list state keys. That changes no output because (a) no batch reads an event below $2
+-- on an orphaned block: orphaning stamps an Interpret redo that deletes those events first, and
+-- every write rechecks the orphaning epoch (write.rs); and (b) a state key embeds its logical
+-- name and resource, so those arms never reach one key through two names or resources. If
+-- either breaks, check lineage on one candidate per key before `winners`. The ENSv2 key arm
+-- keeps its check: a relabelled registry token keeps its state key but gains the new label's
+-- routing key, so one key is reachable under several labels. Each probe stays parameterized by
+-- its event: a normal join can hash all 25M+ lineage rows.
 -- LIMIT prevents lateral pull-up. It cannot discard a matching lineage row because
 -- (chain_id, block_hash) is the chain_lineage primary key; exact height is also checked.
 WITH candidates AS MATERIALIZED (
@@ -61,6 +68,13 @@ WITH candidates AS MATERIALIZED (
            COALESCE(event.raw_fact_ref ->> '{state_key}', event.event_identity),
            event.after_state ? '{clear_marker}'
     FROM normalized_events event
+    JOIN LATERAL (
+        SELECT 1 FROM chain_lineage lineage
+        WHERE lineage.chain_id = event.chain_id
+          AND lineage.block_number = event.block_number AND lineage.block_hash = event.block_hash
+          AND lineage.canonicality_state IN ('canonical','safe','finalized')
+        LIMIT 1
+    ) readable ON TRUE
     WHERE {v2_keys} && $5::text[]
       AND event.chain_id = $1 AND event.block_number < $2
       AND event.source_family LIKE 'ens\_v2\_%'
