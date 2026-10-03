@@ -3051,9 +3051,9 @@ introduces it rebuilds Project from full history before serving the option; see
   returns a `page.total_count` with one entry per `.eth` registration the
   address holds, a wrapped `.eth` name once, and no subname;
   `parent=base.eth&namespace=basenames` counts Basenames registrations. One
-  known exception: a released `.eth` name with no name surface, listed as a
-  registry child below, keeps its registry owner under `owner` and is still
-  counted. A name count uses `dedupe=name`.
+  known exception: a `.eth` name with no name surface, listed as a registry
+  child below, is counted for its registry owner rather than for the holder of
+  its registration, and stays counted after it is released. A name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
