@@ -2448,8 +2448,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so each inserted
-event updates 16 indexes instead of 49, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 16 indexes on the table instead of 49, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the

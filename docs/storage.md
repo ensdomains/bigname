@@ -1990,8 +1990,11 @@ authoritative. The rule that splits the indexes:
   redo-range preparation, the flag recompute, or the manifest sync a runner start performs.
 - Every other index is a read path for Project or the API. Project starts only after
   Interpret completes, and the API refuses the routes that read them while an Interpret redo
-  is in progress (the public namespace snapshot requires each served chain's Interpret not to
-  be in a redo), so none of them is read while it is dropped.
+  is in progress (the public namespace snapshot and the composed name reads require each
+  served chain's Interpret not to be in a redo). The one exception is the event audit,
+  `GET /v1/diagnostics/events`, which stays available during a redo by design: its record
+  attribution reads the record, pointer and Project node indexes among them, so while they
+  are dropped it returns the same rows, only slower.
 
 The 16 kept indexes and the statements that read them:
 

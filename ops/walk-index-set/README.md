@@ -4,7 +4,9 @@ Every Interpret batch inserts its normalized events into `normalized_events`, an
 adds each new row to every index on that table whose predicate the row matches. Most of those
 indexes serve the API's history and event pages or Project's reads, and nothing reads them
 while Interpret walks the chain: Project starts only after Interpret completes, and the API
-refuses the routes that read them while an Interpret redo is in progress. On a large database
+refuses the routes that read them while an Interpret redo is in progress. The event audit,
+`GET /v1/diagnostics/events`, stays available during a redo; while the set is dropped it
+returns the same rows, only slower. On a large database
 their upkeep is a large share of each insert, because their keys (block hashes, nodes, names,
 addresses) arrive in random order and each new entry lands on a different index page.
 
