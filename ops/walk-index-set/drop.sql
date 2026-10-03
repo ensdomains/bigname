@@ -5,15 +5,14 @@
 SET lock_timeout = '0';
 SET statement_timeout = '1h';
 
--- The indexes belong to the table, which every chain on this database shares. Refuse while
--- any chain may be served: its Project has recorded progress or holds a live publication,
--- which it commits before it records progress, and its Interpret is not redoing.
-DO $$
-DECLARE
-    served text;
-BEGIN
+-- The indexes belong to the table, which every chain on this database shares. A chain may be
+-- served when its Project has recorded progress or holds a live publication, which it commits
+-- before it records progress, and its Interpret is not redoing. The check runs before and
+-- after the drops and takes no phase lock, so run the script as the walk or redo starts, not
+-- when Interpret may complete within the hour the drops can take.
+CREATE OR REPLACE FUNCTION pg_temp.walk_index_served_chains() RETURNS text
+LANGUAGE sql STABLE AS $$
     SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
-    INTO served
     FROM (
         SELECT chain_id
         FROM bigname_phase.chain_phase_state
@@ -31,7 +30,13 @@ BEGIN
         WHERE interpret.chain_id = projected.chain_id
           AND interpret.phase_name = 'interpret'
           AND interpret.redo_in_progress
-    );
+    )
+$$;
+
+DO $$
+DECLARE
+    served text := pg_temp.walk_index_served_chains();
+BEGIN
     IF served IS NOT NULL THEN
         RAISE EXCEPTION
             'chains % have projected data and no Interpret redo in progress, so they may be served; follow ops/walk-index-set/README.md before retrying',
@@ -80,3 +85,15 @@ SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
 FROM pg_index
 WHERE indrelid = 'bigname_phase.normalized_events'::regclass
 ORDER BY index_name;
+
+DO $$
+DECLARE
+    served text := pg_temp.walk_index_served_chains();
+BEGIN
+    IF served IS NOT NULL THEN
+        RAISE EXCEPTION
+            'chains % may now be served while the walk index set is dropped; run ops/walk-index-set/install.sql now',
+            served;
+    END IF;
+END
+$$;

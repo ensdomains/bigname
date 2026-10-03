@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=362
+expected_refusal_assertions=363
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=62
 refusal_probe_seconds=0
@@ -2535,7 +2535,8 @@ assert_index_install_hint address-match-index-on-another-table-hint \
 } | run_psql >/dev/null
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # has a current block or a live family marker and its Interpret is not redoing,
-# including a marker committed before Project recorded progress. With every chain in an
+# including a marker committed before Project recorded progress, and must fail after
+# its drops when a chain became servable while they ran. With every chain in an
 # Interpret redo it must drop exactly its list and keep every other index, and a
 # rerun must be a no-op. install.sql must then rebuild the fresh baseline's
 # definitions, rerun as a no-op, and refuse each bad name as the other installers do.
@@ -2586,6 +2587,21 @@ assert_index_install_refusal walk-index-published-chain "$walk_index_drop" \
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
 DELETE FROM project_family_marker WHERE chain_id = 'walk-index-published';
+SQL
+} | run_psql >/dev/null
+# A chain that becomes servable while the drops run fails the check after them.
+walk_index_late_drop="$(mktemp "${TMPDIR:-/tmp}/walk-index-late-drop.XXXXXX")"
+awk '!done && /^DROP INDEX CONCURRENTLY/ {
+    print "INSERT INTO bigname_phase.chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash) VALUES ('"'"'walk-index-late'"'"', '"'"'project'"'"', 1, '"'"'walk-index-block'"'"');"
+    done = 1
+} { print }' "$walk_index_drop" > "$walk_index_late_drop"
+assert_index_install_refusal walk-index-late-chain "$walk_index_late_drop" \
+    "chains walk-index-late may now be served while the walk index set is dropped; run ops/walk-index-set/install.sql now"
+rm -f "$walk_index_late_drop"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DELETE FROM chain_phase_state WHERE chain_id = 'walk-index-late';
 SQL
     render_phase_migration "$walk_index_drop"
     render_phase_migration "$walk_index_drop"

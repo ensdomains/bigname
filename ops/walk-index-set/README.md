@@ -32,10 +32,11 @@ publication in `project_family_marker`, and whose Interpret phase has no redo in
 Project commits a publication before it records its progress, so the marker covers a chain
 whose runner stopped between the two.
 
-The check runs once, when the script starts, and holds nothing against an Interpret redo
-completing while the drops run. Run it as soon as the redo starts, with Interpret's whole
-range still ahead: the drops take minutes, each waiting only for the batch in flight. If
-Interpret completes before `drop.sql` has printed its receipt, run `install.sql` at once. It passes on a fresh database before its first walk,
+The script checks this before the drops and again after them, and takes no phase lock, so
+nothing stops an Interpret redo completing while the drops run. Run it as the walk or redo
+starts, with Interpret's whole range still ahead, not when Interpret may complete within the
+hour the drops can take. If a chain became servable while they ran, the second check fails
+after the receipt, naming the chains, and `psql` exits non-zero: run `install.sql` at once. It passes on a fresh database before its first walk,
 and once every chain whose Project has advanced is in an Interpret redo. On a database that
 holds two chains, such as Ethereum and Base, both chains' Interpret redos must be in progress
 before it runs, or run the walk with every index. A multi-chain `redo` command runs its chains
@@ -53,7 +54,8 @@ psql -X -v ON_ERROR_STOP=1 -f ops/walk-index-set/install.sql "$BIGNAME_DATABASE_
 
 Retain both outputs in the deployment receipt; each ends by printing the index rows.
 
-`drop.sql` can run while Interpret is processing batches. `DROP INDEX CONCURRENTLY` waits for
+Run `drop.sql` as the walk or redo starts (see above). It can run while Interpret is
+processing batches. `DROP INDEX CONCURRENTLY` waits for
 the transactions that may use the index, such as a batch in flight, so the script lifts the
 lock timeout and bounds each drop to one hour. A rerun skips the names already dropped.
 
@@ -123,7 +125,7 @@ first.
 The runner never checks or recreates these indexes, so a restart while they are dropped
 resumes the walk or redo from its marker as usual. `scripts/check-schema` proves that
 `drop.sql` refuses a chain with Project progress and a chain with only a live publication,
-and drops exactly its list, and that `install.sql` rebuilds the fresh baseline's definitions
+fails after its drops when a chain became servable while they ran, and drops exactly its list, and that `install.sql` rebuilds the fresh baseline's definitions
 and refuses an invalid index, an index with other keys or another definition, and a table
 under one of its names. A database test in
 `crates/interpret` proves that the two lists together are every index the baseline defines
