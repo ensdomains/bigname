@@ -416,7 +416,9 @@ chain retains no `normalized_events` history of an uncovered family whose
 manifest has moved to `draft` or `shadow`, Interpret uses the lookahead loader:
 it reads the names and resources the batch's logs mention plus the
 registrations falling due in the batch, restores only their history, and keeps
-no [interpreter session](glossary.md#interpreter-session) between batches. On a
+no [interpreter session](glossary.md#interpreter-session) between batches; it
+keeps only the events of each whole ENSv2 registry a batch had to read, as
+[Interpret process memory](storage.md#interpret-process-memory) describes. On a
 chain with an ENSv2 manifest it also restores the ENSv2 events filed under the
 [ENSv2 state keys](glossary.md#ensv2-state-key) those logs and events link to,
 such as the registry, token and resolver a log names and the registries above
@@ -429,8 +431,10 @@ names and keys. Only that attempt's output is published.
 Otherwise it uses the full-state loader, which restores all retained history
 once and then carries the session. Ethereum mainnet, Ethereum Sepolia and Base
 all use the lookahead loader. On a lookahead chain a reorg costs one redo batch read for
-the names it touches and a runner restart costs nothing, where the full-state
-loader restores the chain's history again after each. Both loaders must produce identical stored output and share one
+the names it touches and a runner restart costs nothing beyond reading again,
+once, each whole ENSv2 registry a later batch requests (a reorg drops the kept
+registries too), where the full-state loader restores the chain's history again
+after each. Both loaders must produce identical stored output and share one
 [interpreter content hash](glossary.md#interpreter-content-hash), so a change
 of loader needs no redo. The choice can change only when a release changes the
 chain's manifest set, including moving to `draft` or `shadow` a manifest whose

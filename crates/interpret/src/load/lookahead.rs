@@ -9,7 +9,10 @@ use bigname_adapters::schema_v2::{
 };
 use sqlx::PgPool;
 
-use super::{LoadedBatch, cache, lookahead_query, manifests, migration, resume};
+use super::{
+    LoadedBatch, LookaheadPrior, WholeRegistries, cache, lookahead_query, manifests, migration,
+    resume,
+};
 use crate::{FullStateReason, InterpretError, Result, StateLoader};
 
 /// Either the batch restored by lookahead, or the reason this chain needs the full-state loader.
@@ -18,6 +21,7 @@ pub(crate) enum Attempt {
     FullStateRequired(StateLoader),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn batch_input(
     pool: &PgPool,
     chain_id: &str,
@@ -26,6 +30,7 @@ pub(crate) async fn batch_input(
     resume_marker: Option<(i64, &str)>,
     state_cache_capacity: StateCacheCapacity,
     statement_timeout: Option<std::num::NonZeroU32>,
+    retained: Option<LookaheadPrior>,
 ) -> Result<Attempt> {
     let mut tx = pool.begin().await.map_err(|error| {
         InterpretError::database("failed to begin lookahead input snapshot", error)
@@ -70,6 +75,26 @@ pub(crate) async fn batch_input(
             reason,
         }));
     }
+    let mut registries = match retained {
+        Some(LookaheadPrior { cache, registries }) => {
+            match cache::revalidate(&mut tx, chain_id, cache, orphaning_epoch).await? {
+                Some(_) => registries,
+                None => {
+                    tracing::info!(
+                        chain_id,
+                        from_block,
+                        "a chain reorganization since the last batch invalidated the retained \
+                         whole ENSv2 registries"
+                    );
+                    WholeRegistries::default()
+                }
+            }
+        }
+        None => WholeRegistries::default(),
+    };
+    registries
+        .bring_forward(&mut tx, chain_id, from_block)
+        .await?;
     let discovery_rules = super::load_discovery_rules(&mut tx, chain_id).await?;
     let mut admissions = super::load_admissions(&mut tx, chain_id, from_block).await?;
     admissions.extend(migration::admissions(&mut tx, chain_id, from_block).await?);
@@ -132,7 +157,14 @@ pub(crate) async fn batch_input(
     }
     dependencies.v2_due_window = Some(window);
     let (prepared, restored_event_count) = loop {
-        let prior = load_closure(&mut tx, chain_id, from_block, &mut dependencies).await?;
+        let prior = load_closure(
+            &mut tx,
+            chain_id,
+            from_block,
+            &mut dependencies,
+            &mut registries,
+        )
+        .await?;
         let restored_event_count = prior.len();
         let restore = begin_schema_v2_adapter_restore_with_provenance(
             chain_id.to_owned(),
@@ -213,7 +245,9 @@ pub(crate) async fn batch_input(
         adapter_session: None,
         prepared: Some(Box::new(prepared)),
         restored_event_count,
+        #[cfg(test)]
         lookahead_nodes: Some(dependencies.nodes),
+        whole_registries: Some(registries),
     })))
 }
 
@@ -224,12 +258,15 @@ pub(crate) async fn batch_input(
 /// that history is finite and fixed inside this snapshot, and nothing is ever removed, so the
 /// set stops growing after finitely many rounds. A subname many labels deep costs one round
 /// per label, because each stored `NewOwner` links a name to its parent, and each stored ENSv2
-/// `ParentChanged` a registry to its parent token. Returns the loaded events in restore order.
+/// `ParentChanged` a registry to its parent token. A whole registry (`<registry>:*`) is read
+/// from the database once and then served from `registries`, which keep it for later batches.
+/// Returns the loaded events in restore order.
 async fn load_closure(
     connection: &mut sqlx::PgConnection,
     chain_id: &str,
     from_block: i64,
     dependencies: &mut V1BatchDependencies,
+    registries: &mut WholeRegistries,
 ) -> Result<Vec<bigname_adapters::schema_v2::PriorEventInput>> {
     loop {
         validate_dependencies(dependencies)?;
@@ -247,18 +284,60 @@ async fn load_closure(
             .map(|request| format!("{}:{}", request.namespace, request.node))
             .collect();
         let resources: Vec<_> = dependencies.resource_ids.iter().copied().collect();
-        let v2_keys: Vec<_> = dependencies.v2_keys.iter().cloned().collect();
+        let (whole, v2_keys): (Vec<_>, Vec<_>) = dependencies
+            .v2_keys
+            .iter()
+            .cloned()
+            .partition(|key| key.ends_with(":*"));
+        for registry in &whole {
+            if !registries.contains(registry) {
+                let started = std::time::Instant::now();
+                let loaded = lookahead_query::ordered_events(
+                    connection,
+                    chain_id,
+                    from_block,
+                    &[],
+                    &[],
+                    std::slice::from_ref(registry),
+                )
+                .await?;
+                tracing::info!(
+                    chain_id,
+                    from_block,
+                    registry = registry.as_str(),
+                    events = loaded.len(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "interpret lookahead loaded a whole ENSv2 registry from stored events"
+                );
+                #[cfg(test)]
+                WHOLE_REGISTRY_LOADS
+                    .with_borrow_mut(|loads| loads.push((from_block, registry.clone())));
+                registries.insert(registry.clone(), loaded);
+            }
+        }
         let mut events = lookahead_query::ordered_events(
             connection, chain_id, from_block, &names, &resources, &v2_keys,
         )
         .await?;
         dependencies
-            .include_prior_events(events.iter().map(|ordered| &ordered.event))
+            .include_prior_events(
+                events
+                    .iter()
+                    .chain(registries.events(&whole))
+                    .map(|ordered| &ordered.event),
+            )
             .map_err(|error| invalid_dependencies("expand prior links", error))?;
         dependencies.include_registry_only_resources(chain_id);
         validate_dependencies(dependencies)?;
         if previous == size(dependencies) {
+            #[cfg(test)]
+            assert_registries_mirror_events(connection, chain_id, from_block, registries, &whole)
+                .await?;
+            // A state key's winner is the same row whichever request reaches it, so an event
+            // both reads return is the same event.
+            events.extend(registries.events(&whole).cloned());
             events.sort_by_key(|ordered| ordered.order);
+            events.dedup_by_key(|ordered| ordered.order);
             return Ok(events.into_iter().map(|ordered| ordered.event).collect());
         }
         // Discard this partial fetch before querying the expanded set.
@@ -355,9 +434,45 @@ fn invalid_dependencies(operation: &str, error: anyhow::Error) -> InterpretError
 thread_local! {
     /// Lookahead attempts discarded because they read an unloaded key, on this thread.
     pub(super) static RETRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// The batches, by first block, that loaded a whole ENSv2 registry, and its key.
+    /// The batches, by first block, that requested a whole ENSv2 registry, and its key.
     pub(super) static WHOLE_REGISTRY_BATCHES: std::cell::RefCell<std::collections::BTreeSet<(i64, String)>> =
         const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+    /// Each read of a whole ENSv2 registry from the database, by batch first block, in order.
+    pub(super) static WHOLE_REGISTRY_LOADS: std::cell::RefCell<Vec<(i64, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every whole registry a batch was served must hold exactly what `events.sql` returns for
+/// its key alone, in the batch's snapshot.
+#[cfg(test)]
+async fn assert_registries_mirror_events(
+    connection: &mut sqlx::PgConnection,
+    chain_id: &str,
+    from_block: i64,
+    registries: &WholeRegistries,
+    whole: &[String],
+) -> Result<()> {
+    for registry in whole {
+        let mut retained: Vec<_> = registries
+            .events(std::slice::from_ref(registry))
+            .cloned()
+            .collect();
+        retained.sort_by_key(|ordered| ordered.order);
+        let stored = lookahead_query::ordered_events(
+            connection,
+            chain_id,
+            from_block,
+            &[],
+            &[],
+            std::slice::from_ref(registry),
+        )
+        .await?;
+        assert_eq!(
+            retained, stored,
+            "retained {registry} differs from its stored events before block {from_block}"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -480,6 +480,73 @@ fn index_names(plan: &Value, names: &mut Vec<String>) {
     }
 }
 
+/// A retained whole registry brought forward by `v2_registry_delta.sql` keeps, per state key,
+/// the row `events.sql` picks: the latest block, then a position over none (the table stores
+/// transaction and log index together), the higher transaction index, the higher log index,
+/// then the higher id; and a zero-address clear in its own slot. Rows are inserted so that
+/// keeping the last one inserted would pick wrong.
+#[tokio::test]
+async fn retained_registry_folds_a_range_like_events_sql_picks_winners() -> Result {
+    let db = database().await?;
+    for (id, block, position, state_key, clear) in [
+        ("tx-old", 1, Some((0, 0)), "tx", false),
+        ("tx-known", 2, Some((0, 1)), "tx", false),
+        ("tx-none", 2, None, "tx", false),
+        ("log-higher", 2, Some((0, 2)), "log", false),
+        ("log-lower", 2, Some((0, 1)), "log", false),
+        ("tx-higher", 2, Some((1, 0)), "transaction", false),
+        ("tx-lower", 2, Some((0, 5)), "transaction", false),
+        ("id-lower", 2, Some((0, 1)), "id", false),
+        ("id-higher", 2, Some((0, 1)), "id", false),
+        ("clear", 2, None, "tx", true),
+        ("later", 3, Some((0, 0)), "tx", false),
+    ] {
+        let after = if clear {
+            json!({"fixture_identity": id, (SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY): []})
+        } else {
+            json!({"fixture_identity": id})
+        };
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,raw_fact_ref,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens','SubregistryChanged','ens_v2_registry_l1',1,$2,$3,'block-'||$3::text,'tx',$4,$5,jsonb_build_object($6::text,$7::text,$8::text,'0x60:-:token:-:SubregistryUpdated'),'ens_v1_unwrapped_authority','canonical',$9)")
+            .bind(id).bind(CHAIN).bind(block)
+            .bind(position.map(|(transaction, _)| transaction))
+            .bind(position.map(|(_, log)| log))
+            .bind(INTERPRETER_STATE_KEY).bind(state_key).bind(super::STATE_SCOPE_KEY).bind(after)
+            .execute(db.pool()).await?;
+    }
+    let registry = "0x60:*".to_owned();
+    let mut connection = db.pool().acquire().await?;
+    let read = async |connection: &mut sqlx::PgConnection, before| {
+        super::ordered_events(
+            connection,
+            CHAIN,
+            before,
+            &[],
+            &[],
+            std::slice::from_ref(&registry),
+        )
+        .await
+    };
+    let mut registries = crate::load::WholeRegistries::default();
+    registries.bring_forward(&mut connection, CHAIN, 2).await?;
+    registries.insert(registry.clone(), read(&mut connection, 2).await?);
+    registries.bring_forward(&mut connection, CHAIN, 3).await?;
+    let mut retained: Vec<_> = registries
+        .events(std::slice::from_ref(&registry))
+        .cloned()
+        .collect();
+    retained.sort_by_key(|ordered| ordered.order);
+    let stored = read(&mut connection, 3).await?;
+    let picked: Vec<_> = stored.iter().map(|ordered| ordered.event.clone()).collect();
+    assert_eq!(
+        identities(&picked),
+        ["tx-known", "log-higher", "tx-higher", "id-higher", "clear"]
+    );
+    assert_eq!(retained, stored);
+    drop(connection);
+    db.cleanup().await?;
+    Ok(())
+}
+
 /// The fixture database holds only the checked-in baseline schema, so this proves the
 /// baseline defines indexes whose expressions the lookahead queries can use, for the ENSv1,
 /// Basenames Base and ENSv2 families alike. A drifted expression or family predicate
@@ -593,9 +660,47 @@ async fn lookahead_sql_uses_baseline_indexes() -> Result {
             }
         }
     }
+    // A retained registry's range read may take either index: both are cheap over one batch
+    // of blocks. It must never scan the table.
+    let delta_sql = super::substitute(super::V2_REGISTRY_DELTA);
+    for mode in ["force_custom_plan", "force_generic_plan"] {
+        let prepared = format!("v2_registry_delta_{mode}");
+        sqlx::raw_sql(&format!(
+            "SET plan_cache_mode={mode}; PREPARE {prepared}(text,bigint,bigint,text[]) AS {delta_sql}"
+        ))
+        .execute(&mut *connection)
+        .await?;
+        let plan: Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (FORMAT JSON) EXECUTE {prepared}('{CHAIN}',2,3,ARRAY['0x60:*'])"
+        ))
+        .fetch_one(&mut *connection)
+        .await?;
+        let mut used = Vec::new();
+        index_names(&plan[0]["Plan"], &mut used);
+        assert!(
+            used.iter().any(|name| {
+                name == "normalized_events_v2_key_probe_idx"
+                    || name == "normalized_events_v2_lookahead_probe_idx"
+            }),
+            "{mode} v2_registry_delta plan must use an ENSv2 probe index, used {used:?}"
+        );
+        assert!(
+            !scans(&plan[0]["Plan"], "normalized_events"),
+            "{mode} v2_registry_delta plan scans normalized_events: {plan}"
+        );
+    }
     drop(connection);
     db.cleanup().await?;
     Ok(())
+}
+
+fn scans(plan: &Value, relation: &str) -> bool {
+    (plan["Node Type"] == "Seq Scan" && plan["Relation Name"] == relation)
+        || plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| scans(child, relation))
 }
 
 /// The index files each event under one name, so the query must find an event under that

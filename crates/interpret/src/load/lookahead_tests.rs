@@ -151,6 +151,7 @@ async fn readonly_mainnet_batches() -> anyhow::Result<()> {
                 None,
                 capacity,
                 None,
+                None,
             )
             .await?
             {

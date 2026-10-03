@@ -1700,7 +1700,24 @@ finite stored history, so the attempts end. A read under another spelling than
 the loaded one fails the batch only when that spelling is loaded too, so the
 adapter's state keys must match the keys its events are filed under. Only an attempt that read nothing unloaded is
 published. The
-session is discarded after the batch. Two partial expression indexes on
+session is discarded after the batch. One part of what the batch read is kept:
+a change to a registry's parent, or to the pointer, expiry or release of the
+token that points at it, renames every name in the registry, so the batch must
+read the whole registry (the latest event per interpreter state key among every
+event filed under its `<registry>:*` [ENSv2 state key](glossary.md#ensv2-state-key)).
+Interpret reads each such registry from the database once and keeps those
+events in process memory. Each later batch first checks them as it checks a
+retained interpreter session (the lineage orphaning epoch and the block anchors
+added since the last check, in its own input snapshot), then reads only the
+readable events filed under the kept registries' keys from the first block of
+the previous batch up to its own first block, and for each interpreter state
+key keeps the event the full read would pick. A batch that requests a kept
+registry uses those events instead of reading the registry again, so they
+must equal what the full read returns in the same snapshot. A reorg that
+changes the epoch, a redo's first batch and a process restart drop them, and
+the next batch that needs a registry reads it whole again. Like the cache
+capacity above, this is an access path with no interpretation meaning and no
+[interpreter content hash](glossary.md#interpreter-content-hash) input. Two partial expression indexes on
 `normalized_events` serve these reads for the ENSv1 families:
 `normalized_events_v1_direct_node_probe_idx` (events of one name) and
 `normalized_events_v1_due_probe_idx` (registrar expiry ranges); two more with the

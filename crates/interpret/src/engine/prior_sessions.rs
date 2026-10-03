@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use crate::{InterpretError, Result, RunMode, load::CachedPrior};
+use crate::{InterpretError, Result, RunMode, load::RetainedPrior};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct SessionKey {
@@ -9,10 +9,10 @@ pub(super) struct SessionKey {
     pub(super) mode: RunMode,
 }
 
-/// The interpreter session the full-state loader carries from one batch to the next, at most
-/// one per chain.
+/// What a loader carries from one batch to the next, at most one per chain: the full-state
+/// loader's interpreter session or the lookahead loader's whole ENSv2 registries.
 #[derive(Default)]
-pub(super) struct PriorSessions(Mutex<HashMap<String, Retained<CachedPrior>>>);
+pub(super) struct PriorSessions(Mutex<HashMap<String, Retained<RetainedPrior>>>);
 
 struct Retained<T> {
     resumes: Resumes,
@@ -37,7 +37,7 @@ impl PriorSessions {
         key: &SessionKey,
         next_block: i64,
         allow_resume: bool,
-    ) -> Result<Option<CachedPrior>> {
+    ) -> Result<Option<RetainedPrior>> {
         Ok(take_resumable(
             &mut *self.lock()?,
             key,
@@ -50,14 +50,14 @@ impl PriorSessions {
         &self,
         key: SessionKey,
         next_block: i64,
-        prior: CachedPrior,
+        prior: RetainedPrior,
         complete: bool,
     ) -> Result<()> {
         retain(&mut *self.lock()?, key, next_block, prior, complete);
         Ok(())
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Retained<CachedPrior>>>> {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Retained<RetainedPrior>>>> {
         self.0.lock().map_err(|_| {
             InterpretError::transient("interpret prior-state session lock was poisoned")
         })

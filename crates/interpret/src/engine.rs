@@ -168,6 +168,11 @@ impl Engine {
             request.resume_current.is_some(),
         )?;
         profile_phase(profile, "take_prior_session", phase_started, None);
+        let (cached_prior, lookahead_prior) = match cached_prior {
+            Some(load::RetainedPrior::FullState(prior)) => (Some(*prior), None),
+            Some(load::RetainedPrior::Lookahead(prior)) => (None, Some(prior)),
+            None => (None, None),
+        };
         let phase_started = Instant::now();
         let resume_marker = request
             .resume_current
@@ -188,6 +193,7 @@ impl Engine {
                 resume_marker,
                 self.state_cache_capacity,
                 self.lookahead_statement_timeout_secs,
+                lookahead_prior,
             )
             .await?
         };
@@ -212,7 +218,7 @@ impl Engine {
                 .await?
             }
         };
-        let used_lookahead = loaded.lookahead_nodes.is_some();
+        let whole_registries = loaded.whole_registries;
         let restored_event_count = loaded.restored_event_count;
         profile_phase(
             profile,
@@ -299,15 +305,27 @@ impl Engine {
         .await?;
         profile_phase(profile, "write_batch", phase_started, None);
         let phase_started = Instant::now();
-        // Lookahead restores each batch from the database, so it keeps no session.
-        if !used_lookahead {
-            self.prior_sessions.store(
-                session_key,
-                batch_to.saturating_add(1),
+        // Lookahead restores each batch's adapter state from the database and keeps only the
+        // whole ENSv2 registries it read.
+        let retained = match whole_registries {
+            None => Some(load::RetainedPrior::FullState(Box::new(
                 load::CachedPrior {
                     cache: next_prior_cache,
                     adapter_session,
                 },
+            ))),
+            Some(registries) => (!registries.is_empty()).then(|| {
+                load::RetainedPrior::Lookahead(load::LookaheadPrior {
+                    cache: next_prior_cache,
+                    registries,
+                })
+            }),
+        };
+        if let Some(retained) = retained {
+            self.prior_sessions.store(
+                session_key,
+                batch_to.saturating_add(1),
+                retained,
                 complete,
             )?;
         }

@@ -23,10 +23,12 @@ const DUE_NAMES: &str = include_str!("lookahead/due_names.sql");
 const V2_DUE_KEYS: &str = include_str!("lookahead/v2_due_keys.sql");
 const V2_LATEST_TOPOLOGY: &str = include_str!("lookahead/v2_latest_topology.sql");
 const RETAINED_FAMILIES: &str = include_str!("lookahead/retained_families.sql");
+const V2_REGISTRY_DELTA: &str = include_str!("lookahead/v2_registry_delta.sql");
 
 type EventRow = (Value, Option<OffsetDateTime>);
 
 /// A loaded event with the position the restore must apply it in.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct OrderedEvent {
     pub(super) order: (i64, i64),
     pub(super) event: PriorEventInput,
@@ -63,13 +65,7 @@ pub(super) async fn ordered_events(
     if names.is_empty() && resources.is_empty() && v2_keys.is_empty() {
         return Ok(Vec::new());
     }
-    let query = EVENTS
-        .replace("{v2_keys}", V2_KEYS.trim_end())
-        .replace("{state_key}", INTERPRETER_STATE_KEY)
-        .replace("{state_scope}", STATE_SCOPE_KEY)
-        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
-        .replace("{transaction_index}", TRANSACTION_INDEX_KEY)
-        .replace("{log_index}", LOG_INDEX_KEY);
+    let query = substitute(EVENTS);
     let mut rows = sqlx::query_as::<_, EventRow>(&query)
         .bind(chain)
         .bind(before)
@@ -78,26 +74,65 @@ pub(super) async fn ordered_events(
         .bind(v2_keys)
         .fetch(connection);
     let mut result = Vec::new();
-    while let Some((mut body, timestamp)) = rows
+    while let Some((body, timestamp)) = rows
         .try_next()
         .await
         .map_err(|error| InterpretError::database("failed to load lookahead prior events", error))?
     {
-        let normalized_event_id = body["normalized_event_id"].as_i64().ok_or_else(|| {
-            InterpretError::data_integrity("lookahead prior event has no normalized event id")
-        })?;
-        let block_number = body["block_number"].as_i64().ok_or_else(|| {
-            InterpretError::data_integrity("lookahead prior event has no block number")
-        })?;
-        if let Some(fields) = body.as_object_mut() {
-            fields.remove("normalized_event_id");
-        }
-        result.push(OrderedEvent {
-            order: (block_number, normalized_event_id),
-            event: decode_event(body, timestamp)?,
-        });
+        result.push(decode_ordered(body, timestamp)?);
     }
     Ok(result)
+}
+
+/// Every readable event in `[from, before)` filed under one of the whole-registry keys
+/// `registries`, with its key, in the order `lookahead/v2_registry_delta.sql` documents.
+pub(super) async fn v2_registry_delta(
+    connection: &mut PgConnection,
+    chain: &str,
+    from: i64,
+    before: i64,
+    registries: &[String],
+) -> Result<Vec<(String, OrderedEvent)>> {
+    let query = substitute(V2_REGISTRY_DELTA);
+    let mut rows = sqlx::query_as::<_, (String, Value, Option<OffsetDateTime>)>(&query)
+        .bind(chain)
+        .bind(from)
+        .bind(before)
+        .bind(registries)
+        .fetch(connection);
+    let mut result = Vec::new();
+    while let Some((registry, body, timestamp)) = rows.try_next().await.map_err(|error| {
+        InterpretError::database("failed to load retained ENSv2 registry events", error)
+    })? {
+        result.push((registry, decode_ordered(body, timestamp)?));
+    }
+    Ok(result)
+}
+
+pub(super) fn substitute(statement: &str) -> String {
+    statement
+        .replace("{v2_keys}", V2_KEYS.trim_end())
+        .replace("{state_key}", INTERPRETER_STATE_KEY)
+        .replace("{state_scope}", STATE_SCOPE_KEY)
+        .replace("{clear_marker}", SUBREGISTRY_INVALIDATED_TOKEN_IDS_KEY)
+        .replace("{transaction_index}", TRANSACTION_INDEX_KEY)
+        .replace("{log_index}", LOG_INDEX_KEY)
+}
+
+fn decode_ordered(mut body: Value, timestamp: Option<OffsetDateTime>) -> Result<OrderedEvent> {
+    let normalized_event_id = body["normalized_event_id"].as_i64().ok_or_else(|| {
+        InterpretError::data_integrity("lookahead prior event has no normalized event id")
+    })?;
+    let block_number = body["block_number"].as_i64().ok_or_else(|| {
+        InterpretError::data_integrity("lookahead prior event has no block number")
+    })?;
+    if let Some(fields) = body.as_object_mut() {
+        fields.remove("normalized_event_id");
+    }
+    Ok(OrderedEvent {
+        order: (block_number, normalized_event_id),
+        event: decode_event(body, timestamp)?,
+    })
 }
 
 /// The ENSv2 state keys of the tokens whose expiry lies in `(start, end]`; see

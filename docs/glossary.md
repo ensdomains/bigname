@@ -1691,7 +1691,9 @@ resources and [ENSv2 state keys](#ensv2-state-key) the batch can touch (those
 its logs mention, those earlier events link to them, and registrations and
 ENSv2 tokens falling due in the batch), instead of all retained history. When
 interpretation reads a name or ENSv2 state key it did not load, it loads that
-too and interprets the batch again. The other way is the *full-state
+too and interprets the batch again. It keeps no interpreter session between
+batches, only the latest events of each whole ENSv2 registry a batch had to
+read, which later batches bring forward by reading their own new blocks. The other way is the *full-state
 loader*, which restores everything once and then carries the
 [interpreter session](#interpreter-session) between batches. Interpret chooses
 between them automatically for each chain and batch; both must produce identical

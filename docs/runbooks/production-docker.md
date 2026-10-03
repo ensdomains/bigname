@@ -677,6 +677,25 @@ no-ops when the indexes already exist, and it ends with the same check, so
 `sqlx migrate run` stops without recording it if either index is missing,
 invalid, not ready, on another table, not an index, or has another definition.
 
+On a chain with an ENSv2 manifest, a batch that changes a registry's parent, or
+the pointer, expiry or release of the token that points at it, renames every
+name in that registry, so the lookahead loader must read the whole registry:
+the latest event of everything filed under its `<registry>:*`
+[ENSv2 state key](../glossary.md#ensv2-state-key). Interpret reads each such
+registry from `normalized_events` once per process, logs
+`interpret lookahead loaded a whole ENSv2 registry from stored events` with the
+registry, its event count and the time taken, and keeps those events in memory;
+each later batch reads only the events written since the previous batch for the
+registries it keeps. A runner restart, the first batch of a redo, or a reorg
+drops them, so expect that line again once per registry after each. Process
+memory grows with the events kept, so read the counts in that line next to the
+container's memory. `BIGNAME_INTERPRET_BLOCKS_PER_BATCH` bounds the per-batch
+range read, not the kept registries. Both reads depend on
+`normalized_events_v2_key_probe_idx` and
+`normalized_events_v2_lookahead_probe_idx`: after a redo has rewritten much of
+`normalized_events`, run `ANALYZE bigname_phase.normalized_events`, or stale
+statistics can make the whole-registry read scan instead.
+
 The release containing `20260922010000_project_node_history_idx.sql`,
 `20260922010100_project_mirror_scope_indexes.sql` and
 `20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes

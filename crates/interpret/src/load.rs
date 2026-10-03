@@ -12,6 +12,7 @@ use crate::{InterpretError, Result};
 
 mod cache;
 pub(crate) mod lookahead;
+mod lookahead_cache;
 mod lookahead_query;
 mod manifests;
 mod migration;
@@ -19,11 +20,18 @@ mod prior;
 mod resume;
 
 pub(crate) use cache::{PriorCache, fold as fold_prior_cache};
+pub(crate) use lookahead_cache::{LookaheadPrior, WholeRegistries};
 pub(crate) use prior::prior_state_values;
 
 pub(crate) struct CachedPrior {
     pub cache: PriorCache,
     pub adapter_session: SchemaV2AdapterSession,
+}
+
+/// What the engine retains for a chain between batches, by the loader that produced it.
+pub(crate) enum RetainedPrior {
+    FullState(Box<CachedPrior>),
+    Lookahead(LookaheadPrior),
 }
 
 pub(crate) struct LoadedBatch {
@@ -34,8 +42,10 @@ pub(crate) struct LoadedBatch {
     /// The batch lookahead already interpreted inside its loading snapshot.
     pub prepared: Option<Box<bigname_adapters::schema_v2::PreparedAdapterBatch>>,
     pub restored_event_count: usize,
+    #[cfg(test)]
     pub lookahead_nodes:
         Option<std::collections::BTreeSet<bigname_adapters::schema_v2::V1NodeRequest>>,
+    pub whole_registries: Option<WholeRegistries>,
 }
 
 type RawLogRow = (
@@ -164,7 +174,9 @@ pub(crate) async fn batch_input(
         adapter_session: Some(adapter_session),
         prepared: None,
         restored_event_count,
+        #[cfg(test)]
         lookahead_nodes: None,
+        whole_registries: None,
     })
 }
 

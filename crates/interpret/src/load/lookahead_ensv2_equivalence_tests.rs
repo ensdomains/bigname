@@ -88,8 +88,8 @@ const OFFSETS: [i64; 9] = [
     1_000 + GRACE + 1,   // 4: quiet; carol's ENSv1 registration lapses
     1_000 + GRACE + 100, // 5: quiet; dave's ENSv2 registration has lapsed
     1_000 + GRACE + 200, // 6: alice gets a resolver, a text record, a new token id and a subregistry
-    1_000 + GRACE + 300, // 7: bob transferred; a text record
-    1_000 + GRACE + 400, // 8: quiet
+    1_000 + GRACE + 300, // 7: bob transferred; a text record; alice's subregistry cleared
+    1_000 + GRACE + 400, // 8: the ETH registry's parent set again
 ];
 
 /// ENSv2 token ids carry a version in their low four bytes
@@ -380,7 +380,23 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     seed.log(ETH_REGISTRY, subregistry.encode_log_data())
         .await?;
 
-    seed_last_block(&mut seed, &block_hash(FIRST_BLOCK + 7), "0x07").await
+    seed_last_block(&mut seed, &block_hash(FIRST_BLOCK + 7), "0x07").await?;
+    if lineage.len() > 8 {
+        seed_reparent(&mut seed).await?;
+    }
+    Ok(())
+}
+
+/// Block 8: the ETH registry's parent set again, which renames every token in it, so a later
+/// batch requests the registry whole.
+async fn seed_reparent(seed: &mut Seeder<'_>) -> TestResult {
+    seed.block(FIRST_BLOCK + 8).await?;
+    let parent = v2::ParentUpdated {
+        parent: ROOT_REGISTRY.parse()?,
+        label: "eth".to_owned(),
+        sender: OWNER.parse()?,
+    };
+    seed.log(ETH_REGISTRY, parent.encode_log_data()).await
 }
 
 /// Block 7. A reorg replaces it with a block of the same shape but another text value.
@@ -401,7 +417,15 @@ async fn seed_last_block(seed: &mut Seeder<'_>, hash: &str, text: &str) -> TestR
     };
     seed.log(ETH_REGISTRY, transferred.encode_log_data())
         .await?;
-    seed.text("bob", text).await
+    seed.text("bob", text).await?;
+    // A zero-address update clears the pointer and is retained beside the token's latest
+    // ordinary subregistry event, so a retained registry must keep both.
+    let cleared = v2::SubregistryUpdated {
+        tokenId: v2_token_version("alice", 1),
+        subregistry: Address::ZERO,
+        sender: OWNER.parse()?,
+    };
+    seed.log(ETH_REGISTRY, cleared.encode_log_data()).await
 }
 
 fn name(label: &str) -> String {
@@ -421,6 +445,7 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         stamp_interpreter_hash(database.pool()).await?;
         super::RETRIES.set(0);
         super::WHOLE_REGISTRY_BATCHES.take();
+        super::WHOLE_REGISTRY_LOADS.take();
         let walk = walk_seeded(
             database.pool(),
             CHAIN,
@@ -435,17 +460,40 @@ async fn ensv2_lookahead_matches_full_state_for_every_batch() -> TestResult {
         database.cleanup().await?;
         // The walk runs the lookahead loader beside the engine's choice. This history reads
         // names no log or stored event mentions, so it must exercise the retry.
-        // Only the batches that give a registry a parent rename every token in it: the
-        // ETH registry's ParentUpdated and alice's SubregistryUpdated.
+        // Only the batches that give a registry a parent or take it away rename every token
+        // in it: the ETH registry's two ParentUpdated, and alice's SubregistryUpdated and its
+        // clear for the migration registry.
         let span = i64::from(blocks_per_batch);
         let batch_of = |block: i64| FIRST_BLOCK + (block - FIRST_BLOCK) / span * span;
+        let eth = format!("{ETH_REGISTRY}:*");
+        let migration = format!("{MIGRATION_REGISTRY}:*");
         assert_eq!(
             super::WHOLE_REGISTRY_BATCHES.take(),
             BTreeSet::from([
-                (batch_of(FIRST_BLOCK), format!("{ETH_REGISTRY}:*")),
-                (batch_of(FIRST_BLOCK + 6), format!("{MIGRATION_REGISTRY}:*")),
+                (batch_of(FIRST_BLOCK), eth.clone()),
+                (batch_of(FIRST_BLOCK + 6), migration.clone()),
+                (batch_of(FIRST_BLOCK + 7), migration.clone()),
+                (batch_of(FIRST_BLOCK + 8), eth.clone()),
             ]),
-            "batches that loaded a whole ENSv2 registry at {blocks_per_batch} blocks per batch"
+            "batches that requested a whole ENSv2 registry at {blocks_per_batch} blocks per batch"
+        );
+        // Each registry is read from the database once, by the batch that first requests it,
+        // and later requests are served from the retained copy. The walk's loader and a
+        // lookahead engine each keep their own copy.
+        let mut loads = super::WHOLE_REGISTRY_LOADS.take();
+        loads.sort();
+        let copies = if force_full_state { 1 } else { 2 };
+        let mut expected: Vec<_> = [
+            (batch_of(FIRST_BLOCK), eth),
+            (batch_of(FIRST_BLOCK + 6), migration),
+        ]
+        .iter()
+        .flat_map(|load| std::iter::repeat_n(load.clone(), copies))
+        .collect();
+        expected.sort();
+        assert_eq!(
+            loads, expected,
+            "whole ENSv2 registries read from the database at {blocks_per_batch} blocks per batch"
         );
         assert!(
             super::RETRIES.get() > 0,
@@ -569,8 +617,12 @@ async fn run(
 
 /// Interprets blocks 0 to 7 three per batch on one engine, orphans block 7 and redoes its
 /// replacement, then follows a new block 8 on a second engine, standing in for a restart.
-/// Returns the stored events and the loader each engine chose.
-async fn reorg_and_restart(force_full_state: bool) -> TestResult<(Vec<String>, Vec<StateLoader>)> {
+/// Returns the stored events, the loader each engine chose and the whole ENSv2 registries read
+/// from the database.
+async fn reorg_and_restart(
+    force_full_state: bool,
+) -> TestResult<(Vec<String>, Vec<StateLoader>, Vec<(i64, String)>)> {
+    super::WHOLE_REGISTRY_LOADS.take();
     let database = database_with_manifests("interpret_lookahead_ensv2_reorg", "sepolia").await?;
     let pool = database.pool();
     stamp_interpreter_hash(pool).await?;
@@ -617,7 +669,9 @@ async fn reorg_and_restart(force_full_state: bool) -> TestResult<(Vec<String>, V
         .execute(pool)
         .await?;
     }
-    seed_last_block(&mut seeder(pool), &replacement, "0x0b").await?;
+    let mut seed = seeder(pool);
+    seed_last_block(&mut seed, &replacement, "0x0b").await?;
+    seed_reparent(&mut seed).await?;
 
     run(&first, None, orphaned, RunMode::Redo).await?;
     let redone = Marker {
@@ -633,20 +687,33 @@ async fn reorg_and_restart(force_full_state: bool) -> TestResult<(Vec<String>, V
     ];
     let stored = stored_events(pool, CHAIN).await?;
     database.cleanup().await?;
-    Ok((stored, choices))
+    Ok((stored, choices, super::WHOLE_REGISTRY_LOADS.take()))
 }
 
 /// A reorg costs the lookahead loader one redo batch read from the database, and a restart
-/// costs nothing; both must store exactly what the full-state loader stores, which restores
-/// the chain's history again after each.
+/// costs nothing beyond reading again each whole registry a batch requests; both must store
+/// exactly what the full-state loader stores, which restores the chain's history again after
+/// each.
 #[tokio::test]
 async fn ensv2_reorg_and_restart_match_full_state() -> TestResult {
-    let (lookahead, choices) = reorg_and_restart(false).await?;
+    let (lookahead, choices, loads) = reorg_and_restart(false).await?;
     assert_eq!(
         choices,
         vec![StateLoader::Lookahead, StateLoader::Lookahead]
     );
-    let (full_state, _) = reorg_and_restart(true).await?;
+    // Batches 0-2 and 6-7 read the ETH and migration registries; the redo's first batch
+    // keeps nothing from before it and reads the migration registry again, and the restarted
+    // engine reads the ETH registry again.
+    assert_eq!(
+        loads,
+        [
+            (FIRST_BLOCK, format!("{ETH_REGISTRY}:*")),
+            (FIRST_BLOCK + 6, format!("{MIGRATION_REGISTRY}:*")),
+            (FIRST_BLOCK + 7, format!("{MIGRATION_REGISTRY}:*")),
+            (FIRST_BLOCK + 8, format!("{ETH_REGISTRY}:*")),
+        ]
+    );
+    let (full_state, _, _) = reorg_and_restart(true).await?;
     assert_eq!(lookahead, full_state);
     let texts: BTreeSet<_> = lookahead
         .iter()

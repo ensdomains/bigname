@@ -557,19 +557,34 @@ pub(super) async fn walk_seeded(
         .with_full_state_loader_forced(force_full_state);
     let mut current: Option<Marker> = None;
     let mut carried: Option<load::CachedPrior> = None;
+    let mut carried_lookahead: Option<load::LookaheadPrior> = None;
     let mut all_released = BTreeSet::new();
     let mut quiet_releases = 0;
     let mut from = FIRST_BLOCK;
     let last_block = FIRST_BLOCK + i64::try_from(offsets.len())? - 1;
     while from <= last_block {
         let to = (from + i64::from(blocks_per_batch) - 1).min(last_block);
-        let lookahead =
-            match super::batch_input(pool, chain, from, to, None, CAPACITY, None).await? {
-                super::Attempt::Loaded(loaded) => *loaded,
-                super::Attempt::FullStateRequired(choice) => {
-                    anyhow::bail!("{chain} manifests must choose lookahead, got {choice:?}")
-                }
-            };
+        let mut lookahead = match super::batch_input(
+            pool,
+            chain,
+            from,
+            to,
+            None,
+            CAPACITY,
+            None,
+            carried_lookahead.take(),
+        )
+        .await?
+        {
+            super::Attempt::Loaded(loaded) => *loaded,
+            super::Attempt::FullStateRequired(choice) => {
+                anyhow::bail!("{chain} manifests must choose lookahead, got {choice:?}")
+            }
+        };
+        let registries = lookahead
+            .whole_registries
+            .take()
+            .expect("lookahead returns its whole registries");
         // Names the batch's own logs mention are loaded whether or not they are due.
         let mentioned: BTreeSet<String> =
             bigname_adapters::schema_v2::collect_v1_batch_dependencies(
@@ -580,7 +595,13 @@ pub(super) async fn walk_seeded(
             .into_iter()
             .map(|request| format!("{}:{}", request.namespace, request.node))
             .collect();
-        let (lookahead_output, _) = interpret(pool, chain, from, lookahead).await?;
+        let (lookahead_output, lookahead_carried) = interpret(pool, chain, from, lookahead).await?;
+        // Kept like the engine keeps them: the engine writes this batch before the next one
+        // brings them forward.
+        carried_lookahead = Some(load::LookaheadPrior {
+            cache: lookahead_carried.cache,
+            registries,
+        });
         let cold = load::batch_input(pool, chain, from, to, None, None, CAPACITY).await?;
         let (cold_output, cold_session) = interpret(pool, chain, from, cold).await?;
         assert_eq!(
@@ -870,7 +891,7 @@ async fn walk_with_retained_uncovered_family(
     let (from, to) = (current.number + 1, current.number + 3);
     add_manifest(pool, "dns_resolver_l1", rollout_status).await?;
     if !force_full_state {
-        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
+        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None, None).await? {
             super::Attempt::Loaded(_) => {}
             super::Attempt::FullStateRequired(choice) => {
                 anyhow::bail!(
@@ -881,7 +902,7 @@ async fn walk_with_retained_uncovered_family(
     }
     retain_uncovered_family(pool, rollout_status).await?;
     if !force_full_state {
-        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None).await? {
+        match super::batch_input(pool, CHAIN, from, to, None, CAPACITY, None, None).await? {
             super::Attempt::Loaded(_) => anyhow::bail!(
                 "lookahead was chosen although {UNCOVERED_FAMILY} history is retained under a \
                  {rollout_status} manifest"
