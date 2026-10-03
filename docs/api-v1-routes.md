@@ -1765,7 +1765,14 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   registry child with no current name row serves its node's current registry
   owner, `owner(node)`: the
   owner of its latest `NewOwner` or `Transfer`, so a transfer after the
-  `NewOwner` moves it. A child whose registry owner is the zero address, one
+  `NewOwner` moves it. A child whose registry owner is the NameWrapper
+  contract that named it under a label failing ENSIP-15 normalization omits
+  `owner`: NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` take the node
+  in the registry and give the token to a holder bigname does not record for a
+  child with no name row
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
+  (see [Manager](api-v1.md#manager)). A child whose registry owner is the zero address, one
   the registry reads as zero, or one the admitted Graveyard holds has no
   owner and is listed only while it has a serving resource. An unmasked 2017
   registry owner word serves its low 20 bytes as `owner`. Registry events prove the child node and its
@@ -3395,7 +3402,8 @@ introduces it rebuilds Project from full history before serving the option; see
   Such an ENSv1 registry child is listed for its current registry owner — the
   node's `owner(node)`, read from its latest `NewOwner` or `Transfer` — as
   `relations: ["owner", "manager"]`, exactly while its parent's
-  `GET /v1/names/{name}/subnames` lists it, and as that route serves it:
+  `GET /v1/names/{name}/subnames` lists it, except the NameWrapper-held child
+  below, and as that route serves it:
   `name` and `display_name` carry the proven, normalization-verified label
   preimage under the parent, else a [non-name form](glossary.md#non-name-form);
   `namehash` is the child node, `owner` the registry owner, and
@@ -3416,9 +3424,19 @@ introduces it rebuilds Project from full history before serving the option; see
   fails ENSIP-15 normalization: its lease and NameWrapper state are projected
   without a name row, so, as the subnames route serves it, its `ens_v1` object
   carries no lifecycle fields, no `expires_at` and no wrapper fields, and the
-  row omits `manager` while still listing it with `relations: ["owner",
-  "manager"]` (see [Manager](api-v1.md#manager)).
-  `relation=owner` and `relation=manager` each list it; `authority` matches
+  row omits `manager`. Such a child whose registry owner is the NameWrapper
+  contract that named it is not listed for the NameWrapper contract under any
+  relation, and its token holder is not listed for it either; once its registry
+  record leaves the NameWrapper it is listed for its new registry owner (see
+  [Manager](api-v1.md#manager)). A known residual: a child the NameWrapper once
+  named whose registry record is later handed back to the NameWrapper address
+  by a plain registry `setOwner` or `setSubnodeOwner`, with no new wrap, also
+  stays unlisted for the NameWrapper contract, whether or not a NameWrapper
+  token survives for it
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+  Every other registry child described here is listed under both
+  `relation=owner` and `relation=manager`; `authority` matches
   it by that value, `is_migrated=true` omits it and `is_migrated=false` keeps it; `q` matches its
   served text; the timestamp sorts place it among the rows without that
   timestamp; `dedupe=registration` keys it by its registry-only resource. A

@@ -4,6 +4,9 @@
 
 const RC_OWNER: &str = "0x00000000000000000000000000000000000000d1";
 const RC_BUYER: &str = "0x00000000000000000000000000000000000000d2";
+/// The NameWrapper and a registrar controller, as the emitters of shadow observations.
+const RC_WRAPPER: &str = "0x00000000000000000000000000000000000000d3";
+const RC_CONTROLLER: &str = "0x00000000000000000000000000000000000000d4";
 
 /// A registry NewOwner under `parent` for `label` to `owner` at `block`, carrying the child
 /// node's registry-only resource as the adapter does. Returns the child node.
@@ -489,13 +492,13 @@ async fn v2_registry_children_serve_the_authority_of_their_registry() -> Result<
 
 /// The shadow surface Interpret writes for `<label>.alpha.eth`, a name whose label fails
 /// normalization (crates/adapters/src/schema_v2/identity.rs, `materialize`), with the
-/// `PreimageObserved` event of the `family` observer that named it, at `block`. Returns the
-/// child's name id.
+/// `PreimageObserved` event of the `family` observer at `emitter` that named it, at `block`.
+/// Returns the child's name id.
 async fn insert_shadow_child_surface(
     database: &TestDatabase,
     child: &str,
     label: &str,
-    family: &str,
+    (family, emitter): (&str, &str),
     source_event: &str,
     block: i64,
 ) -> Result<String> {
@@ -536,32 +539,65 @@ async fn insert_shadow_child_surface(
     .bind(source_event)
     .execute(&database.pool)
     .await?;
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[family_event(
-            &format!("rc-shadow-preimage-{label}"),
-            Some(&id),
-            None,
-            "PreimageObserved",
-            family,
-            block,
-            2,
-            json!({"source_event": source_event, "logical_name_id": id, "namehash": child,
-                   "visibility_state": "shadow", "deactivation_reason": "normalization_gate"}),
-        )],
-    )
-    .await?;
+    let mut observed = family_event(
+        &format!("rc-shadow-preimage-{label}"),
+        Some(&id),
+        None,
+        "PreimageObserved",
+        family,
+        block,
+        2,
+        json!({"source_event": source_event, "logical_name_id": id, "namehash": child,
+               "visibility_state": "shadow", "deactivation_reason": "normalization_gate"}),
+    );
+    observed.raw_fact_ref = json!({"kind": "raw_log", "emitting_address": emitter});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[observed]).await?;
     Ok(id)
 }
 
-/// A child NameWrapper wrapped under a label that fails normalization has only a shadow surface
+/// The served row of `node` among `rows`.
+fn served_child<'a>(rows: &'a [Value], node: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row["namehash"] == json!(node))
+        .unwrap_or_else(|| panic!("{node} is served: {rows:#?}"))
+}
+
+/// The address-names rows and `total_count` of `address` with no relation filter and under
+/// `relation=any`, `relation=owner` and `relation=manager`, each with the `relations` a row
+/// listed for both would match.
+async fn address_rows_by_relation(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<Vec<(Value, Vec<Value>, Value)>> {
+    let mut by_relation = Vec::new();
+    for (relation, matched) in [
+        ("", json!(["owner", "manager"])),
+        ("&relation=any", json!(["owner", "manager"])),
+        ("&relation=owner", json!(["owner"])),
+        ("&relation=manager", json!(["manager"])),
+    ] {
+        let pages = read_family_pages(
+            database,
+            &format!("/v1/addresses/{address}/names?namespace=ens&page_size=10{relation}"),
+        )
+        .await?;
+        by_relation.push((matched, rows_of(&pages), pages[0]["total_count"].clone()));
+    }
+    Ok(by_relation)
+}
+
+/// A child the NameWrapper created with `setSubnodeOwner` under a label that fails
+/// normalization: the NameWrapper takes the node in the registry and mints the token to its
+/// holder (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f),
+/// and the wrapper adapter writes only a shadow surface for it
 /// (crates/adapters/src/schema_v2/protocol/v1/wrapper.rs, `name_wrapped`), so no name row
 /// composes and both routes serve it from its registry. Its wrapper state and any lease are
 /// projected without a composed name, so its `ens_v1` object claims no lifecycle: no `expires_at`
-/// and no wrapper fields. It omits `manager` rather than serve its registry owner, which the
-/// `manager` relation still lists it for. A child whose only shadow a resolver `NameChanged` wrote
-/// has no such state and, like a sibling no label-bearing event named, keeps `expires_at: null`
-/// and serves its registry owner as manager.
+/// and no wrapper fields. Its registry owner is the NameWrapper contract, not its owner, so the
+/// contract's address-names list it under no relation and its subname omits `owner` and
+/// `manager`; its token holder is not listed either. A child whose only shadow a resolver
+/// `NameChanged` wrote has no such state and, like a sibling no label-bearing event named, keeps
+/// `expires_at: null` and serves its registry owner as owner and manager.
 #[tokio::test]
 async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -572,14 +608,21 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         insert_family_label_preimage(&database.pool, label).await?;
     }
     let mut children = Vec::new();
-    for (index, label) in ["Wrapped", "Named", "plain"].into_iter().enumerate() {
+    for (index, (label, owner)) in [
+        ("Wrapped", RC_WRAPPER),
+        ("Named", RC_OWNER),
+        ("plain", RC_OWNER),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let offset = i64::try_from(index)?;
         children.push(
             insert_registry_child(
                 &database,
                 "alpha.eth",
                 label,
-                RC_OWNER,
+                owner,
                 202 + offset,
                 Uuid::from_u128(0x7f1_0011 + u128::try_from(index)?),
             )
@@ -591,7 +634,7 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         &database,
         wrapped,
         "Wrapped",
-        "ens_v1_wrapper_l1",
+        ("ens_v1_wrapper_l1", RC_WRAPPER),
         "NameWrapped",
         202,
     )
@@ -599,11 +642,12 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     // An admitted PublicResolver's `setName` takes any string for a node its caller controls
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f),
     // so a reverse record can name the registry child under a label that fails normalization.
+    // Its emitter is the child's registry owner: only a NameWrapper observation hides a child.
     insert_shadow_child_surface(
         &database,
         named,
         "Named",
-        "ens_v1_resolver_l1",
+        ("ens_v1_resolver_l1", RC_OWNER),
         "NameChanged",
         203,
     )
@@ -654,6 +698,10 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
     .await?;
     publish_test_families(&database, 240).await?;
 
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+        assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
+    }
     let rows = rows_of(
         &read_family_pages(
             &database,
@@ -661,29 +709,167 @@ async fn v2_shadowed_registry_child_serves_ens_v1_without_lifecycle() -> Result<
         )
         .await?,
     );
+    assert!(
+        rows.iter().all(|row| row["namehash"] != json!(wrapped)),
+        "{rows:#?}"
+    );
     let subnames =
         rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
-    for (node, ens_v1, manager) in [
-        (wrapped, json!({}), None),
-        (named, json!({"expires_at": null}), Some(json!(RC_OWNER))),
-        (plain, json!({"expires_at": null}), Some(json!(RC_OWNER))),
-    ] {
-        let row = rows
-            .iter()
-            .find(|row| row["namehash"] == json!(node))
-            .unwrap_or_else(|| panic!("{node} is listed: {rows:#?}"));
-        let subname = subnames
-            .iter()
-            .find(|row| row["namehash"] == json!(node))
-            .unwrap_or_else(|| panic!("{node} is a subname: {subnames:#?}"));
-        for served in [row, subname] {
+    let subname = served_child(&subnames, wrapped);
+    assert_eq!(subname["authority"], json!("ens_v1"), "{subname:#}");
+    assert_eq!(subname["ens_v1"], json!({}), "{subname:#}");
+    assert_eq!(subname.get("owner"), None, "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+    for node in [named, plain] {
+        let row = served_child(&rows, node);
+        for served in [row, served_child(&subnames, node)] {
             assert_eq!(served["authority"], json!("ens_v1"), "{served:#}");
-            assert_eq!(served["ens_v1"], ens_v1, "{served:#}");
+            assert_eq!(served["ens_v1"], json!({"expires_at": null}), "{served:#}");
             assert_eq!(served["owner"], json!(RC_OWNER), "{served:#}");
-            assert_eq!(served.get("manager"), manager.as_ref(), "{served:#}");
+            assert_eq!(served["manager"], json!(RC_OWNER), "{served:#}");
         }
         assert_eq!(row["relations"], json!(["owner", "manager"]), "{row:#}");
     }
+
+    database.cleanup().await
+}
+
+/// A child an ENSv1 registrar controller registered under a label that fails normalization: the
+/// legacy controller accepts any label of three or more characters
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L191-L193 @ ens_v1@91c966f)
+/// and the registration sets the registrant as registry owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f),
+/// so, until a `reclaim` or registry transfer moves the record, the registrant stays listed as
+/// owner and manager of the shadow child and its subname keeps `owner`. Only its `manager` field is withheld, as for every lifecycle shadow. The fixture puts
+/// the child under alpha.eth: which observer emitted the shadow is all that decides the listing.
+#[tokio::test]
+async fn v2_registrar_shadow_child_stays_listed_for_its_registrant() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f2_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Leased").await?;
+    let leased = insert_registry_child(
+        &database,
+        "alpha.eth",
+        "Leased",
+        RC_OWNER,
+        202,
+        Uuid::from_u128(0x7f2_0011),
+    )
+    .await?;
+    insert_shadow_child_surface(
+        &database,
+        &leased,
+        "Leased",
+        ("ens_v1_registrar_l1", RC_CONTROLLER),
+        "NameRegistered",
+        202,
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[family_event(
+            "rc-leased-alpha-grant",
+            Some(&alpha),
+            Some(alpha_resource),
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            201,
+            0,
+            json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                   "expiry": 1_900_000_000i64}),
+        )],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_OWNER).await? {
+        let row = served_child(&rows, &leased);
+        assert_eq!(row["relations"], relation, "{row:#}");
+        assert_eq!(row["owner"], json!(RC_OWNER), "{relation}: {row:#}");
+        assert_eq!(row.get("manager"), None, "{relation}: {row:#}");
+        assert_eq!(row["ens_v1"], json!({}), "{relation}: {row:#}");
+    }
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    let subname = served_child(&subnames, &leased);
+    assert_eq!(subname["owner"], json!(RC_OWNER), "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
+
+    database.cleanup().await
+}
+
+/// A NameWrapper-held shadow child whose registry record later leaves the NameWrapper, as an
+/// unwrap returns it to the controller the holder names
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f), is
+/// listed for its new registry owner and served with that owner; the NameWrapper's earlier
+/// observation does not keep it hidden.
+#[tokio::test]
+async fn v2_wrapper_shadow_child_follows_its_registry_owner_out_of_the_wrapper() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (alpha, alpha_resource) =
+        seed_family_name(&database, "alpha.eth", 0x7f3_0000, "ens_v1").await?;
+    insert_family_label_preimage(&database.pool, b"Wrapped").await?;
+    let resource = Uuid::from_u128(0x7f3_0011);
+    let wrapped =
+        insert_registry_child(&database, "alpha.eth", "Wrapped", RC_WRAPPER, 202, resource)
+            .await?;
+    insert_shadow_child_surface(
+        &database,
+        &wrapped,
+        "Wrapped",
+        ("ens_v1_wrapper_l1", RC_WRAPPER),
+        "NameWrapped",
+        202,
+    )
+    .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            family_event(
+                "rc-unwrapped-alpha-grant",
+                Some(&alpha),
+                Some(alpha_resource),
+                "RegistrationGranted",
+                "ens_v1_registrar_l1",
+                201,
+                0,
+                json!({"authority_kind": "registrar", "registrant": RC_OWNER,
+                       "expiry": 1_900_000_000i64}),
+            ),
+            family_event(
+                "rc-unwrapped-transfer",
+                None,
+                Some(resource),
+                "AuthorityTransferred",
+                "ens_v1_registry_l1",
+                207,
+                0,
+                json!({"source_event": "Transfer", "node": wrapped, "owner": RC_BUYER,
+                       "owner_getter": RC_BUYER, "emitter_role": "registry"}),
+            ),
+        ],
+    )
+    .await?;
+    publish_test_families(&database, 240).await?;
+
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_WRAPPER).await? {
+        assert_eq!(rows, Vec::<Value>::new(), "{relation}");
+        assert_eq!(total, json!(0), "{relation}");
+    }
+    for (relation, rows, _) in address_rows_by_relation(&database, RC_BUYER).await? {
+        let row = served_child(&rows, &wrapped);
+        assert_eq!(row["relations"], relation, "{row:#}");
+        assert_eq!(row["owner"], json!(RC_BUYER), "{relation}: {row:#}");
+        assert_eq!(row.get("manager"), None, "{relation}: {row:#}");
+    }
+    let subnames =
+        rows_of(&read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=10").await?);
+    let subname = served_child(&subnames, &wrapped);
+    assert_eq!(subname["owner"], json!(RC_BUYER), "{subname:#}");
+    assert_eq!(subname.get("manager"), None, "{subname:#}");
 
     database.cleanup().await
 }

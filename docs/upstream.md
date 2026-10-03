@@ -245,6 +245,32 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 > ends the wrapper authority (TYR-147).
 > **Since**: `2026-10-01`
 
+> **A registry child the NameWrapper holds under a label failing normalization is served with no owner** —
+> NameWrapper's `setSubnodeOwner` and `setSubnodeRecord` accept a label that
+> fails ENSIP-15 normalization, take the child's registry record and mint the
+> token to a holder. bigname composes no
+> [name row](glossary.md#composed-name-row) for such a child, so it omits
+> `owner` and `manager` on its parent's subnames page and does not list it for the
+> NameWrapper contract under any relation; it does not list the token holder
+> either. A child the NameWrapper once named whose record is handed back to the
+> NameWrapper address by a plain registry `setOwner` or `setSubnodeOwner`, with
+> no new wrap, also stays unlisted, whether or not a NameWrapper token survives
+> for it.
+> **Upstream**: (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612-L619 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+> (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+> **Our rule**: `docs/api-v1.md` § Manager; `docs/api-v1-routes.md` (subnames and
+> address names).
+> **Why**: the address index records the child's registry owner, the NameWrapper
+> contract, not its token holder, so the read side can only stop serving the
+> contract; listing the holder needs a projection change and is deferred
+> (TYR-148). The read side keys on a NameWrapper having observed the child and
+> holding its registry record now, not on a current token, which is what leaves
+> the write-back case hidden. The TYR-147 change will record the same
+> write-back case for children that have a name row; the two entries merge then.
+> **Since**: `2026-10-03`
+
 
 
 
