@@ -254,6 +254,16 @@ fn carried_session_matches_a_restore_when_ensv2_expires_beside_an_ensv1_renewal(
 
     let (first, session) = interpret_test_batch_incremental(prefix.clone(), None)?;
     let (second, carried) = interpret_test_batch_incremental(suffix.clone(), Some(session))?;
+    for (kind, family) in [
+        ("RegistrationReleased", "ens_v2_registry_l1"),
+        ("RegistrationRenewed", "ens_v2_migration_l1"),
+    ] {
+        assert!(second.normalized_events.iter().any(|event| {
+            event.block_number == Some(renewal_block)
+                && event.event_kind == kind
+                && event.source_family == family
+        }));
+    }
     let mut restore = suffix;
     restore.raw_logs.clear();
     let mut history = prefix.blocks.clone();

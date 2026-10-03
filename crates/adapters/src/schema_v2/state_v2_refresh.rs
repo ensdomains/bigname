@@ -41,7 +41,8 @@ impl State {
         let at_unix_timestamp = self.advance_v2_timestamp(at_unix_timestamp);
         let crossed = self.capture_crossed_v2_expiries(previous_timestamp, at_unix_timestamp);
         self.expand_dirty_v2_registries(at_unix_timestamp);
-        // A kept baseline shares nodes with the live maps, so each refresh write would copy them.
+        // A kept baseline shares nodes with the live maps, so a refresh's first write to each
+        // would copy it.
         self.v2_topology_baseline = None;
         let keys = std::mem::take(&mut self.v2_dirty_tokens)
             .into_iter()
