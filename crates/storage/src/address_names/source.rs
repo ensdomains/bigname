@@ -33,8 +33,13 @@ const ADDRESS_RECORDS_COLUMNS: &str = "arc(address text, coin_type text, logical
 pub(crate) enum RowSource<'a> {
     /// Composed rows: `rows` the relation rows, and `names` the composed name rows
     /// (`logical_name_id`, `declared_summary`, `provenance`) the authority and migration filters
-    /// and the timestamp sorts read.
-    Composed { rows: &'a Value, names: &'a Value },
+    /// and the timestamp sorts read. With `parent`, a normalized name, only the relation rows
+    /// whose name is exactly one label below it.
+    Composed {
+        rows: &'a Value,
+        names: &'a Value,
+        parent: Option<&'a str>,
+    },
 }
 
 impl<'a> RowSource<'a> {
@@ -85,13 +90,25 @@ impl<'a> RowSource<'a> {
     }
 
     fn push_rows(self, builder: &mut QueryBuilder<'a, Postgres>, columns: &'static str) {
-        match self {
-            Self::Composed { rows, .. } => {
-                builder.push("JSONB_TO_RECORDSET(");
-                builder.push_bind(rows);
-                builder.push(") AS ");
-                builder.push(columns);
-            }
-        }
+        let Self::Composed { rows, parent, .. } = self;
+        let Some(parent) = parent else {
+            builder.push("JSONB_TO_RECORDSET(");
+            builder.push_bind(rows);
+            builder.push(") AS ");
+            builder.push(columns);
+            return;
+        };
+        let alias = &columns[..columns.find('(').unwrap_or(columns.len())];
+        builder.push("(SELECT * FROM JSONB_TO_RECORDSET(");
+        builder.push_bind(rows);
+        builder.push(") AS ");
+        builder.push(columns);
+        builder.push(" WHERE TRUE");
+        crate::name_current::push_parent_predicate(
+            builder,
+            &format!("{alias}.normalized_name"),
+            parent,
+        );
+        builder.push(format!(") AS {alias}"));
     }
 }

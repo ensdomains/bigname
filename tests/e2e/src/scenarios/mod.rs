@@ -1,3 +1,4 @@
+mod address_parent;
 mod basenames;
 mod basenames_lifecycle;
 mod catchup_equivalence;

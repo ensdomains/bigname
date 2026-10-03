@@ -2979,6 +2979,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `expires_before` | query | string | no | none | Exclusive expiry upper bound, only with relation=former_owner. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value, including an ENSv1 registry child with no name row by its registry's value. Rows that serve no `authority` match no set. Not accepted with relation=former_owner. |
 | `is_migrated` | query | boolean | no | none | Whether the current name has a selected ENSv2 arm and a retained activated migration time; not accepted with relation=resolves_to or relation=former_owner. |
+| `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed, on every relation and before grouping, paging and page.total_count. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `q` | query | string | no | none | Name search text; normalization, prefix and label-boundary rules are specified in the route prose. Not accepted with relation=former_owner. |
 | `match` | query | enum NameMatch | no | `prefix` | Prefix or substring matching for q. |
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
@@ -3007,7 +3008,7 @@ introduces it rebuilds Project from full history before serving the option; see
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`,
   `authority` (a comma-separated set of `ens_v0`, `ens_v1`, `ens_v2`),
-  `coin_type`, `q`, `match=prefix|contains`,
+  `parent`, `coin_type`, `q`, `match=prefix|contains`,
   `sort=name|expires_at|registered_at|created_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
@@ -3029,6 +3030,17 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (Basenames rows and ownerless registry rows) match no set, including all three
   values, so `authority=ens_v0,ens_v1,ens_v2` is narrower than omitting the
   filter.
+  `parent` keeps only names exactly one label below the given name, by the
+  rule it has on [`GET /v1/names`](#get-v1names): the value is normalized as a
+  path name, and a row matches by its normalized name spelling, not by node or
+  registry topology, so `parent=eth` keeps the `.eth` second-level names and
+  no deeper subname, wrapped or not (see the
+  [naming dictionary](api-v1.md#naming-dictionary)). An ENSv1 registry child
+  with no name row matches by the name it serves, which spells an unknown
+  label as a bracketed labelhash. It applies to every relation, `resolves_to`
+  and `former_owner` included, before grouping, sorting, pagination and
+  `page.total_count`. An empty `parent`, a `parent` that is not a valid name,
+  or a repeated `parent` returns `400 invalid_input`.
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
   `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
@@ -3038,8 +3050,19 @@ introduces it rebuilds Project from full history before serving the option; see
   with the other filters and is rejected with `relation=resolves_to`.
   The ownership collection always returns an exact `page.total_count` before
   applying its cursor, with the same relations, `q` and `match` predicate,
-  `authority` set, migration predicate and deduplication as the rows. For registration counts use
-  `relation=owner&dedupe=registration`; a name count uses `dedupe=name`.
+  `authority` set, `parent`, migration predicate and deduplication as the rows.
+  `owner` also lists names with no token for their registry owner, such as
+  unwrapped subnames and registry children, so `relation=owner&dedupe=registration`
+  counts those as well. For the registrations an address holds, add
+  `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1`
+  returns a `page.total_count` with one entry per `.eth` registration the
+  address holds, a wrapped `.eth` name once, and no subname;
+  `parent=base.eth&namespace=basenames` counts Basenames registrations. One
+  known exception: a `.eth` name with no name surface, listed as a registry
+  child below, is counted for its current registry owner whatever its registration
+  state: when another address holds the registration, after it is released,
+  or when it has none, except a NameWrapper-held child, which is counted for
+  no address. A name count uses `dedupe=name`.
   This GET route supplies exact totals even for single relations whose
   `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
@@ -3146,11 +3169,11 @@ introduces it rebuilds Project from full history before serving the option; see
   positions compare numerically without calendar or safe-integer caps.
   `coin_type`,
   `authority`, `is_migrated`, `q` and nonempty `include` return `400 invalid_input` with
-  it. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
+  it; `parent` applies as on the other relations. Only name deduplication is supported: omitted `dedupe` and `dedupe=name`
   are equivalent; `dedupe=registration` returns `400 invalid_input`, including
   with a continuation cursor. Released names have no current registration resource
   by which this relation can group them. `page.total_count` is `null`. Its cursor binds the address,
-  namespace, both bounds and order, and holds the last row's position, as on
+  namespace, both bounds, `parent` when sent, and order, and holds the last row's position, as on
   `GET /v1/names`. An app looking for names still renewable in grace asks for
   `expires_after` at `now` minus the longest grace and checks `grace_ends_at`
   and the contract's own renewal rules: an explicitly unregistered ENSv2
@@ -3207,8 +3230,8 @@ introduces it rebuilds Project from full history before serving the option; see
   resource can match without a current owner or registration; the result does
   not invent authority for them. For such names, `dedupe=registration` and
   cursor identity use the serving resource as the grouping key while
-  registration fields remain absent. `namespace`, `authority`, `q`, `match`,
-  `sort`, `order`, `dedupe`,
+  registration fields remain absent. `namespace`, `authority`, `parent`, `q`,
+  `match`, `sort`, `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `manager`,
@@ -3320,7 +3343,9 @@ introduces it rebuilds Project from full history before serving the option; see
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, the normalized
   `authority` set, `is_migrated`, `q`, `match=contains` when it narrows a
-  `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
+  `q`, `parent` when sent, dedupe mode, sort, and order (a cursor issued
+  without `parent` keeps the shape it had before the filter existed, so it
+  continues unchanged); a `resolves_to` cursor additionally binds
   the coin-type selector (the canonical decimal coin type, or `evm`), so a
   single-coin cursor never resumes an `evm` read or the reverse, and a cursor
   minted for one relation set never resumes another. `resolves_to` reads

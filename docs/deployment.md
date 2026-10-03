@@ -2383,3 +2383,18 @@ when the managed proxy moved to the listed UniversalResolverV2
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UniversalResolverV2.json:L2 @ ens_v2_sepolia_20261001@07e55a05).
 On Mainnet the `ens_execution` manifest declares no `Upgraded` event, so no
 proxy row exists and the network serves `{"protocol": "ens_v1", "since_block": null}`.
+
+### Parent filter on names by address
+
+The build that adds `parent` to
+[`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames)
+changes only API and read paths. The storage files it edits,
+`crates/storage/src/address_names/{source,page,read,resolves_to_page,resolves_to_evm}.rs`,
+`crates/storage/src/name_current.rs`,
+`crates/storage/src/families/name/list.rs` (a comment only) and
+`crates/storage/src/families/records/{address_names,resolves_to_serving,former_owners}.rs`,
+are read-only queries outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash
+does not rotate. It adds no schema-migration and needs no redo or historical
+ingest fetch. Cursors issued before it continue unchanged, and a cursor issued
+with `parent` must be continued with the same `parent`.

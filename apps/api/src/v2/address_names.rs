@@ -67,6 +67,7 @@ impl QueryParamAllowlist for AddressNamesQueryParams {
         "expires_before",
         "authority",
         "is_migrated",
+        "parent",
         "q",
         "match",
         "sort",
@@ -162,6 +163,11 @@ pub(crate) async fn get_address_names(
     if let Some(namespace) = params.namespace.as_deref() {
         ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
     }
+    let parent = params
+        .parent
+        .as_deref()
+        .map(super::names::normalize_parent)
+        .transpose()?;
     if (params.expires_after.is_some() || params.expires_before.is_some())
         && !params
             .relation
@@ -177,14 +183,26 @@ pub(crate) async fn get_address_names(
         .as_ref()
         .is_some_and(RelationSet::is_resolves_to)
     {
-        return resolves_to::get_address_resolves_to(&state, &normalized_address, &params).await;
+        return resolves_to::get_address_resolves_to(
+            &state,
+            &normalized_address,
+            &params,
+            parent.as_deref(),
+        )
+        .await;
     }
     if params
         .relation
         .as_ref()
         .is_some_and(RelationSet::is_former_owner)
     {
-        return former_owner::get_address_former_owners(&state, &normalized_address, &params).await;
+        return former_owner::get_address_former_owners(
+            &state,
+            &normalized_address,
+            &params,
+            parent.as_deref(),
+        )
+        .await;
     }
     if params.coin_type.is_some() {
         return Err(V2Error::invalid_input(
@@ -220,6 +238,7 @@ pub(crate) async fn get_address_names(
         name_match: params.name_match,
         authority: params.authority.as_ref(),
         is_migrated: params.is_migrated,
+        parent: parent.as_deref(),
         sort: params.sort,
         order,
     };
@@ -247,6 +266,7 @@ pub(crate) async fn get_address_names(
             .map(|q| params.name_match.to_storage(q)),
         authorities.as_deref(),
         params.is_migrated,
+        parent.as_deref(),
         storage_sort,
         storage_order,
         storage_cursor.as_ref(),
