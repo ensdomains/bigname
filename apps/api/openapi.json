@@ -5888,6 +5888,13 @@
           "ens_v2"
         ]
       },
+      "ResolutionProtocol": {
+        "type": "string",
+        "enum": [
+          "ens_v1",
+          "ens_v2"
+        ]
+      },
       "Source": {
         "type": "string",
         "enum": [
@@ -7916,11 +7923,36 @@
           "chain_id": {
             "type": "integer",
             "description": "Numeric EVM chain ID."
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/NamespaceResolution",
+            "description": "ENS protocol generation that `.eth` resolution follows on this network; absent where the namespace has no ENS execution entrypoint on it, and while the network's projected data is not servable (lookup and collection reads answer `409 stale`)."
           }
         },
         "additionalProperties": false,
         "required": [
           "network"
+        ]
+      },
+      "NamespaceResolution": {
+        "type": "object",
+        "properties": {
+          "protocol": {
+            "$ref": "#/components/schemas/ResolutionProtocol",
+            "description": "`ens_v2` past the Universal Resolver cutover, otherwise `ens_v1`."
+          },
+          "since_block": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Block of the latest Universal Resolver `Upgraded` that set the current state; null before any upgrade is observed."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "protocol",
+          "since_block"
         ]
       },
       "PermissionRow": {
