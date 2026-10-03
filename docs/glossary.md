@@ -1715,14 +1715,25 @@ resource and labelhash it names; loading a key loads every event filed under it.
 
 ## ENSv2 name suffix walk
 
-how Interpret finds the name an ENSv2 registry's tokens sit under: from the
-registry's parent claim (`ParentUpdated`) to the parent token, which must be live
-and point back at the registry with its subregistry pointer, then on up the same
-way until a registry whose suffix a manifest declares, such as `.eth`. Each
-token's name is its label followed by the labels the walk collects. When a batch
-touches a registry's claim or its parent token, Interpret compares the walk with
-the one from the previous name refresh; only a changed walk renames every token
-in the registry and in the registries beneath it. See [Interpret process memory](storage.md#interpret-process-memory).
+how Interpret finds the name an ENSv2 registry's tokens sit under. It starts from
+the registry's parent claim, which the registry's `ParentUpdated` event sets
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L175-L182 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L134-L141 @ ens_v2_sepolia_20261001@07e55a05),
+and goes to the parent's token for that label. The token must be unexpired, which
+ENSv2 defines as the current time being before its expiry
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L670-L673 @ ens_v2_sepolia_20261001@07e55a05),
+and its subregistry pointer, set with `SubregistryUpdated`
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L153 @ ens_v2_sepolia_20261001@07e55a05),
+must point back at the registry. The walk then continues the same way up to a
+registry whose suffix a manifest declares, such as `.eth`. The contracts do not
+check that back-pointer when a parent is set; ENSv2's own canonical-name helper
+requires it when reading, and the walk follows that helper
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L119-L142 @ ens_v2_sepolia_20261001@07e55a05).
+Each token's name is its label followed by the labels the walk collects. When a
+batch touches a registry's claim or its parent token, Interpret compares the walk
+with the one from the previous name refresh; only a changed walk renames every
+token in the registry and in the registries beneath it. See
+[Interpret process memory](storage.md#interpret-process-memory).
 
 ## Interpreter state key
 

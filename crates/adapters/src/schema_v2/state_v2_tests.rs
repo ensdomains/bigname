@@ -207,6 +207,41 @@ fn v2_refresh_after_an_ensv1_activation_matches_the_full_walk() {
         assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(2)));
     });
 }
+/// When the last ENSv2 holder of a name leaves, a live ENSv1 authority's resource becomes
+/// current, as a restore of the same history ends, whether it leaves in the batch of the ENSv1
+/// activation or later.
+#[test]
+fn v2_departure_hands_the_name_back_to_its_ensv1_authority() {
+    for refreshed_between in [false, true] {
+        let mut state = anchored_state();
+        install_token(&mut state, ROOT, "0x01", b"alpha", 100);
+        state.link_v2_resource(ROOT, "0x01", "v2".to_owned(), Uuid::from_u128(2), None);
+        state.refresh_dirty_v2_names(1);
+        let name = name_id(&state, ROOT, "0x01");
+        let (_, namehash) = name.split_once(':').expect("logical name id");
+        state.observe_v1_name(
+            NAMESPACE,
+            namehash,
+            name.clone(),
+            true,
+            Uuid::from_u128(1),
+            None,
+            "ens_v1_registry_l1".to_owned(),
+            None,
+            None,
+            None,
+        );
+        if refreshed_between {
+            state.refresh_dirty_v2_names(50);
+        }
+        state.refresh_dirty_v2_names(150);
+        assert_eq!(
+            state.active_resources.get(&name),
+            Some(&Uuid::from_u128(1)),
+            "refreshed between: {refreshed_between}"
+        );
+    }
+}
 #[test]
 fn v2_dirty_drain_emits_transitions_in_ascending_token_key_order() {
     let mut state = anchored_state();

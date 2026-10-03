@@ -586,7 +586,7 @@ impl State {
         if let (Some(logical_name_id), Some(resource_id)) = (logical_name_id, token.resource_id)
             && self.observed_active_resource(logical_name_id) == Some(resource_id)
         {
-            self.active_resources.remove(logical_name_id);
+            self.hand_over_v2_active_resource(logical_name_id);
         }
     }
 }

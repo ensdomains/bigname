@@ -1715,12 +1715,15 @@ because of the registry's suffix, so only the tokens the batch touches for their
 own reasons (a registration, renewal, expiry, release or replacement) are
 refreshed, and the lookahead loader reads only those and the rows the walk
 reads. An ENSv1 event that makes its resource current for a name an ENSv2 token
-also holds reads and refreshes that name's ENSv2 tokens as well: the ENSv2
-holder with the greatest token key that carries a registration and a resource
-stays current, immediately, as a full refresh does, and the ENSv1 resource is
-current only when no such holder exists. When they differ, every token in the registry takes a new name, or loses
-it when the suffix is gone, at the triggering event, so both loaders refresh
-every token. The same holds for every registry below it, whose suffixes move
+also holds reads and refreshes that name's ENSv2 tokens as well. Of the ENSv2
+tokens holding the name with a registration and a resource, the one whose
+registry address and token id sort last stays current, immediately, as a full
+refresh does; the ENSv1 resource is current only when no such token exists, and
+becomes current again when the last one leaves the name. When the two walks differ, both
+loaders refresh every retained token in the registry at the triggering event:
+each one whose registration is live takes the new name, or loses its name when
+the suffix is gone, and a token that had already expired stays unnamed. The same
+holds for every registry below it, whose suffixes move
 too. The lookahead loader then reads the whole
 history of each of those registries for that batch: the latest event per
 interpreter state key filed under each registry's `<registry>:*` key. The batch

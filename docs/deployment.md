@@ -2358,7 +2358,8 @@ consistent for any that will. It adds no schema-migration, table, index,
 manifest or setting, so stamp no Ingest redo. In v0.4.0 it shares the release's
 one Interpret and Project redo pair with the other hash-rotating changes in the
 bundle. A batch that touches an ENSv2 registry without moving its name suffix
-now reads only the rows it touches, so a lookahead redo no longer slows as a
-busy registry's history grows. A batch whose registry suffix does move, or the
+now reads only the history of the names and tokens it touches instead of the
+whole registry's, so a lookahead redo no longer reads a busy registry whole on
+nearly every batch. A batch whose registry suffix does move, or the
 first batch with ENSv2 events on a chain, still reads the registry whole and
 logs a warning; see [Verify health](runbooks/production-docker.md#verify-health).

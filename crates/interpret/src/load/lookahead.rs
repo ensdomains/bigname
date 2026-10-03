@@ -348,39 +348,46 @@ async fn retained_family_reason(
 }
 
 /// For each whole registry the batch read, its tokens, its restored events and the bytes of
-/// those events' state.
+/// those events' state, in one pass over the restored events.
 fn whole_registry_loads(
     prior: &[PriorEventInput],
     dependencies: &V1BatchDependencies,
 ) -> Vec<(String, usize, usize, usize)> {
-    let whole = dependencies
+    let mut whole = dependencies
         .v2_keys
         .iter()
-        .filter_map(|key| key.strip_suffix(":*"));
-    whole
+        .filter_map(|key| key.strip_suffix(":*"))
         .map(|registry| {
-            let mut tokens = std::collections::BTreeSet::new();
-            let (mut events, mut bytes) = (0, 0);
-            for event in prior {
-                // `<registry>:-:<token id>:-:<source event>`, as `lookahead/v2_keys.sql` reads it.
-                let mut scope = event.state_scope.as_deref().unwrap_or_default().split(':');
-                if !scope
-                    .next()
-                    .is_some_and(|emitter| emitter.eq_ignore_ascii_case(registry))
-                {
-                    continue;
-                }
-                events += 1;
-                bytes += event.after_state.to_string().len();
-                tokens.extend(
-                    scope
-                        .nth(1)
-                        .filter(|token| !matches!(*token, "" | "-"))
-                        .map(str::to_owned),
-                );
-            }
-            (registry.to_owned(), tokens.len(), events, bytes)
+            (
+                registry.to_ascii_lowercase(),
+                (std::collections::BTreeSet::new(), 0, 0),
+            )
         })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if whole.is_empty() {
+        return Vec::new();
+    }
+    for event in prior {
+        // `<registry>:-:<token id>:-:<source event>`, as `lookahead/v2_keys.sql` reads it.
+        let mut scope = event.state_scope.as_deref().unwrap_or_default().split(':');
+        let Some((tokens, events, bytes)) = scope
+            .next()
+            .and_then(|emitter| whole.get_mut(&emitter.to_ascii_lowercase()))
+        else {
+            continue;
+        };
+        *events += 1;
+        *bytes += event.after_state.to_string().len();
+        tokens.extend(
+            scope
+                .nth(1)
+                .filter(|token| !matches!(*token, "" | "-"))
+                .map(str::to_owned),
+        );
+    }
+    whole
+        .into_iter()
+        .map(|(registry, (tokens, events, bytes))| (registry, tokens.len(), events, bytes))
         .collect()
 }
 

@@ -169,3 +169,39 @@ fn migrated_v1_lease_expiry_does_not_reopen_after_v2_expiry() -> anyhow::Result<
     }));
     Ok(())
 }
+
+/// An ENSv1 renewal after the move keeps the ENSv2 resource current until the ENSv2 token
+/// expires in the same batch; the name then returns to the ENSv1 authority's resource, and
+/// `interpret_test_batch` checks the live session against a restore and the lookahead loader.
+#[test]
+fn ensv1_renewal_after_the_move_outlives_the_ensv2_registration() -> anyhow::Result<()> {
+    let mut input = migration_and_old_lease_expiry()?;
+    let expiry_block = input.blocks.last().unwrap().block_number;
+    input
+        .raw_logs
+        .retain(|raw| raw.block_number != expiry_block - 1);
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let expiry = scenario["stored_expiry"].as_i64().unwrap();
+    input.raw_logs.push(raw_at_transaction(
+        with_topic0(
+            BaseNameRenewed {
+                id: decimal_u256(&scenario["base_token_id"])?,
+                expires: U256::from(expiry + 2 * 365 * 86400),
+            }
+            .encode_log_data(),
+            keccak256(b"NameRenewed(uint256,uint256)"),
+        ),
+        expiry_block - 1,
+        0,
+        0,
+        fixture["addresses"]["base_registrar"].as_str().unwrap(),
+    ));
+    let output = interpret_test_batch(input)?;
+    assert!(output.normalized_events.iter().any(|event| {
+        event.block_number == Some(expiry_block)
+            && event.event_kind == "RegistrationReleased"
+            && event.source_family.starts_with("ens_v2_")
+    }));
+    Ok(())
+}

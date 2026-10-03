@@ -233,6 +233,7 @@ impl State {
                 .then_some(token.resource_id)
                 .flatten();
             let changed = previous != name || previous_shadow != shadow_name;
+            let mut departed = false;
             let resource_retirement = resource_retirements.contains(&key)
                 && token.resource_id.is_some()
                 && !token.expiry_retirement_emitted
@@ -262,6 +263,7 @@ impl State {
                     })
                 {
                     self.active_resources.remove(&previous.logical_name_id);
+                    departed = true;
                 }
                 transitions.push(V2NameTransition {
                     registry: emitter.to_owned(),
@@ -295,7 +297,11 @@ impl State {
             }
             if changed
                 && let Some(previous) = previous.as_ref()
-                && let Some(resource_id) = self.v2_active_resource_winner(&previous.logical_name_id)
+                && let Some(resource_id) = if departed {
+                    self.v2_departure_successor(&previous.logical_name_id)
+                } else {
+                    self.v2_active_resource_winner(&previous.logical_name_id)
+                }
             {
                 self.active_resources
                     .insert(previous.logical_name_id.clone(), resource_id);
@@ -366,6 +372,28 @@ impl State {
         self.v2_active_resource_winner_key(logical_name_id)
             .and_then(|token_key| self.v2_tokens.get(&token_key))
             .and_then(|token| token.resource_id)
+    }
+
+    /// Takes a departing ENSv2 holder's resource off a name and makes its successor current.
+    pub(super) fn hand_over_v2_active_resource(&mut self, logical_name_id: &str) {
+        self.active_resources.remove(logical_name_id);
+        if let Some(successor) = self.v2_departure_successor(logical_name_id) {
+            self.active_resources
+                .insert(logical_name_id.to_owned(), successor);
+        }
+    }
+
+    /// The resource current for a name once an ENSv2 holder has left it: the next ENSv2
+    /// winner, else the name's ENSv1 authority's, as a restore of the same history ends.
+    pub(super) fn v2_departure_successor(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+        self.v2_active_resource_winner(logical_name_id).or_else(|| {
+            let (namespace, namehash) = logical_name_id.split_once(':')?;
+            self.v1_name(namespace, namehash)
+                .filter(|authority| {
+                    authority.surface_known && authority.logical_name_id == logical_name_id
+                })
+                .map(|authority| authority.resource_id)
+        })
     }
 
     fn v2_active_resource_winner_key(&self, logical_name_id: &str) -> Option<String> {
