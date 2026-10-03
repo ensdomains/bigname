@@ -1484,6 +1484,72 @@ async fn v2_renewed_surface_less_child_keeps_its_owner() -> Result<()> {
     database.cleanup().await
 }
 
+/// A BaseRegistrar `Transfer` without `reclaim` moves the token and leaves the registry record
+/// with the seller
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
+/// Project indexes the buyer under the lease's `ens:<node>` id, but both routes still serve the
+/// child from its registry owner: the buyer's address names list nothing and the seller's rows,
+/// totals and the parent's subnames are unchanged.
+#[tokio::test]
+async fn v2_unnamed_lease_transfer_serves_the_child_from_its_registry_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (node, labelhash) = seed_lapsed_registrar_child(&database).await?;
+    let lease = Uuid::from_u128(LAPSED_LEASE);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &unnamed_lease_events(
+            "rc-sold-renewed",
+            &["RegistrationRenewed", "ExpiryChanged"],
+            ("ens_v1_registrar_l1", "ens"),
+            (&node, &labelhash),
+            (RC_OWNER, 1_900_000_000),
+            230,
+            lease,
+        ),
+    )
+    .await?;
+    publish_test_families(&database, 231).await?;
+    let seller_before = address_rows_by_relation(&database, RC_OWNER).await?;
+    let subnames_before = eth_subnames(&database, "").await?;
+
+    let mut transfer = family_event(
+        "rc-sold-transfer",
+        None,
+        Some(lease),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        232,
+        0,
+        json!({"source_event": "Transfer", "namehash": node, "from": RC_OWNER,
+               "to": RC_BUYER}),
+    );
+    transfer.namespace = "ens".to_owned();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[transfer]).await?;
+    publish_test_families(&database, 233).await?;
+
+    let indexed: Vec<String> = sqlx::query_scalar(
+        "SELECT relation FROM project_address_name_index
+         WHERE address = $1 AND logical_name_id = $2",
+    )
+    .bind(RC_BUYER)
+    .bind(format!("ens:{node}"))
+    .fetch_all(&database.pool)
+    .await?;
+    assert!(!indexed.is_empty(), "the buyer is indexed under the lease's node id");
+    for (relation, rows, total) in address_rows_by_relation(&database, RC_BUYER).await? {
+        assert!(rows.is_empty(), "{relation}: {rows:#?}");
+        assert_eq!(total, json!(0), "{relation}");
+    }
+    assert_eq!(
+        address_rows_by_relation(&database, RC_OWNER).await?,
+        seller_before
+    );
+    assert_eq!(eth_subnames(&database, "").await?, subnames_before);
+    assert_child_served_to(&database, &node, RC_OWNER, "unregistered").await?;
+
+    database.cleanup().await
+}
+
 /// Publish the Base families at `target` over blocks 200..=241 of `base-mainnet`.
 async fn publish_base_families(database: &TestDatabase, target: i64) -> Result<()> {
     const BASE: &str = "base-mainnet";
