@@ -362,7 +362,7 @@ impl State {
     /// holders that carry a registration and a linked resource — the winner an unconditional
     /// re-assert produces on a full ascending walk — so a refresh elects the same resource for
     /// any dirty set that closes over the surface's contention.
-    fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
+    pub(super) fn v2_active_resource_winner(&self, logical_name_id: &str) -> Option<uuid::Uuid> {
         self.v2_active_resource_winner_key(logical_name_id)
             .and_then(|token_key| self.v2_tokens.get(&token_key))
             .and_then(|token| token.resource_id)

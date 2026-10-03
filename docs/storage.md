@@ -1714,7 +1714,11 @@ alongside its other state. When the two walks agree, no token changes name
 because of the registry's suffix, so only the tokens the batch touches for their
 own reasons (a registration, renewal, expiry, release or replacement) are
 refreshed, and the lookahead loader reads only those and the rows the walk
-reads. When they differ, every token in the registry takes a new name, or loses
+reads. An ENSv1 event that makes its resource current for a name an ENSv2 token
+also holds reads and refreshes that name's ENSv2 tokens as well: the ENSv2
+holder with the greatest token key that carries a registration and a resource
+stays current, immediately, as a full refresh does, and the ENSv1 resource is
+current only when no such holder exists. When they differ, every token in the registry takes a new name, or loses
 it when the suffix is gone, at the triggering event, so both loaders refresh
 every token. The same holds for every registry below it, whose suffixes move
 too. The lookahead loader then reads the whole

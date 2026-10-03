@@ -421,12 +421,15 @@ impl State {
         previous
     }
 
-    /// Makes an ENSv1 resource current for a name. ENSv2 tokens holding the name are refreshed at
-    /// the batch end, which elects their winner over it as a full refresh does, so the result
-    /// does not depend on batch boundaries.
+    /// Makes an ENSv1 resource current for a name unless an ENSv2 token holding it wins,
+    /// immediately, as a full refresh does. Those tokens are refreshed too, so the result does
+    /// not depend on batch boundaries.
     pub(super) fn activate_v1_resource(&mut self, logical_name_id: &str, resource_id: Uuid) {
+        let current = self
+            .v2_active_resource_winner(logical_name_id)
+            .unwrap_or(resource_id);
         self.active_resources
-            .insert(logical_name_id.to_owned(), resource_id);
+            .insert(logical_name_id.to_owned(), current);
         if let Some(keys) = self
             .v2_tokens_by_current_name_index
             .get(logical_name_id)

@@ -2351,9 +2351,10 @@ an ENSv2 token hold, such as a name moved to ENSv2 whose ENSv1 registration is
 renewed afterwards. Before, an ENSv1 event could make the ENSv1 resource current
 and the ENSv2 token's resource came back only if a name refresh happened to
 reach that token, which depended on batch boundaries and on unrelated registry
-changes. Now the ENSv2 token's resource is elected again at the end of every
-batch, as a full refresh of every name does, so the result no longer depends on
-how the history was batched. It adds no schema-migration, table, index,
+changes. Now the ENSv2 token's resource stays current immediately, as a full
+refresh of every name elects, so the result no longer depends on how the history
+was batched. No stored event reads this choice today; it keeps the state
+consistent for any that will. It adds no schema-migration, table, index,
 manifest or setting, so stamp no Ingest redo. In v0.4.0 it shares the release's
 one Interpret and Project redo pair with the other hash-rotating changes in the
 bundle. A batch that touches an ENSv2 registry without moving its name suffix

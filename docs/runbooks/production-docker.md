@@ -1326,8 +1326,8 @@ holds it in memory, and once that read completes the runner logs the warning
 for each registry with its token and event counts and the bytes of event state.
 A batch that fails afterwards and is retried logs it again. The first batch with ENSv2 events on a chain, including the first one of
 a redo from before ENSv2 history, has no earlier names to compare with, so it
-reads every registry it touches whole and logs the same warning, usually with
-few or zero events because the registries are new. Otherwise expect the
+reads whole every registry it marks for a name refresh and logs the same
+warning, usually with few or zero events because the registries are new. Otherwise expect the
 warning rarely; frequent warnings for one registry mean its suffix keeps
 moving. Each one is a slower, larger batch, not a stuck one, and the memory it
 needs is described under

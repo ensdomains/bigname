@@ -383,8 +383,8 @@ async fn seed_history(pool: &PgPool, lineage: &[i64]) -> TestResult {
     // Anyone may renew an ENSv1 name, so alice's registration renews after she moved to ENSv2
     // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L367 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L167 @ ens_v1@91c966f).
-    // The renewal makes her ENSv1 resource current for alice.eth, and her ENSv2 token is
-    // refreshed at the batch end to elect its own resource again.
+    // Her ENSv2 token keeps alice.eth's current resource through the renewal, as a full refresh
+    // of every name elects.
     seed.block(FIRST_BLOCK + 4).await?;
     let renewed_again = v1::registrar::NameRenewed {
         id: token("alice"),

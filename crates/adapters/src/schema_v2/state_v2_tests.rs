@@ -182,8 +182,8 @@ fn assert_targeted_refresh_matches_full_walk(mut baseline: State, mutate: impl F
     assert_v2_indexes_are_derived(&targeted);
 }
 /// An ENSv1 authority that becomes current for a name an ENSv2 token holds yields to the ENSv2
-/// winner at the batch end, as a full refresh elects, whether or not the token's registry was
-/// dirtied in the batch.
+/// winner immediately, as a full refresh does, whether or not the token's registry was dirtied
+/// in the batch.
 #[test]
 fn v2_refresh_after_an_ensv1_activation_matches_the_full_walk() {
     let mut state = anchored_state();
@@ -204,6 +204,7 @@ fn v2_refresh_after_an_ensv1_activation_matches_the_full_walk() {
             None,
             None,
         );
+        assert_eq!(state.active_resources.get(&name), Some(&Uuid::from_u128(2)));
     });
 }
 #[test]
