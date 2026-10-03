@@ -1190,9 +1190,10 @@ record
 until a `reclaim` or registry transfer moves it
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 
-A name stops being served as wrapped once a registry write moves its record away
-from NameWrapper. A parent owner can reassign a wrapped child's registry record
-with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
+A name with a [name row](glossary.md#composed-name-row) stops being served as
+wrapped once a registry write moves its record away from NameWrapper; a child
+with no name row follows the paragraph above. A parent owner can reassign a
+wrapped child's registry record with the registry's `setSubnodeOwner`, which emits no `NameUnwrapped`
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f),
 after which NameWrapper no longer treats the child as wrapped
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1076-L1079 @ ens_v1@91c966f).
@@ -1210,8 +1211,11 @@ name stays wrapped
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L637-L660 @ ens_v1@91c966f).
 A registry write back to NameWrapper without a wrap, after the record has left
 it, revives the old token on chain, but bigname keeps serving the NameWrapper
-contract as `owner` and `manager` until the next `NameWrapped`; this is listed
-under [known divergences](upstream.md#known-divergences).
+contract as `owner` and `manager` until the next `NameWrapped`. A child with no
+name row that the NameWrapper named is instead hidden again: it omits `owner`
+and `manager` and is listed for neither the NameWrapper contract nor its token
+holder. Both cases are listed under
+[known divergences](upstream.md#known-divergences).
 
 ## Status Vocabulary
 
