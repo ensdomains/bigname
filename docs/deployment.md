@@ -2581,6 +2581,7 @@ ENSv2 registry and root registry `PermissionChanged` rows, which
 through [released registrar children](#released-registrar-children), the
 lookahead loader's read-path changes and the
 [lease holder of a registry child with no name surface](#lease-holder-of-a-registry-child-with-no-name-surface),
+and the optional [walk index set](#walk-index-set) operator scripts (TYR-209),
 none of which rotates the hash. Deploy
 it with the
 [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
@@ -2589,7 +2590,10 @@ From v0.3.0:
 - The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
   once for every chain. Run one full-history Interpret redo and the Project redo
   it installs under the v0.4.0 binary before the API serves, and record the new
-  hash in the release record.
+  hash in the release record. The [walk index set](#walk-index-set) scripts are an
+  optional step of that redo: `drop.sql` once the Interpret redo has started,
+  `install.sql` before Interpret completes, as the runbook's planned boundary
+  describes.
 - Stamp no Ingest redo. No build since v0.3.0 changes a manifest, watch set or
   start block, so manifest synchronization records no
   [manifest-authority marker](glossary.md#manifest-authority-marker) and no
