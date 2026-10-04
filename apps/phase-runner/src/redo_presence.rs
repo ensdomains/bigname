@@ -16,6 +16,47 @@ pub(crate) fn interpret_replay_range(
     BlockRange::new(requested.from, to)
 }
 
+/// An Interpret redo whose executed range differs from the requested one.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct InterpretReplayNotice {
+    requested: BlockRange,
+    executed: BlockRange,
+}
+
+impl InterpretReplayNotice {
+    pub(crate) fn new(requested: BlockRange, executed: BlockRange) -> Option<Self> {
+        (requested != executed).then_some(Self {
+            requested,
+            executed,
+        })
+    }
+
+    fn message(&self, chain_id: &str) -> String {
+        format!(
+            "interpret redo on chain {chain_id} requested {}..={} but runs {}..={}: Interpret \
+             replays through the recorded interpreted head whatever --to-block says \
+             (docs/runbooks/production-docker.md § Stop and escalate an interpreter mismatch, \
+             step 6)",
+            self.requested.from, self.requested.to, self.executed.from, self.executed.to,
+        )
+    }
+
+    pub(crate) fn emit(&self, chain_id: &str, to_stderr: bool) {
+        let message = self.message(chain_id);
+        tracing::warn!(
+            chain_id,
+            requested_from_block = self.requested.from,
+            requested_to_block = self.requested.to,
+            redo_from_block = self.executed.from,
+            redo_to_block = self.executed.to,
+            "{message}"
+        );
+        if to_stderr {
+            eprintln!("{message}");
+        }
+    }
+}
+
 pub(crate) async fn require_interpret_raw_data(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain_id: &str,
@@ -154,4 +195,22 @@ pub(crate) async fn require_interpret_raw_data(
     }
     crate::ingest_cursor_config::validate_source_keys(chain_id, sources, &persisted_source_keys)?;
     Ok(manifest_attestation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InterpretReplayNotice;
+    use crate::phase::BlockRange;
+
+    #[test]
+    fn notice_names_both_ranges_only_when_they_differ() {
+        let requested = BlockRange::new(0, 11_714_440).unwrap();
+        assert_eq!(InterpretReplayNotice::new(requested, requested), None);
+        let executed = BlockRange::new(0, 11_840_386).unwrap();
+        let message = InterpretReplayNotice::new(requested, executed)
+            .expect("a widened range is reported")
+            .message("1");
+        assert!(message.contains("requested 0..=11714440 but runs 0..=11840386"));
+        assert!(message.contains("production-docker.md § Stop and escalate"));
+    }
 }

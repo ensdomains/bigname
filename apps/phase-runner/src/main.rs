@@ -304,7 +304,8 @@ async fn main() -> Result<()> {
                     .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
                     .with_loop_heartbeat(loop_heartbeat)
                     .with_phase_progress(phase_progress)
-                    .with_metrics_feed(metrics_feed),
+                    .with_metrics_feed(metrics_feed)
+                    .with_redo_notices_on_stderr(),
                 )
             };
             let Some(runner) =

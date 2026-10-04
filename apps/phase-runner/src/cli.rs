@@ -232,7 +232,11 @@ struct RedoArgs {
     #[arg(long)]
     from_block: i64,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "last block to redo; an interpret redo, alone or within --phase all, runs \
+                through the recorded interpreted head whatever this value is"
+    )]
     to_block: i64,
 
     #[arg(
