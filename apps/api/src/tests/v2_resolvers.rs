@@ -572,7 +572,7 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
         203,
         json!({"registration":{"status":"active", "authority_kind":"registrar", "registrant":DIVERGENT_REGISTRATION_REGISTRANT},
             "control":{"registry_owner":DIVERGENT_REGISTRY_OWNER,"owner":DIVERGENT_CONTROL_OWNER,"registrant":DIVERGENT_CONTROL_REGISTRANT},
-            "wrapper_state":"locked", "wrapper_fuses":flags}),
+            "wrapper_state":"locked", "wrapper_fuses":flags, "wrapper_expiry_seconds":1_900_000_000}),
     );
     row.provenance["authority_selection"] = json!({"authority_arm": "ens_v1"});
     // The bound-name adapter delegates to this same name-record renderer.
@@ -587,7 +587,8 @@ fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags(
     assert_eq!(record["authority"], json!("ens_v1"));
     assert_eq!(
         record["ens_v1"],
-        json!({"expires_at": null, "wrapper_state": "locked", "wrapper_fuses": flags})
+        json!({"expires_at": null, "wrapper_state": "locked", "wrapper_fuses": flags,
+            "wrapper_expires_at": "1900000000"})
     );
     assert!(record.get("wrapper_state").is_none(), "{record}");
     assert!(record.get("wrapper_fuses").is_none(), "{record}");

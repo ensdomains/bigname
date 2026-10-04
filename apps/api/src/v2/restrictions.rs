@@ -2,7 +2,7 @@ use bigname_storage::PermissionsCurrentResourceSummary;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::name_record::wrapper_lifecycle_matches_fuses;
+use super::name_record::{wrapper_expiry, wrapper_lifecycle_matches_fuses};
 use super::vocab::{WrapperFuses, WrapperState};
 use super::{V2Error, V2Result};
 
@@ -85,19 +85,8 @@ fn wrapper_restrictions(registration_id: String, block: &Value) -> V2Result<Reso
     let (wrapper_expires_at, wrapper_expires_at_reason) = match block.get("expiry_seconds") {
         None | Some(Value::Null) => (None, None),
         Some(expiry) => {
-            let seconds =
-                bigname_storage::UnixSeconds::from_json(expiry).ok_or_else(invalid_restrictions)?;
-            let reason =
-                bigname_storage::contract_expiry_reason(seconds, "ens_v1_wrapper_l1", None);
-            let timestamp = reason.map_or_else(
-                || {
-                    super::timestamps::ExpiryTimestamp::Seconds(
-                        seconds.unix_timestamp().to_string(),
-                    )
-                },
-                |_| super::timestamps::ExpiryTimestamp::NoExpiry,
-            );
-            (Some(timestamp), reason.map(str::to_owned))
+            let (timestamp, reason) = wrapper_expiry(expiry).ok_or_else(invalid_restrictions)?;
+            (Some(timestamp), reason)
         }
     };
     Ok(ResourceRestrictions::EnsV1Wrapper {

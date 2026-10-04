@@ -213,6 +213,7 @@ fn wrapper_metadata_accepts_locked_is_dot_eth_with_parent_cannot_control() {
 fn ens_v1_object_follows_authority_and_carries_the_lease_expiry() {
     let mut summary = wrapper_summary("emancipated", (1 << 16) | (1 << 17));
     summary["registration"] = json!({"expiry": "1803965433", "ens_v1_expiry": "1798608633"});
+    summary["wrapper_expiry_seconds"] = json!(1_806_384_633_u64);
     let object = |authority| {
         ens_v1(authority, &summary)
             .expect("valid wrapper summary")
@@ -226,6 +227,8 @@ fn ens_v1_object_follows_authority_and_carries_the_lease_expiry() {
             object["wrapper_fuses"]["parent_cannot_control"],
             json!(true)
         );
+        assert_eq!(object["wrapper_expires_at"], json!("1806384633"));
+        assert!(object.get("wrapper_expires_at_reason").is_none());
     }
     assert_eq!(object(Some(Authority::EnsV2)), None);
     assert_eq!(object(None), None);
@@ -244,6 +247,68 @@ fn ens_v1_object_follows_authority_and_carries_the_lease_expiry() {
 
     // Inconsistent stored wrapper metadata fails whatever the authority.
     assert!(ens_v1(Some(Authority::EnsV2), &json!({"wrapper_state": "locked"})).is_err());
+}
+
+#[test]
+fn ens_v1_wrapper_expiry_is_exact_or_null_with_its_reason() {
+    let served = |word: serde_json::Value| {
+        let mut summary = wrapper_summary("wrapped", 0);
+        summary["wrapper_expiry_seconds"] = word;
+        let object = ens_v1(Some(Authority::EnsV1), &summary)
+            .expect("valid wrapper summary")
+            .expect("ENSv1 authority serves ens_v1");
+        let object = serde_json::to_value(object).expect("ens_v1 serializes");
+        (
+            object["wrapper_expires_at"].clone(),
+            object.get("wrapper_expires_at_reason").cloned(),
+        )
+    };
+    assert_eq!(
+        served(json!(u64::MAX - 1)),
+        (json!("18446744073709551614"), None)
+    );
+    assert_eq!(
+        served(json!(u64::MAX)),
+        (json!(null), Some(json!("no_expiry")))
+    );
+    assert_eq!(served(json!(0)), (json!(null), Some(json!("not_set"))));
+}
+
+#[test]
+fn ens_v1_wrapper_expiry_follows_the_wrapper_state_or_its_lapse() {
+    let object = |summary: &serde_json::Value| {
+        ens_v1(Some(Authority::EnsV1), summary).map(|object| {
+            object.map(|object| serde_json::to_value(object).expect("ens_v1 serializes"))
+        })
+    };
+    // A wrapper state without its expiry, or an expiry beside neither a state nor a lapse, is
+    // inconsistent whatever the authority.
+    assert!(object(&wrapper_summary("locked", 1 | (1 << 16) | (1 << 17))).is_err());
+    for summary in [
+        json!({"wrapper_expiry_seconds": 1_000}),
+        json!({"wrapper_expiry_seconds": 1_000, "wrapper_masked": false}),
+    ] {
+        assert!(object(&summary).is_err(), "{summary}");
+        assert!(
+            ens_v1(Some(Authority::EnsV2), &summary).is_err(),
+            "{summary}"
+        );
+    }
+    let mut unreadable = wrapper_summary("wrapped", 0);
+    unreadable["wrapper_expiry_seconds"] = json!("soon");
+    assert!(object(&unreadable).is_err());
+
+    // A lapsed emancipated or locked wrapper serves its past expiry without a state.
+    let lapsed = object(&json!({"registration": {"ens_v1_expiry": "1798608633"},
+        "wrapper_masked": true, "wrapper_expiry_seconds": 1_000}))
+    .expect("lapsed wrapper summary");
+    assert_eq!(
+        lapsed,
+        Some(json!({"expires_at": "1798608633", "wrapper_expires_at": "1000"}))
+    );
+    // A masked wrapper whose state is unknown has no expiry to serve.
+    let unknown = object(&json!({"wrapper_masked": true})).expect("masked wrapper summary");
+    assert_eq!(unknown, Some(json!({"expires_at": null})));
 }
 
 fn wrapper_summary(state: &str, fuses: u32) -> serde_json::Value {

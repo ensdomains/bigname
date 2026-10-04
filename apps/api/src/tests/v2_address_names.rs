@@ -2080,6 +2080,9 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
         }
         let detail = assert_lookup_detail_matches_name_detail(&database, "sub.perms.eth").await?;
         assert_eq!(detail["ens_v1"]["wrapper_state"], json!(state), "{detail}");
+        // A wrapped subname has no lease: its NameWrapper expiry is the top-level expiry too.
+        assert_eq!(detail["ens_v1"]["wrapper_expires_at"], json!("1800000000"), "{detail}");
+        assert_eq!(detail["expires_at"], json!("1800000000"), "{detail}");
         assert_eq!(detail.get("manager"), manager.as_ref(), "{state}: {detail}");
         let (status, subnames) =
             read_family_response(&database, "/v1/names/perms.eth/subnames").await?;
@@ -2091,6 +2094,7 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
             .find(|row| row["namehash"] == detail["namehash"])
             .with_context(|| format!("no sub.perms.eth row: {subnames}"))?;
         assert_eq!(row.get("manager"), manager.as_ref(), "{state}: {row}");
+        assert_eq!(row["ens_v1"], detail["ens_v1"], "{state}: {row}");
         let (status, managed) = read_family_response(
             &database,
             &format!("/v1/addresses/{V2_PERMISSIONS_SUBJECT}/names?relation=manager&namespace=ens"),

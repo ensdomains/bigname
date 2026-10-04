@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::super::{
     V2Error, V2Result,
+    timestamps::ExpiryTimestamp,
     vocab::{WrapperFuses, WrapperState},
 };
 
@@ -29,6 +30,20 @@ pub(crate) fn wrapper_metadata(
         return Err(invalid_wrapper_metadata());
     }
     Ok(Some((state, fuses)))
+}
+
+/// A NameWrapper entry's stored expiry word as served `wrapper_expires_at` with its
+/// `wrapper_expires_at_reason`, identically on `ens_v1` and the wrapper `restrictions`: the exact
+/// second, or null for the NameWrapper maximum (`no_expiry`) and zero (`not_set`). `None` when
+/// the word is not a whole second.
+pub(crate) fn wrapper_expiry(word: &Value) -> Option<(ExpiryTimestamp, Option<String>)> {
+    let seconds = bigname_storage::UnixSeconds::from_json(word)?;
+    let reason = bigname_storage::contract_expiry_reason(seconds, "ens_v1_wrapper_l1", None);
+    let timestamp = match reason {
+        Some(_) => ExpiryTimestamp::NoExpiry,
+        None => ExpiryTimestamp::Seconds(seconds.unix_timestamp().to_string()),
+    };
+    Some((timestamp, reason.map(str::to_owned)))
 }
 
 /// Whether a NameWrapper lifecycle label agrees with a fuse word; shared by name detail and the

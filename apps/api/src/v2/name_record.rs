@@ -56,7 +56,9 @@ pub(super) use values::{
 use values::{
     has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,
 };
-pub(crate) use wrapper::{served_manager, wrapper_lifecycle_matches_fuses, wrapper_metadata};
+pub(crate) use wrapper::{
+    served_manager, wrapper_expiry, wrapper_lifecycle_matches_fuses, wrapper_metadata,
+};
 pub(crate) struct NameRecordQueryParams;
 impl QueryParamAllowlist for NameRecordQueryParams {
     const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source", "include"];

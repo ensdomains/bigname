@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::super::{
-    V2Result,
+    V2Error, V2Result,
+    timestamps::ExpiryTimestamp,
     vocab::{Authority, WrapperFuses, WrapperState},
 };
-use super::{values::json_timestamp_at_paths, wrapper_metadata};
+use super::{values::json_timestamp_at_paths, wrapper_expiry, wrapper_metadata};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct EnsV1 {
@@ -38,6 +39,16 @@ pub(crate) struct EnsV1 {
     pub(crate) wrapper_state: Option<WrapperState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_fuses: Option<WrapperFuses>,
+    /// The NameWrapper entry's own stored expiry, on a row with a wrapper state and on one whose
+    /// emancipated or locked wrapper has lapsed past it. It is what NameWrapper's `getData`
+    /// reads, so a renewal through a controller that calls only `BaseRegistrar.renew` leaves it
+    /// behind the lease
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_expires_at: Option<ExpiryTimestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) wrapper_expires_at_reason: Option<String>,
 }
 
 /// The `ens_v1` object of a row whose served authority is `authority`. Stored wrapper metadata
@@ -47,11 +58,16 @@ pub(crate) fn ens_v1(
     declared_summary: &Value,
 ) -> V2Result<Option<EnsV1>> {
     let wrapper = wrapper_metadata(declared_summary)?;
+    let expiry = stored_wrapper_expiry(declared_summary, wrapper.is_some())?;
     if !matches!(authority, Some(Authority::EnsV0 | Authority::EnsV1)) {
         return Ok(None);
     }
     let (wrapper_state, wrapper_fuses) =
         wrapper.map_or((None, None), |(state, fuses)| (Some(state), Some(fuses)));
+    let (wrapper_expires_at, wrapper_expires_at_reason) = expiry
+        .map_or((None, None), |(timestamp, reason)| {
+            (Some(timestamp), reason)
+        });
     Ok(Some(EnsV1 {
         expires_at: Some(json_timestamp_at_paths(
             declared_summary,
@@ -59,7 +75,30 @@ pub(crate) fn ens_v1(
         )),
         wrapper_state,
         wrapper_fuses,
+        wrapper_expires_at,
+        wrapper_expires_at_reason,
     }))
+}
+
+/// The stored NameWrapper expiry the read attaches (`wrapper_expiry_seconds`): required beside a
+/// wrapper state, and allowed without one only on a masked (lapsed) wrapper.
+fn stored_wrapper_expiry(
+    declared_summary: &Value,
+    backed: bool,
+) -> V2Result<Option<(ExpiryTimestamp, Option<String>)>> {
+    let masked = declared_summary.get("wrapper_masked") == Some(&Value::Bool(true));
+    match declared_summary.get("wrapper_expiry_seconds") {
+        None if backed => Err(inconsistent_wrapper_expiry()),
+        None => Ok(None),
+        Some(_) if !backed && !masked => Err(inconsistent_wrapper_expiry()),
+        Some(word) => wrapper_expiry(word)
+            .map(Some)
+            .ok_or_else(inconsistent_wrapper_expiry),
+    }
+}
+
+fn inconsistent_wrapper_expiry() -> V2Error {
+    V2Error::internal_error("stored wrapper expiry is inconsistent")
 }
 
 /// The `ens_v1` object of an ENSv1 registry child with no name row, which serves `authority` from
