@@ -234,8 +234,9 @@ struct RedoArgs {
 
     #[arg(
         long,
-        help = "last block to redo; an interpret redo, alone or within --phase all, runs \
-                through the recorded interpreted head whatever this value is"
+        help = "last block to redo; for an interpret redo, alone or within --phase all, a \
+                value below the recorded interpreted head does not bound the replay, which \
+                runs through that head"
     )]
     to_block: i64,
 

@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::{
     config::{SourceConfig, normalized_source_kind},
     error::{RunnerError, RunnerResult},
@@ -34,7 +36,7 @@ impl InterpretReplayNotice {
     fn message(&self, chain_id: &str) -> String {
         format!(
             "interpret redo on chain {chain_id} requested {}..={} but runs {}..={}: Interpret \
-             replays through the recorded interpreted head whatever --to-block says \
+             replays through the recorded interpreted head, not to --to-block \
              (docs/runbooks/production-docker.md § Stop and escalate an interpreter mismatch, \
              step 6)",
             self.requested.from, self.requested.to, self.executed.from, self.executed.to,
@@ -51,8 +53,9 @@ impl InterpretReplayNotice {
             redo_to_block = self.executed.to,
             "{message}"
         );
+        // The redo has already committed its start; a closed stderr must not abort it.
         if to_stderr {
-            eprintln!("{message}");
+            let _ = writeln!(std::io::stderr().lock(), "{message}");
         }
     }
 }

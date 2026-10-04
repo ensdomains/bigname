@@ -1631,12 +1631,12 @@ error while another chain continues running.
      [--source <additional-affected-chain-source> ...]
    ```
 
-   The Interpret redo runs through the recorded head whatever `--to-block`
-   says: a lower value does not bound the work, and the range recorded in
-   `chain_phase_state` is the one executed. When the two differ, the redo
-   logs a warning at start and prints the same line on the one-shot command's
-   stderr, naming the requested and the executed range. Plan the redo's
-   duration from `<from>` through the recorded head.
+   The Interpret redo runs through the recorded head: a lower `--to-block`
+   does not bound the work, and the range recorded in `chain_phase_state` is
+   the one executed. When the requested and the executed range differ, the
+   redo logs a warning at start and prints the same line on the one-shot
+   command's stderr, naming both ranges. Plan the redo's duration from
+   `<from>` through the recorded head.
 
 7. If the mismatch reproduces during the redo, keep the phase runner stopped
    and perform the full re-walk at the [planned re-derivation
