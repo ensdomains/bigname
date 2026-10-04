@@ -1149,12 +1149,14 @@ for migration_file in \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
-    "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql"
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
+# The pre-7c normalized_events fixture lacks the manifest sync index, so the first
+# application builds it and the second finds it.
+emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" preceding-shape | run_psql
+emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" baseline-first | run_psql
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.
@@ -2407,21 +2409,54 @@ DROP INDEX $lifecycle_namehash_index;
 $lifecycle_namehash_found;
 SQL
 done
-# The manifest sync index on normalized_events: dropped from the fresh baseline, the
-# schema-migration rebuilds the baseline definition and accepts it on a rerun, and it
-# refuses an invalid, unready, misplaced or differently defined relation under its name.
-# A database that already carries the index under this name and definition, such as one
-# prebuilt concurrently, takes the rerun path.
+# The manifest sync index on normalized_events. The scratch schema's normalized_events
+# comes from the pre-7c fixture, so the expected definition is taken from the fresh
+# baseline's own statement, run in a transaction that rolls back. The schema-migration
+# must rebuild exactly that definition, which must print as the reviewed text, accept
+# it on a rerun, and refuse an invalid, unready, misplaced or differently defined
+# relation under its name. A database that already carries the index under this name
+# and definition, such as one prebuilt concurrently, takes the rerun path.
 manifest_index_migration="$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql"
 manifest_index=normalized_events_manifest_idx
 manifest_index_recovery="follow the recovery steps in docs/deployment.md (Manifest sync index), then run the schema-migrations again"
 manifest_index_unready="$manifest_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $manifest_index_recovery"
 manifest_index_reviewed="CREATE INDEX $manifest_index ON $scratch_schema.normalized_events USING btree (source_manifest_id, event_kind, normalized_event_id DESC) WHERE (source_manifest_id IS NOT NULL)"
+manifest_index_baseline_statement="$(
+    awk -v start="CREATE INDEX IF NOT EXISTS $manifest_index" '
+        $0 == start { found = 1 }
+        found { print }
+        found && /;$/ { exit }
+    ' "$ROOT/crates/storage/schema/baseline/05_normalized_events.sql"
+)"
+if [ -z "$manifest_index_baseline_statement" ]; then
+    printf '%s\n' "fresh baseline does not define $manifest_index" >&2
+    exit 1
+fi
+manifest_index_baseline_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            'BEGIN;' \
+            "DROP INDEX $manifest_index;" \
+            "$manifest_index_baseline_statement" \
+            'SET LOCAL search_path TO pg_catalog;' \
+            "SELECT pg_get_indexdef('$scratch_schema.$manifest_index'::regclass);" \
+            'ROLLBACK;'
+    } | run_psql
+)"
+if [ "$manifest_index_baseline_definition" != "$manifest_index_reviewed" ]; then
+    printf '%s\n' \
+        "fresh baseline $manifest_index prints as: $manifest_index_baseline_definition" \
+        "reviewed definition:                    $manifest_index_reviewed" >&2
+    exit 1
+fi
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<SQL
 CREATE TEMP TABLE expected_manifest_index AS
-SELECT pg_get_indexdef('$manifest_index'::regclass) AS definition;
+SELECT \$expected\$$manifest_index_baseline_definition\$expected\$::text AS definition;
 DROP INDEX $manifest_index;
 SQL
     emit_phase_migration "$manifest_index_migration" preceding-shape
@@ -2429,10 +2464,12 @@ SQL
     cat <<SQL
 DO \$\$
 BEGIN
+    -- The expected text was printed under search_path pg_catalog.
+    PERFORM set_config('search_path', 'pg_catalog', true);
     IF NOT EXISTS (
-        SELECT 1 FROM expected_manifest_index expected
-        JOIN pg_index ON pg_index.indexrelid = '$manifest_index'::regclass
-        WHERE pg_index.indrelid = 'normalized_events'::regclass
+        SELECT 1 FROM pg_temp.expected_manifest_index expected
+        JOIN pg_index ON pg_index.indexrelid = '$scratch_schema.$manifest_index'::regclass
+        WHERE pg_index.indrelid = '$scratch_schema.normalized_events'::regclass
           AND pg_index.indisvalid AND pg_index.indisready
           AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
     ) THEN
