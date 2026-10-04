@@ -3281,7 +3281,9 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
         SET current_block_number = 7,
             current_block_hash = 'redo-state-block-7',
             target_block_number = 9,
-            target_block_hash = 'redo-state-block-9'
+            target_block_hash = 'redo-state-block-9',
+            started_at = '2026-09-18 09:00:00Z',
+            finished_at = '2026-09-18 09:23:10Z'
         WHERE chain_id = $1
           AND phase_name = 'project'
         ",
@@ -3289,6 +3291,9 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
     .bind(chain_id)
     .execute(scratch.pool())
     .await?;
+    let redo_started: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+        .fetch_one(scratch.pool())
+        .await?;
 
     runner(
         scratch.runner(),
@@ -3334,6 +3339,24 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
             Some(9),
             Some("redo-state-block-9".to_owned())
         )
+    );
+    let (started_at_kept, finished_after_redo_start, finished_at): (bool, bool, String) =
+        sqlx::query_as(
+            "SELECT started_at = '2026-09-18 09:00:00Z'::timestamptz,
+                    finished_at >= $2::timestamptz,
+                    finished_at::text
+             FROM chain_phase_state
+             WHERE chain_id = $1
+               AND phase_name = 'project'",
+        )
+        .bind(chain_id)
+        .bind(&redo_started)
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(started_at_kept);
+    assert!(
+        finished_after_redo_start,
+        "redo completion must stamp finished_at ({finished_at}) at or after the redo start ({redo_started})"
     );
     scratch.cleanup().await
 }
