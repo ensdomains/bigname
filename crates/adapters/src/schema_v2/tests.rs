@@ -4667,7 +4667,7 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
-fn a_registry_pointing_a_label_back_at_itself_closes_the_previous_edge_and_opens_none()
+fn a_registry_pointing_a_label_at_itself_opens_no_edge_because_its_subnames_loop_on_chain()
 -> anyhow::Result<()> {
     // Seen from a discovery-admitted user registry on the Sepolia hackathon deployment (block
     // 11673141) and from the manifest-declared ETHRegistry of the 2026-10-01 deployment

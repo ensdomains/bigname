@@ -1244,9 +1244,14 @@ subregistry to the `ETHRegistry`, which emits it in `SubregistryUpdated`, and
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05);
 the Sepolia `ETHRegistry` emitted itself this way at block 11840453. Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
-closes the label's previous `subregistry` edge and opens none, because only
-registry announcements and `ResolverCreated` observations may produce
-self-edges. Interpret writes no operator diagnostic for it; the
+closes the label's previous `subregistry` edge and opens none. That matches
+the chain: a name below that label walks back into the parent registry, whose
+canonical name is the parent's own, so its subnames loop and do not resolve as
+subnames on-chain either
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
+Only registry announcements and `ResolverCreated` observations may produce
+self-edges in any case. Interpret writes no operator diagnostic for it; the
 `SubregistryChanged` normalized event is its record. No names are modelled
 under that label while the pointer stands.
 

@@ -185,7 +185,12 @@ pub(super) fn materialize(
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05).
                 // Declared or discovery-admitted, the pointer closes the previous edge above and
-                // opens none, so no walk can loop; the normalized event is its record.
+                // opens none, which matches the chain: a name below that label walks back into
+                // the parent registry, whose canonical name is the parent's own, so its subnames
+                // loop and do not resolve as subnames on-chain either
+                // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
+                // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
+                // The normalized event is its record.
                 if target == selected.contract_instance_id {
                     continue;
                 }

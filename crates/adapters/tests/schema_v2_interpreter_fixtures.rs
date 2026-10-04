@@ -603,7 +603,8 @@ fn v2_expiry_retirement_is_an_empty_block_restore_and_redo_stable_delta() -> Res
 }
 
 #[test]
-fn sepolia_eth_registry_pointing_a_label_at_itself_closes_the_edge_and_continues() -> Result<()> {
+fn sepolia_eth_registry_self_subregistry_opens_no_edge_because_its_subnames_loop_on_chain()
+-> Result<()> {
     // Sepolia block 11840453, transaction 0xea03502e…, logs 118-123: an ETHRegistrar
     // registration on the manifest-declared ETHRegistry sets the new label's subregistry to the
     // ETHRegistry itself (log 122), then sets its resolver (log 123).
