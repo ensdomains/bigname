@@ -502,6 +502,7 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         assert_eq!(row["kind"], "RootPermissionChanged", "{row}");
         assert_eq!(row["contract_address"], json!(registry), "{row}");
         assert!(row.get("name").is_none(), "{row}");
+        assert_eq!(row["registration_id"], Value::Null, "{row}");
         assert_eq!(row["data"]["grant_scope"]["kind"], "root", "{row}");
     }
     // The root `grant_scope` detail is the shape permission rows give it.

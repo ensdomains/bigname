@@ -408,6 +408,9 @@ fn push_product_registration_id_with_anchors(
         CASE
             WHEN ne.event_kind = 'MigrationApplied' THEN {MIGRATION_SUCCESSOR}
             WHEN ne.resource_id IS NULL THEN NULL::uuid
+            -- A registry root role change carries the registry's root resource, never a
+            -- registration.
+            WHEN ne.event_kind = 'RootPermissionChanged' THEN NULL::uuid
             WHEN ne.source_family IN ('ens_v2_registry_l1', 'ens_v2_migration_l1') AND (
                 ne.event_kind = 'RegistrationReserved'
                 OR CASE WHEN ne.event_kind = 'RegistrationReleased'

@@ -2375,7 +2375,7 @@ raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`. Its subject
 whole root role set right after the change (`[]` when everything was revoked),
 and, because the log states the old bitmap, `added_powers` and
 `removed_powers` are always present; either may be `[]`. It has no `name` and
-no `registration_id`, and its `contract_address` (with `include=raw`) is the
+no `registration_id`, and its `contract_address` (with `include=data`) is the
 registry. `GET /v1/events?contract_address=<registry>` lists a registry's root
 role changes, and an account's own root role changes on every registry are in
 its [address history](#get-v1addressesaddresshistory).
