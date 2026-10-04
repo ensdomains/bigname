@@ -179,20 +179,41 @@ pub(super) fn materialize(
                 let target = catalog
                     .contract_instance_for_address(&address, raw.block_number)?
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &address));
-                // A registry may point one of its own labels back at itself: the ETHRegistrar
-                // passes a registrant's chosen subregistry straight to the ETHRegistry, which
-                // emits it, and the Sepolia ETHRegistry has emitted itself this way (block 11840453,
-                // pinned in tests/fixtures/interpreters/v2-registry-self-subregistry.json)
+                // Only announcements may produce self-edges, so a self-target, declared or
+                // discovery-admitted, opens no edge and the previous edge closed above stays
+                // closed. A registry may point one of its own labels back at itself as subregistry:
+                // the ETHRegistrar passes a registrant's chosen subregistry straight to the
+                // ETHRegistry, which emits it, and the Sepolia ETHRegistry has emitted itself this
+                // way (block 11840453, pinned in
+                // tests/fixtures/interpreters/v2-registry-self-subregistry.json)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05).
-                // Declared or discovery-admitted, the pointer closes the previous edge above and
-                // opens none, which matches the chain: a name below that label walks back into
-                // the parent registry, whose canonical name is the parent's own, so its subnames
-                // loop and do not resolve as subnames on-chain either
+                // A name below that label walks back into the parent registry and reads the
+                // parent's own entries, so its subnames loop back into the parent instead of sitting
+                // under a registry of their own, and the label gains no canonical registry
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
-                // The normalized event is its record.
+                // The normalized event is its record. Any other self-target has nothing to
+                // discover and is recorded.
                 if target == selected.contract_instance_id {
+                    if edge_kind != "subregistry" {
+                        output.decode_skips.push(super::DecodeSkip {
+                            chain_id: raw.chain_id.clone(),
+                            block_hash: raw.block_hash.clone(),
+                            block_number: raw.block_number,
+                            transaction_hash: raw.transaction_hash.clone(),
+                            log_index: raw.log_index,
+                            emitting_address: raw.emitting_address.clone(),
+                            source_family: selected.source.source_family.clone(),
+                            selection_topic0: selected.event.topic0.clone(),
+                            match_all: selected.match_all,
+                            decode_context: format!(
+                                "{} produced a non-announcement self-edge of kind {edge_kind}; \
+                                 the previous edge is closed and no discovery edge is opened",
+                                selected.event.name
+                            ),
+                        });
+                    }
                     continue;
                 }
                 push_contract(

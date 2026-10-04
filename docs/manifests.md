@@ -1248,15 +1248,24 @@ log 122, whose logs are pinned in the
 [interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json). Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
 closes the label's previous `subregistry` edge and opens none. That matches
-the chain: a name below that label walks back into the parent registry, whose
-canonical name is the parent's own, so its subnames loop and do not resolve as
-subnames on-chain either
+the chain: a name below that label walks back into the parent registry and
+reads the parent's own entries, so its subnames loop back into the parent
+instead of sitting under a registry of their own, and the label gains no
+canonical registry
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
-Only registry announcements and `ResolverCreated` observations may produce
-self-edges in any case. Interpret writes no operator diagnostic for it; the
-`SubregistryChanged` normalized event is its record. No names are modelled
-under that label while the pointer stands.
+Interpret writes no operator diagnostic for it; the `SubregistryChanged`
+normalized event is its record. Interpret models no names below that label
+through the pointer while it stands.
+
+Every other non-announcement discovery pointer at its own emitter, a
+`resolver` pointer or a `proxy_implementation` from `Upgraded`, likewise never
+stops Interpret: it closes the emitter's previous edge for that observation and
+opens none, because only registry announcements and `ResolverCreated`
+observations may produce self-edges. It has nothing to discover, so Interpret
+records it as one [operator diagnostic](storage.md#table-ownership) row in
+`interpret_decode_skips`, for manifest-declared and discovery-admitted emitters
+alike.
 
 ### Resolver creation capture
 

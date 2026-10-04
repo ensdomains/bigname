@@ -2641,8 +2641,9 @@ that needs a dropped index may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
 
 ### Registry pointing a label at itself
 
-The build that treats a registry pointing one of its own labels at itself as
-that label's subregistry as a pointer with no target (TYR-222, see
+The build that treats a discovery pointer at its own emitter, such as a
+registry pointing one of its own labels at itself as that label's subregistry,
+as a pointer with no target (TYR-222, see
 [discovery admission](manifests.md#discovery-admission)) changes `crates/adapters/src`, so it
 rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
 for every chain. Before, such a `SubregistryUpdated` from a manifest-declared
@@ -2656,8 +2657,11 @@ build that admits that deployment, including v0.4.0, stops Sepolia there. Now
 the pointer closes the label's previous `subregistry` edge and opens none, for
 a manifest-declared or a discovery-admitted registry alike, and Interpret
 continues. A discovery-admitted registry's self-pointer used to add an
-operator diagnostic row in `interpret_decode_skips`; this build writes none.
-Rows that earlier builds wrote stay, because the table is append-only and keyed
+operator diagnostic row in `interpret_decode_skips`; this build writes none for
+a `subregistry` pointer. A `resolver` or `proxy_implementation` pointer at its
+own emitter, which also stopped Interpret for a manifest-declared emitter,
+now closes the previous edge, opens none and adds one diagnostic row, for any
+emitter. Rows that earlier builds wrote stay, because the table is append-only and keyed
 by the content hash. Normalized events do not change: the `SubregistryChanged`
 event is written as before. It adds
 no schema-migration, table, index, manifest or setting, so stamp no Ingest

@@ -1930,6 +1930,7 @@ mod v2_registry {
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
         event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
         event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
+        event Upgraded(address indexed implementation);
     }
 }
 
@@ -4667,7 +4668,7 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
-fn a_registry_pointing_a_label_at_itself_opens_no_edge_because_its_subnames_loop_on_chain()
+fn a_registry_pointing_a_label_at_itself_opens_no_edge_because_its_subnames_loop_back_into_the_parent()
 -> anyhow::Result<()> {
     // Seen from a discovery-admitted user registry on the Sepolia hackathon deployment (block
     // 11673141) and from the manifest-declared ETHRegistry of the 2026-10-01 deployment
@@ -4755,6 +4756,103 @@ fn a_registry_pointing_a_label_at_itself_opens_no_edge_because_its_subnames_loop
                 .any(|event| event.event_kind == "SubregistryChanged"),
             "{case}: the self-loop is still recorded as SubregistryChanged"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_resolver_or_implementation_self_target_opens_no_edge_and_is_recorded() -> anyhow::Result<()> {
+    let sender: Address = Address::repeat_byte(0x51);
+    let resolver_log = v2_registry::ResolverUpdated {
+        tokenId: U256::from(7),
+        resolver: CONTRACT.parse().unwrap(),
+        sender,
+    }
+    .encode_log_data();
+    let upgraded_log = v2_registry::Upgraded {
+        implementation: CONTRACT.parse().unwrap(),
+    }
+    .encode_log_data();
+    let cases = [
+        (
+            "resolver",
+            (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["registry"][..],
+                &["ResolverChanged"][..],
+            ),
+            resolver_log,
+        ),
+        (
+            "proxy_implementation",
+            (
+                "Upgraded",
+                "event Upgraded(address indexed implementation)",
+                &["registry"][..],
+                &["Upgraded"][..],
+            ),
+            upgraded_log,
+        ),
+    ];
+    for (edge_kind, event, log) in cases {
+        let mut announced = admission(68, "registry");
+        announced.discovery_edge_kind = Some("registry_announcement".to_owned());
+        announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
+        announced.discovery_observation_key = Some("registry-announcement:self".to_owned());
+        for (case, admitted) in [
+            ("declared", admission(68, "registry")),
+            ("undeclared", announced),
+        ] {
+            let output = interpret_test_batch(BatchInput {
+                chain_id: CHAIN.to_owned(),
+                manifests: vec![manifest_with_events(
+                    68,
+                    "ens",
+                    "ens_v2_registry_l1",
+                    &[event],
+                )],
+                discovery_rules: vec![DiscoveryRuleInput {
+                    manifest_id: 68,
+                    edge_kind: edge_kind.to_owned(),
+                    from_role: Some("registry".to_owned()),
+                    admission: "reachable_from_root".to_owned(),
+                }],
+                admissions: vec![admitted],
+                prior_events: Vec::new(),
+                blocks: Vec::new(),
+                raw_logs: vec![raw_at(log.clone(), 1, 0, CONTRACT)],
+            })
+            .with_context(|| format!("{case} {edge_kind} self-target"))?;
+
+            assert!(
+                output
+                    .discovery_edges
+                    .iter()
+                    .all(|edge| edge.edge_kind != edge_kind),
+                "{case} {edge_kind}: no edge opens"
+            );
+            assert!(
+                output.discovery_edge_closures.iter().any(|closure| {
+                    closure.edge_kind == edge_kind
+                        && closure.from_contract_instance_id == Uuid::from_u128(68)
+                        && closure.active_to_block_number == 1
+                }),
+                "{case} {edge_kind}: the previous edge closes"
+            );
+            assert_eq!(
+                output.decode_skips.len(),
+                1,
+                "{case} {edge_kind}: one diagnostic row"
+            );
+            assert!(
+                output.decode_skips[0]
+                    .decode_context
+                    .contains(&format!("self-edge of kind {edge_kind}")),
+                "{case} {edge_kind}: {}",
+                output.decode_skips[0].decode_context
+            );
+        }
     }
     Ok(())
 }
