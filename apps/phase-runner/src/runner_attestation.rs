@@ -4,6 +4,7 @@ use crate::{
     config::ChainConfig,
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::PhaseName,
+    redo_state::RedoSession,
 };
 
 use super::{PhaseRunner, RedoPhase};
@@ -22,9 +23,28 @@ impl PhaseRunner {
         self
     }
 
-    pub(super) fn before_manifest_authority_audit_emit(&self) {
-        if let Some(hook) = self.manifest_authority_audit_before_emit.as_deref() {
-            hook();
+    /// Also prints redo-start notices on stderr, for the one-shot `redo` command.
+    pub fn with_redo_notices_on_stderr(mut self, enabled: bool) -> Self {
+        self.redo_notices_on_stderr = enabled;
+        self
+    }
+
+    pub(super) fn report_redo_start(
+        &self,
+        chain_id: &str,
+        phase: PhaseName,
+        session: &RedoSession,
+    ) {
+        if phase == PhaseName::Interpret
+            && let Some(audit) = session.manifest_authority_audit.as_ref()
+        {
+            if let Some(hook) = self.manifest_authority_audit_before_emit.as_deref() {
+                hook();
+            }
+            audit.emit();
+        }
+        if let Some(notice) = session.interpret_replay_notice.as_ref() {
+            notice.emit(chain_id, self.redo_notices_on_stderr);
         }
     }
 

@@ -21,6 +21,7 @@ pub(crate) struct RedoSession {
     recompute_flags: bool,
     required_ingest: bool,
     pub(crate) manifest_authority_audit: Option<ManifestAuthorityAttestationAudit>,
+    pub(crate) interpret_replay_notice: Option<crate::redo_presence::InterpretReplayNotice>,
 }
 impl RedoSession {
     pub(crate) const fn attempt_fence(&self) -> RedoAttemptFence {
@@ -302,6 +303,10 @@ pub(crate) async fn begin(
         recompute_flags: matches!(mode, RunMode::RecomputeFlags(_)),
         required_ingest,
         manifest_authority_audit: attestation_audit,
+        interpret_replay_notice: (phase == PhaseName::Interpret
+            && matches!(mode, RunMode::Redo(_)))
+        .then(|| crate::redo_presence::InterpretReplayNotice::new(range, execution_range))
+        .flatten(),
     })
 }
 

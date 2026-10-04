@@ -304,7 +304,10 @@ async fn main() -> Result<()> {
                     .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
                     .with_loop_heartbeat(loop_heartbeat)
                     .with_phase_progress(phase_progress)
-                    .with_metrics_feed(metrics_feed),
+                    .with_metrics_feed(metrics_feed)
+                    // A raw stderr line would break a JSON log stream; the JSON
+                    // warning already carries the notice.
+                    .with_redo_notices_on_stderr(!phase_runner::logging::json_requested()),
                 )
             };
             let Some(runner) =

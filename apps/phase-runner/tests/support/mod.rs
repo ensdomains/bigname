@@ -435,3 +435,35 @@ pub mod chain_double {
         }
     }
 }
+
+/// A `tracing` writer that keeps formatted log lines in memory for assertions.
+#[derive(Clone, Default)]
+pub struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("captured log lock")).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("captured log lock")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
