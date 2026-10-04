@@ -477,7 +477,7 @@ pub(crate) async fn finish(
                 ELSE $12
             END,
             started_at = $13::timestamptz,
-            finished_at = CASE WHEN $15 THEN now() ELSE $14::timestamptz END,
+            finished_at = CASE WHEN $15 OR $3 = 'completed' THEN now() ELSE $14::timestamptz END,
             updated_at = now()
         WHERE chain_id = $1
           AND phase_name = $2
