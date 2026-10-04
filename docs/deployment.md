@@ -2652,7 +2652,9 @@ registry stopped Interpret with
 The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453 (transaction
 `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`, log 122,
 pinned in the
-[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json)), so every
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json))
+and again at block 11840461 (transaction
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e`, log 90), so every
 build that admits that deployment, including v0.4.0, stops Sepolia there. Now
 the pointer closes the label's previous `subregistry` edge and opens none, for
 a manifest-declared or a discovery-admitted registry alike, and Interpret
@@ -2662,11 +2664,11 @@ subnames alias the parent's children rather than living under a registry of
 their own; the self-pointer gives the label no canonical registry and no new
 canonical suffix, and bigname models no alias subtree through it. A
 discovery-admitted registry's self-pointer used to add an
-operator diagnostic row in `interpret_decode_skips`; this build writes none for
-a `subregistry` pointer. A `resolver` or `proxy_implementation` pointer at its
-own emitter, which also stopped Interpret for a manifest-declared emitter,
-now closes the previous edge, opens none and adds one diagnostic row, for any
-emitter. Rows that earlier builds wrote stay, because the table is append-only and keyed
+operator diagnostic row in `interpret_decode_skips`; this build writes none. A
+`resolver` or `proxy_implementation` pointer at its own emitter, which also
+stopped Interpret for a manifest-declared emitter, now closes the previous edge
+and opens none in the same way, with a logged warning and no diagnostic row.
+Rows that earlier builds wrote stay, because the table is append-only and keyed
 by the content hash. Normalized events do not change: the `SubregistryChanged`
 event is written as before. It adds
 no schema-migration, table, index, manifest or setting, so stamp no Ingest

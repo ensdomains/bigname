@@ -222,7 +222,7 @@ latency still require production-scale qualification before activation.
 | `ens_names` | operator rainbow load | Unverified rainbow-table candidates consumed by the import command. |
 | `normalized_events` | Interpret; manifest synchronization for `SourceManifestUpdated` only | Protocol events normalized transactionally with identity output, plus retained manifest-authority history. Manifest synchronization's rows must not be deleted or rebuilt as Interpret output: [discovery-rule widening checks](glossary.md#discovery-rule-widening-and-narrowing) reconstruct historical declaration floors from them. |
 | `discovery_watch_admissions` | Interpret | The last acknowledged [discovery-watch admission snapshot](glossary.md#discovery-watch-admission-snapshot) for each active manifest-authority fingerprint and lineage-orphaning epoch. This is replay coordination state, never fetched-fact evidence, redo authority, projection, or serving data. |
-| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, for logs that preceded their emitter's same-batch discovery admission, and for `resolver` or `proxy_implementation` discovery pointers at their own emitter; never identity, normalized-event, projection, or serving data. |
+| `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `project_family_marker`, `project_family_undo`, `project_repair_record` and [owned key family tables](glossary.md#per-block-publication) | Project | Permanent current serving state, publication generation, undo journal and repair progress. Readers compose names, records, control, permissions, resolver collections, reverse claims and address relations from one family snapshot. Child lists and counts use `project_child_edge_candidate`, `project_parent_subregistry` and `project_name_summary`; the `GET /v1/names` expiry walk reads `project_name_summary.authority_arm` to skip names an `authority` filter cannot list. An unavailable marker or overlapping redo refuses composed reads. Family data is rebuildable from canonical interpreted input; hash-pinned hydration overlays follow the documented replay policy. |
@@ -596,8 +596,8 @@ Each `interpret_decode_skips` row records the chain, block and transaction
 identity, log index, emitter, selected [source family](glossary.md#source-family)
 and signature, selection scope, decoder context, and [interpreter content
 hash](glossary.md#interpreter-content-hash). A malformed log from an emitter
-declared in an active manifest is fatal regardless of selection scope, so
-malformed-log rows come only from undeclared emitters. Its primary key combines
+declared in an active manifest is fatal regardless of selection scope, so this
+table receives rows only for undeclared emitters. Its primary key combines
 the raw-log position with that content hash, and Interpret inserts with conflict
 ignore, so replaying or redoing the same log under one interpreter build does
 not duplicate the diagnostic. The rows remain append-only across canonicality
@@ -612,13 +612,6 @@ emitter interprets under, the log's `topic0` as its selection signature,
 from the admitting block itself is interpreted by the same-block second pass
 ([manifests.md](manifests.md#resolver-admission-by-implementation-announcement))
 and produces no row.
-
-A well-formed `resolver` or `proxy_implementation` discovery pointer whose
-target is its own emitter also writes a row, from a manifest-declared or a
-discovery-admitted emitter alike: it closes the emitter's previous edge and
-opens none ([manifests.md](manifests.md#discovery-admission)). Its
-`decode_context` names the event and the edge kind. A `subregistry` pointer at
-its own emitter writes no row.
 
 For a manifest-declared address, an omitted `start_block` is initially stored
 as `contract_instance_addresses.active_from_block_number = NULL`; interval

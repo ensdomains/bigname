@@ -1245,7 +1245,9 @@ subregistry to the `ETHRegistry`, which emits it in `SubregistryUpdated`, and
 the Sepolia `ETHRegistry` emitted itself this way at block 11840453, in
 transaction `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`
 log 122, whose logs are pinned in the
-[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json). Such a
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json),
+and again at block 11840461, in transaction
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e` log 90. Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
 closes the label's previous `subregistry` edge and opens none. A name below
 that label walks back into the parent registry and reads the parent's own
@@ -1263,10 +1265,9 @@ Every other non-announcement discovery pointer at its own emitter, a
 `resolver` pointer or a `proxy_implementation` from `Upgraded`, likewise never
 stops Interpret: it closes the emitter's previous edge for that observation and
 opens none, because only registry announcements and `ResolverCreated`
-observations may produce self-edges. It has nothing to discover, so Interpret
-records it as one [operator diagnostic](storage.md#table-ownership) row in
-`interpret_decode_skips`, for manifest-declared and discovery-admitted emitters
-alike.
+observations may produce self-edges. It has nothing to discover; Interpret
+logs a warning and, as for a `subregistry` self-pointer, writes no operator
+diagnostic, for manifest-declared and discovery-admitted emitters alike.
 
 ### Resolver creation capture
 

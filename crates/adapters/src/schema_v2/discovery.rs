@@ -196,25 +196,20 @@ pub(super) fn materialize(
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
                 // The normalized event is its record. Any other self-target has nothing to
-                // discover and is recorded.
+                // discover; it is logged and, like a subregistry self-pointer, writes no
+                // operator diagnostic row.
                 if target == selected.contract_instance_id {
                     if edge_kind != "subregistry" {
-                        output.decode_skips.push(super::DecodeSkip {
-                            chain_id: raw.chain_id.clone(),
-                            block_hash: raw.block_hash.clone(),
-                            block_number: raw.block_number,
-                            transaction_hash: raw.transaction_hash.clone(),
-                            log_index: raw.log_index,
-                            emitting_address: raw.emitting_address.clone(),
-                            source_family: selected.source.source_family.clone(),
-                            selection_topic0: selected.event.topic0.clone(),
-                            match_all: selected.match_all,
-                            decode_context: format!(
-                                "{} produced a non-announcement self-edge of kind {edge_kind}; \
-                                 the previous edge is closed and no discovery edge is opened",
-                                selected.event.name
-                            ),
-                        });
+                        tracing::warn!(
+                            chain_id = %raw.chain_id,
+                            block_number = raw.block_number,
+                            transaction_hash = %raw.transaction_hash,
+                            log_index = raw.log_index,
+                            emitting_address = %raw.emitting_address,
+                            event = %selected.event.name,
+                            edge_kind = %edge_kind,
+                            "discovery pointer targets its own emitter; previous edge closed, no edge opened"
+                        );
                     }
                     continue;
                 }

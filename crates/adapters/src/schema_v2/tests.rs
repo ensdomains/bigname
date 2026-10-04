@@ -4761,7 +4761,8 @@ fn a_registry_pointing_a_label_at_itself_opens_no_edge_because_its_subnames_loop
 }
 
 #[test]
-fn a_resolver_or_implementation_self_target_opens_no_edge_and_is_recorded() -> anyhow::Result<()> {
+fn a_resolver_or_implementation_self_target_opens_no_edge_and_writes_no_row() -> anyhow::Result<()>
+{
     let sender: Address = Address::repeat_byte(0x51);
     let resolver_log = v2_registry::ResolverUpdated {
         tokenId: U256::from(7),
@@ -4840,17 +4841,9 @@ fn a_resolver_or_implementation_self_target_opens_no_edge_and_is_recorded() -> a
                 }),
                 "{case} {edge_kind}: the previous edge closes"
             );
-            assert_eq!(
-                output.decode_skips.len(),
-                1,
-                "{case} {edge_kind}: one diagnostic row"
-            );
             assert!(
-                output.decode_skips[0]
-                    .decode_context
-                    .contains(&format!("self-edge of kind {edge_kind}")),
-                "{case} {edge_kind}: {}",
-                output.decode_skips[0].decode_context
+                output.decode_skips.is_empty(),
+                "{case} {edge_kind}: no diagnostic row"
             );
         }
     }
