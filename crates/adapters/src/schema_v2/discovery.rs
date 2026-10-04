@@ -181,7 +181,8 @@ pub(super) fn materialize(
                     .unwrap_or_else(|| contract_id(&raw.chain_id, &address));
                 // A registry may point one of its own labels back at itself: the ETHRegistrar
                 // passes a registrant's chosen subregistry straight to the ETHRegistry, which
-                // emits it, and the Sepolia ETHRegistry has emitted itself this way
+                // emits it, and the Sepolia ETHRegistry has emitted itself this way (block 11840453,
+                // pinned in tests/fixtures/interpreters/v2-registry-self-subregistry.json)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05).
                 // Declared or discovery-admitted, the pointer closes the previous edge above and

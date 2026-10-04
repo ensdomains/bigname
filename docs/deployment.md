@@ -2648,7 +2648,10 @@ rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
 for every chain. Before, such a `SubregistryUpdated` from a manifest-declared
 registry stopped Interpret with
 `SubregistryUpdated produced a non-announcement self-edge of kind subregistry`.
-The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453, so every
+The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453 (transaction
+`0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`, log 122,
+pinned in the
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json)), so every
 build that admits that deployment, including v0.4.0, stops Sepolia there. Now
 the pointer closes the label's previous `subregistry` edge and opens none, for
 a manifest-declared or a discovery-admitted registry alike, and Interpret

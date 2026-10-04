@@ -1242,7 +1242,10 @@ subregistry to the `ETHRegistry`, which emits it in `SubregistryUpdated`, and
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L152 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05);
-the Sepolia `ETHRegistry` emitted itself this way at block 11840453. Such a
+the Sepolia `ETHRegistry` emitted itself this way at block 11840453, in
+transaction `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`
+log 122, whose logs are pinned in the
+[interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json). Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
 closes the label's previous `subregistry` edge and opens none. That matches
 the chain: a name below that label walks back into the parent registry, whose
