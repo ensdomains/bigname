@@ -44,6 +44,7 @@ use sqlx::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
 
 use support::ScratchDatabase;
 
@@ -1598,6 +1599,12 @@ async fn interpret_redo_replays_the_dependent_suffix_through_the_recorded_head()
         "interpret-redo-runner",
         test_timing(),
     )?;
+    let logs = support::CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
     runner
         .redo(
             &chain_config(chain)?,
@@ -1605,7 +1612,15 @@ async fn interpret_redo_replays_the_dependent_suffix_through_the_recorded_head()
             BlockRange::new(1, 1)?,
             CancellationToken::new(),
         )
+        .with_subscriber(subscriber)
         .await?;
+    let logs = logs.text();
+    assert_eq!(
+        logs.matches("interpret redo on chain interpret-redo requested 1..=1 but runs 1..=2")
+            .count(),
+        1,
+        "{logs}"
+    );
 
     let states: Vec<(i64, bool)> = sqlx::query_as(
         "
