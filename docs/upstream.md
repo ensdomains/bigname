@@ -174,6 +174,22 @@ under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
 
 ## Known divergences
 
+> **Labels whose subregistry is their own registry: alias subtree not modelled** —
+> a registry can set one of its labels' subregistry to the registry itself, for
+> example when a registrant passes the `ETHRegistry` as the subregistry to
+> `ETHRegistrar.register`. Resolution then walks a name below that label back
+> into the same registry, reading the parent's own entries, so `x.label.eth`
+> reads `x`'s entry and the subtree aliases the parent's children.
+> **Upstream**: (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
+> (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L63-L84 @ ens_v2_sepolia_20261001@07e55a05)
+> (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05)
+> **Our rule / why**: the self-pointer gives the label no canonical registry and
+> no new canonical suffix. Interpret closes the label's previous `subregistry`
+> edge, opens none and models no alias subtree through it; the
+> `SubregistryChanged` normalized event keeps the pointer. See
+> [discovery admission](manifests.md#discovery-admission).
+> **Since**: `2026-10-04`
+
 > **Registry count comparison after full revocation of a newer resource version** —
 > the reference indexer deletes fully revoked assignment rows and determines the
 > newest observed version from remaining rows.

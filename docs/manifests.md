@@ -1247,16 +1247,17 @@ transaction `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`
 log 122, whose logs are pinned in the
 [interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json). Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
-closes the label's previous `subregistry` edge and opens none. That matches
-the chain: a name below that label walks back into the parent registry and
-reads the parent's own entries, so its subnames loop back into the parent
-instead of sitting under a registry of their own, and the label gains no
-canonical registry
+closes the label's previous `subregistry` edge and opens none. A name below
+that label walks back into the parent registry and reads the parent's own
+entries (`x.label.eth` reads `x`'s entry), so its subnames alias the parent's
+children rather than living under a registry of their own; the self-pointer
+gives the label no canonical registry and no new canonical suffix, and bigname
+models no alias subtree through it
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
-Interpret writes no operator diagnostic for it; the `SubregistryChanged`
-normalized event is its record. Interpret models no names below that label
-through the pointer while it stands.
+This is a [known divergence](upstream.md#known-divergences). Interpret writes
+no operator diagnostic for it; the `SubregistryChanged` normalized event is its
+record.
 
 Every other non-announcement discovery pointer at its own emitter, a
 `resolver` pointer or a `proxy_implementation` from `Upgraded`, likewise never

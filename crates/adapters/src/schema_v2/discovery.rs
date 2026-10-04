@@ -189,8 +189,10 @@ pub(super) fn materialize(
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05).
                 // A name below that label walks back into the parent registry and reads the
-                // parent's own entries, so its subnames loop back into the parent instead of sitting
-                // under a registry of their own, and the label gains no canonical registry
+                // parent's own entries (x.label.eth reads x's entry), so its subnames alias the
+                // parent's children rather than living under a registry of their own; the
+                // self-pointer gives the label no canonical registry and no new canonical suffix,
+                // and bigname models no alias subtree through it
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L76-L82 @ ens_v2_sepolia_20261001@07e55a05)
                 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/universalResolver/libraries/LibResolution.sol:L127-L160 @ ens_v2_sepolia_20261001@07e55a05).
                 // The normalized event is its record. Any other self-target has nothing to

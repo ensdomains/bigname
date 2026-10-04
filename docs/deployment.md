@@ -2656,7 +2656,12 @@ pinned in the
 build that admits that deployment, including v0.4.0, stops Sepolia there. Now
 the pointer closes the label's previous `subregistry` edge and opens none, for
 a manifest-declared or a discovery-admitted registry alike, and Interpret
-continues. A discovery-admitted registry's self-pointer used to add an
+continues. A name below that label walks back into the parent registry and
+reads the parent's own entries (`x.label.eth` reads `x`'s entry), so its
+subnames alias the parent's children rather than living under a registry of
+their own; the self-pointer gives the label no canonical registry and no new
+canonical suffix, and bigname models no alias subtree through it. A
+discovery-admitted registry's self-pointer used to add an
 operator diagnostic row in `interpret_decode_skips`; this build writes none for
 a `subregistry` pointer. A `resolver` or `proxy_implementation` pointer at its
 own emitter, which also stopped Interpret for a manifest-declared emitter,
