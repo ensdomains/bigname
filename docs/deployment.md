@@ -2695,3 +2695,47 @@ From v0.4.0:
 - From a build before v0.4.0, the deploy also carries the
   [v0.4.0 rollout](#v040-rollout)'s requirements. The one full-history
   Interpret redo and its Project redo under v0.4.1 discharge both rotations.
+
+### Manifest sync index
+
+The build that indexes the manifest sync's startup read (TYR-220, see
+[walk index set](storage.md#walk-index-set)) changes the normalized-events baseline, one
+schema-migration, the walk index set lists and their checks, all outside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
+and it needs no redo, no manifest or environment change and no historical ingest fetch. At every
+start the phase runner's manifest sync reads the latest `SourceManifestUpdated` event of each
+manifest. Without an index on `(source_manifest_id, event_kind)`, PostgreSQL walks the primary
+key backward from the newest event, and because those events were written near the start of the
+walk, each probe reads most of `normalized_events`. On a mainnet-size table (about 109 million
+rows) a runner start spent over an hour in that read before doing any work; with the index it
+finishes in seconds. Sepolia-size tables pay seconds without it.
+
+`20261004120000_normalized_events_manifest_idx.sql` adds `normalized_events_manifest_idx` on
+`normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)`, partial on
+`source_manifest_id IS NOT NULL`, the name and definition the retired public-schema baseline
+gave it. It joins the [walk index set](glossary.md#walk-index-set), so `ops/walk-index-set/drop.sql`
+keeps it. The schema-migration is a plain `CREATE INDEX` that scans all of `normalized_events`
+while holding a SHARE lock on it until the schema-migration commits, which blocks Interpret's
+writes. On a mainnet-size database the prebuild is required: build it concurrently first,
+outside a transaction, while the phase runner and API keep running (on the mainnet table above
+the concurrent build took about four minutes and the index is about 6 GB):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_manifest_idx
+    ON bigname_phase.normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)
+    WHERE source_manifest_id IS NOT NULL;
+```
+
+Then apply the schema-migrations with `--target-version 20261004120000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
+A database that already carries this index under this name and definition, for example one
+prebuilt before this build, converges the same way. On a small database, such as a Sepolia one,
+the plain build may instead run with the phase runner and redo processes stopped.
+`CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks that the
+name is an index on `normalized_events` that is `indisvalid` and `indisready` with the reviewed
+`pg_get_indexdef`, and fails without recording itself otherwise. To recover, drop the named
+relation (an interrupted concurrent build leaves an invalid index: confirm in
+`pg_stat_progress_create_index` that no build is still running, then `DROP INDEX CONCURRENTLY`
+it), rebuild it with the statement above and apply the schema-migrations again. A runner started
+before the index exists behaves the same, only slower at start. API standbys receive the index
+through replication.

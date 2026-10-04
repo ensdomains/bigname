@@ -15,7 +15,7 @@ exceed the API's statement timeout (`BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`) until
 `install.sql` has run. The operator's `phase-runner inspect` block and raw-event windows count
 and list normalized events by block hash, which `normalized_events_block_idx` serves.
 
-The [walk index set](../../docs/glossary.md#walk-index-set) is the 16 indexes Interpret keeps.
+The [walk index set](../../docs/glossary.md#walk-index-set) is the 17 indexes Interpret keeps.
 `drop.sql` drops the other 33 before a from-zero walk or a full-history Interpret redo, and
 `install.sql` rebuilds them, with their reviewed definitions, before Project runs.
 [`docs/storage.md`](../../docs/storage.md#walk-index-set) lists both sets and the rule that
