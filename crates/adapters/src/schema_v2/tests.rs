@@ -4667,11 +4667,12 @@ fn registry_created_emits_the_ruled_self_edge() -> anyhow::Result<()> {
 }
 
 #[test]
-fn a_registry_pointing_a_label_back_at_itself_does_not_halt_interpretation() -> anyhow::Result<()> {
-    // Seen on the Sepolia hackathon deployment (block 11673141): a discovery-admitted user
-    // registry set one of its own labels' subregistry to its own address. Under the #569
-    // ruling an undeclared emitter's anomalous log is skipped and recorded, not terminal; a
-    // manifest-declared registry doing the same stays fatal.
+fn a_registry_pointing_a_label_back_at_itself_closes_the_previous_edge_and_opens_none()
+-> anyhow::Result<()> {
+    // Seen from a discovery-admitted user registry on the Sepolia hackathon deployment (block
+    // 11673141) and from the manifest-declared ETHRegistry of the 2026-10-01 deployment
+    // (block 11840453). Declared or not, the emitter's previous edge for the label closes and
+    // no edge or diagnostic row is written; the normalized event is the record.
     let sender: Address = Address::repeat_byte(0x51);
     let manifest = || {
         manifest_with_events(
@@ -4712,48 +4713,49 @@ fn a_registry_pointing_a_label_back_at_itself_does_not_halt_interpretation() -> 
     announced.discovery_from_contract_instance_id = Some(announced.contract_instance_id);
     announced.discovery_observation_key = Some("registry-announcement:self".to_owned());
 
-    let declared = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest()],
-        discovery_rules: rules(),
-        admissions: vec![admission(68, "registry")],
-        prior_events: Vec::new(),
-        blocks: Vec::new(),
-        raw_logs: self_loop(),
-    });
-    assert!(
-        declared.is_err(),
-        "a manifest-declared registry pointing at itself stays fatal"
-    );
+    for (case, admission) in [
+        ("declared", admission(68, "registry")),
+        ("undeclared", announced),
+    ] {
+        let output = interpret_test_batch(BatchInput {
+            chain_id: CHAIN.to_owned(),
+            manifests: vec![manifest()],
+            discovery_rules: rules(),
+            admissions: vec![admission],
+            prior_events: Vec::new(),
+            blocks: Vec::new(),
+            raw_logs: self_loop(),
+        })
+        .with_context(|| format!("{case} registry pointing a label at itself"))?;
 
-    let output = interpret_test_batch(BatchInput {
-        chain_id: CHAIN.to_owned(),
-        manifests: vec![manifest()],
-        discovery_rules: rules(),
-        admissions: vec![announced],
-        prior_events: Vec::new(),
-        blocks: Vec::new(),
-        raw_logs: self_loop(),
-    })?;
-
-    assert!(
-        output
-            .discovery_edges
-            .iter()
-            .all(|edge| edge.edge_kind != "subregistry"),
-        "a self-loop opens no subregistry discovery edge"
-    );
-    assert_eq!(
-        output.decode_skips.len(),
-        1,
-        "the skip is recorded explicitly"
-    );
-    assert!(
-        output.decode_skips[0]
-            .decode_context
-            .contains("self-edge of kind subregistry")
-    );
-    assert_eq!(output.decode_skips[0].block_number, 1);
+        assert!(
+            output
+                .discovery_edges
+                .iter()
+                .all(|edge| edge.edge_kind != "subregistry"),
+            "{case}: a self-loop opens no subregistry discovery edge"
+        );
+        assert!(
+            output.discovery_edge_closures.iter().any(|closure| {
+                closure.edge_kind == "subregistry"
+                    && closure.from_contract_instance_id == Uuid::from_u128(68)
+                    && closure.active_to_block_number == 1
+                    && closure.log_index == 0
+            }),
+            "{case}: the label's previous subregistry edge closes at the self-loop"
+        );
+        assert!(
+            output.decode_skips.is_empty(),
+            "{case}: a self-loop writes no diagnostic row"
+        );
+        assert!(
+            output
+                .normalized_events
+                .iter()
+                .any(|event| event.event_kind == "SubregistryChanged"),
+            "{case}: the self-loop is still recorded as SubregistryChanged"
+        );
+    }
     Ok(())
 }
 
