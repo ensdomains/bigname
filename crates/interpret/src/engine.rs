@@ -156,6 +156,11 @@ impl Engine {
             )));
         };
         let (batch_to, batch_hash) = markers.last().expect("non-empty markers");
+        let profile = profile.then_some(FoldProfile {
+            chain_id: &request.chain_id,
+            from_block: *batch_from,
+            to_block: *batch_to,
+        });
         let session_key = prior_sessions::SessionKey {
             chain_id: request.chain_id.clone(),
             from_block: request.from_block,
@@ -331,10 +336,22 @@ impl Engine {
     }
 }
 
-fn profile_phase(enabled: bool, phase: &str, started: Instant, retained_events: Option<usize>) {
-    if !enabled {
+#[derive(Clone, Copy)]
+struct FoldProfile<'a> {
+    chain_id: &'a str,
+    from_block: i64,
+    to_block: i64,
+}
+
+fn profile_phase(
+    profile: Option<FoldProfile<'_>>,
+    phase: &str,
+    started: Instant,
+    retained_events: Option<usize>,
+) {
+    let Some(profile) = profile else {
         return;
-    }
+    };
     let rss_kib = std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|status| {
@@ -348,10 +365,30 @@ fn profile_phase(enabled: bool, phase: &str, started: Instant, retained_events: 
         })
         .unwrap_or(0);
     eprintln!(
-        "interpret-fold-profile phase={phase} elapsed_ms={} retained_events={} rss_kib={rss_kib}",
-        started.elapsed().as_millis(),
-        retained_events.unwrap_or(0),
+        "{}",
+        profile_line(
+            profile,
+            phase,
+            started.elapsed().as_millis(),
+            retained_events.unwrap_or(0),
+            rss_kib,
+        )
     );
+}
+
+// Parsers read the leading fields positionally; append new fields at the end.
+fn profile_line(
+    profile: FoldProfile<'_>,
+    phase: &str,
+    elapsed_ms: u128,
+    retained_events: usize,
+    rss_kib: u64,
+) -> String {
+    format!(
+        "interpret-fold-profile phase={phase} elapsed_ms={elapsed_ms} \
+         retained_events={retained_events} rss_kib={rss_kib} chain={} from={} to={}",
+        profile.chain_id, profile.from_block, profile.to_block,
+    )
 }
 
 fn validate_loaded_lineage(
@@ -426,4 +463,23 @@ async fn validate_resume(pool: &PgPool, request: &BatchRequest, target: &Marker)
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::{FoldProfile, profile_line};
+
+    #[test]
+    fn profile_line_appends_batch_range_after_existing_fields() {
+        let profile = FoldProfile {
+            chain_id: "ethereum-mainnet",
+            from_block: 19_000_000,
+            to_block: 19_009_999,
+        };
+        assert_eq!(
+            profile_line(profile, "write_batch", 1234, 56, 7890),
+            "interpret-fold-profile phase=write_batch elapsed_ms=1234 retained_events=56 \
+             rss_kib=7890 chain=ethereum-mainnet from=19000000 to=19009999"
+        );
+    }
 }
