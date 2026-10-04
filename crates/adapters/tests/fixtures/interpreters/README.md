@@ -52,14 +52,17 @@ ens_v2@a971bd64) The registry accepts a later expiry update for the same token.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @
 ens_v2@a971bd64)
 
-`v2-registry-self-subregistry.json` is the production log run of a `.eth`
-registration on the Sepolia `ETHRegistry` at block 11,840,453 (transaction
-`0xea03502e…`, logs 118-123), with its exact topics, data, block hash and
-timestamp. The registrant chose the `ETHRegistry` itself as the new label's
-subregistry, so log 122 is a `SubregistryUpdated` naming its own emitter. The
-test pins that the manifest-declared registry's pointer closes the label's
-previous `subregistry` edge, opens none, writes no operator diagnostic, keeps
-its `SubregistryChanged` normalized event, and lets the same transaction's
+`v2-registry-self-subregistry.json` holds the production log runs of two `.eth`
+registrations on the Sepolia `ETHRegistry`: block 11,840,453 (transaction
+`0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`, logs
+118-123) and block 11,840,461 (transaction
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e`, logs
+86-91), with their exact topics, data, block hashes and timestamps. Each
+registrant chose the `ETHRegistry` itself as the new label's subregistry, so
+logs 122 and 90 are `SubregistryUpdated` naming their own emitter. The test
+pins that the manifest-declared registry's pointer closes the label's previous
+`subregistry` edge, opens none, writes no operator diagnostic, keeps its
+`SubregistryChanged` normalized event, and lets the same transaction's
 `ResolverUpdated` interpret.
 
 The original four cases were copied from these now-deleted legacy adapter

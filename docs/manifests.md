@@ -1247,7 +1247,8 @@ transaction `0xea03502e4a0eaa4a65c2021bb5d9f77bfb531c4568805e09054454c34607454e`
 log 122, whose logs are pinned in the
 [interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json),
 and again at block 11840461, in transaction
-`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e` log 90. Such a
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e` log 90,
+pinned in the same fixture. Such a
 pointer, from a manifest-declared or a discovery-admitted registry alike,
 closes the label's previous `subregistry` edge and opens none. A name below
 that label walks back into the parent registry and reads the parent's own

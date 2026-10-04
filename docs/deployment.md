@@ -2654,7 +2654,8 @@ The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453 (transaction
 pinned in the
 [interpreter fixture](../crates/adapters/tests/fixtures/interpreters/v2-registry-self-subregistry.json))
 and again at block 11840461 (transaction
-`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e`, log 90), so every
+`0xae61dbac6716e749f0d6a2f3560adc2aaa7b7a81d3ba5288809c3737b4a3793e`, log 90,
+pinned in the same fixture), so every
 build that admits that deployment, including v0.4.0, stops Sepolia there. Now
 the pointer closes the label's previous `subregistry` edge and opens none, for
 a manifest-declared or a discovery-admitted registry alike, and Interpret
