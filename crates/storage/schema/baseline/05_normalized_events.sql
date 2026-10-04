@@ -845,6 +845,13 @@ CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
         normalized_event_id
     );
 
+-- The manifest sync's latest SourceManifestUpdated per manifest at every runner start
+-- (crates/manifests/src/schema_v2_sync_state.rs and schema_v2_event_history.rs). Keep it
+-- identical to migrations/20261004120000_normalized_events_manifest_idx.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_manifest_idx
+    ON normalized_events (source_manifest_id, event_kind, normalized_event_id DESC)
+    WHERE source_manifest_id IS NOT NULL;
+
 COMMENT ON TABLE normalized_events IS
     'This table stores plain protocol events from the interpreter.';
 COMMENT ON COLUMN normalized_events.normalized_event_id IS

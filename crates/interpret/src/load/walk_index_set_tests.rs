@@ -21,7 +21,7 @@ const INSTALL_SQL: &str = include_str!("../../../../ops/walk-index-set/install.s
 const RUNNER: &str = "walk-index-set-runner";
 
 /// The kept indexes, as `docs/storage.md` § Walk index set lists them.
-const KEEP: [&str; 16] = [
+const KEEP: [&str; 17] = [
     "normalized_events_pkey",
     "normalized_events_event_identity_key",
     "normalized_events_interpreter_state_history_idx",
@@ -30,6 +30,7 @@ const KEEP: [&str; 16] = [
     "normalized_events_chain_block_number_idx",
     "normalized_events_chain_block_number_desc_idx",
     "normalized_events_projection_idx",
+    "normalized_events_manifest_idx",
     "normalized_events_v1_direct_node_probe_idx",
     "normalized_events_v1_due_probe_idx",
     "normalized_events_basenames_direct_node_probe_idx",
