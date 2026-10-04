@@ -827,6 +827,12 @@ already-pending redo rather than absorbing that work. If one of its phases
 fails, the error lists every pending phase-specific recovery command in
 dependency order, including a required Verify redo created by Ingest. The
 operator must complete those durable markers before rerunning `--phase all`.
+A completed redo restores the phase's pre-redo cursors and lifecycle, except
+that a normal phase the redo found running or paused becomes `failed` and must
+be resumed. When the restored status is `completed`,
+`chain_phase_state.finished_at` is stamped with the redo's completion time, so
+it reads as when the phase last completed; a restored `failed` status keeps its
+failure time and error.
 Verify redo checks its source
 and SELECT-only database configuration before phase initialization, locking,
 or redo-state publication.
