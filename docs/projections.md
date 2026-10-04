@@ -1119,9 +1119,10 @@ epoch row lands on the reactivated registrar resource and the un-admitted
 admin role (`can_transfer_admin` for `transfer`) no current row on the resource
 or its registry root carries, because only a held admin role can grant or
 revoke that role and the registration cannot re-grant an admin role; it is
-`NULL` for every other resource. The registry root is read from the resource
-identity table, and current resource and registry-root admin aggregates are
-read in the same family snapshot. A root permission change therefore affects
+`NULL` for every other resource. The registry root is resource 0 of the
+registry contract instance that the resource's own events name, counted only
+when its identity row is readable. Current resource and registry-root admin
+aggregates are read in the same family snapshot. A root permission change therefore affects
 `locked_roles` without rewriting every registration.
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
