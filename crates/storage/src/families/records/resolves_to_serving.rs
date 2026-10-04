@@ -20,7 +20,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::{
-    address_names::{name_row, publication_stamps},
+    address_names::{compose_base_chunk, name_row, publication_stamps},
     candidates::candidate_resources_from,
     inventory::{FamilyAttribution, load_family_record_inventories_on},
     resolves_to::{RecordRow, may_fall_back, record_rows},
@@ -32,7 +32,7 @@ use crate::{
     address_names::{
         RowSource, load_address_records_evm_page_from, load_address_records_page_from,
     },
-    families::name::{CoverageShape, FamilyPublication, load_composed, servable_publication},
+    families::name::{FamilyPublication, servable_publication},
 };
 
 /// `load_address_records_current_page` over the families.
@@ -159,7 +159,9 @@ async fn compose_address_record_rows(
     let (mut rows, mut names) = (Vec::new(), Vec::new());
     for (chain_id, resources) in by_chain {
         // Resolve the requested name scope before a different chain's rebuild can veto it.
-        let ids = names_reaching(conn, &chain_id, &resources, namespaces).await?;
+        let mut ids = names_reaching(conn, &chain_id, &resources, namespaces).await?;
+        // Chunks in id order emit the rows in the order one composition of every id did.
+        ids.sort_unstable();
         if ids.is_empty() {
             continue;
         }
@@ -181,22 +183,24 @@ async fn compose_address_record_rows(
         if records.is_empty() {
             continue;
         }
-        let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
-        for row in composed.values() {
-            let Some(record_resource) = serves_records_through(row) else {
-                continue;
-            };
-            let Some(found) = records.get(&record_resource) else {
-                continue;
-            };
-            let mut coin_types = BTreeSet::new();
-            for record in found {
-                // DISTINCT ON (address, coin_type, logical_name_id).
-                if coin_types.insert(record.coin_type.clone()) {
-                    rows.push(address_record_row(&address, record, row, &publication));
+        for chunk in ids.chunks(super::seams::compose_chunk()) {
+            let composed = compose_base_chunk(conn, chunk).await?;
+            for row in composed.values() {
+                let Some(record_resource) = serves_records_through(row) else {
+                    continue;
+                };
+                let Some(found) = records.get(&record_resource) else {
+                    continue;
+                };
+                let mut coin_types = BTreeSet::new();
+                for record in found {
+                    // DISTINCT ON (address, coin_type, logical_name_id).
+                    if coin_types.insert(record.coin_type.clone()) {
+                        rows.push(address_record_row(&address, record, row, &publication));
+                    }
                 }
+                names.push(name_row(row));
             }
-            names.push(name_row(row));
         }
     }
     Ok((Value::Array(rows), Value::Array(names)))

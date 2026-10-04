@@ -8,11 +8,12 @@ mod resolves_to_filter;
 mod resolves_to_page;
 mod source;
 mod types;
-pub(crate) use page::load_address_names_page_from;
+mod walk;
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,
 };
+pub(crate) use page::{load_address_names_page_entries_from, load_address_names_page_from};
 pub(crate) use query::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 pub(crate) use read::load_address_names_current_at_bound;
 #[cfg(test)]
@@ -34,12 +35,13 @@ pub use resolves_to_page::load_address_records_current_page;
 pub(crate) use resolves_to_page::load_address_records_page_from;
 pub(crate) use source::RowSource;
 pub use types::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
-    AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
-    AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
-    AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary, NameQuery, NameQueryMatch,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
+    AddressNamesCurrentCappedPage, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
+    AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, NameQuery, NameQueryMatch,
 };
+pub use walk::{AddressNamesPageRequest, load_family_address_names_capped_page};
 
 /// The publication half of the read filter: the row's target block is on readable lineage.
 macro_rules! publication_read_filter {

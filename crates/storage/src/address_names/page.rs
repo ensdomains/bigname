@@ -146,17 +146,6 @@ pub(crate) async fn load_address_names_page_from(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
-    let page_size = checked_page_size_usize(
-        page_size,
-        "address_names_current page_size must be positive",
-        "address_names_current page_size does not fit in usize",
-    )?;
-    let page_limit = checked_page_limit_i64_from_usize(
-        page_size,
-        "address_names_current page_size is too large",
-        "address_names_current page_size exceeds SQL limit",
-    )?;
-
     let summary = load_address_names_current_summary(
         &mut *conn,
         source,
@@ -169,7 +158,60 @@ pub(crate) async fn load_address_names_page_from(
         is_migrated,
     )
     .await?;
+    let (entries, next_cursor) = load_address_names_page_entries_from(
+        conn,
+        source,
+        address,
+        namespace,
+        relations,
+        dedupe_by,
+        q,
+        authority,
+        is_migrated,
+        sort,
+        order,
+        cursor,
+        page_size,
+    )
+    .await?;
+    Ok(AddressNamesCurrentSortedPage {
+        entries,
+        next_cursor,
+        summary,
+    })
+}
 
+/// The page statement of [`load_address_names_page_from`] alone: the page's entries and the
+/// cursor after its last entry when more follow, with no summary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn load_address_names_page_entries_from(
+    conn: &mut PgConnection,
+    source: RowSource<'_>,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
+    is_migrated: Option<bool>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<(
+    Vec<AddressNameCurrentEntry>,
+    Option<AddressNamesCurrentSortedCursor>,
+)> {
+    let page_size = checked_page_size_usize(
+        page_size,
+        "address_names_current page_size must be positive",
+        "address_names_current page_size does not fit in usize",
+    )?;
+    let page_limit = checked_page_limit_i64_from_usize(
+        page_size,
+        "address_names_current page_size is too large",
+        "address_names_current page_size exceeds SQL limit",
+    )?;
     if let Some(cursor) = cursor {
         ensure_address_names_current_cursor_matches_sort(sort, cursor)?;
     }
@@ -255,12 +297,7 @@ pub(crate) async fn load_address_names_page_from(
     });
     let mut entries: Vec<AddressNameCurrentEntry> = rows.into_iter().map(|row| row.entry).collect();
     attach_served_managers(&mut entries, source);
-
-    Ok(AddressNamesCurrentSortedPage {
-        entries,
-        next_cursor,
-        summary,
-    })
+    Ok((entries, next_cursor))
 }
 
 /// A surface-less registry child's `served_manager` from its composed relation rows, all of which

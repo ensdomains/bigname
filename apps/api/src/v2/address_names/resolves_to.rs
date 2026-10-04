@@ -95,6 +95,11 @@ pub(super) async fn get_address_resolves_to(
         ));
     }
     let include = address_names_include(&params.include)?;
+    if include.total_count {
+        return Err(V2Error::invalid_input(
+            "include=total_count requires an ownership relation",
+        ));
+    }
     let include_role_summary = include.role_summary;
     let normalized_q = params
         .q

@@ -37,7 +37,7 @@ use crate::families::{
 /// after it is not part of it, exactly as the ordinary compositor leaves such a surface out
 /// (`name::batch::load_base`), so the child stays listed here until the publication that
 /// composes its name row.
-pub(super) async fn compose_registry_child_rows(
+pub(crate) async fn compose_registry_child_rows(
     conn: &mut PgConnection,
     address: &str,
     namespace: Option<&str>,
@@ -80,8 +80,13 @@ pub(super) async fn compose_registry_child_rows(
     }
     let mut rows = Vec::new();
     for (chain_id, (published_block, ids)) in by_chain {
-        let mut children: Vec<RegistryChildRow> =
-            load_owned_registry_children(conn, &chain_id, address, &ids, published_block).await?;
+        let mut children: Vec<RegistryChildRow> = Vec::new();
+        for chunk in ids.chunks(super::seams::compose_chunk()) {
+            children.extend(
+                load_owned_registry_children(conn, &chain_id, address, chunk, published_block)
+                    .await?,
+            );
+        }
         // The NameWrapper holds such a child for a token holder, its owner and manager, whom the
         // address index does not record; the child is listed for neither
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579-L581 @ ens_v1@91c966f).

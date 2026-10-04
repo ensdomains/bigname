@@ -34,6 +34,9 @@ mod serving;
 use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
+pub(crate) use address_names::{
+    AddressComposer, ComposedName, address_name_candidates, compose_candidate_rows, includes_roles,
+};
 pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
 pub use facts::{
     ResolverClassification as FamilyResolverClassification,
@@ -54,6 +57,7 @@ pub use links::{
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
 pub use primary::{load_family_primary_name_snapshot, load_family_primary_name_snapshots};
+pub(crate) use registry_children::compose_registry_child_rows;
 pub use resolves_to_serving::{load_family_resolves_to_evm_page, load_family_resolves_to_page};
 pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
 pub use reverse_page::{

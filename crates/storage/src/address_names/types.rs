@@ -262,6 +262,15 @@ pub struct AddressNamesCurrentPage {
     pub summary: AddressNamesCurrentSummary,
 }
 
+/// A page of grouped current address-name entries whose total is exact only when it was asked
+/// for or the address has few candidate names (`families::records::address_names_walk`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddressNamesCurrentCappedPage {
+    pub entries: Vec<AddressNameCurrentEntry>,
+    pub next_cursor: Option<AddressNamesCurrentSortedCursor>,
+    pub total_count: Option<u64>,
+}
+
 /// Bounded sorted page of grouped current address-name entries for the extended v2 read path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressNamesCurrentSortedPage {
