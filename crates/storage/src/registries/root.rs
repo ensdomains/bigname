@@ -1,11 +1,7 @@
 use anyhow::Result;
 use sqlx::{PgPool, types::Uuid};
 
-use crate::identity::ens_v2_registry_resource_id;
-
-/// EAC resource 0, whose grants apply to the whole registry.
-const ROOT_UPSTREAM_RESOURCE: &str =
-    "0x0000000000000000000000000000000000000000000000000000000000000000";
+use crate::identity::ens_v2_registry_root_resource_id;
 
 /// The root resource of the ENSv2 registry at one address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +40,7 @@ pub async fn load_registry_root_resource(
     .await?;
     Ok(
         row.map(|(instance, migration_registry)| RegistryRootResource {
-            resource_id: ens_v2_registry_resource_id(chain_id, instance, ROOT_UPSTREAM_RESOURCE),
+            resource_id: ens_v2_registry_root_resource_id(chain_id, instance),
             migration_registry,
         }),
     )

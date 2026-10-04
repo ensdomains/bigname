@@ -20,6 +20,22 @@ pub fn ens_v2_registry_resource_id(
     Uuid::from_bytes(bytes)
 }
 
+/// The upstream EAC resource of an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource 0).
+pub const ENS_V2_ROOT_UPSTREAM_RESOURCE: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The bigname identity of an ENSv2 registry contract instance's root resource.
+pub fn ens_v2_registry_root_resource_id(
+    chain_id: &str,
+    registry_contract_instance_id: Uuid,
+) -> Uuid {
+    ens_v2_registry_resource_id(
+        chain_id,
+        registry_contract_instance_id,
+        ENS_V2_ROOT_UPSTREAM_RESOURCE,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

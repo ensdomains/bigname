@@ -2,7 +2,9 @@ mod ids;
 mod read;
 mod types;
 
-pub use ids::ens_v2_registry_resource_id;
+pub use ids::{
+    ENS_V2_ROOT_UPSTREAM_RESOURCE, ens_v2_registry_resource_id, ens_v2_registry_root_resource_id,
+};
 pub use read::{
     load_name_surface, load_name_surface_including_noncanonical,
     load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,

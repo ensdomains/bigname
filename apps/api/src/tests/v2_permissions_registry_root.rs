@@ -7,14 +7,10 @@ const ROOT_HOLDERS: [&str; 4] = [
     "0x00000000000000000000000000000000000000c4",
 ];
 const REVOKED_HOLDER: &str = "0x00000000000000000000000000000000000000c5";
-const ZERO_RESOURCE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const ZERO_RESOURCE: &str = bigname_storage::ENS_V2_ROOT_UPSTREAM_RESOURCE;
 
 fn alpha_root() -> Uuid {
-    bigname_storage::ens_v2_registry_resource_id(
-        "ethereum-mainnet",
-        Uuid::from_u128(0xA190),
-        ZERO_RESOURCE,
-    )
+    bigname_storage::ens_v2_registry_root_resource_id("ethereum-mainnet", Uuid::from_u128(0xA190))
 }
 
 fn root_role_event(subject: &str, block: i64, powers: Value) -> NormalizedEvent {
