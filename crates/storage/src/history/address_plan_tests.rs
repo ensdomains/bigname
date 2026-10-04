@@ -43,10 +43,16 @@ const SELECTOR_INDEXES: [&str; 3] = [
     "normalized_events_resource_history_idx",
     "normalized_events_pkey",
 ];
+const ROOT_ROLE_INDEX: &str = "normalized_events_address_root_permission_idx";
 
 #[tokio::test]
 async fn address_history_selector_plans_use_history_indexes() -> Result<()> {
     with_fixture("address_history_selector_plan", check_selector_plans).await
+}
+
+#[tokio::test]
+async fn address_history_root_role_branch_uses_its_index() -> Result<()> {
+    with_fixture("address_history_root_role_plan", check_root_role_plans).await
 }
 
 #[tokio::test]
@@ -174,6 +180,100 @@ async fn check_selector_plans(connection: &mut PgConnection) -> Result<()> {
     ensure!(
         plan_failures.is_empty(),
         "address history plans:\n{}",
+        plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// A product read in `both` scope adds the registry root role changes whose subject is the
+/// address. Every unrelated holder's root changes share one root resource, so the branch must be
+/// keyed by the subject through its own index, beside the anchors' indexes, and the root-only
+/// selector of an address with no other anchor must read that index alone.
+async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
+    let mut plan_failures = Vec::new();
+    for (case, anchors, expected) in [
+        (
+            "anchored",
+            HistorySelector::logical_names_or_resources(
+                vec![target_name()],
+                vec![target_resource()],
+            ),
+            &[
+                "target:root",
+                "target:pointer",
+                "target:record",
+                "target:owner",
+                "target:transfer",
+                "target:grant",
+            ][..],
+        ),
+        ("root-only", HistorySelector::None, &["target:root"][..]),
+    ] {
+        let mut keyed: Vec<&str> = vec![ROOT_ROLE_INDEX];
+        if case == "anchored" {
+            keyed.extend(SELECTOR_INDEXES);
+        }
+        let filter = EventHistoryReadFilter {
+            selectors: vec![HistorySelector::OrRootPermissionSubject {
+                anchors: Box::new(anchors),
+                subject: TARGET.to_owned(),
+            }],
+            ..EventHistoryReadFilter::default()
+        }
+        .with_attributed_records(&mut *connection)
+        .await?;
+        let push_count = |builder: &mut _| {
+            push_history_count_query(builder, &filter, true, Some(10_001));
+        };
+        let push_page = |builder: &mut _| {
+            push_history_select(builder, &filter, true, false, false);
+            push_history_filters(builder, &filter, true);
+            push_product_history_duplicate_filter(builder, &filter, true);
+            push_history_order(builder, filter.order);
+            builder.push(" LIMIT ");
+            builder.push_bind(51_i64);
+        };
+        for (statement, plans) in [
+            ("count", explain_both(connection, push_count).await?),
+            ("page", explain_both(connection, push_page).await?),
+        ] {
+            for plan in plans {
+                let nodes = main_plan_nodes(&plan);
+                let label = format!("{case} {statement}");
+                if let Err(error) = assert_no_unkeyed_event_scan(&label, &nodes, &plan, &keyed) {
+                    plan_failures.push(error.to_string());
+                } else if !index_names(&nodes).contains(&ROOT_ROLE_INDEX) {
+                    plan_failures.push(format!("{label} does not use {ROOT_ROLE_INDEX}: {plan}"));
+                }
+            }
+        }
+        let mut count = QueryBuilder::<Postgres>::new("");
+        push_count(&mut count);
+        let total: i64 = count
+            .build_query_scalar()
+            .fetch_one(&mut *connection)
+            .await?;
+        ensure!(
+            total == expected.len() as i64,
+            "{case} count returned {total}"
+        );
+        let mut page = QueryBuilder::<Postgres>::new("");
+        push_page(&mut page);
+        let identities = page
+            .build()
+            .fetch_all(&mut *connection)
+            .await?
+            .iter()
+            .map(|row| row.try_get::<String, _>("event_identity"))
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure!(
+            identities == expected,
+            "{case} page returned {identities:?}"
+        );
+    }
+    ensure!(
+        plan_failures.is_empty(),
+        "address history root role plans:\n{}",
         plan_failures.join("\n\n")
     );
     Ok(())
@@ -879,6 +979,11 @@ fn target_resource() -> Uuid {
     Uuid::from_u128(0xa11)
 }
 
+/// The registry root resource every root role change in the fixture shares.
+fn root_resource() -> Uuid {
+    Uuid::from_u128(0xf00)
+}
+
 async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     sqlx::raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public")
         .execute(&mut *connection)
@@ -922,7 +1027,9 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         SELECT lpad(to_hex(n), 32, '0')::uuid, 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state
         FROM generate_series(1, {names}) n
         UNION ALL
-        SELECT '{target_resource}', 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state;
+        SELECT '{target_resource}', 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state
+        UNION ALL
+        SELECT '{root_resource}', 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state;
 
         INSERT INTO normalized_events
             (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
@@ -974,7 +1081,19 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
                'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-mainnet',
                'block-{fifth}', {fifth}, 'tx-target-pointer', 0, 0,
                'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
-               jsonb_build_object('node', '{target_hash}', 'resolver', '{TARGET_RESOLVER}');
+               jsonb_build_object('node', '{target_hash}', 'resolver', '{TARGET_RESOLVER}')
+        UNION ALL
+        SELECT 'unrelated:root:' || n, 'ens', NULL, '{root_resource}'::uuid,
+               'RootPermissionChanged', 'ens_v2_registry_l1', 1, 'ethereum-mainnet',
+               'block-' || n, n, 'tx-root-' || n, 0, 1, 'ens_v2_permissions',
+               'canonical'::canonicality_state,
+               jsonb_build_object('subject', '0x' || lpad(to_hex(n), 40, '0'))
+        FROM generate_series(1, {names}) n
+        UNION ALL
+        SELECT 'target:root', 'ens', NULL, '{root_resource}'::uuid, 'RootPermissionChanged',
+               'ens_v2_registry_l1', 1, 'ethereum-mainnet', 'block-{sixth}', {sixth},
+               'tx-target-root', 0, 0, 'ens_v2_permissions', 'canonical'::canonicality_state,
+               jsonb_build_object('subject', upper('{TARGET}'));
 
         "#,
         blocks = UNRELATED_NAMES + 10,
@@ -987,6 +1106,8 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         third = UNRELATED_NAMES + 3,
         fourth = UNRELATED_NAMES + 4,
         fifth = UNRELATED_NAMES + 5,
+        sixth = UNRELATED_NAMES + 6,
+        root_resource = root_resource(),
     ))
     .execute(&mut *connection)
     .await?;

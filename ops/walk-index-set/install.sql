@@ -90,6 +90,8 @@ BEGIN
              $def$CREATE INDEX normalized_events_address_token_holder_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE ((event_kind = 'TokenControlTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_registry_owner_match_idx',
              $def$CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_address_root_permission_idx',
+             $def$CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_project_node_history_idx',
              $def$CREATE INDEX normalized_events_project_node_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), block_number) WHERE ((logical_name_id IS NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (((event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (source_family = ANY (ARRAY['ens_v1_resolver_l1'::text, 'ens_v2_resolver_l1'::text, 'basenames_base_resolver'::text]))) OR ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])))))$def$),
             ('normalized_events_project_v1_pointer_node_idx',
@@ -513,6 +515,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registry_owner
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_root_permission_idx
+    ON bigname_phase.normalized_events (
+        lower(after_state ->> 'subject'),
+        block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE event_kind = 'RootPermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_idx
     ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
     WHERE logical_name_id IS NULL
@@ -580,6 +593,7 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_address_registrant_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_token_holder_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_registry_owner_match_idx'),
+    to_regclass('bigname_phase.normalized_events_address_root_permission_idx'),
     to_regclass('bigname_phase.normalized_events_project_node_history_idx'),
     to_regclass('bigname_phase.normalized_events_project_v1_pointer_node_idx'),
     to_regclass('bigname_phase.normalized_events_project_v1_pointer_addressed_node_idx')

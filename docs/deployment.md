@@ -139,9 +139,10 @@ the matching schema-migrations on a large initialized database, and before
 starting a release whose loader covers the chain.
 
 The address history read looks up an address's past names and resources
-through three partial expression indexes on `normalized_events`. Follow their
+through three partial expression indexes on `normalized_events`, and its
+registry root role changes through a fourth. Follow their
 [online index runbook](../ops/address-history-indexes/README.md) before applying
-the matching schema-migration on a large initialized database.
+the matching schema-migrations on a large initialized database.
 
 History and event pages read `normalized_events` in chain-position order through
 `normalized_events_chain_block_number_desc_idx`. Follow its
@@ -2636,7 +2637,7 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 33 `normalized_events` indexes Interpret does not read, so Interpret
+`drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
 maintains 16 indexes on the table instead of 49, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
@@ -2745,3 +2746,36 @@ relation (an interrupted concurrent build leaves an invalid index: confirm in
 it), rebuild it with the statement above and apply the schema-migrations again. A runner started
 before the index exists behaves the same, only slower at start. API standbys receive the index
 through replication.
+
+### Registry root role changes in history
+
+The build that serves ENSv2 registry root role changes (`RootPermissionChanged`) as `permission`
+history rows (see [permission change values](api-v1-routes.md#permission-change-values))
+changes the API, `crates/storage/src/history`, the normalized-events baseline, one
+schema-migration, the address-history and walk index set scripts and their checks, all outside
+the [interpreter content hash](glossary.md#interpreter-content-hash), so the hash does not rotate
+and it needs no redo, no manifest or environment change and no historical ingest fetch. Stored
+rows do not change; the API starts serving rows it already had. `GET /v1/events`, a registry's
+`contract_address` history and its overview's `counts.events` gain the registry's root role
+changes, and address history in `both` or `registration` scope with the `role_holder` relation
+gains the address's own. Only the Sepolia manifests admit ENSv2 sources today, so responses
+change only there.
+
+`20261005120000_normalized_events_address_root_permission_idx.sql` adds
+`normalized_events_address_root_permission_idx`, keyed by the lowercased subject, then the block
+and log position, and partial on activated, readable `RootPermissionChanged` rows. Address
+history needs it: without it every address history page and count scans `normalized_events`. It
+joins the walk index set's drop list. The index holds only root role changes, so it stays small
+(no rows on a chain without ENSv2 sources) and the build needs no meaningful extra disk; its cost
+is one scan of `normalized_events`. The schema-migration is a plain `CREATE INDEX` that holds a
+SHARE lock on the table for that scan, which blocks Interpret's writes, so on a large
+initialized database rerun [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md)
+first, outside a transaction, while the phase runner and API keep running. It finds the three
+existing address-history indexes and builds only this one, concurrently, then checks all four.
+Then apply the schema-migrations with `--target-version 20261005120000` and the same
+`lock_timeout`, `statement_timeout` and retry procedure; it finds the index and skips the build.
+On a small database the plain build may instead run with the phase runner and redo processes
+stopped. The schema-migration checks that the name is an index on `normalized_events` that is
+`indisvalid` and `indisready` with the reviewed `pg_get_indexdef`, and fails without recording
+itself otherwise; the runbook's recovery applies. Start the new API only after the
+schema-migration has applied. API standbys receive the index through replication.

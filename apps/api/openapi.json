@@ -6082,6 +6082,7 @@
           "RecordVersionChanged",
           "ReverseChanged",
           "PermissionChanged",
+          "RootPermissionChanged",
           "PermissionScopeChanged",
           "RolesChanged",
           "EACRolesChanged",

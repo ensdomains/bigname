@@ -1059,6 +1059,89 @@ where
 // The block-bounded evidence and the current labels count are read on one snapshot of the
 // captured publication: a publication during the read neither refuses the overview nor adds its
 // new label to the count.
+/// Registry root role changes are `permission` events of the registry: the overview's event
+/// count includes them and still equals the feed total, while the history of a name the
+/// registry holds does not gain them.
+#[tokio::test]
+async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_fixture(&database).await?;
+    let name_history = "/v1/names/one.alpha.eth/history?scope=both&include=total_count";
+    let before = registry_payload(&database, name_history).await?;
+    let root = Uuid::from_u128(0xA300);
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(root, None, "0xregistry66", 66)],
+    )
+    .await?;
+    let root_change = |id: &str, account: u8, log_index: i64| {
+        let mut event = registry_event(
+            id,
+            None,
+            "RootPermissionChanged",
+            66,
+            ALPHA_REGISTRY,
+            json!({
+                "source_event": "EACRolesChanged",
+                "subject": format!("0x{account:040x}"),
+                "scope": {"kind": "registry_root", "chain_id": REGISTRY_CHAIN_ID,
+                    "registry_address": ALPHA_REGISTRY},
+                "upstream_resource": format!("0x{:064x}", 0),
+                "role_bitmap": "0x1",
+                "effective_powers": ["registrar"],
+                "root_resource": true,
+            }),
+        );
+        event.resource_id = Some(root);
+        event.log_index = Some(log_index);
+        event.derivation_kind = "ens_v2_permissions".to_owned();
+        event
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            root_change("alpha-root-grant-1", 1, 3),
+            root_change("alpha-root-grant-2", 2, 4),
+        ],
+    )
+    .await?;
+
+    let overview = registry_payload(
+        &database,
+        &format!("/v1/registries/1/{ALPHA_REGISTRY}?include=counts"),
+    )
+    .await?;
+    let feed = registry_payload(
+        &database,
+        &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
+    )
+    .await?;
+    assert_eq!(feed["page"]["total_count"], json!(7), "{feed}");
+    assert_eq!(
+        overview["data"]["counts"]["events"], feed["page"]["total_count"],
+        "{overview}"
+    );
+    let root_feed = registry_payload(
+        &database,
+        &format!(
+            "/v1/events?contract_address={ALPHA_REGISTRY}&kind=RootPermissionChanged&include=total_count"
+        ),
+    )
+    .await?;
+    assert_eq!(root_feed["page"]["total_count"], json!(2), "{root_feed}");
+    assert!(
+        root_feed["data"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().all(|row| row["type"] == "permission")),
+        "{root_feed}"
+    );
+
+    let after = registry_payload(&database, name_history).await?;
+    assert_eq!(after["data"], before["data"], "{after}");
+    assert_eq!(after["page"]["total_count"], before["page"]["total_count"]);
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_registry_counts_labels_at_the_captured_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

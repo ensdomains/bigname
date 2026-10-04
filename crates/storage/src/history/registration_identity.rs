@@ -27,6 +27,8 @@ type PublicationBounds<'a> = Option<&'a BTreeMap<String, i64>>;
 const MIGRATION_SUCCESSOR: &str =
     "NULLIF(ne.after_state #>> '{successor_binding,resource_id}', '')::uuid";
 
+/// Only resource-less rows reach this predicate. `RootPermissionChanged` is absent because a
+/// registry root role change always carries the registry's root resource.
 pub(super) fn push_product_event_kind_predicate(builder: &mut QueryBuilder<'_, Postgres>) {
     builder.push(
         "ne.event_kind IN (

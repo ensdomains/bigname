@@ -346,6 +346,15 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
 
+Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
+`normalized_events` for its registry root role branch, installed by the normalized-events
+baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
+row:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_address_root_permission_idx` | the `OrRootPermissionSubject` branch of `push_selector_filter` in `history/filters.rs`: activated, readable `RootPermissionChanged` rows by lowercased subject |
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
@@ -468,6 +477,18 @@ hash](glossary.md#interpreter-content-hash) input changes. Existing installation
 three indexes through `20260923120000_normalized_events_address_match_indexes.sql`; prebuild
 them concurrently on a large database with
 [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md) first.
+
+A registry root role change (`RootPermissionChanged`) belongs to no name, and its resource is
+the registry's root resource, which every holder of that registry shares, so neither anchor
+reaches it without also reaching every other holder's changes. The page and count of a product
+address read in `both` or `registration` scope whose relations admit `role_holder` therefore
+add one more branch to the same OR: `RootPermissionChanged` rows whose lowercased
+`after_state ->> 'subject'` is the address. `normalized_events_address_root_permission_idx`
+keys that branch by the lowercased subject, then the block and log position, over activated
+rows in readable canonicality states, so a page whose address has no other anchor reads it in
+history order. Diagnostics reads do not add the branch. Existing installations receive the
+index through `20261005120000_normalized_events_address_root_permission_idx.sql`; the same
+`ops/address-history-indexes/install.sql` prebuilds it concurrently.
 
 Node-keyed resolver record writes carry neither a name nor a resource, so history reaches them
 through the registration's resolver pointers (`attribution.rs`). The reader evaluates the
@@ -2103,7 +2124,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 34 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
@@ -2129,6 +2150,7 @@ these: `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
+`normalized_events_address_root_permission_idx`,
 `normalized_events_project_node_history_idx`, `normalized_events_project_v1_pointer_node_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 

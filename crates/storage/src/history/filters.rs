@@ -99,6 +99,17 @@ pub(super) fn push_selector_filter<'a>(
         HistorySelector::ProductRegistration { .. } => {
             builder.push("TRUE");
         }
+        HistorySelector::OrRootPermissionSubject { anchors, subject } => {
+            builder.push("(");
+            push_selector_filter(builder, anchors, attributed);
+            // Keyed by `normalized_events_address_root_permission_idx`; keep the expression
+            // identical to it.
+            builder.push(
+                " OR (ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ",
+            );
+            builder.push_bind(subject.as_str());
+            builder.push("))");
+        }
         HistorySelector::None => {
             builder.push("FALSE");
         }

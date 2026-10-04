@@ -145,12 +145,26 @@ pub(super) async fn load_address_history_selector(
     let logical_name_ids = logical_name_ids.into_iter().collect::<Vec<_>>();
     let resource_ids = resource_ids.into_iter().collect::<Vec<_>>();
 
-    Ok(match scope {
+    let anchors = match scope {
         HistoryScope::Surface => HistorySelector::logical_names(logical_name_ids),
         HistoryScope::Resource => HistorySelector::resources(resource_ids),
         HistoryScope::Both => {
             HistorySelector::logical_names_or_resources(logical_name_ids, resource_ids)
         }
+    };
+    // A registry root role belongs to no name: product reads in `both` or `registration` scope
+    // that admit `role_holder` list the root role changes made to the address. Diagnostics keep
+    // their name and resource anchors only.
+    let root_roles = !include_candidates
+        && scope != HistoryScope::Surface
+        && relations.is_none_or(|values| values.contains(&AddressNameRelation::RoleHolder));
+    Ok(if root_roles {
+        HistorySelector::OrRootPermissionSubject {
+            anchors: Box::new(anchors),
+            subject: address.to_owned(),
+        }
+    } else {
+        anchors
     })
 }
 
