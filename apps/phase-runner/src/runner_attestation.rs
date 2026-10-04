@@ -24,8 +24,8 @@ impl PhaseRunner {
     }
 
     /// Also prints redo-start notices on stderr, for the one-shot `redo` command.
-    pub fn with_redo_notices_on_stderr(mut self) -> Self {
-        self.redo_notices_on_stderr = true;
+    pub fn with_redo_notices_on_stderr(mut self, enabled: bool) -> Self {
+        self.redo_notices_on_stderr = enabled;
         self
     }
 
