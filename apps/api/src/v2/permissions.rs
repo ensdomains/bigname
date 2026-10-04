@@ -42,6 +42,7 @@ const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
+const REGISTRY_FILTER_KEY: &str = "registry";
 const INCLUDE_FILTER_KEY: &str = "include";
 
 pub(crate) struct PermissionsQueryParams;
@@ -51,6 +52,7 @@ impl QueryParamAllowlist for PermissionsQueryParams {
         "name",
         "registration_id",
         "address",
+        "registry",
         "namespace",
         "at",
         "finality",
@@ -250,17 +252,11 @@ pub(crate) async fn get_permissions(
     let mut meta = snapshot.finish(&state).await?;
     let permission_support =
         permission_support_for_resources(&support_resource_ids, &permission_summaries);
-    apply_permissions_collection_support_meta(
-        &mut meta,
-        permission_support,
-        if resolved.resource_id.is_some() {
-            PermissionRequestScope::ResourceBound
-        } else {
-            PermissionRequestScope::AccountWide
-        },
-    );
+    apply_permissions_collection_support_meta(&mut meta, permission_support, resolved.scope);
+    // A registry root has no registration whose restrictions could apply.
     let restrictions = resolved
         .resource_id
+        .filter(|_| resolved.scope == PermissionRequestScope::ResourceBound)
         .and_then(|resource_id| permission_summaries.get(&resource_id))
         .map(ResourceRestrictions::from_summary)
         .transpose()?
@@ -321,7 +317,8 @@ fn empty_permissions_response(
             );
         }
         EmptyPermissionsSelection::NamespaceRegistrationMismatch
-        | EmptyPermissionsSelection::ResourceIsNotARegistration => {}
+        | EmptyPermissionsSelection::ResourceIsNotARegistration
+        | EmptyPermissionsSelection::UnknownRegistry => {}
     }
 
     Json(PermissionsResponse {

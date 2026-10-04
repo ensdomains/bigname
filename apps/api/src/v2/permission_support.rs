@@ -23,6 +23,8 @@ pub(crate) enum UnlistedPermissionSurface {
     /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
     /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2@a971bd64)
     /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L165-L167 @ ens_v2@a971bd64)
+    /// For a migration `WrapperRegistry`'s root resource, the parent name's owner and that owner's
+    /// operators on the parent registry, which act with the roles the parent registry holds.
     EnsV2RegistryOperators,
     /// BaseRegistrar ERC-721 per-token and operator approvals. An approved spender passes the
     /// same check as the token owner, which also gates `reclaim`.
@@ -82,6 +84,10 @@ const fn surface_bits(surfaces: &[UnlistedPermissionSurface]) -> u8 {
 pub(crate) enum PermissionRequestScope {
     ResourceBound,
     AccountWide,
+    /// The root resource of an ENSv2 registry.
+    RegistryRoot {
+        migration_registry: bool,
+    },
 }
 
 /// Which permission surfaces the served rows leave unlisted. A set of registrations reports the
@@ -108,6 +114,20 @@ impl PermissionSupport {
     /// and resolver operators and delegates are not.
     pub(crate) const ENS_V2_REGISTRY_PARTIAL: Self =
         Self::partial(&[EnsV2RegistryOperators, ResolverApprovals]);
+    /// An ENSv2 registry's root resource. Every write to a role bitmap emits `EACRolesChanged`, and
+    /// the registry adds an owner's roles to its operators only for a token resource, so the root's
+    /// role holders are rows.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+    pub(crate) const REGISTRY_ROOT: Self = Self::FULL;
+    /// A migration `WrapperRegistry`'s root resource. Its roles are granted to the parent
+    /// registry, and the contract gives exactly those roles to the parent name's owner and that
+    /// owner's operators on the parent registry, which are not rows.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L140-L142 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+    pub(crate) const MIGRATION_REGISTRY_ROOT_PARTIAL: Self =
+        Self::partial(&[EnsV2RegistryOperators]);
     /// An address-only read, which may reach registrations of every kind.
     pub(crate) const ACCOUNT_WIDE_PARTIAL: Self = Self::partial(&ALL_SURFACES);
     /// Support is missing or indeterminate.
@@ -211,6 +231,13 @@ pub(crate) fn apply_permissions_collection_support_meta(
     // the address may reach, whatever each visible registration supports.
     let support = match request_scope {
         PermissionRequestScope::ResourceBound => support,
+        PermissionRequestScope::RegistryRoot { migration_registry } => {
+            if migration_registry {
+                PermissionSupport::MIGRATION_REGISTRY_ROOT_PARTIAL
+            } else {
+                PermissionSupport::REGISTRY_ROOT
+            }
+        }
         PermissionRequestScope::AccountWide => {
             support.merge(PermissionSupport::ACCOUNT_WIDE_PARTIAL)
         }
@@ -253,6 +280,32 @@ mod tests {
         let mut meta = Meta::default();
         apply_permissions_collection_support_meta(&mut meta, support, scope);
         meta
+    }
+
+    #[test]
+    fn registry_root_support_ignores_the_root_summary() {
+        let root = PermissionRequestScope::RegistryRoot {
+            migration_registry: false,
+        };
+        assert_eq!(
+            collection_meta(PermissionSupport::UNKNOWN, root),
+            Meta::default()
+        );
+        let migration = collection_meta(
+            PermissionSupport::UNKNOWN,
+            PermissionRequestScope::RegistryRoot {
+                migration_registry: true,
+            },
+        );
+        assert_eq!(migration.completeness, Some(Completeness::Partial));
+        assert_eq!(
+            migration.unsupported_reason.as_deref(),
+            Some(PERMISSIONS_PARTIALLY_LISTED_REASON)
+        );
+        assert_eq!(
+            serde_json::to_value(&migration.unlisted_permission_surfaces).unwrap(),
+            json!(["ens_v2_registry_operators"])
+        );
     }
 
     #[test]
