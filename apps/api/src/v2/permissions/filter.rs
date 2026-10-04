@@ -149,19 +149,23 @@ pub(super) async fn resolve_permissions_filter(
 
     let namespace = inputs.namespace.clone();
     let mut resource_is_not_a_registration = false;
+    // The registry resolves at the captured publication's block, so an instance the interpreter
+    // admitted or retired after it does not select a resource the published rows do not describe.
     let registry_root = match params.registry.as_ref() {
-        Some(registry) => Some(
-            bigname_storage::load_registry_root_resource(
+        Some(registry) => Some(match block_bounds.get(registry.chain_slug) {
+            Some(&block) => bigname_storage::load_registry_root_resource(
                 &state.pool,
                 registry.chain_slug,
                 &registry.address,
+                block,
             )
             .await
             .map_err(|error| {
                 tracing::error!(?error, "failed to resolve a registry root resource");
                 V2Error::internal_error("failed to resolve registry root resource")
             })?,
-        ),
+            None => None,
+        }),
         None => None,
     };
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {

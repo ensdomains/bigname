@@ -192,12 +192,47 @@ async fn v2_get_permissions_marks_migration_registry_roots_partial() -> Result<(
         VALUES ('alpha-edge', 'alpha-migration', 'migration_registry_creation', $1, $2, $3, '[{\"kind\":\"raw_log\"}]',
             'ethereum-mainnet', 60, '0xregistry60', '0xtx60', 0, 0, 'canonical', 'activated', 'fixture')")
         .bind(Uuid::from_u128(0xA190)).bind(ALPHA_REGISTRY).bind(manifest).execute(&database.pool).await?;
-    let page = v2_permissions_payload_for_database(&database,
-        &format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}")).await?;
+    let uri = format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}");
+    // A creation record without its canonical announcement edge, such as one retained from a
+    // losing fork, does not make the registry a migration registry.
+    let unannounced = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert!(unannounced["meta"].get("completeness").is_none(), "{unannounced}");
+    sqlx::query("INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+            discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash,
+            canonicality_state, provenance)
+        VALUES ('ethereum-mainnet', 'registry_announcement', $1, $1, 'RegistryCreated', 'migration_registry_creation',
+            $2, 60, '0xregistry60', 'canonical', '{\"transaction_index\":0,\"log_index\":0}')")
+        .bind(Uuid::from_u128(0xA190)).bind(manifest).execute(&database.pool).await?;
+    let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(page["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{page}");
     assert_eq!(page["meta"]["completeness"], "partial");
     assert_eq!(page["meta"]["unsupported_reason"], "permissions_partially_listed");
     assert_eq!(page["meta"]["unlisted_permission_surfaces"], json!(["ens_v2_registry_operators"]));
+    database.cleanup().await
+}
+
+// The registry resolves at the captured publication: an instance admitted after it selects
+// nothing, one retired after it still selects its published holders, and one dropped as if it
+// never existed selects nothing.
+#[tokio::test]
+async fn v2_get_permissions_resolves_the_registry_at_the_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_root_holders(&database).await?;
+    let uri = format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}");
+    let set = |sql: &'static str| sqlx::query(sql).bind(ALPHA_REGISTRY).execute(&database.pool);
+    set("UPDATE contract_instance_addresses SET active_from_block_number = 90 WHERE address = $1").await?;
+    let admitted_later = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(admitted_later["data"], json!([]), "{admitted_later}");
+    set("UPDATE contract_instance_addresses SET active_from_block_number = 61, active_to_block_number = 85,
+        deactivated_at = now() WHERE address = $1").await?;
+    let retired_later = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(retired_later["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{retired_later}");
+    set("UPDATE contract_instance_addresses SET active_to_block_number = 80 WHERE address = $1").await?;
+    let retired = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(retired["data"], json!([]), "{retired}");
+    set("UPDATE contract_instance_addresses SET active_to_block_number = NULL WHERE address = $1").await?;
+    let dropped = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(dropped["data"], json!([]), "{dropped}");
     database.cleanup().await
 }
 

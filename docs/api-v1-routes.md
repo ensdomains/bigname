@@ -2732,13 +2732,15 @@ introduces it rebuilds Project from full history before serving the option; see
   restrictions or permission support metadata.
   `registry=<chain_id>:<address>` takes a supported numeric chain ID and a
   case-insensitive address; any other shape returns `400 invalid_input`. It
-  selects the root resource of the registry contract instance that currently
-  holds the address, derived the same way the interpreter derives it, and returns
+  selects the root resource of the registry contract instance that holds the
+  address at the served publication's block (`meta.as_of`), derived the same way
+  the interpreter derives it, and returns
   that resource's current holders, so a revoked holder is absent. With `address`
   it returns that account's root row or an empty page, which answers whether the
   account holds root roles on the registry. An address no active contract
-  instance holds, a retired registry instance, or a registry with no current
-  root holders returns `200` with empty `data`; the empty page does not prove the
+  instance holds at that block (including one admitted after it), a registry
+  instance retired by then, or a registry with no current root holders returns
+  `200` with empty `data`; the empty page does not prove the
   registry exists, which the [registry overview](#get-v1registrieschain_idaddress)
   answers. `namespace` applies as for a `registration_id` read: ENSv2 root grants
   are in the `ens` namespace. Root rows are also returned by `address` reads and
@@ -2987,7 +2989,8 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
   The exception is a [migration registry](glossary.md#migration-registry-wrapperregistry),
-  recognized by its activated migration registry creation record. Its root
+  recognized by its activated migration registry creation record on a readable
+  block, with the matching canonical registry announcement. Its root
   roles are granted to the parent registry, and the contract gives exactly those
   roles to the parent name's current owner and to that owner's operators on the
   parent registry, who are not rows. Such a read reports

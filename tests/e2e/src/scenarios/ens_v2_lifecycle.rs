@@ -1018,10 +1018,14 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
     // contract instance; it must be the resource the interpreter wrote the root grants on. The
     // deployer's constructor grant remains and the revoked grantee is absent.
     let registry = format!("{:#x}", deployment.eth_registry.address);
-    let root =
-        bigname_storage::load_registry_root_resource(&run.db.pool, "ethereum-sepolia", &registry)
-            .await?
-            .context("the ETH registry has an active contract instance")?;
+    let root = bigname_storage::load_registry_root_resource(
+        &run.db.pool,
+        "ethereum-sepolia",
+        &registry,
+        i64::MAX,
+    )
+    .await?
+    .context("the ETH registry has an active contract instance")?;
     assert!(!root.migration_registry);
     let written: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT resource_id FROM normalized_events \
