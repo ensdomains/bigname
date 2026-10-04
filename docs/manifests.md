@@ -1235,6 +1235,21 @@ but do not admit their targets to Ingest or Interpret. Changing, clearing, expir
 or regenerating a name cannot create or retire the resolver's independent capture interval.
 Address-scoped interpretation begins at the `RegistryCreated()` block, including same-block recovery: direct `PermissionedRegistry` construction emits it first, while a `UserRegistry` proxy emits it during initialization. (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@a971bd64) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L43 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/UserRegistry.sol:L47 @ ens_v2_sepolia_20260629@ccaeb58)
 
+A registry can point one of its own labels at itself as that label's
+subregistry. `ETHRegistrar.register` passes the registrant's chosen
+subregistry to the `ETHRegistry`, which emits it in `SubregistryUpdated`, and
+`setSubregistry` accepts any registry address
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L151-L158 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L148-L152 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L508-L510 @ ens_v2_sepolia_20261001@07e55a05);
+the Sepolia `ETHRegistry` emitted itself this way at block 11840453. Such a
+pointer, from a manifest-declared or a discovery-admitted registry alike,
+closes the label's previous `subregistry` edge and opens none, because only
+registry announcements and `ResolverCreated` observations may produce
+self-edges. Interpret writes no operator diagnostic for it; the
+`SubregistryChanged` normalized event is its record. No names are modelled
+under that label while the pointer stands.
+
 ### Resolver creation capture
 
 The current ENSv2 resolver manifest declares `ResolverCreated()` as an all-emitter

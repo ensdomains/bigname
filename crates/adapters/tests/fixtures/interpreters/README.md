@@ -52,6 +52,16 @@ ens_v2@a971bd64) The registry accepts a later expiry update for the same token.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @
 ens_v2@a971bd64)
 
+`v2-registry-self-subregistry.json` is the production log run of a `.eth`
+registration on the Sepolia `ETHRegistry` at block 11,840,453 (transaction
+`0xea03502e…`, logs 118-123), with its exact topics, data, block hash and
+timestamp. The registrant chose the `ETHRegistry` itself as the new label's
+subregistry, so log 122 is a `SubregistryUpdated` naming its own emitter. The
+test pins that the manifest-declared registry's pointer closes the label's
+previous `subregistry` edge, opens none, writes no operator diagnostic, keeps
+its `SubregistryChanged` normalized event, and lets the same transaction's
+`ResolverUpdated` interpret.
+
 The original four cases were copied from these now-deleted legacy adapter
 tests:
 

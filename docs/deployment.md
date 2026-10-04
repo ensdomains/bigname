@@ -2638,3 +2638,45 @@ large database, schedule it before Project starts, as the
 [production runbook](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary)
 describes. Without the rebuild no row changes, but Project reads more slowly and an API read
 that needs a dropped index may exceed `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS`.
+
+### Registry pointing a label at itself
+
+The build that treats a registry pointing one of its own labels at itself as
+that label's subregistry as a pointer with no target (TYR-222, see
+[discovery admission](manifests.md#discovery-admission)) changes `crates/adapters/src`, so it
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash)
+for every chain. Before, such a `SubregistryUpdated` from a manifest-declared
+registry stopped Interpret with
+`SubregistryUpdated produced a non-announcement self-edge of kind subregistry`.
+The 2026-10-01 Sepolia `ETHRegistry` emitted one at block 11840453, so every
+build that admits that deployment, including v0.4.0, stops Sepolia there. Now
+the pointer closes the label's previous `subregistry` edge and opens none, for
+a manifest-declared or a discovery-admitted registry alike, and Interpret
+continues. A discovery-admitted registry's self-pointer used to add an
+operator diagnostic row in `interpret_decode_skips`; this build writes none.
+Rows that earlier builds wrote stay, because the table is append-only and keyed
+by the content hash. Normalized events do not change: the `SubregistryChanged`
+event is written as before. It adds
+no schema-migration, table, index, manifest or setting, so stamp no Ingest
+redo.
+
+### v0.4.1 rollout
+
+v0.4.1 is v0.4.0 plus the
+[registry pointing a label at itself](#registry-pointing-a-label-at-itself)
+build. Deploy it with the
+[planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+From v0.4.0:
+
+- The [interpreter content hash](glossary.md#interpreter-content-hash) rotates
+  once for every chain. Run one full-history Interpret redo and the Project redo
+  it installs under the v0.4.1 binary before the API serves, and record the new
+  hash in the release record. A bounded redo range cannot adopt a new hash. The
+  [walk index set](#walk-index-set) scripts are an optional step of that redo,
+  as in v0.4.0.
+- Stamp no Ingest redo and apply no schema-migration.
+- A Sepolia database that stopped at block 11840453 under v0.4.0 continues
+  past it under v0.4.1, after that redo.
+- From a build before v0.4.0, the deploy also carries the
+  [v0.4.0 rollout](#v040-rollout)'s requirements. The one full-history
+  Interpret redo and its Project redo under v0.4.1 discharge both rotations.
