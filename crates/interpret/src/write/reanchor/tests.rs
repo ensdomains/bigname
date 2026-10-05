@@ -281,3 +281,46 @@ async fn a_surface_with_no_hash_path_observation_keeps_unwitnessed_raw_labels() 
     database.cleanup().await?;
     Ok(())
 }
+
+/// Redo completion settles the witness on the earliest same-block preimage by log position,
+/// whichever one the replay's writes left on the row.
+#[tokio::test]
+async fn redo_completion_orders_same_block_witnesses_by_log_position() -> TestResult {
+    let database = database("interpret_reanchor_witness_log_order").await?;
+    let pool = database.pool();
+    insert_surface(pool, 3, Some(3), true).await?;
+    insert_preimage(pool, 3).await?;
+    insert_event(
+        pool,
+        "preimage-3-recovered-late",
+        PREIMAGE_OBSERVATION_EVENT_KIND,
+        3,
+        json!({"raw_name": "child.eth", "raw_labels": ["child", "eth"], "namehash": "0xchild"}),
+    )
+    .await?;
+    sqlx::raw_sql(
+        "UPDATE normalized_events SET log_index = 7
+         WHERE event_identity = 'preimage-3-recovered-late';
+         UPDATE name_surfaces SET preimage_event_identity = 'preimage-3-recovered-late'",
+    )
+    .execute(pool)
+    .await?;
+
+    let mut transaction = pool.begin().await?;
+    super::stable_identities(&mut transaction, CHAIN, 3, 3).await?;
+    transaction.commit().await?;
+
+    assert_eq!(
+        stored(pool).await?,
+        (
+            Some("child.eth".into()),
+            Some("preimage-3".into()),
+            "shadow".into(),
+            3,
+            "canonical".into(),
+            Some(time::OffsetDateTime::from_unix_timestamp(3)?)
+        )
+    );
+    database.cleanup().await?;
+    Ok(())
+}
