@@ -99,3 +99,43 @@ pub async fn load_address_history_page_for_relations(
         format!("failed to load history page for {}", parts.join(" "))
     })
 }
+
+/// A bounded product page sharing the caller's already admitted read-only snapshot.
+/// The pool entry above remains available for storage callers with independent admission.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_address_history_page_for_relations_on(
+    connection: &mut sqlx::PgConnection,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    scope: HistoryScope,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: HistorySummaryMode,
+    options: &HistoryPageOptions,
+) -> Result<HistoryPage> {
+    anyhow::ensure!(
+        options.publication_block_bounds.is_some() && summary_mode != HistorySummaryMode::Full,
+        "shared address-history reads require bounded product options"
+    );
+    let fence = redo::capture_interpret_redo_fence_on(connection).await?;
+    #[cfg(any(test, feature = "test-support"))]
+    history_anchor_read_test_hooks::run_on(
+        connection,
+        history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
+    )
+    .await?;
+    super::load_page_on(
+        connection,
+        &address.to_ascii_lowercase(),
+        namespace,
+        relations,
+        scope,
+        cursor,
+        page_size,
+        summary_mode,
+        options,
+        Some(&fence),
+    )
+    .await
+}

@@ -2,9 +2,11 @@ mod address_evidence;
 pub use address_evidence::{HistoricalHistoryRelation, historical_history_relations};
 mod address_matches;
 mod address_walk;
-pub use address_walk::load_address_history_page_for_relations;
 #[cfg(any(test, feature = "test-support"))]
 pub use address_walk::seams::{AddressHistoryWorkingSet, with_address_history_working_set};
+pub use address_walk::{
+    load_address_history_page_for_relations, load_address_history_page_for_relations_on,
+};
 mod attribution;
 mod binding_anchors;
 mod block_window;

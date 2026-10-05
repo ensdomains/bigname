@@ -9,8 +9,8 @@ use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
 /// The publication captured for one request. A current-state page reads it on one read-only
 /// REPEATABLE READ snapshot ([`Self::conn`]), so its reads cannot mix publications; its
-/// continuation positions survive later publications. History pages retain their separately
-/// documented bounded-walk behavior.
+/// continuation positions survive later publications. Address history also admits its publication
+/// on that snapshot; other history pages retain their documented bounded-walk behavior.
 pub(crate) struct CollectionSnapshot {
     namespaces: PublicNamespaceSet,
     evaluated_at: OffsetDateTime,
@@ -53,6 +53,36 @@ impl CollectionSnapshot {
         Ok((snapshot, cursor))
     }
 
+    /// Address history admits its publication on the same snapshot used by the bounded page.
+    /// Manifest loading precedes acquiring the transaction, including for one-connection pools.
+    pub(crate) async fn capture_address_history<C>(
+        state: &AppState,
+        namespace: Option<&str>,
+        decode_cursor: impl FnOnce() -> V2Result<C>,
+    ) -> V2Result<(Self, C)> {
+        if let Some(namespace) = namespace {
+            ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+        }
+        let cursor = decode_cursor()?;
+        let prepared = super::support::prepare_public_namespace_admission(state)
+            .await
+            .map_err(api_error_to_v2)?;
+        #[cfg(test)]
+        finish_test_hooks::run_at(&state.pool, finish_test_hooks::Stage::BeforeRead).await?;
+        let captured_at = std::time::Instant::now();
+        let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to begin the address-history read"))?;
+        let namespaces = prepared
+            .select_on(&mut reads)
+            .await
+            .map_err(api_error_to_v2)?
+            .for_namespace(namespace);
+        let snapshot =
+            Self::from_namespaces(state, namespace, namespaces, captured_at, Some(reads))?;
+        Ok((snapshot, cursor))
+    }
+
     async fn capture_scope(
         state: &AppState,
         cursor: Option<&str>,
@@ -67,6 +97,17 @@ impl CollectionSnapshot {
             .await
             .map_err(api_error_to_v2)?
             .for_namespace(namespace);
+        let snapshot = Self::from_namespaces(state, namespace, namespaces, captured_at, None)?;
+        Ok((snapshot, cursor))
+    }
+
+    fn from_namespaces(
+        state: &AppState,
+        namespace: Option<&str>,
+        namespaces: PublicNamespaceSet,
+        captured_at: std::time::Instant,
+        reads: Option<Transaction<'static, Postgres>>,
+    ) -> V2Result<Self> {
         if namespaces.is_empty()
             || namespaces
                 .request_scope()
@@ -79,16 +120,15 @@ impl CollectionSnapshot {
         }
 
         let evaluated_at = { publication_clock(&namespaces)? };
-        let snapshot = Self {
+        Ok(Self {
             namespaces,
             evaluated_at,
             namespace: namespace.map(str::to_owned),
             pool: state.pool.clone(),
-            reads: None,
+            reads,
             served: false,
             captured_at,
-        };
-        Ok((snapshot, cursor))
+        })
     }
 
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
@@ -142,7 +182,7 @@ impl CollectionSnapshot {
             }
             self.served = true;
             #[cfg(test)]
-            finish_test_hooks::run_at(&self.pool, finish_test_hooks::Stage::Pinned).await?;
+            finish_test_hooks::run_on(reads, finish_test_hooks::Stage::Pinned).await?;
         }
         Ok(self
             .reads
@@ -202,7 +242,11 @@ impl CollectionSnapshot {
             self.conn().await?;
         }
         #[cfg(test)]
-        finish_test_hooks::run(&state.pool).await?;
+        finish_test_hooks::run_on(
+            self.reads.as_deref_mut().expect("served snapshot"),
+            finish_test_hooks::Stage::Finish,
+        )
+        .await?;
         if let Some(reads) = self.reads.take() {
             reads
                 .commit()
@@ -353,6 +397,18 @@ pub(crate) mod finish_test_hooks {
         let database = current_test_database(pool)
             .await
             .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;
+        run_for_database(database, stage).await
+    }
+
+    pub(crate) async fn run_on(connection: &mut sqlx::PgConnection, stage: Stage) -> V2Result<()> {
+        let database = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(connection)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;
+        run_for_database(database, stage).await
+    }
+
+    async fn run_for_database(database: String, stage: Stage) -> V2Result<()> {
         let database = (database, stage);
         if let Some(hook) = HOOKS.take(&database) {
             hook.reached.wait().await;

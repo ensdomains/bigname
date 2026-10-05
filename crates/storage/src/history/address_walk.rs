@@ -17,7 +17,9 @@ mod catalogue_source;
 mod catalogue_tests;
 mod duplicates;
 mod entry;
-pub use entry::load_address_history_page_for_relations;
+pub use entry::{
+    load_address_history_page_for_relations, load_address_history_page_for_relations_on,
+};
 mod matches;
 #[cfg(test)]
 mod plan_tests;
@@ -92,19 +94,49 @@ pub(super) async fn load_page(
     options: &super::HistoryPageOptions,
     fence: Option<&super::InterpretRedoFence>,
 ) -> anyhow::Result<super::HistoryPage> {
+    let mut transaction = super::paging::begin_history_snapshot(pool, "address page").await?;
+    let page = load_page_on(
+        &mut transaction,
+        address,
+        namespace,
+        relations,
+        scope,
+        cursor,
+        page_size,
+        summary_mode,
+        options,
+        fence,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(page)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn load_page_on(
+    transaction: &mut sqlx::PgConnection,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    scope: HistoryScope,
+    cursor: Option<&HistoryCursor>,
+    page_size: u64,
+    summary_mode: super::HistorySummaryMode,
+    options: &super::HistoryPageOptions,
+    fence: Option<&super::InterpretRedoFence>,
+) -> anyhow::Result<super::HistoryPage> {
     use super::{EventHistoryReadFilter, HistorySummaryMode, keyset::HistoryKeyset};
     use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
     use anyhow::Context;
 
     let _timer = seams::Timer::new("address_history_read_micros");
-    let mut transaction = super::paging::begin_history_snapshot(pool, "address page").await?;
     if let Some(fence) = fence {
-        super::redo::ensure_interpret_redo_fence(&mut transaction, fence).await?;
+        super::redo::ensure_interpret_redo_fence(transaction, fence).await?;
     }
-    let catalogue = catalogue::select_source(&mut transaction, options).await?;
+    let catalogue = catalogue::select_source(transaction, options).await?;
     #[cfg(any(test, feature = "test-support"))]
     super::history_anchor_read_test_hooks::run_on(
-        &mut transaction,
+        transaction,
         super::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPublicationCheck,
     )
     .await?;
@@ -131,7 +163,7 @@ pub(super) async fn load_page(
             }
             let mut anchor = walk::Accumulator::new(1, Some(0));
             walk::collect(
-                &mut transaction,
+                transaction,
                 &read,
                 &cursor_filter,
                 None,
@@ -177,7 +209,7 @@ pub(super) async fn load_page(
         }
     };
     let count_outcome = if catalogue {
-        catalogue_count::count(&mut transaction, &read, &filter, summary_mode).await?
+        catalogue_count::count(transaction, &read, &filter, summary_mode).await?
     } else {
         catalogue_count::CountOutcome::Unknown
     };
@@ -195,7 +227,7 @@ pub(super) async fn load_page(
     );
     let page_timer = seams::Timer::new("address_history_page_walk_micros");
     walk::collect(
-        &mut transaction,
+        transaction,
         &read,
         &filter,
         keyset.as_ref(),
@@ -218,7 +250,7 @@ pub(super) async fn load_page(
         };
         let mut count = walk::Accumulator::new(0, None);
         walk::collect(
-            &mut transaction,
+            transaction,
             &authoritative,
             &filter,
             None,
@@ -232,7 +264,7 @@ pub(super) async fn load_page(
         let _timer = seams::Timer::new("address_history_count_walk_micros");
         let mut count = walk::Accumulator::new(0, count_limit);
         walk::collect(
-            &mut transaction,
+            transaction,
             &read,
             &filter,
             None,
@@ -263,7 +295,6 @@ pub(super) async fn load_page(
     let next_cursor = has_more
         .then(|| rows.last().map(super::keyset::history_cursor_from_row))
         .flatten();
-    transaction.commit().await?;
     Ok(super::HistoryPage {
         rows,
         next_cursor,

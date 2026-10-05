@@ -166,6 +166,13 @@ fn decode_last_item(payload: &CursorPayload) -> V2Result<RequestCursor> {
 /// client restarts. Both reads run behind the Interpret redo check, so a redo refuses the page
 /// with its retry before a row the redo removed can turn into a restart.
 pub(crate) async fn resolve(state: &AppState, cursor: RequestCursor) -> V2Result<HistoryCursor> {
+    resolve_on((&state.pool).into(), cursor).await
+}
+
+pub(crate) async fn resolve_on(
+    mut db: bigname_storage::ReadDb<'_>,
+    cursor: RequestCursor,
+) -> V2Result<HistoryCursor> {
     match cursor {
         RequestCursor::Position(cursor) => Ok(cursor),
         RequestCursor::TransactionHash(mut cursor) => {
@@ -173,7 +180,7 @@ pub(crate) async fn resolve(state: &AppState, cursor: RequestCursor) -> V2Result
                 return Err(invalid_cursor_error());
             };
             let transaction_index = bigname_storage::load_history_transaction_index(
-                &state.pool,
+                db.reborrow(),
                 &cursor.event_identity,
                 position,
             )
@@ -186,7 +193,7 @@ pub(crate) async fn resolve(state: &AppState, cursor: RequestCursor) -> V2Result
         }
         RequestCursor::Legacy(event_identity) => {
             let position =
-                bigname_storage::load_history_anchor_position(&state.pool, &event_identity)
+                bigname_storage::load_history_anchor_position(db.reborrow(), &event_identity)
                     .await
                     .map_err(|error| map_history_page_error(error, "failed to load history"))?
                     .ok_or_else(restart_required)?;

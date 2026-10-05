@@ -1,4 +1,4 @@
-//! The real route chooses its source at the request snapshot, using admission's old token.
+//! The real route admits and reads one publication on the same page transaction.
 use super::*;
 use bigname_storage::history_anchor_read_test_hooks::{self, HistoryReadHookPoint};
 
@@ -193,11 +193,7 @@ async fn address_history_catalogue_publication_change_without_count_uses_origina
 
 async fn check_publication_change(include: &str) -> Result<()> {
     for (point, change, path) in [
-        (
-            HistoryReadHookPoint::AfterAnchors,
-            "advance",
-            "captured_publication_advanced",
-        ),
+        (HistoryReadHookPoint::AfterAnchors, "advance", "catalogue"),
         (
             HistoryReadHookPoint::AfterPublicationCheck,
             "advance",
@@ -206,17 +202,13 @@ async fn check_publication_change(include: &str) -> Result<()> {
         (
             HistoryReadHookPoint::AfterAnchors,
             "same-block-rebuild",
-            "captured_publication_advanced",
+            "catalogue",
         ),
-        (
-            HistoryReadHookPoint::AfterAnchors,
-            "reset",
-            "catalogue_unavailable",
-        ),
+        (HistoryReadHookPoint::AfterAnchors, "reset", "catalogue"),
         (
             HistoryReadHookPoint::AfterAnchors,
             "missing-marker",
-            "catalogue_unavailable",
+            "catalogue",
         ),
     ] {
         let database = TestDatabase::new_migrated().await?;
@@ -299,24 +291,26 @@ async fn check_publication_change(include: &str) -> Result<()> {
             .expect("source selection receipt");
         assert_eq!(receipt["path"], path);
         assert!(receipt["admission_to_snapshot_ms"].as_f64().is_some());
+        assert_eq!(status, StatusCode::OK, "{body}");
+        if include.is_empty() {
+            assert_no_count(&stats);
+        }
+        assert_eq!(
+            body["data"], before["data"],
+            "the pinned publication changed the page"
+        );
+        assert_eq!(body["page"], before["page"]);
+        assert_eq!(body["meta"], before["meta"]);
+        assert_eq!(receipt["captured"], receipt["observed"]);
         if matches!(change, "reset" | "missing-marker") {
-            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            // The in-flight snapshot was valid. A subsequent request sees the missing state.
+            let response = app_router(database.app_state_with_public_namespaces(&["ens"]))
+                .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body: Value = read_json(response).await?;
             assert_eq!(body["error"]["code"], "stale");
         } else {
-            assert_eq!(status, StatusCode::OK, "{body}");
-            if include.is_empty() {
-                assert_no_count(&stats);
-            }
-            assert_eq!(
-                body["data"], before["data"],
-                "the publication gap changed the bounded page"
-            );
-            assert_eq!(body["page"]["total_count"], before["page"]["total_count"]);
-            if path == "catalogue" {
-                assert_eq!(receipt["captured"], receipt["observed"]);
-            } else {
-                assert_ne!(receipt["captured"], receipt["observed"]);
-            }
             let (fresh, fresh_stats) = measured(&database, &uri, 200).await?;
             assert_eq!(fresh_stats.counters.get("catalogue"), Some(&1));
             if change == "advance" {
@@ -334,4 +328,80 @@ async fn check_publication_change(include: &str) -> Result<()> {
         database.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn address_history_refuses_missing_publication_before_snapshot_is_pinned() -> Result<()> {
+    use crate::v2::collection_snapshot::finish_test_hooks::{Stage, install_at};
+    for reset in [false, true] {
+        let database = TestDatabase::new_migrated().await?;
+        seed_names(&database, 2).await?;
+        let (_guard, control) = install_at(&database.lookup_pool, Stage::BeforeRead).await?;
+        let state = database.app_state_with_public_namespaces(&["ens"]);
+        let request = tokio::spawn(async move {
+            app_router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/addresses/{ADDRESS}/history?relation=owner&page_size=1"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            control.wait_until_reached(),
+        )
+        .await?;
+        if reset {
+            reset_family_families(&database).await?;
+        } else {
+            sqlx::query("DELETE FROM bigname_phase.project_history_catalogue_marker")
+                .execute(&database.pool)
+                .await?;
+        }
+        control.resume().await;
+        let response = request.await??;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: Value = read_json(response).await?;
+        assert_eq!(body["error"]["code"], "stale");
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn address_history_snapshot_reuses_one_pool_connection() -> Result<()> {
+    use std::str::FromStr;
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 2).await?;
+    let config = database.database_config(1)?;
+    let options =
+        sqlx::postgres::PgConnectOptions::from_str(config.database_url.as_deref().unwrap())?
+            .options([("search_path", "bigname_phase".to_owned())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let state = AppState::new_with_rpc_urls(pool.clone(), bigname_lookup::ChainRpcUrls::default())
+        .with_public_namespaces_for_test(["ens"]);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app_router(state).oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{ADDRESS}/history?relation=owner&page_size=1&include=data"
+                ))
+                .body(Body::empty())?,
+        ),
+    )
+    .await??;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await?;
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["page"]["total_count"], Value::Null);
+    pool.close().await;
+    database.cleanup().await
 }

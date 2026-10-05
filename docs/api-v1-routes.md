@@ -68,6 +68,19 @@ it returns `409 stale` rather than a misleading partial total. Registry and
 resolver collections use the same publication fence in addition to their
 documented selected-chain position.
 
+Address history captures each page's publication and reads its address membership,
+resolver attribution, event page, and display names on the same read-only
+`REPEATABLE READ` database transaction. A healthy publication or Project
+republication after that transaction is pinned does not force a slower read or
+change the page's reported `meta.as_of`. Missing or reset publication state
+visible when the transaction is pinned is refused; changes committed afterward
+cannot erase the valid publication already being read. The namespace's manifest
+authority is revalidated when that transaction ends, and the Interpret redo
+checks still run before returning the response. Optional per-row context retains
+its separately fenced post-page reads. This makes the address page's selection
+coherent without freezing a multi-page history walk: each continuation captures
+the publication available for that new request.
+
 The history collections, `/v1/events`, name history (with or without
 `include=child_registrations`), and address history, are
 [history walks](glossary.md#history-walk), not snapshots.
@@ -84,16 +97,17 @@ after that position, whether or not the row the cursor came from still exists.
 A later page can therefore include rows published after the first page, a row
 can move or disappear after an Interpret redo, and `total_count` can change
 between pages. `meta.as_of` is the publication captured when the page was
-admitted. The page's rows are bounded at it, but the inputs listed under
-[history collection filters](#history-collection-filters) as read from current
-state (the resolver classification, and the address relation kinds in the
-known limitation) are not pinned to it, so not every field of a page belongs
-to that one publication. Publication changes do not expire a position cursor,
+admitted. The page's rows are bounded at it. Address history pins its page
+selection as specified above. Other history routes may read resolver
+classification from current state rather than that publication, and optional
+per-row context retains separate fenced reads, so not every response field
+belongs to that one publication. Publication changes do not expire a position cursor,
 and a publication that lands while a page is being read does not refuse that
 page either. The page is still capped at the
-publication it reports, so no row above it can appear; but when the new
-publication rewrites rows at or below it, for example after a reorg, the page
-can mix rows from before and after that rewrite. Because
+publication it reports, so no row above it can appear. Outside address
+history's pinned page selection, a new publication that rewrites rows at or
+below that bound, for example after a reorg, can mix rows from before and after
+that rewrite. Because
 `event_identity` is only the final tiebreaker, a re-derivation that changes the
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
@@ -2020,7 +2034,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   neither attributes an older write nor closes an earlier pointer's window.
   Bindings and ownership before `from_timestamp` remain valid anchors; the
   timestamp window filters event rows.
-- Two inputs are read from current state. An address's relations are read from
+- Two inputs use current-state semantics. Address history reads them on the
+  same publication as the page; this does not turn a current relation into
+  an event-time relation. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
   cites for it lies at or below the published block. A `role_holder` row is
   read from the address's current registry-scope grant on the name's selected
