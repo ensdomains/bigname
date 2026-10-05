@@ -1,11 +1,73 @@
-//! A positive lower bound for the unchanged capped count. Distinct historical names own
-//! disjoint direct events; failure to pass the cap says nothing about the collection total.
+//! Complete direct-event counts and positive bounds for the unchanged capped count.
+//! Failure to pass a lower-bound cap says nothing about the collection total.
 
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{AddressRead, catalogue_source, seams, source::push_arm_filters};
-use crate::history::{EventHistoryReadFilter, HistoryScope};
+use super::{
+    AddressRead, catalogue_direct_count, catalogue_source, seams,
+    source::{direct_only_kind, push_arm_filters},
+};
+use crate::history::{EventHistoryReadFilter, HistoryScope, HistorySummaryMode};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CountOutcome {
+    Exact(u64),
+    OverCap(u64),
+    Unknown,
+}
+
+impl CountOutcome {
+    pub(super) fn value(self) -> Option<u64> {
+        match self {
+            Self::Exact(count) | Self::OverCap(count) => Some(count),
+            Self::Unknown => None,
+        }
+    }
+}
+
+pub(super) async fn count(
+    connection: &mut PgConnection,
+    read: &AddressRead<'_>,
+    filter: &EventHistoryReadFilter,
+    summary: HistorySummaryMode,
+) -> Result<CountOutcome> {
+    if summary == HistorySummaryMode::None {
+        return Ok(CountOutcome::Unknown);
+    }
+    if filter.match_no_events {
+        return Ok(CountOutcome::Exact(0));
+    }
+    let cap = match summary {
+        HistorySummaryMode::CappedCount(cap) => Some(cap),
+        HistorySummaryMode::Count => None,
+        _ => return Ok(CountOutcome::Unknown),
+    };
+    if !filter.event_kinds.is_empty()
+        && filter.event_kinds.iter().all(|kind| direct_only_kind(kind))
+    {
+        let limit = cap
+            .map(|cap| {
+                i64::try_from(cap.checked_add(1).context("history count cap overflow")?)
+                    .context("history count cap exceeds SQL limit")
+            })
+            .transpose()?;
+        let count =
+            u64::try_from(catalogue_direct_count::count(connection, read, filter, limit).await?)?;
+        return Ok(if cap.is_some_and(|cap| count > cap) {
+            CountOutcome::OverCap(count)
+        } else {
+            CountOutcome::Exact(count)
+        });
+    }
+    let Some(cap) = cap else {
+        return Ok(CountOutcome::Unknown);
+    };
+    if let Some(count) = prove_over_cap(connection, read, filter, cap).await? {
+        return Ok(CountOutcome::OverCap(count));
+    }
+    Ok(CountOutcome::Unknown)
+}
 
 pub(super) async fn prove_over_cap(
     connection: &mut PgConnection,

@@ -3,6 +3,60 @@ use super::*;
 use bigname_storage::history_anchor_read_test_hooks::{self, HistoryReadHookPoint};
 
 #[tokio::test]
+async fn address_history_catalogue_count_paths_keep_exact_results_and_cursors() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let events = seed_names(&database, 11).await?;
+    let expected_grants: Vec<_> = events
+        .iter()
+        .filter(|(_, id)| id.ends_with("RegistrationGranted"))
+        .map(|(_, id)| hkw_id(id))
+        .collect();
+    for include in ["", "&include=total_count"] {
+        let uri = format!(
+            "/v1/addresses/{ADDRESS}/history?relation=owner&kind=RegistrationGranted&order=asc&page_size=1{include}"
+        );
+        let (first, stats) = measured(&database, &uri, 1).await?;
+        assert_eq!(stats.counters.get("catalogue_direct_count"), Some(&1));
+        assert_eq!(first["page"]["total_count"], json!(11));
+        assert_eq!(hk_ids(&first), expected_grants[..1]);
+        let cursor = first["page"]["next_cursor"].as_str().unwrap();
+        let (next, stats) = measured(&database, &format!("{uri}&cursor={cursor}"), 1).await?;
+        assert_eq!(stats.counters.get("catalogue_direct_count"), Some(&1));
+        assert_eq!(next["page"]["total_count"], json!(11));
+        assert_eq!(hk_ids(&next), expected_grants[1..2]);
+    }
+    let uri = format!(
+        "/v1/addresses/{ADDRESS}/history?relation=owner&record_key=addr:60&order=desc&page_size=2"
+    );
+    let (records, stats) = measured(&database, &uri, 2).await?;
+    let expected_records: Vec<_> = events
+        .iter()
+        .rev()
+        .filter(|(_, id)| id.ends_with("RecordChanged"))
+        .take(2)
+        .map(|(_, id)| hkw_id(id))
+        .collect();
+    assert_eq!(hk_ids(&records), expected_records);
+    assert_eq!(records["page"]["total_count"], json!(11));
+    assert!(!stats.counters.contains_key("catalogue_direct_count"));
+    let uri = format!(
+        "/v1/addresses/{ADDRESS}/history?relation=owner&order=asc&page_size=200&include=total_count"
+    );
+    let (mixed, stats) = measured(&database, &uri, 200).await?;
+    assert_eq!(mixed["page"]["total_count"], json!(44));
+    assert_eq!(
+        hk_ids(&mixed),
+        events.iter().map(|(_, id)| hkw_id(id)).collect::<Vec<_>>()
+    );
+    assert!(
+        stats
+            .counters
+            .contains_key("address_history_exact_cursor_micros")
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_history_new_owner_reads_old_shared_history_without_backfill() -> Result<()> {
     const NEW_OWNER: &str = "0x000000000000000000000000000000000000d235";
     let database = TestDatabase::new_migrated().await?;

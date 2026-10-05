@@ -99,7 +99,7 @@ async fn catalogue_prefixes_keep_complete_keys_and_seek_sparse_sources() -> Resu
     result
 }
 
-async fn install_catalogue(connection: &mut sqlx::PgConnection) -> Result<()> {
+pub(super) async fn install_catalogue(connection: &mut sqlx::PgConnection) -> Result<()> {
     sqlx::raw_sql("INSERT INTO project_history_source(chain_id,source_kind,source_key,first_bucket,last_bucket,bucket_range,event_mask,key_bloom)
       SELECT chain_id,kind,key,min(block_number/256),max(block_number/256),int8range(min(block_number/256),max(block_number/256)+1),9223372036854775807,~B'0'::bit(256)
       FROM (SELECT chain_id,0::smallint AS kind,logical_name_id AS key,block_number FROM normalized_events WHERE logical_name_id IS NOT NULL

@@ -4,6 +4,11 @@
 mod catalogue;
 mod catalogue_count;
 #[cfg(test)]
+mod catalogue_count_plans;
+#[cfg(test)]
+mod catalogue_count_tests;
+mod catalogue_direct_count;
+#[cfg(test)]
 mod catalogue_layout_tests;
 #[cfg(test)]
 mod catalogue_plans;
@@ -28,6 +33,7 @@ use uuid::Uuid;
 use super::{HistoryCursor, HistoryScope};
 use crate::AddressNameRelation;
 
+#[derive(Clone, Copy)]
 struct AddressRead<'a> {
     address: &'a str,
     namespace: Option<&'a str>,
@@ -170,18 +176,18 @@ pub(super) async fn load_page(
             anyhow::bail!("bounded address history requires count-only summary")
         }
     };
-    let proved_count = if catalogue {
-        if let HistorySummaryMode::CappedCount(cap) = summary_mode {
-            catalogue_count::prove_over_cap(&mut transaction, &read, &filter, cap).await?
-        } else {
-            None
-        }
+    let count_outcome = if catalogue {
+        catalogue_count::count(&mut transaction, &read, &filter, summary_mode).await?
     } else {
-        None
+        catalogue_count::CountOutcome::Unknown
     };
+    let proved_count = count_outcome.value();
+    let authoritative_count = catalogue
+        && summary_mode == HistorySummaryMode::Count
+        && count_outcome == catalogue_count::CountOutcome::Unknown;
     let mut output = walk::Accumulator::new(
         page_limit,
-        if keyset.is_some() || proved_count.is_some() {
+        if keyset.is_some() || proved_count.is_some() || authoritative_count {
             Some(0)
         } else {
             count_limit
@@ -201,6 +207,27 @@ pub(super) async fn load_page(
     drop(page_timer);
     let total = if let Some(count) = proved_count {
         count
+    } else if authoritative_count {
+        // Mixed exact counts must exhaust eligibility. The existing authoritative cursor
+        // enumerates it once, avoiding a new planned portal for every catalogue prefix.
+        // Its filters, publication bounds and validation share this repeatable-read snapshot.
+        let _timer = seams::Timer::new("address_history_exact_cursor_micros");
+        let authoritative = AddressRead {
+            catalogue: false,
+            ..read
+        };
+        let mut count = walk::Accumulator::new(0, None);
+        walk::collect(
+            &mut transaction,
+            &authoritative,
+            &filter,
+            None,
+            None,
+            &mut membership,
+            &mut count,
+        )
+        .await?;
+        count.count
     } else if keyset.is_some() && summary_mode != HistorySummaryMode::None {
         let _timer = seams::Timer::new("address_history_count_walk_micros");
         let mut count = walk::Accumulator::new(0, count_limit);

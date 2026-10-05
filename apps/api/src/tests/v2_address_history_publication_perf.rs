@@ -2,7 +2,7 @@
 use super::*;
 
 #[tokio::test]
-#[ignore = "manual disabled-count reader check on a retained performance fixture"]
+#[ignore = "manual disabled/direct/exact reader check on a retained performance fixture"]
 async fn address_history_read_retained_without_count() -> Result<()> {
     use bigname_storage::{
         HistoryCataloguePublication, HistoryCataloguePublicationFence, HistoryOrder,
@@ -10,6 +10,13 @@ async fn address_history_read_retained_without_count() -> Result<()> {
     };
     let url = std::env::var("BIGNAME_HISTORY_PUBLICATION_URL")?;
     let output = PathBuf::from(std::env::var("BIGNAME_HISTORY_PUBLICATION_RECEIPT")?);
+    let mode = std::env::var("BIGNAME_HISTORY_RETAINED_COUNT_MODE").unwrap_or_default();
+    let summary_mode = match mode.as_str() {
+        "" | "record-page" => HistorySummaryMode::None,
+        "direct" => HistorySummaryMode::CappedCount(10_000),
+        "exact" => HistorySummaryMode::Count,
+        _ => anyhow::bail!("unknown retained count mode"),
+    };
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect_with(
@@ -24,13 +31,24 @@ async fn address_history_read_retained_without_count() -> Result<()> {
         database.starts_with("bigname_api_test_"),
         "requires disposable API fixture"
     );
-    let (number, hash, generation): (i64, String, String) = sqlx::query_as(
-        "SELECT current_block_number,current_block_hash,sequence::text FROM project_family_marker WHERE chain_id=$1",
+    let (number, hash, generation, content_hash): (i64, String, String, String) = sqlx::query_as(
+        "SELECT current_block_number,current_block_hash,sequence::text,input_content_hash FROM project_family_marker WHERE chain_id=$1",
     ).bind(CHAIN).fetch_one(&pool).await?;
+    anyhow::ensure!(content_hash == bigname_content_hash::INTERPRETER_CONTENT_HASH);
+    let kinds: Vec<String> = match mode.as_str() {
+        "direct" => vec!["RegistrationGranted".to_owned()],
+        "record-page" => vec![
+            "RecordChanged".to_owned(),
+            "RecordVersionChanged".to_owned(),
+        ],
+        _ => Vec::new(),
+    };
     let mut results = Vec::new();
     for order in [HistoryOrder::Asc, HistoryOrder::Desc] {
         let options = HistoryPageOptions {
             order,
+            event_kinds: kinds.clone(),
+            record_key: (mode == "record-page").then(|| "text:description".to_owned()),
             publication_block_bounds: Some([(CHAIN.to_owned(), number)].into()),
             catalogue_publication: Some(HistoryCataloguePublicationFence::Captured {
                 publications: vec![HistoryCataloguePublication {
@@ -47,6 +65,7 @@ async fn address_history_read_retained_without_count() -> Result<()> {
         let stats = std::sync::Arc::new(std::sync::Mutex::new(
             bigname_storage::AddressHistoryWorkingSet::default(),
         ));
+        let started = std::time::Instant::now();
         let page = bigname_storage::with_address_history_working_set(
             stats.clone(),
             bigname_storage::load_address_history_page_for_relations(
@@ -58,14 +77,24 @@ async fn address_history_read_retained_without_count() -> Result<()> {
                 true,
                 None,
                 200,
-                HistorySummaryMode::None,
+                summary_mode,
                 &options,
                 true,
             ),
         )
         .await?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(page.rows.len(), 200);
-        assert!(page.summary.is_none());
+        if summary_mode == HistorySummaryMode::None {
+            assert!(page.summary.is_none());
+        } else {
+            let expected = if mode == "direct" {
+                number.min(10_001)
+            } else {
+                number * 4
+            };
+            assert_eq!(page.summary.as_ref().unwrap().total_count, expected as u64);
+        }
         let stats = stats.lock().unwrap().clone();
         assert_eq!(stats.counters.get("catalogue"), Some(&1));
         assert!(stats.live.values().all(|value| *value == 0));
@@ -76,19 +105,25 @@ async fn address_history_read_retained_without_count() -> Result<()> {
             .collect();
         let expected: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT event_identity FROM normalized_events WHERE event_identity LIKE 'perf:%%'
+             AND (cardinality($1::text[]) = 0 OR event_kind = ANY($1))
              ORDER BY block_number {direction},block_hash {direction},transaction_index {direction},
                 log_index {direction},event_identity {direction} LIMIT 200",
             direction = order.as_str()
         ))
+        .bind(&kinds)
         .fetch_all(&pool)
         .await?;
         assert_eq!(identities, expected);
         results.push(
             json!({"order":order.as_str(),"rows":identities,"working_set":format!("{stats:?}"),
+            "count_mode":mode,"elapsed_ms":elapsed_ms,"total_count":page.summary.as_ref().map(|summary|summary.total_count),
             "catalogue_receipt":stats.catalogue_receipt}),
         );
     }
-    durable_profile_receipt(&output, &json!({"database":database,"results":results}))?;
+    durable_profile_receipt(
+        &output,
+        &json!({"database":database,"compiled_content_hash":content_hash,"measurement":"Native debug storage reader; not HTTP acceptance","results":results}),
+    )?;
     pool.close().await;
     Ok(())
 }

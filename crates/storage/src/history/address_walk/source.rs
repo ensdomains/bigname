@@ -26,6 +26,21 @@ pub(super) const EVENT_COLUMNS: &str = "ne.normalized_event_id, ne.event_identit
 const READABLE: &str = "('canonical', 'safe', 'finalized')";
 const ZERO_NODE: &str = "'0x0000000000000000000000000000000000000000000000000000000000000000'";
 
+/// These recognized kinds are exhausted by the name/resource arms below. The other arms
+/// add record attribution, subject-only roots, or globally deduplicated resolver handoffs.
+/// An unknown vocabulary entry must keep using the authoritative witness walk.
+pub(super) fn direct_only_kind(kind: &str) -> bool {
+    crate::history::catalogue_contract::event_kind_mask(kind) != i64::MAX
+        && !matches!(
+            kind,
+            "RecordChanged"
+                | "RecordVersionChanged"
+                | "ResolverRecordLinked"
+                | "RootPermissionChanged"
+                | "ResolverChanged"
+        )
+}
+
 /// The caller supplies WITH or a comma. These sets remain in PostgreSQL; the API never fetches
 /// their complete rows. Current resources include only bindings the existing bound validator
 /// could accept. The selected relation/resource still requires composition.

@@ -60,6 +60,7 @@ async fn measured(
         "attribution_sql_rows",
         "attribution_results",
         "handoff_peers",
+        "catalogue_proof_names",
     ] {
         assert!(
             stats.peak.get(key).copied().unwrap_or_default() <= 7,
@@ -272,9 +273,11 @@ async fn address_history_walk_historical_name_keeps_a_different_current_resource
     ];
     assert_eq!(hk_ids(&before), expected, "{before}");
     assert_eq!(before["page"]["total_count"], json!(2));
+    // Explicit exact counts use the existing authoritative cursor. It composes this one
+    // current-only role member, with the result cached for the rest of the same snapshot.
     assert_eq!(
         stats.counters.get("names_composed").copied().unwrap_or(0),
-        0,
+        1,
         "{stats:?}"
     );
 
@@ -302,7 +305,7 @@ async fn address_history_walk_historical_name_keeps_a_different_current_resource
     assert_eq!(after["page"]["total_count"], before["page"]["total_count"]);
     assert_eq!(
         stats.counters.get("names_composed").copied().unwrap_or(0),
-        0,
+        1,
         "{stats:?}"
     );
 
@@ -443,8 +446,8 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
     assert_eq!(next["page"]["total_count"], json!(1_201));
     assert_eq!(
         stats.counters.get("names_composed").copied().unwrap_or(0),
-        0,
-        "page and count use the published membership: {stats:?}"
+        1,
+        "explicit exact count composes the current member once in the same snapshot: {stats:?}"
     );
     assert_eq!(
         hk_ids(&next),
