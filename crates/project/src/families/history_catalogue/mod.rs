@@ -83,7 +83,8 @@ pub(crate) async fn stamp(
     stats: &mut BlockStats,
 ) -> Result<()> {
     let before: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(marker) FROM project_history_catalogue_marker marker WHERE chain_id=$1",
+        "/* project:history.stamp_before */ SELECT to_jsonb(marker)
+         FROM project_history_catalogue_marker marker WHERE chain_id=$1",
     )
     .bind(chain)
     .fetch_all(&mut **transaction)

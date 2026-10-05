@@ -414,7 +414,8 @@ async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> R
             }
         }
     }
-    // Both an explicit any and the unfiltered request retain role membership work.
+    // Names still load role candidates and grants. History uses the bounded catalogue,
+    // which includes those roles without the whole-address role loaders.
     for route in ["names", "history"] {
         for query in ["", "?relation=any", "?relation=owner,role_holder"] {
             let reads = Arc::new(Mutex::new(Vec::new()));
@@ -428,7 +429,11 @@ async fn v2_address_ownership_filters_skip_role_candidate_and_grant_reads() -> R
             .await?;
             assert_eq!(
                 *reads.lock().unwrap(),
-                ["candidates", "grants"],
+                if route == "names" {
+                    vec!["candidates", "grants"]
+                } else {
+                    vec![]
+                },
                 "{route}{query}"
             );
             assert!(!payload["data"].as_array().unwrap().is_empty(), "{payload}");

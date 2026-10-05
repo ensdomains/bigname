@@ -32,6 +32,11 @@ fn reset_tables() -> BTreeSet<&'static str> {
                     // Added later, by 20261005140000_project_ens_v2_registry_entries.sql.
                     | "project_ens_v2_entry_owner"
                     | "project_ens_v2_registry_parent"
+                    // Added later, by 20261005170000_project_address_history_catalogue.sql.
+                    | "project_address_history_anchor"
+                    | "project_history_source"
+                    | "project_history_source_edge"
+                    | "project_history_catalogue_marker"
             )
         })
         .chain(CONTROL_TABLES)
