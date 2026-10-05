@@ -33,6 +33,7 @@ pub(crate) struct RawQueryParams {
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
     pub(crate) resolver: Option<String>,
+    pub(crate) registry: Option<String>,
     pub(crate) contract_address: Option<String>,
     pub(crate) owner: Option<String>,
     pub(crate) exclude_owner: Option<String>,
@@ -72,7 +73,8 @@ pub(crate) struct QueryParams {
     pub(crate) name: Option<String>,
     pub(crate) registration_id: Option<String>,
     pub(crate) address: Option<String>,
-    pub(crate) resolver: Option<ResolverSelector>,
+    pub(crate) resolver: Option<ContractSelector>,
+    pub(crate) registry: Option<ContractSelector>,
     pub(crate) contract_address: Option<String>,
     /// Lower-cased owner filters of the registry labels route.
     pub(crate) owner: Option<String>,
@@ -113,16 +115,16 @@ pub(crate) struct TimestampBound {
     pub(crate) canonical: String,
 }
 
-/// A resolver contract named as `<numeric chain_id>:<address>`; the chain is
-/// carried as the storage slug and the address in lowercase canonical form.
+/// A contract named as `<numeric chain_id>:<address>`, such as the `resolver` or `registry`
+/// selector; the chain is carried as the storage slug and the address in lowercase canonical form.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolverSelector {
+pub(crate) struct ContractSelector {
     pub(crate) chain_id: u64,
     pub(crate) chain_slug: &'static str,
     pub(crate) address: String,
 }
 
-impl ResolverSelector {
+impl ContractSelector {
     /// Wire form cursors bind: `<numeric chain_id>:<lowercase address>`.
     pub(crate) fn canonical(&self) -> String {
         format!("{}:{}", self.chain_id, self.address)
@@ -173,7 +175,8 @@ impl TryFrom<RawQueryParams> for QueryParams {
             contract_address: parse_address(raw.contract_address, "contract_address")?,
             owner: parse_address(raw.owner, "owner")?,
             exclude_owner: parse_address(raw.exclude_owner, "exclude_owner")?,
-            resolver: parse_resolver_selector(raw.resolver)?,
+            resolver: parse_contract_selector(raw.resolver, "resolver")?,
+            registry: parse_contract_selector(raw.registry, "registry")?,
             relation: parse_relation_set_param(raw.relation.as_deref())?,
             authority: parse_authority(raw.authority.as_deref())?,
             parent: raw.parent,
@@ -431,14 +434,17 @@ fn parse_address(value: Option<String>, field: &'static str) -> V2Result<Option<
         .map_err(|error| V2Error::invalid_input(error.message))
 }
 
-fn parse_resolver_selector(value: Option<String>) -> V2Result<Option<ResolverSelector>> {
+fn parse_contract_selector(
+    value: Option<String>,
+    field: &'static str,
+) -> V2Result<Option<ContractSelector>> {
     let Some(value) = trim_to_option(value) else {
         return Ok(None);
     };
     let invalid = || {
-        V2Error::invalid_input(
-            "resolver must be <chain_id>:<address> with a supported numeric chain id",
-        )
+        V2Error::invalid_input(format!(
+            "{field} must be <chain_id>:<address> with a supported numeric chain id"
+        ))
     };
     let (chain_id, address) = value.split_once(':').ok_or_else(invalid)?;
     let chain_id = chain_id.trim();
@@ -447,9 +453,9 @@ fn parse_resolver_selector(value: Option<String>) -> V2Result<Option<ResolverSel
     }
     let chain_id = chain_id.parse::<u64>().map_err(|_| invalid())?;
     let chain_slug = super::chains::numeric_to_slug(chain_id).ok_or_else(invalid)?;
-    let address = parse_evm_address(address, "resolver")
-        .map_err(|error| V2Error::invalid_input(error.message))?;
-    Ok(Some(ResolverSelector {
+    let address =
+        parse_evm_address(address, field).map_err(|error| V2Error::invalid_input(error.message))?;
+    Ok(Some(ContractSelector {
         chain_id,
         chain_slug,
         address,

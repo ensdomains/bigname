@@ -554,14 +554,15 @@
             "name": "include",
             "in": "query",
             "required": false,
-            "description": "Comma-separated expansion names; unlisted values are invalid. Nonempty include is not accepted with relation=former_owner.",
+            "description": "Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner.",
             "schema": {
               "type": "array",
               "items": {
                 "type": "string",
                 "enum": [
                   "counts",
-                  "role_summary"
+                  "role_summary",
+                  "total_count"
                 ]
               }
             },
@@ -3446,7 +3447,7 @@
             "name": "name",
             "in": "query",
             "required": false,
-            "description": "Name anchor. At least one of name, registration_id or address is required.",
+            "description": "Name anchor. At least one of name, registration_id, address or registry is required.",
             "schema": {
               "type": "string"
             }
@@ -3465,6 +3466,15 @@
             "in": "query",
             "required": false,
             "description": "EVM address in hexadecimal form.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "registry",
+            "in": "query",
+            "required": false,
+            "description": "ENSv2 registry as `<chain_id>:<address>` with a supported numeric chain ID; selects the grants on its root resource. Cannot be combined with name or registration_id.",
             "schema": {
               "type": "string"
             }
@@ -6082,6 +6092,7 @@
           "RecordVersionChanged",
           "ReverseChanged",
           "PermissionChanged",
+          "RootPermissionChanged",
           "PermissionScopeChanged",
           "RolesChanged",
           "EACRolesChanged",
@@ -6353,7 +6364,7 @@
           },
           "token_id": {
             "type": "string",
-            "description": "Decimal-string token identifier."
+            "description": "Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
           },
           "owner": {
             "type": "string",
@@ -6748,7 +6759,7 @@
           },
           "token_id": {
             "type": "string",
-            "description": "Decimal-string token identifier."
+            "description": "Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
           },
           "owner": {
             "type": "string",
@@ -8459,7 +8470,7 @@
           },
           "detail": {
             "$ref": "#/components/schemas/GrantScopeDetail",
-            "description": "Scope-specific fields; empty for root, registry and registration. Registrar-controller is history-only."
+            "description": "Scope-specific fields; empty for registry and registration. Root names its registry. Registrar-controller is history-only."
           }
         },
         "additionalProperties": false,
@@ -8474,6 +8485,10 @@
           "resolver": {
             "$ref": "#/components/schemas/ContractRef",
             "description": "Resolver contract for this answer."
+          },
+          "registry": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "ENSv2 registry whose root resource the grant is on, only for root scope."
           },
           "chain_id": {
             "type": "integer",
@@ -8763,6 +8778,38 @@
       "HistoryEventData": {
         "type": "object",
         "properties": {
+          "token_id": {
+            "type": "string",
+            "description": "Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
+          },
+          "canonical_id": {
+            "type": "string",
+            "description": "Decimal ENSv2 event-local identifier with its low 32 bits cleared; scoped by registry and chain, not a registration UUID."
+          },
+          "cost": {
+            "type": "string",
+            "description": "Unsigned decimal unsplit registration amount or renewal amount; native wei for ENSv1, raw payment-token units for ENSv2."
+          },
+          "base_cost": {
+            "type": "string",
+            "description": "Unsigned decimal explicitly emitted registration base amount."
+          },
+          "premium": {
+            "type": "string",
+            "description": "Unsigned decimal explicitly emitted registration premium."
+          },
+          "payment_token": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "ERC-20 contract named by an ENSv2 payment observation; explicit zero address is preserved, without inferring a currency."
+          },
+          "referrer": {
+            "type": "string",
+            "description": "Emitted bytes32 referrer as lowercase 0x-prefixed hex, including explicit zero."
+          },
+          "operator": {
+            "type": "string",
+            "description": "Lowercase operator explicitly retained on an ERC-1155 transfer."
+          },
           "registrant": {
             "type": "string",
             "description": "Registrant the registration event named, as the on-chain event carries it."

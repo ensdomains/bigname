@@ -445,6 +445,8 @@ include!("tests/v2_address_names.rs");
 include!("tests/v2_address_names_budget.rs");
 include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_names_roles.rs");
+include!("tests/v2_address_names_bounded.rs");
+include!("tests/v2_address_names_memory.rs");
 include!("tests/v2_history_permission_changes.rs");
 include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
@@ -466,6 +468,8 @@ mod v2_history_bounded_rebinding;
 mod v2_history_bounded_regeneration;
 #[path = "tests/v2_registry_permission_identity.rs"]
 mod v2_registry_permission_identity;
+#[path = "tests/v2_registry_token_ids.rs"]
+mod v2_registry_token_ids;
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_resolver_generation_races.rs");
@@ -480,6 +484,7 @@ include!("tests/v2_history_event_data.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_names_filters.rs");
+include!("tests/v2_names_expiry_oracle.rs");
 include!("tests/v2_former_owner_cursors.rs");
 #[path = "tests/v2_former_owner_produced.rs"]
 mod v2_former_owner_produced;
@@ -504,6 +509,8 @@ mod lookup_redo;
 mod read_only_lookup;
 #[path = "tests/v2_family_lookup_release.rs"]
 mod v2_family_lookup_release;
+#[path = "tests/v2_registry_root_restrictions.rs"]
+mod v2_registry_root_restrictions;
 #[path = "tests/v2_sepolia_redeploy.rs"]
 mod v2_sepolia_redeploy;
 include!("tests/v2_family_permissions.rs");

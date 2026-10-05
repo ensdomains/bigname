@@ -181,9 +181,14 @@ pub(crate) async fn get_events(
     } else {
         history_total_count(storage_page.summary.as_ref())
     };
-    let context =
-        super::history_context::load_history_row_context(&state.pool, &storage_page.rows, include)
-            .await?;
+    let context = super::history_context::load_history_row_context(
+        &state.pool,
+        &storage_page.rows,
+        include,
+        &snapshot.block_bounds(),
+        storage_page.interpret_redo_fence.as_ref(),
+    )
+    .await?;
     let logical_name_ids = storage_page
         .rows
         .iter()
@@ -244,7 +249,11 @@ pub(crate) fn build_event(
     Some(Event {
         id: super::history_event_id(row),
         event_type,
-        name: name.map(str::to_owned),
+        // A registry root role change belongs to no name, even when a nonconforming registry
+        // tied one to its root resource.
+        name: name
+            .filter(|_| row.event_kind != "RootPermissionChanged")
+            .map(str::to_owned),
         namespace: row.namespace.clone(),
         registration_id: row
             .registration_id
