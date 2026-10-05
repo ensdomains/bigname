@@ -91,6 +91,7 @@ pub(super) async fn collect(
                 pending.filter(|(_, valid)| *valid).map(|(id, _)| id),
             )
             .await?;
+        let _matched_live = Live::new("validated_witnesses", matched.len());
         duplicates::retain_winners(connection, read, filter, membership, &rows, &mut matched)
             .await?;
         for (row, valid) in rows.into_iter().zip(matched) {

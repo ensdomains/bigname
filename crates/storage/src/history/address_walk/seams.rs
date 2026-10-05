@@ -101,19 +101,33 @@ pub(super) fn cache_capacity() -> usize {
 }
 
 pub(in crate::history) struct Live {
+    #[cfg(any(test, feature = "test-support"))]
     kind: &'static str,
+    #[cfg(any(test, feature = "test-support"))]
     rows: usize,
 }
 impl Live {
     pub(in crate::history) fn new(kind: &'static str, rows: usize) -> Self {
-        let mut live = Self { kind, rows: 0 };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = kind;
+        let mut live = Self {
+            #[cfg(any(test, feature = "test-support"))]
+            kind,
+            #[cfg(any(test, feature = "test-support"))]
+            rows: 0,
+        };
         live.set(rows);
         live
     }
     pub(in crate::history) fn set(&mut self, rows: usize) {
         #[cfg(any(test, feature = "test-support"))]
         scoped::change(self.kind, self.rows, rows);
-        self.rows = rows;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.rows = rows;
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = rows;
     }
 }
 impl Drop for Live {

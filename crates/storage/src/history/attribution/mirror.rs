@@ -52,6 +52,14 @@ pub(super) async fn load_mirror_attribution(
         .iter()
         .map(|mirror| (mirror.resource_id, None))
         .collect::<BTreeMap<_, _>>();
+    let _resource_live = requested.map(|_| {
+        super::super::address_walk::seams::Live::new(
+            "mirror_substitution_resources",
+            attribution.len(),
+        )
+    });
+    let mut pairs_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_substitution_pairs", 0));
     let followable = mirrors
         .into_iter()
         .filter(|mirror| mirror.followable)
@@ -84,6 +92,15 @@ pub(super) async fn load_mirror_attribution(
             .get_or_insert_with(BTreeSet::new);
         if let Some(event_id) = row.try_get::<Option<i64>, _>("normalized_event_id")? {
             writes.insert(event_id);
+        }
+        if let Some(live) = pairs_live.as_mut() {
+            live.set(
+                attribution
+                    .values()
+                    .filter_map(Option::as_ref)
+                    .map(BTreeSet::len)
+                    .sum(),
+            );
         }
     }
     Ok(attribution)

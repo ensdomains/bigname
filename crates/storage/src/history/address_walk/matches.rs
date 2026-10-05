@@ -47,6 +47,7 @@ impl Membership {
             .map(|w| w.normalized_event_id)
             .collect();
         accepted.extend(already_matched);
+        let mut accepted_live = Live::new("accepted_witness_ids", accepted.len());
         let mut missing = BTreeMap::<String, BTreeSet<String>>::new();
         for witness in witnesses.iter().filter(|w| {
             matches!(w.witness_kind, 1 | 2 | 4) && !accepted.contains(&w.normalized_event_id)
@@ -70,6 +71,7 @@ impl Membership {
             }
         }
         let mut needed = BTreeSet::new();
+        accepted_live.set(accepted.len());
         for witness in witnesses.iter().filter(|w| matches!(w.witness_kind, 3 | 4)) {
             if accepted.contains(&witness.normalized_event_id) {
                 continue;
@@ -97,6 +99,7 @@ impl Membership {
             }
         }
         if !needed.is_empty() {
+            accepted_live.set(accepted.len());
             let pairs: Vec<_> = needed.into_iter().collect();
             let _input = Live::new("attribution_inputs", pairs.len());
             let matched = matching_attribution_pairs(connection, &pairs, read.published).await?;
@@ -110,6 +113,7 @@ impl Membership {
                 }
             }
         }
+        accepted_live.set(accepted.len());
         Ok(witnesses
             .iter()
             .map(|w| accepted.contains(&w.normalized_event_id))

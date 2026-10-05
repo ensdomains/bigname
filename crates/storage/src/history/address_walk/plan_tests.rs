@@ -9,9 +9,13 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 
 use super::{AddressRead, source::push_candidate_query};
-use crate::history::{ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryScope};
+use crate::history::{
+    ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryOrder,
+    HistoryPosition, HistoryScope, keyset::HistoryKeyset,
+};
 
 const ADDRESS: &str = "0x0000000000000000000000000000000000000a11";
+const ROOT_ADDRESS: &str = "0x0000000000000000000000000000000000000c11";
 const EMPTY_ADDRESS: &str = "0x0000000000000000000000000000000000000bad";
 
 #[tokio::test]
@@ -42,13 +46,27 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
         install(&mut connection, target, unrelated).await?;
         let published = BTreeMap::from([("ethereum-mainnet".to_owned(), (target + unrelated + 1) as i64)]);
         let mut failures = Vec::new();
-        for (label, address, absent_key) in [("heavy", ADDRESS, false), ("sparse", ADDRESS, true), ("empty", EMPTY_ADDRESS, false)] {
+        for (label, address, record_key, order, continuation, expected) in [
+            ("heavy", ADDRESS, None, HistoryOrder::Desc, false, target*16),
+            ("heavy-asc", ADDRESS, None, HistoryOrder::Asc, false, target*16),
+            ("continuation", ADDRESS, None, HistoryOrder::Desc, true, (target/2-1)*12+target*4),
+            ("record", ADDRESS, Some("text:description"), HistoryOrder::Desc, false, target*6),
+            ("sparse", ADDRESS, Some("missing-key"), HistoryOrder::Desc, false, 0),
+            ("empty", EMPTY_ADDRESS, None, HistoryOrder::Desc, false, 0),
+            ("root", ROOT_ADDRESS, None, HistoryOrder::Desc, false, 1),
+        ] {
             let read = AddressRead { address, namespace: Some("ens"), relations: None, scope: HistoryScope::Both, canonical_only: true, published: Some(&published) };
             let filter = EventHistoryReadFilter {
                 block_window: Some(HistoryBlockWindow { ranges: vec![ChainBlockRange { chain_id: "ethereum-mainnet".to_owned(), from_block: None, to_block: Some((target + unrelated + 1) as i64) }] }),
-                record_key: absent_key.then(|| "missing-key".to_owned()),
+                record_key: record_key.map(str::to_owned), order,
                 ..Default::default()
             };
+            let cursor = HistoryCursor { normalized_event_id: None,
+                event_identity: format!("plan:grant:{}", target/2),
+                position: Some(HistoryPosition { chain_id: Some("ethereum-mainnet".into()),
+                    block_number: Some((target/2) as i64), block_hash: Some(format!("block-{}", target/2)),
+                    transaction_index: Some(0), log_index: Some(0), transaction_hash: None }) };
+            let keyset = continuation.then_some(HistoryKeyset { cursor: &cursor, block_number: Some((target/2) as i64) });
             for mode in ["auto", "force_custom_plan", "force_generic_plan"] {
                 sqlx::raw_sql(&format!("SET plan_cache_mode={mode}; SET statement_timeout='120s'; SET jit=off; SET enable_seqscan=on")).execute(&mut *connection).await?;
                 // DECLARE uses a nonpersistent request statement. Also inspect a true generic
@@ -58,7 +76,7 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
                 let mut query = QueryBuilder::<Postgres>::new(if generic {
                     "EXPLAIN (GENERIC_PLAN, FORMAT JSON) "
                 } else { "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " });
-                push_candidate_query(&mut query, &read, &filter, None);
+                push_candidate_query(&mut query, &read, &filter, keyset.as_ref());
                 let sql = query.sql().to_owned();
                 let plan: Value = if generic {
                     // Do not bind concrete values: GENERIC_PLAN accepts unresolved SQL
@@ -77,11 +95,14 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
                     std::fs::write(directory.join(format!("{name}.sql")), sql)?;
                 }
                 for scan in scans {
+                    if scan["index"] == "normalized_events_record_id_link_idx" && (generic || scan["loops"].as_u64().unwrap_or(0) > 0)
+                        && !scan["condition"].as_str().unwrap_or_default().contains("'node'") {
+                        failures.push(format!("{label}/{mode} did not key the shared-resolver link probe by node: {scan}"));
+                    }
                     if scan["type"] == "Seq Scan" && (generic || scan["loops"].as_u64().unwrap_or(0) > 0) {
                         failures.push(format!("{label}/{mode} scanned normalized_events: {scan}"));
                     }
                 }
-                let expected = if label == "heavy" { target * 12 } else { 0 };
                 ensure!(generic || plan[0]["Plan"]["Actual Rows"].as_u64() == Some(expected as u64), "{label}/{mode}: expected {expected} distinct witnesses, plan={plan}");
             }
         }
@@ -97,11 +118,20 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
         println!("paired: {}", json!({"execution_ms":plan[0]["Execution Time"],"rows":plan[0]["Plan"]["Actual Rows"],"event_scans":scans}));
         if let Ok(directory) = std::env::var("BIGNAME_ADDRESS_HISTORY_PLAN_DIR") {
             std::fs::write(PathBuf::from(&directory).join(format!("{target}-{unrelated}-paired.json")), serde_json::to_vec_pretty(&plan)?)?;
-            std::fs::write(PathBuf::from(directory).join(format!("{target}-{unrelated}-paired.sql")), paired_sql)?;
+            std::fs::write(PathBuf::from(directory).join(format!("{target}-{unrelated}-paired.sql")), &paired_sql)?;
         }
         ensure!(plan[0]["Plan"]["Actual Rows"].as_u64() == Some(resources.len() as u64), "paired output must contain exactly the requested valid pairs: {plan}");
         for scan in scans {
             if scan["type"] == "Seq Scan" && scan["loops"].as_u64().unwrap_or(0) > 0 { failures.push(format!("paired attribution scanned normalized_events: {scan}")); }
+        }
+        let generic_sql = paired_sql.replace("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)", "EXPLAIN (GENERIC_PLAN, FORMAT JSON)");
+        let generic: Value = sqlx::raw_sql(&generic_sql).fetch_one(&mut *connection).await?.get(0);
+        ensure!(generic.to_string().contains('$'), "paired generic plan must retain parameters");
+        if let Ok(directory) = std::env::var("BIGNAME_ADDRESS_HISTORY_PLAN_DIR") {
+            std::fs::write(PathBuf::from(directory).join(format!("{target}-{unrelated}-paired-generic.json")), serde_json::to_vec_pretty(&generic)?)?;
+        }
+        for scan in event_scans(&generic[0]["Plan"]) {
+            if scan["type"] == "Seq Scan" { failures.push(format!("paired generic plan scans normalized_events: {scan}")); }
         }
         ensure!(failures.is_empty(), "{}", failures.join("\n"));
         Ok(())
@@ -153,13 +183,18 @@ async fn install(connection: &mut PgConnection, target: usize, unrelated: usize)
       INSERT INTO normalized_events(event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
       SELECT 'plan:grant:'||n,'ens','ens:0x'||lpad(to_hex(n),64,'0'),lpad(to_hex(n),32,'0')::uuid,'RegistrationGranted','ens_v2_registry_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,0,'ens_v2_registry_resource_surface','canonical'::canonicality_state,jsonb_build_object('registrant',CASE WHEN n<={target} THEN '{ADDRESS}' ELSE '0x'||lpad(to_hex(n),40,'e') END) FROM generate_series(1,{total}) n
       UNION ALL
-      SELECT 'plan:pointer:'||n,'ens','ens:0x'||lpad(to_hex(n),64,'0'),lpad(to_hex(n),32,'0')::uuid,'ResolverChanged','ens_v1_registry_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,1,'ens_v1_unwrapped_authority','canonical'::canonicality_state,jsonb_build_object('resolver','0x'||lpad(to_hex(n),40,'d'),'node','0x'||lpad(to_hex(n),64,'0')) FROM generate_series(1,{total}) n
+      SELECT 'plan:pointer:'||n,'ens','ens:0x'||lpad(to_hex(n),64,'0'),lpad(to_hex(n),32,'0')::uuid,'ResolverChanged','ens_v1_registry_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,1,'ens_v1_unwrapped_authority','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','node','0x'||lpad(to_hex(n),64,'0')) FROM generate_series(1,{total}) n
       UNION ALL
-      SELECT 'plan:record:'||n,'ens',NULL,NULL,'RecordChanged',CASE WHEN n%2=0 THEN 'ens_v1_resolver_l1' ELSE 'ens_v2_resolver_l1' END,1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,2,'ens_v1_unwrapped_authority','canonical'::canonicality_state,jsonb_build_object('resolver','0x'||lpad(to_hex(n),40,'d'),'node','0x'||lpad(to_hex(n),64,'0'),'record_key','text:description','value','plan fixture') FROM generate_series(1,{total}) n
+      SELECT 'plan:record:'||n,'ens',NULL,NULL,'RecordChanged',CASE WHEN n%2=0 THEN 'ens_v1_resolver_l1' ELSE 'ens_v2_resolver_l1' END,1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,2,'ens_v1_unwrapped_authority','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','node','0x'||lpad(to_hex(n),64,'0'),'record_key','text:description','value','plan fixture') FROM generate_series(1,{total}) n
       UNION ALL
-      SELECT 'plan:link:'||n,'ens',NULL,NULL,'ResolverRecordLinked','ens_v2_resolver_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,3,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x'||lpad(to_hex(n),40,'d'),'node','0x'||lpad(to_hex(n),64,'0'),'storage_model','resolver_record_id','resolver_record_id','record-'||n) FROM generate_series(1,{total}) n
+      SELECT 'plan:link:'||n,'ens',NULL,NULL,'ResolverRecordLinked','ens_v2_resolver_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,3,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','node','0x'||lpad(to_hex(n),64,'0'),'storage_model','resolver_record_id','resolver_record_id','record-'||n) FROM generate_series(1,{total}) n
       UNION ALL
-      SELECT 'plan:id-record:'||n,'ens',NULL,NULL,'RecordChanged','ens_v2_resolver_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,4,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x'||lpad(to_hex(n),40,'d'),'storage_model','resolver_record_id','resolver_record_id','record-'||n,'record_key','text:description','value','plan fixture') FROM generate_series(1,{total}) n;
+      SELECT 'plan:id-record:'||n,'ens',NULL,NULL,'RecordChanged','ens_v2_resolver_l1',1,'ethereum-mainnet','block-'||n,n,'tx-'||n,0,4,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','storage_model','resolver_record_id','resolver_record_id','record-'||n,'record_key','text:description','value','plan fixture') FROM generate_series(1,{total}) n;
+      INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
+      VALUES ('plan:default-link','ens','ResolverRecordLinked','ens_v2_resolver_l1',1,'ethereum-mainnet','block-1',1,'tx-default',0,6,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','node','0x0000000000000000000000000000000000000000000000000000000000000000','storage_model','resolver_record_id','resolver_record_id','default-record')),
+      ('plan:default-record','ens','RecordChanged','ens_v2_resolver_l1',1,'ethereum-mainnet','block-1',1,'tx-default',0,7,'ens_v2_resolver','canonical'::canonicality_state,jsonb_build_object('resolver','0x0000000000000000000000000000000000000d11','storage_model','resolver_record_id','resolver_record_id','default-record','record_key','text:description','value','shared default record'));
+      INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_hash,block_number,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
+      VALUES ('plan:root','ens','RootPermissionChanged','ens_v2_root_l1',1,'ethereum-mainnet','block-1',1,'tx-root',0,100,'ens_v2_registry_resource_surface','canonical'::canonicality_state,jsonb_build_object('subject','{ROOT_ADDRESS}'));
       ANALYZE;
     "#)).execute(&mut *connection).await?;
     Ok(())

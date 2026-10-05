@@ -249,6 +249,9 @@ async fn load_attribution_map_restricted(
             .entry(row.try_get("resource_id")?)
             .or_default()
             .insert(row.try_get("normalized_event_id")?);
+        if let Some(live) = map_live.as_mut() {
+            live.set(attributed.values().map(BTreeSet::len).sum());
+        }
     }
 
     drop(_rows_live);
@@ -261,12 +264,28 @@ async fn load_attribution_map_restricted(
     // has no attributed writes at all, superseded pointers included.
     let mirrored =
         mirror::load_mirror_attribution(connection, resource_ids, published, requested).await?;
+    let _mirrored_pairs = requested.map(|_| {
+        super::address_walk::seams::Live::new(
+            "mirror_substitution_pairs",
+            mirrored
+                .values()
+                .filter_map(Option::as_ref)
+                .map(BTreeSet::len)
+                .sum(),
+        )
+    });
+    let _mirrored_resources = requested.map(|_| {
+        super::address_walk::seams::Live::new("mirror_substitution_resources", mirrored.len())
+    });
     for (resource_id, substitution) in mirrored {
         match substitution {
             Some(event_ids) => attributed.entry(resource_id).or_default().extend(event_ids),
             None => {
                 attributed.remove(&resource_id);
             }
+        }
+        if let Some(live) = map_live.as_mut() {
+            live.set(attributed.values().map(BTreeSet::len).sum());
         }
     }
     attributed.retain(|_, event_ids| !event_ids.is_empty());

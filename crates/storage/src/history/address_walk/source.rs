@@ -70,7 +70,7 @@ fn push_address_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, read: &'a Add
 }
 
 fn push_pointer_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, read: &'a AddressRead<'a>) {
-    builder.push(format!(
+    builder.push(
         ", address_pointers AS (
          SELECT DISTINCT witness.witness_kind, witness.current_chain, witness.current_name,
                 pointer.resource_id, pointer.chain_id, lower(surface.namehash) AS namehash,
@@ -79,7 +79,7 @@ fn push_pointer_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, read: &'a Add
          JOIN bigname_phase.normalized_events pointer ON pointer.resource_id = witness.resource_id
          JOIN bigname_phase.name_surfaces surface ON surface.logical_name_id = pointer.logical_name_id AND surface.chain_id = pointer.chain_id
          WHERE pointer.event_kind = 'ResolverChanged'"
-    ));
+    );
     push_readable_event(builder, "pointer", read.published);
     push_readable_surface(builder, "surface", read.published);
     builder.push(format!(
@@ -89,14 +89,19 @@ fn push_pointer_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, read: &'a Add
                 lower(link.after_state ->> 'resolver') AS resolver_address,
                 link.after_state ->> 'resolver_record_id' AS record_id
          FROM address_pointers pointer
-         JOIN bigname_phase.normalized_events link ON link.chain_id = pointer.chain_id
-          AND lower(link.after_state ->> 'resolver') = pointer.resolver_address
-          AND lower(link.after_state ->> 'node') IN (pointer.namehash, {ZERO_NODE})
-         WHERE link.event_kind = 'ResolverRecordLinked' AND link.after_state ->> 'storage_model' = 'resolver_record_id'
+         CROSS JOIN LATERAL (SELECT pointer.namehash AS node UNION SELECT {ZERO_NODE}) wanted_node
+         CROSS JOIN LATERAL (
+           SELECT link.normalized_event_id, link.chain_id, link.after_state
+           FROM bigname_phase.normalized_events link
+           WHERE link.chain_id = pointer.chain_id
+             AND lower(link.after_state ->> 'resolver') = pointer.resolver_address
+             AND lower(link.after_state ->> 'node') = wanted_node.node
+             AND link.event_kind = 'ResolverRecordLinked' AND link.after_state ->> 'storage_model' = 'resolver_record_id'
            AND link.consumer_visibility = 'activated' AND link.canonicality_state IN {READABLE}"
     ));
     push_publication_bound(builder, "link", read.published);
-    builder.push(")");
+    // Keep both exact-node and default-node probes parameterized by the full index key.
+    builder.push(" OFFSET 0) link)");
 }
 
 /// Current-name witness 1 needs only eligible current membership; 2 additionally needs the
@@ -110,7 +115,25 @@ fn push_event_arms<'a>(
     keyset: Option<&HistoryKeyset<'a>>,
 ) {
     let mut arm = false;
+    if read.scope != HistoryScope::Surface
+        && read
+            .relations
+            .is_none_or(|relations| relations.contains(&crate::AddressNameRelation::RoleHolder))
+    {
+        // Root roles are independent of name/resource membership and belong only to the
+        // changed subject. Match the root-history index's expression exactly.
+        builder.push(format!("SELECT {EVENT_COLUMNS}, 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM normalized_events ne"));
+        push_arm_filters(builder, read, filter, keyset);
+        builder.push(" AND ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ").push_bind(read.address);
+        if let Some(namespace) = read.namespace {
+            builder.push(" AND ne.namespace = ").push_bind(namespace);
+        }
+        arm = true;
+    }
     if read.scope != HistoryScope::Resource {
+        if arm {
+            builder.push(" UNION ALL ");
+        }
         push_probe(
             builder,
             read,
@@ -192,7 +215,7 @@ fn push_probe<'a>(
 ) {
     builder.push(format!("SELECT ne.*, {witness} FROM {source} CROSS JOIN LATERAL (SELECT {EVENT_COLUMNS} FROM normalized_events ne"));
     push_arm_filters(builder, read, filter, keyset);
-    builder.push(" AND ");
+    builder.push(" AND ne.event_kind <> 'RootPermissionChanged' AND ");
     builder.push(predicate);
     builder.push(" OFFSET 0) ne");
 }

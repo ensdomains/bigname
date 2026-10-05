@@ -3,6 +3,18 @@
 
 use super::*;
 use std::sync::{Arc, Mutex};
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::prelude::*;
+
+#[derive(Clone)]
+struct StatementCounter(Arc<std::sync::atomic::AtomicUsize>);
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StatementCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == "sqlx::query" {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
 
 const ADDRESS: &str = "0x000000000000000000000000000000000000a235";
 const OTHER: &str = "0x000000000000000000000000000000000000b235";
@@ -19,12 +31,22 @@ async fn measured(
         batch_size: 7,
         ..Default::default()
     }));
+    let statements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let body = bigname_storage::with_address_history_working_set(
         stats.clone(),
         v2_history_payload_for_database(database, uri),
     )
+    .with_subscriber(tracing_subscriber::registry().with(StatementCounter(statements.clone())))
     .await?;
-    let stats = stats.lock().unwrap().clone();
+    let mut stats = stats.lock().unwrap().clone();
+    stats.counters.insert(
+        "sql_statements",
+        statements.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    assert!(
+        stats.counters["sql_statements"] > 0,
+        "SQL tracing must observe actual route statements"
+    );
     assert!(
         stats.live.values().all(|live| *live == 0),
         "retained allocations after request: {stats:?}"
@@ -292,6 +314,21 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
             .map(|n| hkw_id(&format!("walk-role-record-{n:04}")))
             .collect::<Vec<_>>()
     );
+    if let Ok(directory) = std::env::var("BIGNAME_HISTORY_KEEP_DEEP_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(directory.join("database-deep.txt"), &database.database_name)?;
+        std::fs::write(
+            directory.join("fixture-deep.json"),
+            serde_json::to_vec_pretty(&json!({
+                "database":database.database_name,"names":1,"retained_binding_candidates":retained_candidates,
+                "record_events":1201,"route":base,"working_set":format!("{stats:?}")
+            }))?,
+        )?;
+        database.pool.close().await;
+        database.lookup_pool.close().await;
+        return Ok(());
+    }
     database.cleanup().await
 }
 
