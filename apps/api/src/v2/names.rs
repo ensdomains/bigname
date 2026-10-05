@@ -190,7 +190,7 @@ async fn get_names_page(
         .transpose()?;
     let has_more = next_cursor.is_some();
     // A released row names its last holder, as name detail does (TYR-63).
-    let data = storage_page
+    let mut data = storage_page
         .rows
         .iter()
         .map(|row| {
@@ -212,7 +212,12 @@ async fn get_names_page(
                 ..build_search_name(row)?
             })
         })
-        .collect::<V2Result<_>>()?;
+        .collect::<V2Result<Vec<_>>>()?;
+    super::name_record::fill_wrapper_expiries(
+        snapshot.conn().await?,
+        data.iter_mut().filter_map(|name| name.ens_v1.as_mut()),
+    )
+    .await?;
 
     Ok(Json(Envelope {
         data,

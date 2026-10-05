@@ -1,5 +1,8 @@
 use axum::{
-    Router, middleware,
+    Router,
+    extract::Request,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 
@@ -16,6 +19,13 @@ use super::{
     get_resolver_links, get_resolver_roles, get_search, get_status, get_subnames,
 };
 
+/// The routes that serve `ens_v1` on rows composed by more than one read leave each row's
+/// wrapper expiry pending and read them all once, after the page is known
+/// (`name_record::fill_wrapper_expiries`).
+async fn defer_wrapper_expiries(request: Request, next: Next) -> Response {
+    bigname_storage::wrapper_expiry::defer_wrapper_expiries(next.run(request)).await
+}
+
 pub(super) fn router() -> Router<AppState> {
     // Indexed single-resource reads carry the snapshot they were read at as `meta.as_of_token`;
     // only these routes get body-derived weak ETags and Cache-Control (see `cache_headers`).
@@ -26,12 +36,26 @@ pub(super) fn router() -> Router<AppState> {
             "/v1/addresses/{address}/primary-name",
             get(get_primary_name),
         )
-        .route("/v1/resolvers/{chain_id}/{address}", get(get_resolver))
+        .route(
+            "/v1/resolvers/{chain_id}/{address}",
+            get(get_resolver).layer(middleware::from_fn(defer_wrapper_expiries)),
+        )
         .route_layer(middleware::from_fn(indexed_read_cache_headers));
+    let wrapper_expiry_deferred = Router::new()
+        .route("/v1/lookup", post(get_lookup))
+        .route("/v1/names", get(get_names))
+        .route("/v1/names/{name}/subnames", get(get_subnames))
+        .route("/v1/addresses/{address}/names", get(get_address_names))
+        .route("/v1/search", get(get_search))
+        .route(
+            "/v1/registries/{chain_id}/{address}/labels",
+            get(get_registry_labels),
+        )
+        .route_layer(middleware::from_fn(defer_wrapper_expiries));
 
     Router::new()
         .merge(indexed_single_resource_reads)
-        .route("/v1/lookup", post(get_lookup))
+        .merge(wrapper_expiry_deferred)
         .route(
             "/v1/resolvers/{chain_id}/{address}/links",
             get(get_resolver_links),
@@ -41,19 +65,11 @@ pub(super) fn router() -> Router<AppState> {
             get(get_resolver_roles),
         )
         .route("/v1/status", get(get_status))
-        .route("/v1/names", get(get_names))
-        .route("/v1/names/{name}/subnames", get(get_subnames))
         .route("/v1/names/{name}/history", get(get_history))
         .route("/v1/permissions", get(get_permissions))
-        .route("/v1/addresses/{address}/names", get(get_address_names))
         .route("/v1/addresses/{address}/history", get(get_address_history))
-        .route("/v1/search", get(get_search))
         .route("/v1/events", get(get_events))
         .route("/v1/registries/{chain_id}/{address}", get(get_registry))
-        .route(
-            "/v1/registries/{chain_id}/{address}/labels",
-            get(get_registry_labels),
-        )
         .route("/v1/namespaces/{namespace}", get(get_namespace))
         .route(
             "/v1/diagnostics/names/{name}/coverage",

@@ -4,6 +4,7 @@ mod migration;
 mod public_authority;
 mod row;
 mod snapshot;
+pub mod wrapper_expiry;
 
 use std::collections::BTreeMap;
 

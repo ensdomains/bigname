@@ -2049,6 +2049,95 @@ async fn v2_owner_and_manager_follow_the_wrapper_state_on_every_name_row() -> Re
     Ok(())
 }
 
+/// A response reads the wrapper expiries it serves once per chain, however many composed reads
+/// built its rows: subnames composes the parent and then the page, and search walks its
+/// candidates one batch at a time here.
+#[tokio::test]
+async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    insert_family_registry_child_edge(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "perms.eth",
+        &format!("{:#x}", alloy_primitives::keccak256(b"sub")),
+        "0x00000000000000000000000000000000000000e7",
+        120,
+        "0xperms120",
+    )
+    .await?;
+    seed_wrapped_subname_inputs(&database, "sub.perms.eth", Uuid::from_u128(0x5a_0505)).await?;
+    for (uri, batch, served) in [
+        ("/v1/names/perms.eth/subnames", 200, 1),
+        ("/v1/search?q=perms&match=contains&namespace=ens", 1, 2),
+    ] {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (status, body) =
+            bigname_storage::wrapper_expiry::seams::with_wrapper_expiry_read_counter(
+                reads.clone(),
+                bigname_storage::families::name::seams::with_batch_size(
+                    batch,
+                    read_family_response(&database, uri),
+                ),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let with_expiry = body["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["ens_v1"]["wrapper_expires_at"].is_string())
+            .count();
+        assert_eq!(with_expiry, served, "{uri}: {body}");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{uri}: one read for the one chain"
+        );
+    }
+    database.cleanup().await
+}
+
+/// Search reads its page and wrapper expiries on one snapshot and releases it before the namespace
+/// revalidation, which reads through the pool, so a one-connection pool serves both a bare and
+/// a namespace-scoped search.
+#[tokio::test]
+async fn v2_search_serves_wrapper_expiries_on_a_one_connection_pool() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?
+        .options([("search_path", "bigname_phase".to_owned())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    for uri in [
+        "/v1/search?q=alice",
+        "/v1/search?q=alice&namespace=ens",
+    ] {
+        let state =
+            AppState::new_with_rpc_urls(pool.clone(), bigname_lookup::ChainRpcUrls::default())
+                .with_public_namespaces_for_test(["ens"]);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            app_router(state).oneshot(Request::builder().uri(uri).body(Body::empty())?),
+        )
+        .await
+        .with_context(|| format!("{uri} stalled on a one-connection pool"))??;
+        let status = response.status();
+        let body: Value = read_json(response).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(
+            body["data"][0]["ens_v1"]["wrapper_expires_at"].is_string(),
+            "{uri}: {body}"
+        );
+    }
+    pool.close().await;
+    database.cleanup().await
+}
+
 /// TYR-134: a wrapped subname serves its token holder as `manager` on name detail, lookup detail
 /// and its parent's subnames row, before and after it is emancipated, and the `manager` relation
 /// lists the subname for that holder.
@@ -2080,6 +2169,9 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
         }
         let detail = assert_lookup_detail_matches_name_detail(&database, "sub.perms.eth").await?;
         assert_eq!(detail["ens_v1"]["wrapper_state"], json!(state), "{detail}");
+        // A wrapped subname row serves its NameWrapper expiry as the top-level expiry too.
+        assert_eq!(detail["ens_v1"]["wrapper_expires_at"], json!("1800000000"), "{detail}");
+        assert_eq!(detail["expires_at"], json!("1800000000"), "{detail}");
         assert_eq!(detail.get("manager"), manager.as_ref(), "{state}: {detail}");
         let (status, subnames) =
             read_family_response(&database, "/v1/names/perms.eth/subnames").await?;
@@ -2091,6 +2183,7 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
             .find(|row| row["namehash"] == detail["namehash"])
             .with_context(|| format!("no sub.perms.eth row: {subnames}"))?;
         assert_eq!(row.get("manager"), manager.as_ref(), "{state}: {row}");
+        assert_eq!(row["ens_v1"], detail["ens_v1"], "{state}: {row}");
         let (status, managed) = read_family_response(
             &database,
             &format!("/v1/addresses/{V2_PERMISSIONS_SUBJECT}/names?relation=manager&namespace=ens"),

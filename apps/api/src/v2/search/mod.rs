@@ -226,9 +226,32 @@ pub(crate) async fn get_search(
     if public_namespace_set.is_some() {
         public_namespace_read_test_hooks::run(&state.pool).await?;
     }
-    let storage_page =
-        load_search_storage_page(&state, &filter, storage_cursor.as_ref(), params.page_size)
-            .await?;
+    // The page and its wrapper expiries are read on one snapshot.
+    let mut reads = bigname_storage::begin_read_snapshot(&state.pool)
+        .await
+        .map_err(|_| V2Error::internal_error("failed to load search results"))?;
+    let storage_page = load_search_storage_page(
+        &mut reads,
+        &filter,
+        storage_cursor.as_ref(),
+        params.page_size,
+    )
+    .await?;
+    let mut data = storage_page
+        .rows
+        .iter()
+        .map(build_search_name)
+        .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        &mut *reads,
+        data.iter_mut().filter_map(|name| name.ens_v1.as_mut()),
+    )
+    .await?;
+    // Closed before the revalidation below, which reads through the pool.
+    reads
+        .commit()
+        .await
+        .map_err(|_| V2Error::internal_error("failed to load search results"))?;
     #[cfg(test)]
     if public_namespace_set.is_none() {
         public_namespace_read_test_hooks::run(&state.pool).await?;
@@ -260,11 +283,6 @@ pub(crate) async fn get_search(
         .map(|cursor| search_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
-    let data = storage_page
-        .rows
-        .iter()
-        .map(build_search_name)
-        .collect::<V2Result<_>>()?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -368,13 +386,13 @@ fn search_filter(
 }
 
 async fn load_search_storage_page(
-    state: &AppState,
+    reads: &mut sqlx::PgConnection,
     filter: &NameCurrentListFilter,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
 ) -> V2Result<bigname_storage::NameCurrentListPage> {
     // The rows are composed from the owned key families; the candidates are the name surfaces.
-    bigname_storage::families::name::load_family_search_page(&state.pool, filter, cursor, page_size)
+    bigname_storage::families::name::load_family_search_page(reads, filter, cursor, page_size)
         .await
         .map_err(crate::v2::name_rows_error(
             crate::v2::SnapshotReadResource::Name,

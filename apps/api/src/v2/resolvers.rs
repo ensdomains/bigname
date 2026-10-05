@@ -222,6 +222,13 @@ pub(crate) async fn get_resolver(
         .iter()
         .map(|row| build_bound_name_record(row, numeric_chain_id))
         .collect::<V2Result<Vec<_>>>()?;
+    super::name_record::fill_wrapper_expiries(
+        publication.conn().await?,
+        bound_name_records
+            .iter_mut()
+            .filter_map(|record| record.ens_v1.as_mut()),
+    )
+    .await?;
     super::name_record::tokens::apply_records(
         publication.conn().await?,
         &mut bound_name_records,

@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, Row};
 
 use super::{CoverageShape, batch, rendered::composed_surface_sql};
 pub use expiring::load_family_expiring_page;
@@ -100,7 +100,7 @@ impl Gathered {
 /// The composed /v1/search page: `filter` must carry no address filter (the search route has
 /// none), and the page is sorted by name ascending.
 pub async fn load_family_search_page(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     filter: &NameCurrentListFilter,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
@@ -120,7 +120,7 @@ pub async fn load_family_search_page(
             cursor.namehash.clone(),
         )
     });
-    let mut snapshot = batch::read_snapshot(pool).await?;
+    let mut snapshot = db.into().snapshot().await?;
     let mut gathered = Gathered::default();
     loop {
         let candidates = search_candidates(&mut snapshot, filter, after.as_ref(), batch).await?;
@@ -141,7 +141,7 @@ pub async fn load_family_search_page(
         let page =
             list_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
         if exhausted || page.next_cursor.is_some() {
-            snapshot.commit().await?;
+            snapshot.close().await?;
             return Ok(page);
         }
     }
