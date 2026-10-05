@@ -8,9 +8,7 @@ use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 use super::{AddressNamesPageRequest, WalkInputs};
 use crate::{
     AddressNamesCurrentOrder, AddressNamesCurrentSort, AddressNamesCurrentSortedCursorValue,
-    address_names::{
-        push_expires_at_timestamp_expr, push_json_timestamp_expr, push_registered_at_timestamp_expr,
-    },
+    address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr},
     families::{name::FamilyPublication, records::ComposedName},
 };
 
@@ -85,9 +83,6 @@ pub(super) async fn walk_order(
              LEFT JOIN bigname_phase.project_name_summary summary
                ON summary.chain_id = surface.chain_id
               AND summary.logical_name_id = surface.logical_name_id
-             LEFT JOIN bigname_phase.project_name_history history
-               ON history.chain_id = surface.chain_id
-              AND history.logical_name_id = surface.logical_name_id
              UNION ALL SELECT child.logical_name_id, NULL::NUMERIC FROM UNNEST(",
         );
         builder.push_bind(children);
@@ -158,13 +153,12 @@ pub(super) async fn walk_order(
 }
 
 /// A candidate's stored sort timestamp in the page's units: the name summary's exact expiry
-/// seconds or registration time, or the name history's first observation.
+/// seconds or registration time. The walk never runs for `sort=created_at` (`super`).
 fn push_walk_timestamp(builder: &mut QueryBuilder<'_, Postgres>, sort: AddressNamesCurrentSort) {
     builder.push(match sort {
         AddressNamesCurrentSort::ExpiresAt => "summary.expires_at",
         AddressNamesCurrentSort::RegisteredAt => "EXTRACT(EPOCH FROM summary.registered_at)",
-        AddressNamesCurrentSort::CreatedAt => "EXTRACT(EPOCH FROM history.created_at)",
-        AddressNamesCurrentSort::Name => "NULL::NUMERIC",
+        AddressNamesCurrentSort::CreatedAt | AddressNamesCurrentSort::Name => "NULL::NUMERIC",
     });
 }
 
@@ -177,14 +171,7 @@ fn push_served_timestamp(builder: &mut QueryBuilder<'_, Postgres>, sort: Address
             push_registered_at_timestamp_expr(builder);
             builder.push(")");
         }
-        AddressNamesCurrentSort::CreatedAt => {
-            builder.push("EXTRACT(EPOCH FROM COALESCE(");
-            push_json_timestamp_expr(builder, &["registration", "created_at"]);
-            builder.push(", ");
-            push_json_timestamp_expr(builder, &["history", "created_at"]);
-            builder.push("))");
-        }
-        AddressNamesCurrentSort::Name => {
+        AddressNamesCurrentSort::CreatedAt | AddressNamesCurrentSort::Name => {
             builder.push("NULL::NUMERIC");
         }
     }
@@ -212,9 +199,6 @@ pub(super) async fn timestamps_agree(
          LEFT JOIN bigname_phase.project_name_summary summary
            ON summary.chain_id = surface.chain_id
           AND summary.logical_name_id = surface.logical_name_id
-         LEFT JOIN bigname_phase.project_name_history history
-           ON history.chain_id = surface.chain_id
-          AND history.logical_name_id = surface.logical_name_id
          WHERE (",
     );
     push_served_timestamp(&mut builder, sort);

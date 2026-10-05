@@ -173,8 +173,22 @@ async fn bulk_payload(database: &TestDatabase, uri: &str) -> Result<Value> {
     v2_address_names_payload_for_database(database, uri).await
 }
 
+/// How a capped page above the cap reads: `sort=created_at` has no stored key to walk by.
+fn capped_path(uri: &str) -> &'static str {
+    if uri.contains("sort=created_at") {
+        "full"
+    } else {
+        "walk"
+    }
+}
+
 /// Every page of `uri` at `page_size`, following `next_cursor`.
 async fn walk_all_pages(database: &TestDatabase, uri: &str) -> Result<Vec<Value>> {
+    walk_pages(database, uri, 1000).await
+}
+
+/// The first `limit` pages of `uri`, following `next_cursor`.
+async fn walk_pages(database: &TestDatabase, uri: &str, limit: usize) -> Result<Vec<Value>> {
     let separator = if uri.contains('?') { '&' } else { '?' };
     let mut pages = Vec::new();
     let mut cursor: Option<String> = None;
@@ -186,10 +200,9 @@ async fn walk_all_pages(database: &TestDatabase, uri: &str) -> Result<Vec<Value>
         let payload = bulk_payload(database, &page_uri).await?;
         cursor = payload["page"]["next_cursor"].as_str().map(str::to_owned);
         pages.push(payload);
-        if cursor.is_none() {
+        if cursor.is_none() || pages.len() == limit {
             return Ok(pages);
         }
-        anyhow::ensure!(pages.len() < 1000, "{uri} did not finish paging");
     }
 }
 
@@ -299,7 +312,7 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
                 let (walked, paths) =
                     with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
                 let walked = walked?;
-                assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
+                assert!(paths.iter().all(|path| *path == capped_path(&uri)), "{uri}: {paths:?}");
                 assert_eq!(
                     exact.iter().map(page_body).collect::<Vec<_>>(),
                     walked.iter().map(page_body).collect::<Vec<_>>(),
@@ -310,6 +323,26 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
                     walked.iter().all(|page| page["page"]["total_count"].is_null()),
                     "{uri}"
                 );
+            }
+        }
+    }
+    // Small pages stop the walk early: the first pages and their cursors match the full read,
+    // and the first page composes a fraction of the address.
+    for sort in ["name", "expires_at", "registered_at"] {
+        for order in ["asc", "desc"] {
+            for dedupe in ["name", "registration"] {
+                let uri = format!(
+                    "/v1/addresses/{BULK_ADDRESS}/names?sort={sort}&order={order}&dedupe={dedupe}&page_size=25"
+                );
+                let exact = walk_pages(&database, &uri, 4).await?;
+                let (walked, batches) =
+                    with_batches(with_exact_total_cap(0, walk_pages(&database, &uri, 4))).await;
+                assert_eq!(
+                    exact.iter().map(page_body).collect::<Vec<_>>(),
+                    walked?.iter().map(page_body).collect::<Vec<_>>(),
+                    "{uri}"
+                );
+                assert!(batches.iter().sum::<usize>() < 600, "{uri}: {batches:?}");
             }
         }
     }
@@ -403,7 +436,7 @@ async fn v2_address_names_rich_fixture_is_identical_across_paths() -> Result<()>
             let (walked, paths) =
                 with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
             let walked = walked?;
-            assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
+            assert!(paths.iter().all(|path| *path == capped_path(&uri)), "{uri}: {paths:?}");
             assert_eq!(
                 exact.iter().map(page_body).collect::<Vec<_>>(),
                 walked.iter().map(page_body).collect::<Vec<_>>(),
@@ -431,7 +464,16 @@ async fn v2_address_names_roles_fixture_is_identical_across_paths() -> Result<()
     let database = TestDatabase::new_migrated().await?;
     seed_role_holder(&database, json!(["renew"])).await?;
     for address in [ROLE_HOLDER, V2_ADDRESS] {
-        for query in ["", "relation=role_holder", "relation=owner", "dedupe=registration"] {
+        for query in [
+            "",
+            "relation=role_holder",
+            "relation=owner",
+            "dedupe=registration",
+            "sort=expires_at&order=desc",
+            "sort=registered_at&dedupe=registration",
+            "sort=created_at&order=desc&dedupe=registration",
+            "order=desc&relation=role_holder",
+        ] {
             let uri = format!("/v1/addresses/{address}/names?page_size=1&{query}");
             let exact = walk_all_pages(&database, &uri).await?;
             let chunked = with_compose_chunk(1, walk_all_pages(&database, &uri)).await?;

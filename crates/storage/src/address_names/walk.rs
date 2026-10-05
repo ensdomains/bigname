@@ -10,8 +10,10 @@
 //! The walk orders every candidate by its sort key without composing it: the served name,
 //! `ens_beautify` of the stored surface spelling as composition computes it, or the stored name
 //! summary's expiry or registration time (`project_name_summary`, written with the page's own
-//! timestamp expressions) or the name history's first observation (`project_name_history`),
-//! then the name id. Registry children sort by the name they serve and have no timestamp.
+//! timestamp expressions), then the name id. `sort=created_at` has no stored equivalent:
+//! composition can date a name from an earlier registrar event that only a later binding named,
+//! which the name history (`project_name_history`) never backdates. Above the cap it reads every
+//! candidate, still with a null total. Registry children sort by the name they serve and have no timestamp.
 //! Postgres orders the keys, so the order is the page statement's under the database
 //! collation. The walk composes the candidates in that order, in batches that double, and runs
 //! the unchanged page statement over the rows gathered so far. A group whose first member the
@@ -108,9 +110,11 @@ pub async fn load_family_address_names_capped_page(
         include_roles,
         with_history_evidence: false,
     };
-    let walk = !exact_total && candidates.len() > seams::exact_total_cap();
+    let capped = !exact_total && candidates.len() > seams::exact_total_cap();
     drop(candidates);
-    if walk {
+    if capped && request.sort == AddressNamesCurrentSort::CreatedAt {
+        seams::note_address_name_path("full");
+    } else if capped {
         if let Some((entries, next_cursor)) =
             walk_page(&mut snapshot, request, &composer, &by_chain, &children).await?
         {
@@ -160,7 +164,7 @@ pub async fn load_family_address_names_capped_page(
     Ok(AddressNamesCurrentCappedPage {
         entries: page.entries,
         next_cursor: page.next_cursor,
-        total_count: (!walk).then_some(page.summary.grouped_entry_count),
+        total_count: (!capped).then_some(page.summary.grouped_entry_count),
     })
 }
 

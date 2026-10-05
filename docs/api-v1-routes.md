@@ -3102,16 +3102,22 @@ introduces it rebuilds Project from full history before serving the option; see
   set, `parent`, migration predicate and deduplication as the rows. It is exact
   when the address has at most 1,000 candidate names, and `null` above that
   unless `include=total_count` asks for the exact total. The candidate names are
-  counted before any relation or other filter: the names on which some admission
-  could make the address the `owner` or `manager` (the address index of
-  [address collections](projections.md#address-and-child-collections)), the names
-  of registrations on which it holds an ENSv2 registry role, and its ENSv1
-  registry children with no name row, in the requested namespace. An address
-  with more than 1,000 candidates therefore reports `null` even when its
-  filtered collection is small. Above the cap a page reads about as many names
-  as it returns, in sort order, rather than every candidate;
-  `include=total_count` reads every candidate and on an address with tens of
-  thousands of names can reach the request deadline (`408 request_timeout`).
+  counted before the `q`, `match`, `authority`, `parent` and migration filters:
+  the names on which some admission could make the address the `owner` or
+  `manager` (the address index of
+  [address collections](projections.md#address-and-child-collections)), its ENSv1
+  registry children with no name row, and, when the relation set includes
+  `role_holder` (as it does by default), the names of registrations on which it
+  holds an ENSv2 registry role, all in the requested namespace. An address with
+  more than 1,000 candidates therefore reports `null` even when its filtered
+  collection is small. Above the cap a page composes candidates in sort order,
+  in growing batches, and stops once later candidates can no longer change it,
+  so an ordinary page composes about as many names as it returns. A filter that
+  matches few names can still compose every candidate, and `sort=created_at`
+  always reads every candidate, because a name's first observation can be
+  dated by a registrar event bound to it only later. `include=total_count`
+  also reads every candidate; on an address with tens of thousands of names
+  these reads can reach the request deadline (`408 request_timeout`).
   The flag changes no row, order or cursor and does not bind cursors, so a
   client can request it on the first page only.
   `owner` also lists names with no token for their registry owner, such as
