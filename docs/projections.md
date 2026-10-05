@@ -122,13 +122,15 @@ or an answer of the wrong shape) is never turned into per-selector failures.
 What follows depends on what Project knows about the endpoint at that block:
 
 - The endpoint says it cannot serve the block. Project recognises this from
-  the JSON-RPC error: the "resource not found" code, or a message that names a
-  missing block, header or state. This holds at any point of a block's reads,
+  the JSON-RPC error by a fixed list bigname chose: error code -32001, or a
+  message containing one of a set of fragments about a missing block, header
+  or state. This holds at any point of a block's reads,
   after earlier aggregates were answered too. Every selector not yet read is
   not observed and neither kind sends another call for the block; selectors
   already read keep their results. The test is a heuristic: an endpoint that
   words the refusal differently is not recognised, and its failures are then
-  handled as the next two cases.
+  handled as the next two cases; a false match only stops the reads of that
+  one block.
 - Nothing has been answered at the block yet. Project sends one one-call
   aggregate at the same block hash. If that fails too, the block is treated as
   not served, as above. This probe is sent only then; once any aggregate of

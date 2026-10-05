@@ -34,8 +34,8 @@ impl std::fmt::Display for JsonRpcCallError {
 
 impl std::error::Error for JsonRpcCallError {}
 
-/// Messages with which widely used execution clients and providers refuse a call because they
-/// cannot serve the requested block or its state.
+/// Message fragments this code treats as "the endpoint cannot serve the requested block or its
+/// state". The list is a heuristic chosen here, not a statement about any client or provider.
 const BLOCK_UNAVAILABLE_MESSAGES: &[&str] = &[
     "header not found",
     "header for hash not found",
@@ -49,14 +49,13 @@ const BLOCK_UNAVAILABLE_MESSAGES: &[&str] = &[
     "not currently canonical",
 ];
 
-/// The JSON-RPC "resource not found" code a hash-pinned call answers with for a block the
-/// endpoint does not have.
+/// The error code this code treats the same way, whatever the message.
 const RESOURCE_NOT_FOUND: i64 = -32001;
 
-/// Whether a failed call carries a JSON-RPC error that says the endpoint cannot serve the
-/// requested block, as opposed to failing on what the call holds. This is a heuristic over the
-/// error code and message: an endpoint that words the refusal differently is not recognised, and
-/// a transport failure or timeout never is.
+/// Whether a failed call carries a JSON-RPC error this code treats as "block unavailable", as
+/// opposed to failing on what the call holds. This is a heuristic over the error code and
+/// message. A miss falls back to the caller's ordinary failure handling; a false match only
+/// stops hydration's pass for that one block. A transport failure or timeout never matches.
 pub fn rpc_error_reports_block_unavailable(error: &anyhow::Error) -> bool {
     error
         .chain()
