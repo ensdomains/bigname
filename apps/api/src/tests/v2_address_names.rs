@@ -2169,7 +2169,7 @@ async fn v2_wrapped_subname_manager_is_the_token_holder_in_every_state() -> Resu
         }
         let detail = assert_lookup_detail_matches_name_detail(&database, "sub.perms.eth").await?;
         assert_eq!(detail["ens_v1"]["wrapper_state"], json!(state), "{detail}");
-        // A wrapped subname has no lease: its NameWrapper expiry is the top-level expiry too.
+        // A wrapped subname row serves its NameWrapper expiry as the top-level expiry too.
         assert_eq!(detail["ens_v1"]["wrapper_expires_at"], json!("1800000000"), "{detail}");
         assert_eq!(detail["expires_at"], json!("1800000000"), "{detail}");
         assert_eq!(detail.get("manager"), manager.as_ref(), "{state}: {detail}");

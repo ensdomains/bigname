@@ -51,7 +51,10 @@ pub(super) async fn enrich_all(
 
 /// Write the stored expiry of the name's NameWrapper entry beside the composed wrapper fields:
 /// on a row that serves a wrapper state, and on a row whose emancipated or locked wrapper has
-/// passed its expiry, which composition masks (`wrapper_masked`) instead. Inside
+/// passed its expiry, which composition masks (`wrapper_masked`) instead because NameWrapper then
+/// reports no owner and no fuses for it
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f).
+/// Inside
 /// `defer_wrapper_expiries` each such row gets a pending marker instead, which the response
 /// resolves once for all the rows it serves.
 async fn attach_wrapper_expiries(

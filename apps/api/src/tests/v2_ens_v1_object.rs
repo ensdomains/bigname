@@ -309,7 +309,7 @@ async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> 
 }
 
 /// The NameWrapper maximum expiry serves null with `no_expiry`
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68 @ ens_v1@91c966f), and a zero
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L57 @ ens_v1@91c966f), and a zero
 /// expiry null with `not_set`, on a backed and on a lapsed wrapper.
 #[tokio::test]
 async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()> {

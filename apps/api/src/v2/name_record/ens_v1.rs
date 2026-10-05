@@ -45,8 +45,13 @@ pub(crate) struct EnsV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) wrapper_fuses: Option<WrapperFuses>,
     /// The NameWrapper entry's own stored expiry, on a row with a wrapper state and on one whose
-    /// emancipated or locked wrapper has lapsed past it. It is what NameWrapper's `getData`
-    /// reads, so a renewal through a controller that calls only `BaseRegistrar.renew` leaves it
+    /// emancipated or locked wrapper has lapsed past it, when NameWrapper reports no owner and no
+    /// fuses for it
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f).
+    /// It is the expiry NameWrapper's `getData` reads from the token's own word
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L128-L135 @ ens_v1@91c966f),
+    /// so a renewal through a controller that calls only `BaseRegistrar.renew` leaves it
     /// behind the lease
     /// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f).
