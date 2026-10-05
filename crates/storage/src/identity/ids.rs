@@ -20,7 +20,8 @@ pub fn ens_v2_registry_resource_id(
     Uuid::from_bytes(bytes)
 }
 
-/// The upstream EAC resource of an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource 0).
+/// The upstream EAC resource of an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource 0)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05).
 pub const ENS_V2_ROOT_UPSTREAM_RESOURCE: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000000";
 
