@@ -104,6 +104,8 @@ mod scoped {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+pub use super::list::load_family_expiring_page_unbounded;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::before_snapshot;
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use scoped::{after_publication, batch_size, note_composed_names, note_submitted_rows};
@@ -112,8 +114,6 @@ pub use scoped::{
     with_batch_size, with_composed_names_counter, with_pause_after_publication,
     with_pause_before_snapshot, with_peak_source_counter, with_submitted_rows_counter,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use super::list::load_family_expiring_page_unbounded;
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) async fn before_snapshot() {}

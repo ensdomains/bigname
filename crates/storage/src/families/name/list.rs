@@ -332,7 +332,8 @@ pub async fn load_family_expiring_page_unbounded(
     .context("failed to load the namespace's names")?;
     let composed = batch::load_base(&mut snapshot, &names, CoverageShape::Plain).await?;
     let source = Value::Array(composed.values().map(source_row).collect());
-    let page = expiring_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
+    let page =
+        expiring_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
     snapshot.close().await?;
     Ok(page)
 }

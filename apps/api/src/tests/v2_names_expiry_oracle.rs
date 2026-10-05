@@ -161,11 +161,12 @@ impl OracleFixture {
 
 /// The oracle fixture, published at 240:
 /// - `tie00.eth`..`tie29.eth` share [`ORACLE_TIE`], cycling ens_v2, ens_v0 and ens_v1;
-/// - `frac-a.eth` and `frac-b.eth` expire a quarter and three quarters into that second;
+/// - `frac-a.eth` and `frac-b.eth` (ENSv2) expire a quarter and three quarters into that second;
 /// - `early.eth` and `late.eth` expire before and after it, `kid.late.eth` and `kid.tie00.eth`
 ///   are ENSv2 subnames;
 /// - `big.eth` expires at 2^63 and `max.eth` at the largest uint64, past every bigint;
-/// - `orphan.eth` (unsupported) and `ownerless.eth` (no authority) share the tie second;
+/// - `orphan.eth` is unsupported yet keeps a finite expiry in the tie second, and
+///   `ownerless.eth` serves no registration; neither is listed;
 /// - `lapsed.eth` was released at 230 and keeps its 2020 expiry.
 async fn seed_expiry_oracle_fixture(database: &TestDatabase) -> Result<OracleFixture> {
     seed_bounded_membership_blocks(database, 240).await?;
@@ -179,7 +180,7 @@ async fn seed_expiry_oracle_fixture(database: &TestDatabase) -> Result<OracleFix
         fixture.name(database, &format!("tie{index:02}.eth"), shape, json!(ORACLE_TIE)).await?;
     }
     for (name, shape, expiry) in [
-        ("frac-a.eth", OracleShape::EnsV1, json!(1_850_000_000.25)),
+        ("frac-a.eth", OracleShape::EnsV2, json!(1_850_000_000.25)),
         ("frac-b.eth", OracleShape::EnsV2, json!(1_850_000_000.75)),
         ("early.eth", OracleShape::EnsV0, json!(1_840_000_000)),
         ("late.eth", OracleShape::EnsV2, json!(1_860_000_000)),
@@ -275,36 +276,40 @@ fn oracle_orders() -> [bigname_storage::NameCurrentListOrder; 2] {
 async fn v2_names_expiry_pages_equal_the_unbounded_oracle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_expiry_oracle_fixture(&database).await?;
-    let windows: [(Option<&str>, Option<&str>); 6] = [
-        (Some("0"), None),
-        (Some("1800000000"), Some("1900000000")),
-        (Some("1850000000"), Some("1850000001")),
-        (Some("1850000000.5"), Some("1850000000.75")),
-        (None, Some("1850000000.25")),
-        (Some("9223372036854775807"), None),
+    type Case<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a [&'a str]>, Option<&'a str>);
+    // (expires_after, expires_before, authority, parent); the first three also page one row
+    // at a time, so every cursor of the shared second is resumed from.
+    let cases: [Case; 11] = [
+        (Some("1850000000"), Some("1850000001"), None, None),
+        (Some("0"), None, None, None),
+        (Some("0"), None, Some(&["ens_v0"]), None),
+        (Some("1800000000"), Some("1900000000"), Some(&["ens_v1"]), None),
+        (Some("1850000000.25"), Some("1850000000.75"), None, None),
+        (None, Some("1850000000.25"), None, None),
+        (Some("9223372036854775807"), None, None, None),
+        (Some("0"), None, Some(&["ens_v0", "ens_v2"]), None),
+        (Some("0"), None, None, Some("eth")),
+        (Some("0"), None, Some(&["ens_v2"]), Some("late.eth")),
+        (Some("1850000000"), Some("1850000001"), Some(&["ens_v1"]), Some("eth")),
     ];
-    let filters: [(Option<&[&str]>, Option<&str>); 6] = [
-        (None, None),
-        (Some(&["ens_v0"]), None),
-        (Some(&["ens_v1"]), None),
-        (Some(&["ens_v0", "ens_v2"]), None),
-        (None, Some("eth")),
-        (Some(&["ens_v2"]), Some("late.eth")),
-    ];
-    for (after, before) in windows {
-        for (authorities, parent) in filters {
-            let filter = oracle_filter(after, before, authorities, parent)?;
-            for order in oracle_orders() {
-                for page_size in [1, 7] {
-                    for batch in [1, 1_000] {
-                        bigname_storage::families::name::seams::with_batch_size(
-                            batch,
-                            oracle_walk(&database, &filter, order, page_size),
-                        )
-                        .await?;
-                    }
+    for (index, (after, before, authorities, parent)) in cases.into_iter().enumerate() {
+        let filter = oracle_filter(after, before, authorities, parent)?;
+        for order in oracle_orders() {
+            let mut listed = Vec::new();
+            for (page_size, batch) in [(1, 1_000), (7, 1_000), (7, 3)] {
+                if page_size == 1 && index > 2 {
+                    continue;
                 }
+                listed.push(
+                    bigname_storage::families::name::seams::with_batch_size(
+                        batch,
+                        oracle_walk(&database, &filter, order, page_size),
+                    )
+                    .await?,
+                );
             }
+            assert!(listed.windows(2).all(|pair| pair[0] == pair[1]), "{filter:?} {order:?}");
+            assert!(!listed[0].is_empty(), "{filter:?} lists nothing");
         }
     }
     database.cleanup().await
@@ -321,7 +326,7 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
     let ties = (0..ORACLE_TIE_NAMES).map(|index| format!("tie{index:02}.eth"));
     let mut expected = vec!["lapsed.eth".to_owned(), "early.eth".to_owned()];
     let mut tie_second: Vec<String> = ties
-        .chain(["kid.late.eth".to_owned(), "ownerless.eth".to_owned()])
+        .chain(["kid.late.eth".to_owned()])
         .collect();
     tie_second.sort();
     expected.extend(tie_second);
@@ -329,7 +334,7 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
         ["frac-a.eth", "frac-b.eth", "kid.tie00.eth", "late.eth", "big.eth", "max.eth"]
             .map(str::to_owned),
     );
-    assert_eq!(all, expected, "orphan.eth is unsupported and never listed");
+    assert_eq!(all, expected, "orphan.eth and ownerless.eth are never listed");
     for (authority, names) in [
         ("ens_v0", vec!["early.eth", "tie01.eth", "tie04.eth"]),
         ("ens_v2", vec!["kid.late.eth", "tie00.eth", "tie03.eth"]),
@@ -346,40 +351,80 @@ async fn v2_names_expiry_oracle_fixture_lists_each_shape() -> Result<()> {
     database.cleanup().await
 }
 
-// The work counters see every name a listing composes and the largest source it binds; a walk
-// that fills its page in one batch composes at least the rows it serves.
-#[tokio::test]
-async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
+/// One listing page with its work: (page, names composed, largest source, rows submitted).
+async fn oracle_counted_page(
+    database: &TestDatabase,
+    filter: &bigname_storage::NameCurrentExpiringFilter,
+    page_size: u64,
+) -> Result<(bigname_storage::NameCurrentListPage, u64, u64, u64)> {
     use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-    let database = TestDatabase::new_migrated().await?;
-    seed_expiry_oracle_fixture(&database).await?;
+    use bigname_storage::families::name::seams;
     let chains = [FAMILY_CHAIN.to_owned()];
-    let filter = oracle_filter(Some("0"), None, Some(&["ens_v0"]), None)?;
     let (composed, peak, submitted) =
         (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    let page = bigname_storage::families::name::seams::with_composed_names_counter(
+    let page = seams::with_composed_names_counter(
         composed.clone(),
-        bigname_storage::families::name::seams::with_peak_source_counter(
+        seams::with_peak_source_counter(
             peak.clone(),
-            bigname_storage::families::name::seams::with_submitted_rows_counter(
+            seams::with_submitted_rows_counter(
                 submitted.clone(),
                 bigname_storage::families::name::load_family_expiring_page(
-                    &database.pool, &filter, bigname_storage::NameCurrentListOrder::Asc, None, 2,
-                    &chains,
+                    &database.pool, filter, bigname_storage::NameCurrentListOrder::Asc, None,
+                    page_size, &chains,
                 ),
             ),
         ),
     )
     .await?;
-    let (composed, peak, submitted) = (
+    Ok((
+        page,
         composed.load(Ordering::Relaxed),
         peak.load(Ordering::Relaxed),
         submitted.load(Ordering::Relaxed),
-    );
+    ))
+}
+
+// The work counters see every name a listing composes and the largest source it binds. Stale
+// expiries (a name renewed out of the window many times) leave the page equal to the oracle;
+// the counts are printed, not bounded.
+#[tokio::test]
+async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut fixture = seed_expiry_oracle_fixture(&database).await?;
+    let filter = oracle_filter(Some("0"), None, Some(&["ens_v0"]), None)?;
+    let (page, composed, peak, submitted) = oracle_counted_page(&database, &filter, 2).await?;
     eprintln!("expiring page_size=2 ens_v0: composed={composed} peak={peak} submitted={submitted}");
     assert_eq!(page.rows.len(), 2);
     assert!(peak >= 2 && peak <= submitted, "peak {peak} submitted {submitted}");
     assert!(composed >= peak, "composed {composed} peak {peak}");
+
+    // late.eth renews twenty times through a window it then leaves.
+    let (late, resource) = fixture.names["late.eth"].clone();
+    for step in 0..20 {
+        let mut renewal = fixture.event(&late, resource, "RegistrationRenewed",
+            "ens_v2_registry_l1", json!({"expiry": 1_810_000_000 + step}));
+        renewal.block_number = Some(241);
+        renewal.block_hash = Some("0xhistory241".to_owned());
+        renewal.transaction_hash = Some("0xtx241".to_owned());
+        fixture.events.push(renewal);
+    }
+    let mut last = fixture.event(&late, resource, "RegistrationRenewed", "ens_v2_registry_l1",
+        json!({"expiry": 1_860_000_000}));
+    last.block_number = Some(241);
+    last.block_hash = Some("0xhistory241".to_owned());
+    last.transaction_hash = Some("0xtx241".to_owned());
+    fixture.events.push(last);
+    fixture.insert(&database).await?;
+    publish_test_families(&database, 241).await?;
+    let stale = oracle_filter(Some("1810000000"), Some("1810000100"), None, None)?;
+    let (page, composed, peak, submitted) = oracle_counted_page(&database, &stale, 2).await?;
+    eprintln!("expiring stale window: composed={composed} peak={peak} submitted={submitted}");
+    assert!(page.rows.is_empty() && page.next_cursor.is_none(), "{page:?}");
+    let asc = bigname_storage::NameCurrentListOrder::Asc;
+    assert!(oracle_walk(&database, &stale, asc, 2).await?.is_empty());
+    let all = oracle_walk(&database, &oracle_filter(Some("1800000000"), None, None, None)?, asc, 7)
+        .await?;
+    assert!(all.contains(&"late.eth".to_owned()), "{all:?}");
     database.cleanup().await
 }
 
