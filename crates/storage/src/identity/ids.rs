@@ -20,8 +20,8 @@ pub fn ens_v2_registry_resource_id(
     Uuid::from_bytes(bytes)
 }
 
-/// The upstream EAC resource of an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource 0)
-/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05).
+/// The upstream EAC resource of an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource 0).
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2_sepolia_20261001@07e55a05)
 pub const ENS_V2_ROOT_UPSTREAM_RESOURCE: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -74,5 +74,18 @@ mod tests {
                 Uuid::parse_str(expected).expect("golden UUID should parse")
             );
         }
+    }
+
+    #[test]
+    fn ens_v2_registry_root_resource_id_is_the_instance_resource_zero() {
+        assert_eq!(
+            ens_v2_registry_root_resource_id(
+                "ethereum-mainnet",
+                Uuid::parse_str("00000000-0000-0000-0000-00000000e201")
+                    .expect("golden UUID should parse"),
+            ),
+            Uuid::parse_str("882f36f0-b76f-5dd2-9eae-e4d2fe4bb714")
+                .expect("golden UUID should parse")
+        );
     }
 }
