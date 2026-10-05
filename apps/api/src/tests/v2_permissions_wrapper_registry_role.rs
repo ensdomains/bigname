@@ -70,6 +70,11 @@ async fn documented_non_superuser_api_role_serves_wrapper_roots_and_preflight_re
     assert_eq!(status, StatusCode::OK, "{body:#}");
     assert_derived(&body, ALICE, "holder", PARENT, ALICE);
     sqlx::query(&format!(
+        "GRANT SELECT ON bigname_phase.discovery_edges TO {role}"
+    ))
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(&format!(
         "REVOKE SELECT ON bigname_phase.project_ens_v2_registry_parent FROM {role}"
     ))
     .execute(&database.pool)
