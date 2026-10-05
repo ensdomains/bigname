@@ -30,6 +30,8 @@ DECLARE
 BEGIN
     FOR checked_index, expected_definition IN
         SELECT * FROM (VALUES
+            ('normalized_events_registry_token_idx',
+             $def$CREATE INDEX normalized_events_registry_token_idx ON bigname_phase.normalized_events USING btree (chain_id, resource_id, block_number DESC, transaction_index DESC, log_index DESC) WHERE ((source_family = ANY (ARRAY['ens_v2_registry_l1'::text, 'ens_v2_root_l1'::text])) AND (event_kind = ANY (ARRAY['TokenResourceLinked'::text, 'TokenRegenerated'::text])) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (resource_id IS NOT NULL) AND (block_number IS NOT NULL) AND (transaction_index IS NOT NULL) AND (log_index IS NOT NULL))$def$),
             ('normalized_events_v1_subregistry_after_node_scope_idx',
              $def$CREATE INDEX normalized_events_v1_subregistry_after_node_scope_idx ON bigname_phase.normalized_events USING btree (chain_id, (((namespace || ':'::text) || lower((after_state ->> 'node'::text)))), block_number) WHERE ((event_kind = 'SubregistryChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'basenames_base_registry'::text])) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (btrim((after_state ->> 'node'::text)) <> ''::text) AND ((after_state ->> 'child_node'::text) IS NOT NULL) AND (btrim((after_state ->> 'child_node'::text)) <> ''::text))$def$),
             ('normalized_events_v1_subregistry_after_child_scope_idx',
@@ -164,6 +166,16 @@ $check$;
 
 -- Refuse before building anything; see the comment above.
 DO $$ BEGIN PERFORM pg_temp.check_walk_index_set(false); END $$;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_token_idx
+ON bigname_phase.normalized_events
+    (chain_id, resource_id, block_number DESC, transaction_index DESC, log_index DESC)
+WHERE source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+  AND event_kind IN ('TokenResourceLinked', 'TokenRegenerated')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND resource_id IS NOT NULL AND block_number IS NOT NULL
+  AND transaction_index IS NOT NULL AND log_index IS NOT NULL;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_v1_subregistry_after_node_scope_idx
     ON bigname_phase.normalized_events (

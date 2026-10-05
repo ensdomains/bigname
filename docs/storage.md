@@ -230,6 +230,27 @@ latency still require production-scale qualification before activation.
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `resolution_divergences` | guarded non-API lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
+The API owns `normalized_events_registry_token_idx`, a read-only partial index on
+Interpret's `normalized_events`. It serves `storage:normalized_events.registry_tokens`
+(`crates/storage/src/registry_token_ids.rs`): at most 200 deduplicated resources per query,
+with one latest-event index probe for each chain/resource bounded by the selected publication.
+Only activated, readable `TokenResourceLinked` and `TokenRegenerated` events from the ENSv2
+root/registry source families can supply a token. The query also checks matching readable
+chain/hash/number lineage. It selects the latest event by physical block/transaction/log position
+before parsing its token word as U256; invalid latest evidence fails instead of selecting an
+older value. Resource UUIDs remain stable permission handles, independent of token versions.
+
+Name detail loads its selected composed row and token evidence in one short read-only
+REPEATABLE READ snapshot, then closes it before verified RPC work. Resolver bound-name pages
+reuse their collection snapshot; detail lookup enriches all forward and reverse records once
+before its existing served-head generation revalidation. Feed and DTOs without `token_id` make
+no token read. There is no historical token endpoint: exact name/resolver selectors below the
+current publication still return `stale`. The reader changes no normalized or projected rows.
+The [concurrent prebuild runbook](../ops/registry-token-index/README.md) gives the large-database
+installation, adoption and recovery procedure for schema-migration
+`20261005090000_normalized_events_registry_token_index.sql`. This index is rebuilt with the
+[walk index set](#walk-index-set) before serving resumes.
+
 `project:families.hydrate.text.select` reads changed selector keys and the ordered share from
 `project_text_hydration_work_order_idx`. The reverse selector uses
 `project_reverse_hydration_work_active_idx` and `_stale_idx` before joining tuple state.
@@ -2128,8 +2149,9 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 34 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
-these: `normalized_events_v1_subregistry_after_node_scope_idx`,
+The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_registry_token_idx`,
+`normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
 `normalized_events_v2_subregistry_pointer_scope_idx`,

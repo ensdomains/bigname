@@ -6363,7 +6363,7 @@
           },
           "token_id": {
             "type": "string",
-            "description": "Decimal-string token identifier."
+            "description": "Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
           },
           "owner": {
             "type": "string",
@@ -6758,7 +6758,7 @@
           },
           "token_id": {
             "type": "string",
-            "description": "Decimal-string token identifier."
+            "description": "Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#ensv2-token-identity)."
           },
           "owner": {
             "type": "string",
