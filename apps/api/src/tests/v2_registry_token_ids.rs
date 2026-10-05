@@ -71,6 +71,15 @@ fn transfer(version: u32, from: Address, to: Address, block: i64, index: i64) ->
     )
 }
 fn registration(version: u32, resource_version: u32, block: i64) -> Vec<RawLogInput> {
+    registration_with_expiry(version, resource_version, block, 1_900_000_000)
+}
+
+fn registration_with_expiry(
+    version: u32,
+    resource_version: u32,
+    block: i64,
+    expiry: u64,
+) -> Vec<RawLogInput> {
     let holder: Address = HOLDER.parse().unwrap();
     vec![
         raw(
@@ -79,7 +88,7 @@ fn registration(version: u32, resource_version: u32, block: i64) -> Vec<RawLogIn
                 labelHash: keccak256(LABEL),
                 label: LABEL.into(),
                 owner: holder,
-                expiry: 1_900_000_000,
+                expiry,
                 sender: holder,
             }
             .encode_log_data(),
@@ -165,7 +174,9 @@ fn fixture(historical: bool) -> Result<(ManifestInput, BatchOutput, Vec<RawLogIn
         ),
         transfer(1, holder, Address::ZERO, 122, 1),
     ]);
-    logs.extend(registration(2, 1, 123));
+    // Renew must extend an existing expiry, so begin short and extend it at block 127.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+    logs.extend(registration_with_expiry(2, 1, 123, 1_700_000_128));
     logs.extend([
         raw(
             EACRolesChanged {
@@ -194,21 +205,11 @@ fn fixture(historical: bool) -> Result<(ManifestInput, BatchOutput, Vec<RawLogIn
         raw(
             ExpiryUpdated {
                 tokenId: token(3),
-                newExpiry: 1_900_000_001,
-                sender: holder,
-            }
-            .encode_log_data(),
-            127,
-            0,
-        ),
-        raw(
-            ExpiryUpdated {
-                tokenId: token(3),
                 newExpiry: 1_700_000_130,
                 sender: holder,
             }
             .encode_log_data(),
-            128,
+            127,
             0,
         ),
         transfer(3, holder, Address::ZERO, 131, 0),
