@@ -1329,12 +1329,18 @@ CREATE TABLE IF NOT EXISTS project_node_record_value (
     sibling_address_bytes_hex text,
     raw_name jsonb,
     raw_name_bytes jsonb,
+    hydration_limit integer,
+    hydration_failures integer,
     PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (arm IN ('named', 'native', 'guarded'))
 );
 COMMENT ON TABLE project_node_record_value IS
     'Project-owned node record values of family F6: per partition and record key, the latest record in the canonical event order, with its coin-60 compatibility sibling.';
+COMMENT ON COLUMN project_node_record_value.hydration_limit IS
+    'This value is the largest Multicall3 aggregate hydration may next send the text selector in, left by a read whose aggregate failed as a whole; null when the last read answered the selector or none failed. Scheduling state only.';
+COMMENT ON COLUMN project_node_record_value.hydration_failures IS
+    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
 COMMENT ON COLUMN project_node_record_value.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_node_record_value.resolver_address IS
@@ -1890,11 +1896,17 @@ CREATE TABLE IF NOT EXISTS project_reverse_tuple (
     attempt_hash text,
     attempt_ordinal bigint,
     baseline jsonb,
+    attempt_limit integer,
+    attempt_failures integer,
     PRIMARY KEY (address, coin_type, namespace),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_reverse_tuple IS
     'Project-owned reverse tuples of family F12: per address, coin type and namespace, the latest ReverseChanged and the latest direct claim, with the hydration result once hydration moves into the block.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_limit IS
+    'This value is the largest Multicall3 aggregate hydration may next send the tuple in, left by a read whose aggregate failed as a whole; null when the last read answered the tuple or none failed. Scheduling state only.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_failures IS
+    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
 COMMENT ON COLUMN project_reverse_tuple.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_reverse_tuple.coin_type IS
@@ -2309,10 +2321,13 @@ CREATE TABLE IF NOT EXISTS project_text_hydration_work (
     arm_identity text NOT NULL,
     record_key text NOT NULL,
     hydrated_at_block bigint,
+    hydration_failures integer,
     PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key)
 );
 COMMENT ON TABLE project_text_hydration_work IS
     'Project-owned derived index of text selectors needing hydration or overlay clearing. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+COMMENT ON COLUMN project_text_hydration_work.hydration_failures IS
+    'This value copies project_node_record_value.hydration_failures. Nothing orders or filters by it yet.';
 CREATE INDEX IF NOT EXISTS project_text_hydration_work_order_idx
     ON project_text_hydration_work (chain_id, hydrated_at_block NULLS FIRST,
         resolver_address, arm, arm_identity, record_key);
@@ -2326,10 +2341,13 @@ CREATE TABLE IF NOT EXISTS project_reverse_hydration_work (
     attempt_ordinal bigint,
     attempt_block bigint,
     successful_at_block bigint,
+    attempt_failures integer,
     PRIMARY KEY (address, coin_type, namespace)
 );
 COMMENT ON TABLE project_reverse_hydration_work IS
     'Project-owned derived index of continuously refreshed reverse tuples and obsolete overlays to clear. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
+COMMENT ON COLUMN project_reverse_hydration_work.attempt_failures IS
+    'This value copies project_reverse_tuple.attempt_failures. Nothing orders or filters by it yet.';
 CREATE INDEX IF NOT EXISTS project_reverse_hydration_work_active_idx
     ON project_reverse_hydration_work (chain_id, attempt_ordinal NULLS FIRST,
         successful_at_block NULLS FIRST, address) WHERE eligible;

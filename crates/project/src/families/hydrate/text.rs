@@ -5,17 +5,26 @@
 //! then the backlog a rebuild leaves (every overlay null) in a stable rolling order, never-read
 //! selectors before the oldest attempts.
 //!
+//! `hydrated_value` is the observation. `hydrated_at_block` is its block and the selector's
+//! place in the backlog; `hydration_limit` and `hydration_failures` only schedule it: the size
+//! of aggregate it may next be sent in, and how many reads in a row observed no value for it.
 //! What a read writes (`batch::Read`):
-//! - an answered call that succeeded, with a value or empty, writes the overlay and its block;
-//! - an answered call that itself failed inside the aggregate writes a null overlay and stamps
-//!   `hydrated_at_block` with the attempt. This is a fail-closed policy, not evidence that the
-//!   record is empty: nothing is served for the selector and it waits behind the rest of the
-//!   backlog;
-//! - a deferred selector (its aggregate failed while the endpoint served the block) is written
-//!   the same way. Every selected selector is work, so its overlay, if it has one, was already
-//!   not served for the selector as it now stands; the stamp is what moves it back;
-//! - an unobserved selector (the RPC batch failed and the endpoint did not serve the block) is
-//!   not written at all.
+//! - an answered call that succeeded, with a value or empty, writes the overlay and its block
+//!   and clears the limit and the failure count;
+//! - an answered call that itself failed inside the aggregate writes a null overlay, stamps
+//!   `hydrated_at_block` with the attempt, clears the limit and counts one more failure. This is
+//!   a fail-closed policy, not evidence that the record is empty: nothing is served for the
+//!   selector and it waits behind the rest of the backlog;
+//! - a deferred selector (its aggregate failed while the endpoint answered other calls at the
+//!   block) is stamped the same way and takes the limit the read left it with, so a later head
+//!   sends it in a smaller aggregate. Every selected selector is work, so its overlay, if it
+//!   has one, was already not served for the selector as it now stands, and is cleared with the
+//!   stamp;
+//! - an unobserved selector (the endpoint did not serve the block, or the pass had no time or
+//!   call left for it) is not written at all.
+//!
+//! Nothing reads `hydration_failures` yet: a selector that fails every time is still read and
+//! stamped each time its turn comes, alone once its limit is one.
 //!
 //! `text.sql` decides which selectors need work and cuts the block's share, so a block never
 //! transfers the selectors that are already current. Every row it returns is work: a read stamps
@@ -29,6 +38,7 @@ use std::{collections::BTreeMap, sync::LazyLock};
 use bigname_lookup::{
     ChainRpcUrls, EnsTextRecordMulticallBlock, EnsTextRecordMulticallRequest,
     EnsTextRecordMulticallResult, MULTICALL3_ADDRESS, execute_ens_text_record_multicall,
+    rpc_error_reports_block_unavailable,
 };
 use bigname_storage::families::position::emission_ordinal_sql;
 use serde_json::{Value, json};
@@ -41,8 +51,9 @@ use super::super::{
 };
 use super::ETHEREUM;
 use super::admission::TEXT_RESOLVERS;
-use super::batch::{Aggregate, BATCH_LIMIT, Kind, Read, Session};
+use super::batch::{Aggregate, BATCH_LIMIT, Failure, Kind, Read, Session};
 use super::outcome::Writes;
+use super::schedule;
 use crate::{ProjectError, Result};
 
 /// The most selectors one block reads, one Multicall3 aggregate.
@@ -52,6 +63,7 @@ pub(super) struct Candidate {
     key: Row,
     selector: Value,
     request: Option<EnsTextRecordMulticallRequest>,
+    limit: Option<usize>,
 }
 
 pub(super) struct Prepared {
@@ -206,7 +218,17 @@ fn candidate(value: Value) -> Result<Candidate> {
         ),
         selector,
         request,
+        limit: value
+            .as_object()
+            .and_then(|row| schedule::limit(row, "hydration_limit")),
     })
+}
+
+/// Whether any selected selector has a read to make.
+pub(super) fn waiting(candidates: &[Candidate]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.request.is_some())
 }
 
 struct Call<'a> {
@@ -221,7 +243,7 @@ impl Aggregate for Call<'_> {
     async fn send(
         &self,
         chunk: &[Self::Request],
-    ) -> std::result::Result<Vec<Self::Answer>, String> {
+    ) -> std::result::Result<Vec<Self::Answer>, Failure> {
         execute_ens_text_record_multicall(
             self.rpc_urls,
             ETHEREUM,
@@ -230,7 +252,10 @@ impl Aggregate for Call<'_> {
             chunk,
         )
         .await
-        .map_err(|error| format!("{error:#}"))
+        .map_err(|error| Failure {
+            block_unavailable: rpc_error_reports_block_unavailable(&error),
+            message: format!("{error:#}"),
+        })
     }
 }
 
@@ -238,10 +263,10 @@ pub(super) async fn execute(
     candidates: Vec<Candidate>,
     session: &mut Session<'_>,
 ) -> Result<Prepared> {
-    let requests: Vec<_> = candidates
+    let (requests, limits): (Vec<_>, Vec<_>) = candidates
         .iter()
-        .filter_map(|candidate| candidate.request.clone())
-        .collect();
+        .filter_map(|candidate| Some((candidate.request.clone()?, candidate.limit)))
+        .unzip();
     let rpc_urls = session.rpc_urls;
     if !requests.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
         return Err(ProjectError::configuration(
@@ -255,7 +280,7 @@ pub(super) async fn execute(
             block_hash: session.head.hash.clone(),
         },
     };
-    let reads = session.read(Kind::Text, &requests, &call).await;
+    let reads = session.read(Kind::Text, &requests, &limits, &call).await;
     session.stats.text.failed_calls += reads
         .iter()
         .filter(|read| {
@@ -327,7 +352,7 @@ impl Prepared {
                     overlay["status"] = json!("not_found")
                 }
                 Some(Read::Answered(EnsTextRecordMulticallResult::Failed { .. }))
-                | Some(Read::Deferred)
+                | Some(Read::Deferred { .. })
                 | None => overlay = Value::Null,
             }
             if !overlay.is_null() {
@@ -341,14 +366,23 @@ impl Prepared {
                 Value::Null
             };
             let before = row.clone();
+            let failed = overlay.is_null() && read.is_some();
             set(&mut row, "hydrated_value", overlay);
             set(&mut row, "hydrated_at_block", height);
-            if row != before {
+            set(
+                &mut row,
+                "hydration_limit",
                 match read {
-                    Some(Read::Deferred) => writes.schedules += 1,
-                    _ => writes.values += 1,
-                }
+                    Some(Read::Deferred { limit }) => json!(limit),
+                    _ => Value::Null,
+                },
+            );
+            if failed {
+                schedule::count_failure(&mut row, "hydration_failures");
+            } else {
+                set(&mut row, "hydration_failures", Value::Null);
             }
+            writes.count(&before, &row, &["hydrated_value"]);
             rows.put(&tables::NODE_RECORD_VALUE, row)?;
         }
         Ok(writes)

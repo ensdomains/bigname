@@ -68,9 +68,10 @@ the head. The predecessor check is unchanged, so the block must still be the
 marker's child by number and parent hash. Consequently:
 
 - Blocks applied while Project catches up publish without any hydration RPC.
-  Their changed selectors wait in the work indexes and are read first at the
-  head. With marker 100 and head 110, blocks 101 to 109 make no call and block
-  110 hydrates.
+  Their changed selectors wait in the work indexes and join the rolling
+  selection at the head, with no priority over older work: only what the head
+  block itself changed is selected ahead of it. With marker 100 and head 110,
+  blocks 101 to 109 make no call and block 110 hydrates.
 - A block a run stops on because its block budget is spent is not the head.
   The continuation that reaches the head hydrates there. Budgets, repair,
   replay and rebuild scheduling are unchanged; no run is cut short to make a
@@ -113,22 +114,54 @@ selector ends in exactly one of four outcomes:
 | --- | --- | --- |
 | Observed | The endpoint answered the aggregate and the selector's call returned a value or an empty answer. | The value, or the empty answer, with the block it was observed at. A successful empty answer replaces an earlier value. |
 | Failed call | The endpoint answered the aggregate and this selector's own call failed inside it, or returned data that cannot be decoded. | The overlay is cleared and the attempt recorded, so the reader serves the event-derived baseline. This is a fail-closed policy; it is not evidence that the value was cleared on chain. |
-| Deferred | The selector's aggregate failed as a whole while the endpoint answered another aggregate at the same block. | No value is observed. The selector moves behind the rest of its queue; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
-| Not observed | The RPC batch failed and the endpoint did not answer any aggregate at the block, or the block's reads ran out of time. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
+| Deferred | The selector's aggregate failed as a whole while the endpoint answered other calls at the same block, and the block had no call or time left to split it further. | No value is observed. The selector moves behind the rest of its queue and records the largest aggregate it may next be sent in; a reverse tuple keeps its name and the block it was observed at (see [Primary names](#primary-names)). |
+| Not observed | The endpoint did not serve the block, the block's reads ran out of time, or the block had no call left for the selector's first aggregate. | Nothing. The row, its value and the block the value was observed at are left exactly as they were, and the selector keeps its place. |
 
 An aggregate that fails as a whole (a transport or JSON-RPC error, a timeout,
 or an answer of the wrong shape) is never turned into per-selector failures.
-On the first such failure of a block, Project sends one one-call aggregate at
-the same block hash. If that fails too, the endpoint does not serve the block:
-every selector not yet read is not observed, and neither kind sends another
-call for the block. If it succeeds, the failure comes from what the aggregate
-holds (its size, its execution cost, or one selector), so Project splits the
-aggregate in halves and sends each again, spending at most 16 extra calls per
-kind and block. Selectors in a half that is answered are read normally; those
-left when the calls are spent, or alone in an aggregate that still fails, are
-deferred. Each call is limited to 10 seconds and one block's reads, both kinds
-together, to 30 seconds; the block is then published without the reads that
-did not fit. A block whose reads all fail still publishes. Every failed
+What follows depends on what Project knows about the endpoint at that block:
+
+- The endpoint says it cannot serve the block. Project recognises this from
+  the JSON-RPC error: the "resource not found" code, or a message that names a
+  missing block, header or state. This holds at any point of a block's reads,
+  after earlier aggregates were answered too. Every selector not yet read is
+  not observed and neither kind sends another call for the block; selectors
+  already read keep their results. The test is a heuristic: an endpoint that
+  words the refusal differently is not recognised, and its failures are then
+  handled as the next two cases.
+- Nothing has been answered at the block yet. Project sends one one-call
+  aggregate at the same block hash. If that fails too, the block is treated as
+  not served, as above. This probe is sent only then; once any aggregate of
+  the block has been answered it is not sent again.
+- The endpoint has answered an aggregate or the probe at the block. Project
+  then treats the failure as coming from what the aggregate holds (its size,
+  its execution cost, or one selector) and splits the aggregate in halves.
+  This is evidence, not proof: an endpoint can answer a small call and still
+  refuse a real one, and a brief endpoint fault can fail the probe.
+
+Splitting is bounded twice. One kind sends at most one aggregate per 250
+selectors plus 16 per block. Each call is limited to 10 seconds and one
+block's reads, both kinds together, to 30 seconds, and a failed aggregate is
+split only while there is time for both halves and for every half already
+waiting, each taken at the longest any call of this block has needed. When an
+aggregate cannot be split, its selectors are deferred with half its size as
+their limit; halves that were never sent are deferred with their own size. A
+selector alone in a failed aggregate is deferred with a limit of one. The next
+head that selects them sends them in aggregates no larger than that limit, so
+the splitting continues where it stopped instead of starting from 250 again.
+A selector that fails every time ends up alone and costs one call whenever
+its turn comes; the readable selectors that shared its aggregate are read.
+Nothing limits how often such a selector is tried again.
+
+Reverse names are read before text values. While text selectors are waiting,
+the reverse reads may use at most half of the block's 30 seconds, so slow
+reverse reads cannot take the whole block from text; text then has all the
+time that is left. A call cut short by that time says nothing about its
+aggregate: its selectors and all that remain of its kind are not observed,
+and the pass counts as timed out, never as deferred or unserved. These limits bound the time spent
+waiting for RPC answers. Selecting the block's selectors before the reads and
+publishing after them take their own time, so the limits are not a bound on
+the publication. A block whose reads all fail still publishes. Every failed
 aggregate is logged with its chain, block, kind, selector count and error.
 
 Text hydration is restricted to supported inventory entries on the four
@@ -142,10 +175,14 @@ the pinned ENS app metadata
 The transaction checks the record event position, partition version, namehash
 and classification again. `project_node_record_value.hydrated_value` retains
 the outcome, value, block hash and selectors; `hydrated_at_block` retains the
-height. The event columns remain unchanged. Successful empty reads are
-`not_found`; a failed call or lost admission exposes the baseline. Each
-hydrating block reads at most 250 text selectors: those the block changed
-first, then never-read selectors, then the oldest attempts. Every selected
+height; `hydration_limit` and `hydration_failures` only schedule the selector
+(the largest aggregate it may next be sent in, and the reads in a row that
+observed no value). The event columns remain unchanged. Successful empty reads
+are `not_found`; a failed call or lost admission exposes the baseline. Each
+hydrating block selects at most 250 text selectors: those the block changed
+first, then never-read selectors, then the oldest attempts. Selection is not a
+promise that all of them are read in that block: the call and time limits
+above apply. Every selected
 text selector is one whose overlay is missing or no longer matches it, so
 nothing served is lost when a failed call or a deferred selector clears the
 overlay and records the attempt. A canonical result
@@ -1658,20 +1695,26 @@ Replay, rebuild and catch-up blocks perform no hydration RPC. Undo restores the 
 with its row, and new or changed selectors use event-derived claims until a later
 head block refreshes them. Rebuild ranges retain their existing behavior.
 
-Each hydrating block reads every eligible tuple the block changed, in as many
-aggregates of 250 as that takes, then at most 250 additional eligible tuples.
+Each hydrating block selects every eligible tuple the block changed and at
+most 250 additional eligible tuples. Both are sent together in address order,
+so a changed tuple is not necessarily read before the rolling ones, and the
+call and time limits of [follow-only hydration](#follow-only-hydration) decide
+how many of them the block reads.
 Rolling selection orders never-attempted tuples
 first, then the least recently attempted group; within a group it uses the
 oldest successful hydration height and stable tuple identity. Attempts use the
 publication generation as a durable ordering value, `attempt_ordinal`. It only
-orders the rotation. `hydrated_name`, `attempt_block`, `attempt_hash` and
+orders the rotation. `attempt_limit` is the largest aggregate the tuple may
+next be sent in after its aggregate failed, and `attempt_failures` counts the
+reads in a row that observed no name; both are scheduling state, journalled
+and undone with the row. `hydrated_name`, `attempt_block`, `attempt_hash` and
 `baseline` are the observation: the name, the block it was observed at and the
 selector it was observed for, always written together.
 
 A tuple whose own call failed inside an answered aggregate advances in the
 rotation with a cleared name, so the reader serves the event-derived baseline.
 A deferred tuple advances in the rotation too, but keeps its observation: only
-`attempt_ordinal` changes, so a tuple that cannot be read does not hold the
+the scheduling columns change, so a tuple that cannot be read does not hold the
 oldest group's place and block the groups behind it, and its name is never
 shown as observed at a block where it was not. A tuple that was not observed
 is not written and keeps its place. These counters never make a failed result

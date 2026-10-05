@@ -13,7 +13,7 @@ use bigname_project::{
     Marker,
     families::{FamilyMode, RebuildRanges},
 };
-use reverse::{CHAIN, apply, journalled, options, run, seed, tuple};
+use reverse::{CHAIN, apply, fork_block, journalled, options, run, seed, tuple};
 use support::{Fixture, hash, marker};
 
 const TUPLES: &str = "project_reverse_tuple";
@@ -26,23 +26,6 @@ async fn fixture(label: &str, blocks: i64) -> Result<(Fixture, rpc::Rpc)> {
         rpc.answer(block, Some(&format!("block{block}.eth")));
     }
     Ok((fixture, rpc))
-}
-
-/// A canonical block `number` off the fixture's own hashes, the child of `parent`.
-async fn fork_block(fixture: &Fixture, number: i64, parent: &str) -> Result<Marker> {
-    let hash = format!("0x{}{number:02x}", "f".repeat(62));
-    sqlx::query(
-        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
-             block_timestamp, canonicality_state)
-         VALUES ($1, $2, $3, $4, to_timestamp(1800000000 + $4 * 12), 'canonical')",
-    )
-    .bind(CHAIN)
-    .bind(&hash)
-    .bind(parent)
-    .bind(number)
-    .execute(&fixture.pool)
-    .await?;
-    Ok(Marker { number, hash })
 }
 
 #[tokio::test]
@@ -147,6 +130,71 @@ async fn a_replaced_head_reached_by_undo_and_replay_does_not_hydrate() -> Result
     let (_, error) = apply(&fixture, &next, FamilyMode::Normal, &options).await;
     assert!(error.is_none(), "{error:?}");
     assert_eq!(rpc.calls().last(), Some(&(next.hash.clone(), 1)));
+    assert_eq!(tuple(&fixture, 1).await?["hydrated_name"], "after.eth");
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_head_replaced_after_the_run_captured_it_is_published_without_hydration() -> Result<()> {
+    let (fixture, rpc) = fixture("family_hydration_head_swap", 4).await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    seed(&fixture, 1, 1).await?;
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    // The run to block 3 captures block 3 as the head when it starts. While it publishes block
+    // 2, another block takes height 3: the trigger commits the replacement with block 2.
+    let replacement = Marker {
+        number: 3,
+        hash: format!("0x{}03", "f".repeat(62)),
+    };
+    rpc.answer_hash(&replacement.hash, Some("replacement.eth"));
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION replace_head() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.current_block_number = 2 THEN
+                 UPDATE chain_lineage SET canonicality_state = 'orphaned'
+                 WHERE chain_id = NEW.chain_id AND block_number = 3
+                   AND canonicality_state = 'canonical';
+                 INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state)
+                 VALUES (NEW.chain_id, '{}', '{}', 3, to_timestamp(1800000036), 'canonical')
+                 ON CONFLICT DO NOTHING;
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER replace_head AFTER INSERT OR UPDATE ON project_family_marker
+             FOR EACH ROW EXECUTE FUNCTION replace_head();",
+        replacement.hash,
+        hash(2)
+    ))
+    .execute(&fixture.pool)
+    .await?;
+    rpc::head(&fixture.pool, 3).await?;
+    let calls = rpc.calls();
+    let (outcome, _) = apply(&fixture, &marker(3), FamilyMode::Normal, &options(&rpc)).await;
+    sqlx::raw_sql(
+        "DROP TRIGGER replace_head ON project_family_marker; DROP FUNCTION replace_head();",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    // The replacement is published at the captured head's height, with no pass and no call.
+    let published: (i64, String) = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash FROM project_family_marker
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(published, (3, replacement.hash.clone()));
+    assert_eq!(outcome.hydration.passes, 0);
+    assert_eq!(rpc.calls(), calls);
+    let unhydrated = tuple(&fixture, 1).await?;
+    assert_eq!(unhydrated["hydrated_name"], "block1.eth");
+    assert_eq!(unhydrated["attempt_block"], 1);
+    // The next ordinary follow block on the new branch is a head again.
+    let next = fork_block(&fixture, 4, &replacement.hash).await?;
+    rpc.answer_hash(&next.hash, Some("after.eth"));
+    let (_, error) = apply(&fixture, &next, FamilyMode::Normal, &options(&rpc)).await;
+    assert!(error.is_none(), "{error:?}");
     assert_eq!(tuple(&fixture, 1).await?["hydrated_name"], "after.eth");
     fixture.cleanup().await
 }

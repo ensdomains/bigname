@@ -442,28 +442,61 @@ fn hydration_counts_rpc_attempts_apart_from_committed_writes() -> Result<()> {
         },
         ..Default::default()
     };
-    for outcome in [&refused, &unserved, &committed, &FamilyOutcome::default()] {
+    // A run whose first aggregate was cut by the block's time: no probe, and not unserved.
+    let timed_out = FamilyOutcome {
+        hydration: HydrationOutcome {
+            passes: 1,
+            timed_out_passes: 1,
+            reverse: HydrationKindOutcome {
+                rpc_calls: 1,
+                rpc_failures: 1,
+                not_observed: 250,
+                ..Default::default()
+            },
+            rpc_ms: 30_000,
+            head_age_seconds: Some(30),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // Several runs are summed before one export; a run with no pass adds nothing.
+    let runs = [
+        &refused,
+        &unserved,
+        &timed_out,
+        &committed,
+        &FamilyOutcome::default(),
+    ];
+    for outcome in runs {
         feed.project_families("ethereum-mainnet", outcome);
     }
     metrics.project_writes.apply(feed.take_project_writes());
 
     let scrape = metrics.registry.encode()?;
     let chain = "chain=\"ethereum-mainnet\"";
+    let prepared: u64 = runs.iter().map(|run| run.hydration.passes).sum();
+    let ended: u64 = scrape
+        .lines()
+        .filter(|line| line.starts_with("phase_runner_project_hydration_passes_total{"))
+        .map(|line| line.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum();
+    assert_eq!(ended, prepared, "each pass ends one way\n{scrape}");
     for line in [
         format!("phase_runner_project_hydration_passes_total{{{chain},result=\"served\"}} 2\n"),
         format!("phase_runner_project_hydration_passes_total{{{chain},result=\"unserved\"}} 1\n"),
-        format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"reverse\"}} 2\n"),
+        format!("phase_runner_project_hydration_passes_total{{{chain},result=\"timed_out\"}} 1\n"),
+        format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"reverse\"}} 3\n"),
         format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"text\"}} 3\n"),
         format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"probe\"}} 1\n"),
         format!(
-            "phase_runner_project_hydration_rpc_failures_total{{{chain},kind=\"reverse\"}} 1\n"
+            "phase_runner_project_hydration_rpc_failures_total{{{chain},kind=\"reverse\"}} 2\n"
         ),
         format!("phase_runner_project_hydration_rpc_failures_total{{{chain},kind=\"text\"}} 2\n"),
         format!(
             "phase_runner_project_hydration_selectors_total{{{chain},kind=\"reverse\",outcome=\"observed\"}} 250\n"
         ),
         format!(
-            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"reverse\",outcome=\"not_observed\"}} 250\n"
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"reverse\",outcome=\"not_observed\"}} 500\n"
         ),
         format!(
             "phase_runner_project_hydration_selectors_total{{{chain},kind=\"text\",outcome=\"observed\"}} 248\n"

@@ -169,7 +169,9 @@ async fn rolling_progress(poison: i64, cross_head: bool) -> Result<()> {
     if cross_head {
         follow(db.pool(), &rpc.endpoint, 1, 4).await?;
         follow(db.pool(), &rpc.endpoint, 1, 5).await?;
-        assert_eq!(counts(&rpc), [page, &[1], page, &[1]].concat());
+        // The next time round the poisoned tuple goes alone, as the split left it: its call,
+        // the probe that follows the block's first failure, then the rest of the page in one.
+        assert_eq!(counts(&rpc), [page, &[1], &[1, 1, 249], &[1]].concat());
     }
     rpc.server.abort();
     db.cleanup().await

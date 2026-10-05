@@ -2,22 +2,32 @@
 //! not-found response; null is no overlay (a failed call or a no-longer-eligible selector).
 //!
 //! `hydrated_name`, `attempt_block`, `attempt_hash` and `baseline` belong together: the name, the
-//! block it was observed at and the selector it was observed for. `attempt_ordinal` only orders
-//! the rolling refresh. What a read writes (`batch::Read`):
-//! - an answered call that succeeded, with a name or empty, writes all five;
+//! block it was observed at and the selector it was observed for. `attempt_ordinal`,
+//! `attempt_limit` and `attempt_failures` only schedule the rolling refresh: the tuple's place in
+//! it, the size of aggregate it may next be sent in, and how many reads in a row observed no
+//! name for it. What a read writes (`batch::Read`):
+//! - an answered call that succeeded, with a name or empty, writes the name, its block and
+//!   selector and a new ordinal, and clears the limit and the failure count;
 //! - an answered call that itself failed inside the aggregate writes a null name with the
-//!   attempt's block. This is a fail-closed policy, not evidence that the name was cleared: the
-//!   reader falls back to the event-derived claim;
-//! - a deferred tuple (its aggregate failed while the endpoint served the block) keeps its name
-//!   and the block it was observed at, and takes only a new `attempt_ordinal`, so it cannot hold
-//!   the oldest cohort's place. The name stays the last one successfully observed;
-//! - an unobserved tuple (the RPC batch failed and the endpoint did not serve the block) is not
-//!   written at all.
+//!   attempt's block, clears the limit and counts one more failure. This is a fail-closed
+//!   policy, not evidence that the name was cleared: the reader falls back to the event-derived
+//!   claim;
+//! - a deferred tuple (its aggregate failed while the endpoint answered other calls at the
+//!   block) keeps its name and the block it was observed at. It takes a new ordinal, so it
+//!   cannot hold the oldest cohort's place, the limit the read left it with, so a later head
+//!   sends it in a smaller aggregate, and one more failure. The name stays the last one
+//!   successfully observed;
+//! - an unobserved tuple (the endpoint did not serve the block, or the pass had no time or call
+//!   left for it) is not written at all.
+//!
+//! Nothing reads `attempt_failures` yet: a tuple that fails every time is still read each time
+//! its turn comes, alone once its limit is one.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
     ChainRpcUrls, EnsReverseNameMulticallBlock, EnsReverseNameMulticallRequest,
     EnsReverseNameMulticallResult, MULTICALL3_ADDRESS, execute_ens_reverse_name_multicall,
+    rpc_error_reports_block_unavailable,
 };
 use bigname_storage::families::position::emission_ordinal_sql;
 use serde_json::{Value, json};
@@ -30,9 +40,13 @@ use super::super::{
 };
 use super::ETHEREUM;
 use super::admission::EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
-use super::batch::{Aggregate, Kind, Read, Session};
+use super::batch::{Aggregate, Failure, Kind, Read, Session};
 use super::outcome::Writes;
+use super::schedule;
 use crate::{ProjectError, Result};
+
+/// The columns that hold a tuple's observation; the other hydration columns only schedule it.
+const OBSERVATION: &[&str] = &["hydrated_name", "attempt_block", "attempt_hash", "baseline"];
 
 pub(super) struct Candidate {
     row: Row,
@@ -40,6 +54,7 @@ pub(super) struct Candidate {
     node: Option<String>,
     resolver: Option<String>,
     active: bool,
+    limit: Option<usize>,
 }
 
 pub(super) struct Prepared {
@@ -103,7 +118,9 @@ pub(super) async fn select(
                 .get("eligible")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let limit = schedule::limit(&row, "attempt_limit");
             Some(Candidate {
+                limit,
                 row,
                 key,
                 node,
@@ -193,7 +210,7 @@ impl Aggregate for Call<'_> {
     async fn send(
         &self,
         chunk: &[Self::Request],
-    ) -> std::result::Result<Vec<Self::Answer>, String> {
+    ) -> std::result::Result<Vec<Self::Answer>, Failure> {
         execute_ens_reverse_name_multicall(
             self.rpc_urls,
             ETHEREUM,
@@ -202,7 +219,10 @@ impl Aggregate for Call<'_> {
             chunk,
         )
         .await
-        .map_err(|error| format!("{error:#}"))
+        .map_err(|error| Failure {
+            block_unavailable: rpc_error_reports_block_unavailable(&error),
+            message: format!("{error:#}"),
+        })
     }
 }
 
@@ -210,16 +230,18 @@ pub(super) async fn execute(
     candidates: Vec<Candidate>,
     session: &mut Session<'_>,
 ) -> Result<Prepared> {
-    // Every tuple the block changed is read, beyond the rolling share, in as many aggregates as
-    // they need.
-    let requests: Vec<_> = candidates
+    // Every tuple the block changed is selected, beyond the rolling share.
+    let (requests, limits): (Vec<_>, Vec<_>) = candidates
         .iter()
         .filter(|candidate| candidate.active)
-        .map(|candidate| EnsReverseNameMulticallRequest {
-            resolver_address: candidate.resolver.clone().expect("active resolver"),
-            reverse_node: candidate.node.clone().expect("active node"),
+        .map(|candidate| {
+            let request = EnsReverseNameMulticallRequest {
+                resolver_address: candidate.resolver.clone().expect("active resolver"),
+                reverse_node: candidate.node.clone().expect("active node"),
+            };
+            (request, candidate.limit)
         })
-        .collect();
+        .unzip();
     let rpc_urls = session.rpc_urls;
     if !requests.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
         return Err(ProjectError::configuration(
@@ -233,7 +255,7 @@ pub(super) async fn execute(
             block_hash: session.head.hash.clone(),
         },
     };
-    let reads = session.read(Kind::Reverse, &requests, &call).await;
+    let reads = session.read(Kind::Reverse, &requests, &limits, &call).await;
     session.stats.reverse.failed_calls += reads
         .iter()
         .filter(|read| {
@@ -302,9 +324,11 @@ impl Prepared {
             let before = row.clone();
             let name = match read {
                 Some(Read::Unobserved) => continue,
-                Some(Read::Deferred) => {
+                Some(Read::Deferred { limit }) => {
                     set(&mut row, "attempt_ordinal", json!(ordinal));
-                    writes.schedules += u64::from(row != before);
+                    set(&mut row, "attempt_limit", json!(limit));
+                    schedule::count_failure(&mut row, "attempt_failures");
+                    writes.count(&before, &row, OBSERVATION);
                     rows.put(&tables::REVERSE_TUPLE, row)?;
                     continue;
                 }
@@ -317,6 +341,15 @@ impl Prepared {
                     Value::Null
                 }
             };
+            set(&mut row, "attempt_limit", Value::Null);
+            if matches!(
+                read,
+                Some(Read::Answered(EnsReverseNameMulticallResult::Failed { .. }))
+            ) {
+                schedule::count_failure(&mut row, "attempt_failures");
+            } else {
+                set(&mut row, "attempt_failures", Value::Null);
+            }
             set(&mut row, "hydrated_name", name);
             set(
                 &mut row,
@@ -356,7 +389,7 @@ impl Prepared {
                     Value::Null
                 },
             );
-            writes.values += u64::from(row != before);
+            writes.count(&before, &row, OBSERVATION);
             rows.put(&tables::REVERSE_TUPLE, row)?;
         }
         Ok(writes)

@@ -796,7 +796,7 @@ holds, never while it catches up, replays or rebuilds
 must therefore answer `eth_call` by block hash at the newest ingested blocks;
 it needs no deep historical state for hydration. The runner gives each
 hydration request a 5-second connect and 10-second total timeout, and Project
-limits one block's reads to 30 seconds. An endpoint that fails does not stop
+limits the time one block waits for its reads to 30 seconds. An endpoint that fails does not stop
 publication and does not change stored values; see
 [Project family work](runbooks/pipeline-monitoring.md#project-family-work) for
 the counters and log lines.
@@ -2965,8 +2965,22 @@ nowhere else; replace it rather than leave it running.
 The build that makes [hydration](glossary.md#hydration) run only on the head
 block changes `crates/project/src`, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
-chain. It adds no schema-migration, manifest change, watch-plan change or
-environment variable, and no API response shape changes.
+chain. It carries one schema-migration,
+`20261005180000_project_hydration_schedule.sql`, and no manifest change,
+watch-plan change or environment variable; no API response shape changes.
+
+The schema-migration adds hydration's scheduling columns: `attempt_limit` and
+`attempt_failures` on `project_reverse_tuple`, `hydration_limit` and
+`hydration_failures` on `project_node_record_value`, and a copy of each
+failure count on the two hydration work indexes. They are nullable and added
+without a default, so no row is rewritten and no family is reset; on an empty
+schema-migration database it is a no-op and `phase-runner init-schema`
+installs the same columns. It takes the family marker table in `EXCLUSIVE`
+mode until it commits. Apply it with the runner stopped and before the new
+binary starts: the family writer stores rows by column name, so the new binary
+on a database without the columns silently drops the values, and every head
+then starts splitting a failed aggregate from its full size again. A previous
+binary on the new schema leaves the columns null, which reads as no limit.
 
 Behavior changes on `ethereum-mainnet`, the only hydrated chain
 ([follow-only hydration](projections.md#follow-only-hydration)):
@@ -2977,10 +2991,13 @@ Behavior changes on `ethereum-mainnet`, the only hydrated chain
   tuples it changed, at its own block hash; against an endpoint without that
   block's state each read failed, cleared the reverse name it was refreshing
   and recorded a failed attempt on the text selector.
-- An RPC batch that fails as a whole no longer clears hydrated reverse names
-  or records failed text attempts. A served primary name can therefore be the
-  last one successfully observed rather than absent while the endpoint fails.
-  A call that fails inside an answered aggregate still clears its value.
+- An RPC batch that fails as a whole no longer clears hydrated reverse names.
+  A served primary name can therefore be the last one successfully observed
+  rather than absent while the endpoint fails. Against an endpoint that does
+  not serve the block nothing is written at all. Against one that answers
+  other calls at the block, the failed batch is split, within a call and time
+  limit per block, and what is still unread records only where to resume. A
+  call that fails inside an answered aggregate still clears its value.
 - Seven hydration metrics and two `warn` log lines are new
   ([Project family work](runbooks/pipeline-monitoring.md#project-family-work)).
   The hydration HTTP client now has a 5-second connect and 10-second total
@@ -2993,7 +3010,7 @@ Adoption and restart plan for an existing deployment, following the
    against the database again once the next step has started, and do not
    alternate the two: a rebuild left part-way by one hash is not resumed by the
    other.
-2. Apply any schema-migration the same release carries. This build has none.
+2. Apply the release's schema-migrations, `20261005180000` among them.
 3. Under the new binary, run the full-history Interpret redo and then the
    Project redo it installs, to completion, as for any rotation. A bounded
    range cannot adopt a new hash. Neither redo needs

@@ -94,10 +94,12 @@ pub async fn execute_ens_reverse_name_multicall(
     let return_hex = match call_result.result {
         Ok(Value::String(value)) => value,
         Ok(other) => bail!("ENS reverse-name Multicall3 eth_call returned non-string JSON {other}"),
-        Err(error) => bail!(
-            "ENS reverse-name Multicall3 eth_call failed: {}",
-            error.message
-        ),
+        // The typed error stays in the chain: `rpc_error_reports_block_unavailable` reads it.
+        Err(error) => {
+            return Err(
+                anyhow::Error::new(error).context("ENS reverse-name Multicall3 eth_call failed")
+            );
+        }
     };
     let return_data = hex_to_bytes(&return_hex)
         .context("ENS reverse-name Multicall3 return data is not valid hex")?;

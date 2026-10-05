@@ -1,6 +1,8 @@
 //! F6 through the actual Follow preparation, pinned RPC, publication, reader and undo paths.
 //! The admitted legacy resolver is the existing text hydration allowlist's first address.
 //! (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858)
+#[path = "families_hydration/reverse.rs"]
+mod reverse;
 #[path = "families_hydration/rpc.rs"]
 mod rpc;
 #[path = "families_support/mod.rs"]
@@ -1090,5 +1092,112 @@ async fn text_split_stamps_the_selector_it_cannot_read_and_an_unserved_block_wri
             .all(|(_, _, status)| status.as_deref() == Some("success"))
     );
     assert_eq!(pending_text(&fixture).await?, 0);
+    fixture.cleanup().await
+}
+
+/// Keys whose overlay holds a successful read.
+async fn read_keys(fixture: &Fixture) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM project_node_record_value
+         WHERE hydrated_value ->> 'status' = 'success'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn text_selectors_beside_unreadable_ones_are_all_read_over_the_following_heads() -> Result<()>
+{
+    const UNREADABLE: [i64; 9] = [1, 2, 3, 4, 8, 16, 32, 63, 126];
+    let (fixture, rpc) = fixture().await?;
+    for position in 1..=250 {
+        keyed_text(&fixture, 1, position + 1, &format!("key{position:03}")).await?;
+    }
+    for block in 1..=8 {
+        rpc.answer(block, Some("value"));
+    }
+    // Any aggregate asking for one of nine keys fails whole, at every block. They sit where
+    // almost every aggregate the first head has calls for holds one of them.
+    for position in UNREADABLE {
+        rpc.poison(&alloy_primitives::hex::encode(format!("key{position:03}")));
+    }
+    let outcome = run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let first = outcome.hydration.text;
+    assert_eq!(
+        (first.answered, first.deferred, first.rpc_calls),
+        (3, 247, 17)
+    );
+    assert_eq!(read_keys(&fixture).await?, 3);
+
+    // Each later head starts from the sizes the one before left, so the readable keys are read.
+    let mut heads = 1;
+    while read_keys(&fixture).await? < 241 {
+        heads += 1;
+        assert!(heads <= 8, "readable keys were never read");
+        let outcome = run(&fixture, heads, FamilyMode::Normal, &rpc).await?;
+        assert!(outcome.hydration.text.rpc_calls <= 17);
+    }
+    assert!(heads <= 6, "{heads} heads");
+    // The nine stay pending, each alone, and are tried again without holding anything back.
+    assert_eq!(pending_text(&fixture).await?, 9);
+    let limits: Vec<Option<i32>> = sqlx::query_scalar(
+        "SELECT hydration_limit FROM project_node_record_value
+         WHERE hydrated_value IS NULL ORDER BY record_key",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(limits, vec![Some(1); 9]);
+    let outcome = run(&fixture, heads + 1, FamilyMode::Normal, &rpc).await?;
+    let text_outcome = outcome.hydration.text;
+    assert_eq!((text_outcome.rpc_calls, text_outcome.deferred), (9, 9));
+    assert_eq!(
+        (text_outcome.value_writes, text_outcome.schedule_writes),
+        (0, 9)
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn slow_reverse_reads_leave_time_for_the_text_selectors_of_the_same_block() -> Result<()> {
+    use std::time::Duration;
+    let (fixture, rpc) = fixture().await?;
+    reverse::seed(&fixture, 1, 1).await?;
+    keyed_text(&fixture, 1, 9, "waiting").await?;
+    rpc.answer(1, Some("value"));
+    // The reverse tuple's aggregate outlasts the whole block's time. Reverse names are read
+    // first, but only within half of that time while a text selector is waiting.
+    rpc.slow(&reverse::node(1), Duration::from_secs(5));
+    rpc::head(&fixture.pool, 1).await?;
+    let limits = bigname_project::families::HydrationTimeLimits {
+        call: Duration::from_secs(1),
+        block: Duration::from_secs(1),
+    };
+    let options = reverse::options(&rpc).with_hydration_time_limits(limits);
+    let (outcome, error) = reverse::apply(&fixture, &marker(1), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let hydration = &outcome.hydration;
+    assert_eq!(
+        (hydration.reverse.rpc_calls, hydration.reverse.not_observed),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            hydration.reverse.deferred,
+            hydration.reverse.schedule_writes
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        (hydration.text.answered, hydration.text.value_writes),
+        (1, 1)
+    );
+    assert_eq!(
+        (hydration.timed_out_passes, hydration.unserved_passes),
+        (1, 0)
+    );
+    assert_eq!(
+        attempts(&fixture).await?,
+        vec![("waiting".to_owned(), Some(1), Some("success".to_owned()))]
+    );
     fixture.cleanup().await
 }

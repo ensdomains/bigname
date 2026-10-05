@@ -101,16 +101,16 @@ impl ProjectWriteGauges {
             )?,
             hydration_passes: registry.int_counter_vec(
                 "phase_runner_project_hydration_passes_total",
-                "Head blocks whose hydration reads were prepared, by how the pass ended: \
-                 served, unserved (the endpoint answered no aggregate at the block) or timed_out \
-                 (the pass spent its time before every selector was read).",
+                "Head blocks whose hydration reads were prepared, each under the one way its pass \
+                 ended: timed_out (the pass spent its time before every selector was read), \
+                 unserved (the endpoint did not serve the block) or served.",
                 &["chain", "result"],
             )?,
             hydration_rpc_calls: registry.int_counter_vec(
                 "phase_runner_project_hydration_rpc_calls_total",
                 "Hydration Multicall3 aggregates sent, whether or not their block then \
-                 published; kind probe is the one-call aggregate that tells an endpoint failure \
-                 from a failing batch.",
+                 published; kind probe is the one-call aggregate sent after a failed batch when \
+                 the endpoint has answered nothing at the block yet.",
                 &["chain", "kind"],
             )?,
             hydration_rpc_failures: registry.int_counter_vec(
@@ -122,14 +122,15 @@ impl ProjectWriteGauges {
                 "phase_runner_project_hydration_selectors_total",
                 "Selectors a hydration pass read, by outcome: observed (a value or an empty \
                  answer), failed_call (its own call failed inside an answered aggregate), \
-                 deferred (its aggregate failed while the endpoint served the block) or \
-                 not_observed (the endpoint did not serve the block, or the pass ran out of time).",
+                 deferred (its aggregate failed while the endpoint answered other calls at the \
+                 block) or not_observed (the endpoint did not serve the block, or the pass had \
+                 no time or no call left).",
                 &["chain", "kind", "outcome"],
             )?,
             hydration_writes: registry.int_counter_vec(
                 "phase_runner_project_hydration_writes_total",
-                "Rows hydration changed in committed blocks: value (the hydrated value or the \
-                 block it was observed at) or schedule (only the row's place in its queue).",
+                "Rows hydration changed in committed blocks: value (the row's observation) or \
+                 schedule (only its place in the queue, aggregate size limit or failure count).",
                 &["chain", "kind", "write"],
             )?,
             hydration_rpc_seconds: registry.gauge_vec(
@@ -176,6 +177,7 @@ impl ProjectWriteGauges {
                 .with_label_values(&[chain, result])
                 .inc_by(count)
         };
+        // Project counts a pass as timed out or as unserved, never both.
         let failed = hydration.unserved_passes + hydration.timed_out_passes;
         passes("served", hydration.passes.saturating_sub(failed));
         passes("unserved", hydration.unserved_passes);

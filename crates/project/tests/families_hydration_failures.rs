@@ -222,6 +222,7 @@ async fn a_failed_aggregate_among_answered_ones_is_split_and_its_other_tuples_ar
     assert!(poisoned["hydrated_name"].is_null());
     assert!(poisoned["attempt_block"].is_null(), "nothing was observed");
     assert!(poisoned["attempt_ordinal"].is_i64(), "it only moved back");
+    assert_eq!(poisoned["attempt_failures"], 1);
     fixture.cleanup().await
 }
 
@@ -321,6 +322,11 @@ async fn an_unreadable_tuple_in_the_oldest_cohort_keeps_its_name_and_yields_its_
     let outcome = run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
     assert_eq!(outcome.hydration.reverse.deferred, 1);
     assert_eq!(
+        sizes(&rpc, 6),
+        vec![249, 1],
+        "tuple 5 failed alone at block 4, so it is sent alone and the page is not split again"
+    );
+    assert_eq!(
         attempts(&fixture).await?,
         vec![(Some(2), 1), (Some(5), 1), (Some(6), 249)]
     );
@@ -332,12 +338,12 @@ async fn an_unreadable_tuple_in_the_oldest_cohort_keeps_its_name_and_yields_its_
 async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_tuples()
 -> Result<()> {
     use std::time::Duration;
-    let (fixture, rpc) = fixture("family_hydration_time", 2).await?;
+    let (fixture, rpc) = fixture("family_hydration_time", 3).await?;
     run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
-    // 600 tuples change in the head block: three aggregates. The endpoint takes 300 ms an
-    // answer and the block's reads may take 400 ms, so the second aggregate is cut off when the
-    // time is spent (or, on a slow machine, never sent) and the third is never sent.
-    for index in 1..=600 {
+    // 251 tuples change in the head block: an aggregate of 250 and one of a single tuple. The
+    // endpoint takes 300 ms an answer and the block's reads may take 400 ms, so the single
+    // tuple's call is cut off by the block's time after another aggregate was answered.
+    for index in 1..=251 {
         seed(&fixture, 1, index).await?;
     }
     rpc.answer(1, Some("read.eth"));
@@ -352,19 +358,31 @@ async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_
     assert!(error.is_none(), "{error:?}");
     assert_eq!(outcome.marker, Some(marker(1)), "the block is published");
     let reverse = outcome.hydration.reverse;
-    assert_eq!(outcome.hydration.timed_out_passes, 1);
+    // On a slow machine the first aggregate is cut instead and nothing is answered.
     assert!(
-        reverse.answered == 500 || reverse.answered == 250,
+        reverse.answered == 250 || reverse.answered == 0,
         "{reverse:?}"
     );
-    assert_eq!(reverse.not_observed, 600 - reverse.answered);
-    assert!(reverse.rpc_failures <= 1, "{reverse:?}");
-    assert_eq!(reverse.deferred, 0, "out of time is not a deferral");
+    assert_eq!(reverse.not_observed, 251 - reverse.answered);
+    assert_eq!(
+        reverse.deferred, 0,
+        "a call the block's time cut is no deferral"
+    );
+    assert_eq!(reverse.schedule_writes, 0);
     assert_eq!(reverse.value_writes, reverse.answered);
-    let unread = tuple(&fixture, 600).await?;
+    assert_eq!(reverse.rpc_failures, 1, "the cut call is still counted");
+    assert_eq!(
+        (
+            outcome.hydration.passes,
+            outcome.hydration.timed_out_passes,
+            outcome.hydration.unserved_passes
+        ),
+        (1, 1, 0)
+    );
+    let unread = tuple(&fixture, 251).await?;
     assert!(unread["hydrated_name"].is_null());
     assert!(
-        unread["attempt_ordinal"].is_null(),
+        unread["attempt_ordinal"].is_null() && unread["attempt_limit"].is_null(),
         "not observed is no write"
     );
 
@@ -384,9 +402,86 @@ async fn hydration_that_runs_out_of_time_publishes_the_block_without_the_unread_
     let reverse = outcome.hydration.reverse;
     assert_eq!((reverse.rpc_calls, reverse.rpc_failures), (1, 1));
     assert_eq!(
-        (outcome.hydration.probes, outcome.hydration.unserved_passes),
-        (1, 1)
+        (
+            outcome.hydration.probes,
+            outcome.hydration.unserved_passes,
+            outcome.hydration.timed_out_passes
+        ),
+        (1, 1, 0)
     );
     assert_eq!(fixture.rows("project_reverse_tuple").await?, before);
+
+    // A first aggregate the block's time cuts leaves no time for a probe: the pass ran out of
+    // time, and that says nothing about whether the endpoint serves the block.
+    rpc.answer(3, Some("later.eth"));
+    rpc::head(&fixture.pool, 3).await?;
+    let limits = HydrationTimeLimits {
+        call: Duration::from_secs(5),
+        block: Duration::from_millis(100),
+    };
+    let options = options.with_hydration_time_limits(limits);
+    let (outcome, error) = apply(&fixture, &marker(3), FamilyMode::Normal, &options).await;
+    assert!(error.is_none(), "{error:?}");
+    let hydration = &outcome.hydration;
+    assert_eq!(
+        (
+            hydration.passes,
+            hydration.timed_out_passes,
+            hydration.unserved_passes
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!((hydration.probes, hydration.probe_failures), (0, 0));
+    assert_eq!(hydration.reverse.deferred, 0);
+    assert_eq!(fixture.rows("project_reverse_tuple").await?, before);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn an_endpoint_that_loses_the_block_mid_pass_stops_the_pass_and_keeps_what_it_answered()
+-> Result<()> {
+    let (fixture, rpc) = fixture("family_hydration_block_lost", 2).await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    // 600 tuples change in the head block: three aggregates. The endpoint answers the first,
+    // then refuses every request saying it does not have the block.
+    for index in 1..=600 {
+        seed(&fixture, 1, index).await?;
+    }
+    rpc.answer(1, Some("read.eth"));
+    rpc.lose_block_after(1);
+    let outcome = run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let reverse = outcome.hydration.reverse;
+    assert_eq!(
+        sizes(&rpc, 1),
+        vec![250, 250],
+        "the refused aggregate is not split and nothing is sent after it"
+    );
+    assert_eq!((reverse.rpc_calls, reverse.rpc_failures), (2, 1));
+    assert_eq!(
+        (reverse.answered, reverse.deferred, reverse.not_observed),
+        (250, 0, 350)
+    );
+    assert_eq!((reverse.value_writes, reverse.schedule_writes), (250, 0));
+    let hydration = &outcome.hydration;
+    assert_eq!((hydration.probes, rpc.probes()), (0, 0));
+    assert_eq!(
+        (
+            hydration.passes,
+            hydration.unserved_passes,
+            hydration.timed_out_passes
+        ),
+        (1, 1, 0)
+    );
+    // The answered tuples keep their observation; the others are untouched and still first.
+    assert_eq!(tuple(&fixture, 1).await?["hydrated_name"], "read.eth");
+    let unread = tuple(&fixture, 600).await?;
+    assert!(unread["hydrated_name"].is_null());
+    assert!(unread["attempt_ordinal"].is_null() && unread["attempt_limit"].is_null());
+    rpc.clear_faults();
+    rpc.answer(2, Some("back.eth"));
+    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(sizes(&rpc, 2), vec![250]);
+    assert_eq!(tuple(&fixture, 251).await?["hydrated_name"], "back.eth");
+    assert_eq!(tuple(&fixture, 1).await?["hydrated_name"], "read.eth");
     fixture.cleanup().await
 }

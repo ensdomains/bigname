@@ -155,3 +155,39 @@ pub async fn attempts(fixture: &Fixture) -> Result<Vec<(Option<i64>, i64)>> {
     .fetch_all(&fixture.pool)
     .await?)
 }
+
+/// A canonical block `number` off the fixture's own hashes, the child of `parent`.
+pub async fn fork_block(fixture: &Fixture, number: i64, parent: &str) -> Result<Marker> {
+    let hash = format!("0x{}{number:02x}", "f".repeat(62));
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, $4, to_timestamp(1800000000 + $4 * 12), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(&hash)
+    .bind(parent)
+    .bind(number)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(Marker { number, hash })
+}
+
+/// The reverse work index beside what its source rows derive: every fixture tuple is eligible.
+pub async fn work_index(fixture: &Fixture) -> Result<(Vec<Value>, Vec<Value>)> {
+    let index = sqlx::query_scalar(
+        "SELECT jsonb_build_array(address, attempt_ordinal, attempt_block, successful_at_block,
+             attempt_failures)
+         FROM project_reverse_hydration_work WHERE eligible ORDER BY address",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    let derived = sqlx::query_scalar(
+        "SELECT jsonb_build_array(address, attempt_ordinal, attempt_block,
+             CASE WHEN hydrated_name IS NOT NULL THEN attempt_block END, attempt_failures)
+         FROM project_reverse_tuple ORDER BY address",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    Ok((index, derived))
+}

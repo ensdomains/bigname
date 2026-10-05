@@ -12,6 +12,7 @@ mod admission;
 pub(crate) mod batch;
 pub(crate) mod outcome;
 mod reverse;
+mod schedule;
 mod text;
 pub(crate) mod work;
 
@@ -107,7 +108,10 @@ pub(crate) async fn prepare(
         stats,
     );
     let reads = async {
+        // Reverse names are read first, within half of the time while text selectors wait.
+        session.share(if text::waiting(&text) { 2 } else { 1 });
         let reverse = reverse::execute(reverse, &mut session).await?;
+        session.share(1);
         Ok::<_, ProjectError>((reverse, text::execute(text, &mut session).await?))
     }
     .await;

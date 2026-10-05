@@ -21,6 +21,8 @@ struct Responses {
     probes: Arc<Mutex<usize>>,
     before_reply: Arc<Mutex<Option<(sqlx::PgPool, String)>>>,
     faults: Arc<Mutex<Faults>>,
+    /// Hydration aggregates answered since the last `lose_block_after`.
+    answered: Arc<Mutex<usize>>,
 }
 
 #[derive(Clone, Default)]
@@ -33,6 +35,12 @@ struct Faults {
     limit: Option<usize>,
     /// Every answer waits this long first.
     delay: Option<std::time::Duration>,
+    /// An aggregate holding a call whose target or calldata contains the pattern waits this long
+    /// before it answers or fails. The one-call probe holds none, so it stays fast.
+    slow: Vec<(String, std::time::Duration)>,
+    /// Once this many hydration aggregates were answered, the endpoint refuses every request
+    /// with an error that says it does not have the block.
+    block_lost_after: Option<usize>,
 }
 
 pub struct Rpc {
@@ -116,6 +124,20 @@ impl Rpc {
     #[allow(dead_code)]
     pub fn delay(&self, delay: std::time::Duration) {
         self.responses.faults.lock().unwrap().delay = Some(delay);
+    }
+    #[allow(dead_code)]
+    pub fn slow(&self, hex: &str, delay: std::time::Duration) {
+        self.responses
+            .faults
+            .lock()
+            .unwrap()
+            .slow
+            .push((plain_hex(hex), delay));
+    }
+    #[allow(dead_code)]
+    pub fn lose_block_after(&self, aggregates: usize) {
+        *self.responses.answered.lock().unwrap() = 0;
+        self.responses.faults.lock().unwrap().block_lost_after = Some(aggregates);
     }
     #[allow(dead_code)]
     pub fn clear_faults(&self) {
@@ -206,7 +228,22 @@ async fn respond(State(state): State<Responses>, Json(request): Json<Value>) -> 
         return error(&request, "fixture RPC failure");
     };
     let faults = state.faults.lock().unwrap().clone();
+    if faults
+        .block_lost_after
+        .is_some_and(|aggregates| *state.answered.lock().unwrap() >= aggregates)
+    {
+        return error(&request, "header not found");
+    }
     if let Some(delay) = faults.delay {
+        tokio::time::sleep(delay).await;
+    }
+    let slowest = faults
+        .slow
+        .iter()
+        .filter(|(hex, _)| calls.iter().any(|call| call.contains(hex)))
+        .map(|(_, delay)| *delay)
+        .max();
+    if let Some(delay) = slowest {
         tokio::time::sleep(delay).await;
     }
     let holds = |call: &String, patterns: &[String]| patterns.iter().any(|hex| call.contains(hex));
@@ -215,6 +252,9 @@ async fn respond(State(state): State<Responses>, Json(request): Json<Value>) -> 
     }
     if calls.iter().any(|call| holds(call, &faults.poisoned)) {
         return error(&request, "fixture aggregate content failure");
+    }
+    if !probe {
+        *state.answered.lock().unwrap() += 1;
     }
     let inner = (name,).abi_encode_params();
     let results: Vec<(bool, Bytes)> = calls
