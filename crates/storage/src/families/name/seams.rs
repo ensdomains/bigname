@@ -18,6 +18,8 @@ mod scoped {
         static PAUSE: (Arc<Notify>, Arc<Notify>);
         static BATCH_SIZE: usize;
         static SUBMITTED_ROWS: Arc<AtomicU64>;
+        static COMPOSED_NAMES: Arc<AtomicU64>;
+        static PEAK_SOURCE: Arc<AtomicU64>;
     }
 
     /// Runs `future` adding to `counter` every composed row a listing walk in it submits to its
@@ -29,9 +31,30 @@ mod scoped {
         SUBMITTED_ROWS.scope(counter, future).await
     }
 
+    /// Runs `future` adding to `counter` every name a listing in it asks to compose, so a test
+    /// can bound composition work apart from what reaches the page statement.
+    pub async fn with_composed_names_counter<F: Future>(
+        counter: Arc<AtomicU64>,
+        future: F,
+    ) -> F::Output {
+        COMPOSED_NAMES.scope(counter, future).await
+    }
+
+    /// Runs `future` raising `peak` to the largest composed-row source a listing in it binds to
+    /// one page statement.
+    pub async fn with_peak_source_counter<F: Future>(peak: Arc<AtomicU64>, future: F) -> F::Output {
+        PEAK_SOURCE.scope(peak, future).await
+    }
+
     pub(in crate::families::name) fn note_submitted_rows(rows: usize) {
-        let _ = SUBMITTED_ROWS.try_with(|counter| {
-            counter.fetch_add(u64::try_from(rows).unwrap_or(u64::MAX), Ordering::Relaxed)
+        let rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        let _ = SUBMITTED_ROWS.try_with(|counter| counter.fetch_add(rows, Ordering::Relaxed));
+        let _ = PEAK_SOURCE.try_with(|peak| peak.fetch_max(rows, Ordering::Relaxed));
+    }
+
+    pub(in crate::families::name) fn note_composed_names(names: usize) {
+        let _ = COMPOSED_NAMES.try_with(|counter| {
+            counter.fetch_add(u64::try_from(names).unwrap_or(u64::MAX), Ordering::Relaxed)
         });
     }
 
@@ -83,12 +106,14 @@ mod scoped {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use scoped::before_snapshot;
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{after_publication, batch_size, note_submitted_rows};
+pub(super) use scoped::{after_publication, batch_size, note_composed_names, note_submitted_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use scoped::{
-    with_batch_size, with_pause_after_publication, with_pause_before_snapshot,
-    with_submitted_rows_counter,
+    with_batch_size, with_composed_names_counter, with_pause_after_publication,
+    with_pause_before_snapshot, with_peak_source_counter, with_submitted_rows_counter,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use super::list::load_family_expiring_page_unbounded;
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) async fn before_snapshot() {}
@@ -103,3 +128,6 @@ pub(super) fn batch_size(production: usize) -> usize {
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_submitted_rows(_rows: usize) {}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) fn note_composed_names(_names: usize) {}

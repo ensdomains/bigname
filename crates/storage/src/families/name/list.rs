@@ -85,6 +85,7 @@ impl Gathered {
             .into_iter()
             .filter(|name| self.names.insert(name.clone()))
             .collect();
+        super::seams::note_composed_names(fresh.len());
         let composed = batch::load(conn, &fresh, CoverageShape::Plain).await?;
         self.rows.extend(composed.values().map(source_row));
         Ok(())
@@ -307,6 +308,33 @@ pub async fn load_family_expiring_page(
             return Ok(truncate(page, page_size));
         }
     }
+}
+
+/// The expiring page over every name of `filter.namespace` composed at once: what the walk must
+/// return, whatever it costs. A test oracle only.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn load_family_expiring_page_unbounded(
+    db: impl Into<crate::ReadDb<'_>>,
+    filter: &NameCurrentExpiringFilter,
+    order: NameCurrentListOrder,
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+    chains: &[String],
+) -> Result<NameCurrentListPage> {
+    let mut snapshot = db.into().snapshot().await?;
+    batch::ensure_published(&mut snapshot, chains).await?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT logical_name_id FROM bigname_phase.name_surfaces WHERE namespace = $1",
+    )
+    .bind(filter.namespace.as_str())
+    .fetch_all(&mut *snapshot)
+    .await
+    .context("failed to load the namespace's names")?;
+    let composed = batch::load_base(&mut snapshot, &names, CoverageShape::Plain).await?;
+    let source = Value::Array(composed.values().map(source_row).collect());
+    let page = expiring_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
+    snapshot.close().await?;
+    Ok(page)
 }
 
 /// A page read with one extra row, cut to `page_size` with its continuation.

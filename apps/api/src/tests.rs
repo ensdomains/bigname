@@ -480,6 +480,7 @@ include!("tests/v2_history_event_data.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_names_filters.rs");
+include!("tests/v2_names_expiry_oracle.rs");
 include!("tests/v2_former_owner_cursors.rs");
 #[path = "tests/v2_former_owner_produced.rs"]
 mod v2_former_owner_produced;
