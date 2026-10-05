@@ -1333,7 +1333,7 @@ SQL
 # normalized-event index may build before this later refusal is discovered.
 assert_migration_refusal permission-populated-grants-empty-events "$permission_index_migration" \
     'missing prebuilt index project_grant_registry_parent_idx on populated project_grant; run ops/registry-permission-indexes/install.sql before this schema-migration' <<SQL
-DELETE FROM normalized_events WHERE event_identity = 'permission-index-prebuild-probe';
+DELETE FROM normalized_events;
 DROP INDEX normalized_events_registry_origin_idx;
 DROP INDEX normalized_events_wrapper_departure_idx;
 DROP INDEX normalized_events_user_registry_departure_idx;

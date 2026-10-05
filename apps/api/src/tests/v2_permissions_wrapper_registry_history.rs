@@ -165,10 +165,9 @@ async fn factory_migration_roots_and_deeper_wrappers_work_in_warm_cold_and_split
             3,
             WRAPPER,
             "child",
-            BOB,
+            (BOB, ALICE),
             (TIME + 100) as u64,
             U256::ZERO,
-            ALICE,
         )
         .wrapper(4, CHILD, WRAPPER, "child", WRAPPER, migration_roles)
         .approve(5, WRAPPER, BOB, OPERATOR, true);

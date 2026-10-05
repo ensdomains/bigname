@@ -237,17 +237,16 @@ impl Logs {
         expiry: u64,
         roles: U256,
     ) -> &mut Self {
-        self.register_by(offset, registry, label, owner, expiry, roles, ADMIN)
+        self.register_by(offset, registry, label, (owner, ADMIN), expiry, roles)
     }
     fn register_by(
         &mut self,
         offset: i64,
         registry: &str,
         label: &str,
-        owner: &str,
+        (owner, sender): (&str, &str),
         expiry: u64,
         roles: U256,
-        sender: &str,
     ) -> &mut Self {
         let token = id(label);
         self.push(
