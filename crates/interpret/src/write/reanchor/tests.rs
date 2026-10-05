@@ -132,6 +132,8 @@ type Stored = (
     Option<time::OffsetDateTime>,
 );
 
+type Bundle = (Option<Vec<String>>, Option<Vec<u8>>, Value, Option<String>);
+
 async fn stored(pool: &PgPool) -> TestResult<Stored> {
     Ok(sqlx::query_as(
         "SELECT raw_name, preimage_event_identity, visibility_state, block_number,
@@ -157,7 +159,7 @@ async fn rolled_back_raw_evidence_leaves_the_older_hash_path_identity() -> TestR
         stored(pool).await?,
         (None, None, "active".into(), 1, "canonical".into(), None)
     );
-    let bundle: (Option<Vec<String>>, Option<Vec<u8>>, Value, Option<String>) = sqlx::query_as(
+    let bundle: Bundle = sqlx::query_as(
         "SELECT raw_labels, dns_encoded_name, normalization_errors, deactivation_reason
          FROM name_surfaces WHERE logical_name_id = $1",
     )

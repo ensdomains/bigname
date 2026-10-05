@@ -1962,6 +1962,17 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
+## Preimage witness
+
+the `PreimageObserved` event a [name surface](#surface-name-surface) names in
+`preimage_event_identity` as the source of its raw label bytes: the earliest
+canonical preimage observation of that name. It is kept apart from the surface's
+own first-observation block, because a node can be established by its label-hash
+path before any event states its bytes. A reorg or redo that removes the witness
+moves it to the next surviving preimage observation, or removes the raw bytes
+when none survives and a label-hash-path observation still establishes the
+surface. See [storage](storage.md#name-identity-and-raw-evidence).
+
 ## Pre-surface
 
 a name whose registry events were observed before any plaintext [name
@@ -2416,8 +2427,11 @@ statistics.
 
 an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
-currently backs it. Raw labels and their normalization flags are observations,
-not identity; display names are derived when read, following the audit's
+currently backs it. The identity is the node and the label-hash path that
+proves it. Raw labels and their normalization flags are observations,
+not identity: a surface stores the raw bytes of its labels only once all of
+them are known, with the [preimage witness](#preimage-witness) that carried
+them, and stores none until then. Display names are derived when read, following the audit's
 [normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.

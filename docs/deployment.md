@@ -2745,3 +2745,33 @@ relation (an interrupted concurrent build leaves an invalid index: confirm in
 it), rebuild it with the statement above and apply the schema-migrations again. A runner started
 before the index exists behaves the same, only slower at start. API standbys receive the index
 through replication.
+
+### Name surfaces without raw label bytes
+
+The build that lets a [name surface](glossary.md#surface-name-surface) exist before the raw
+bytes of its labels are known changes the identity baseline, one schema-migration, the adapter
+surface model and Interpret's surface writer, redo re-anchoring and flag recompute
+([storage](storage.md#name-identity-and-raw-evidence)). Those sources are inside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
+every chain. No adapter produces a surface without raw bytes yet: a re-derivation under this
+build writes the same surfaces, bindings and normalized events as before, and each surface
+additionally names its [preimage witness](glossary.md#preimage-witness).
+
+`20261005120000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
+`name_surfaces.raw_name`, `raw_labels` and `dns_encoded_name`, adds the nullable
+`preimage_event_identity` column, replaces the label-count check with
+`name_surfaces_raw_evidence_check`, and fills the new column for every existing row from its
+earliest canonical `PreimageObserved` event. No existing row loses a value. The
+schema-migration takes an ACCESS EXCLUSIVE lock on `name_surfaces` and holds it while the
+backfill joins `name_surfaces` to `normalized_events` through
+`normalized_events_name_history_idx` and the new check validates every row. Apply it with
+the phase runner, redo processes and API stopped, with the same `lock_timeout`,
+`statement_timeout` and retry procedure as the other schema-migrations and `--target-version
+20261005120000`; it is not a concurrent step, and its duration grows with `name_surfaces`.
+A binary from before this build can still read and write the migrated table, because it
+writes all three raw columns on every row.
+
+After the schema-migration, an existing deployment finishes the full-range Interpret redo and
+the stamped Project redo the rotation installs before the matching API serves, as the
+[handoff](#phase-runner-configuration) describes. This build targets the next hash-rotating
+release; when it ships with other rotating changes, one redo pair discharges them all.
