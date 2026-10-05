@@ -1,9 +1,100 @@
--- New semantic Project family: deploy matching binaries only after the full-history
--- Interpret redo and its Project redo. Merely installing the tables publishes no catalogue.
+-- New semantic Project family: use matching binaries and complete the required
+-- full-history Interpret and Project redos before serving the new API.
+-- Populated upgrades must first run ops/address-history-catalogue-indexes/install.sql.
+-- Validate the complete set before dropping any old index; adopt concurrent builds
+-- by name without rebuilding them. Empty databases can build directly.
 DO $migration$
+DECLARE
+    reviewed record;
+    final_oid oid;
+    candidate_oid oid;
+    final_matches boolean;
+    has_events boolean;
+    commands text[] := ARRAY[]::text[];
+    command text;
+    previous_search_path text;
+    previous_quote_all_identifiers text;
 BEGIN
     IF to_regclass('bigname_phase.project_family_marker') IS NULL THEN RETURN; END IF;
     LOCK TABLE bigname_phase.project_family_marker IN EXCLUSIVE MODE;
+    -- Freeze writes and concurrent index DDL while checking the population and
+    -- definitions. Planned deployment has already stopped the API and runners.
+    LOCK TABLE bigname_phase.normalized_events IN SHARE MODE;
+    SELECT EXISTS (SELECT 1 FROM bigname_phase.normalized_events) INTO has_events;
+    previous_search_path := current_setting('search_path');
+    previous_quote_all_identifiers := current_setting('quote_all_identifiers');
+    PERFORM set_config('search_path', 'pg_catalog', true);
+    PERFORM set_config('quote_all_identifiers', 'off', true);
+    FOR reviewed IN
+        SELECT * FROM (VALUES
+            ('normalized_events_name_history_idx', 'ahc_name_prebuild_idx',
+             $def$ON bigname_phase.normalized_events USING btree (logical_name_id, block_number DESC NULLS LAST, chain_id, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((logical_name_id IS NOT NULL) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_resource_history_idx', 'ahc_resource_prebuild_idx',
+             $def$ON bigname_phase.normalized_events USING btree (resource_id, block_number DESC NULLS LAST, chain_id, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((resource_id IS NOT NULL) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_project_node_history_idx', 'ahc_node_prebuild_idx',
+             $def$ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), block_number DESC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((logical_name_id IS NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (((event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (source_family = ANY (ARRAY['ens_v1_resolver_l1'::text, 'ens_v2_resolver_l1'::text, 'basenames_base_resolver'::text]))) OR ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])))))$def$),
+            ('normalized_events_record_id_write_idx', 'ahc_record_prebuild_idx',
+             $def$ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), ((after_state ->> 'resolver_record_id'::text)), block_number DESC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((event_kind = 'RecordChanged'::text) AND ((after_state ->> 'storage_model'::text) = 'resolver_record_id'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_history_discovery_name_idx', 'normalized_events_history_discovery_name_idx',
+             $def$ON bigname_phase.normalized_events USING btree (chain_id, logical_name_id, block_number) WHERE ((logical_name_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (canonicality_state <> ALL (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_history_discovery_resource_idx', 'normalized_events_history_discovery_resource_idx',
+             $def$ON bigname_phase.normalized_events USING btree (chain_id, resource_id, block_number) WHERE ((logical_name_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (canonicality_state <> ALL (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
+        ) AS definitions(index_name, candidate_name, definition)
+    LOOP
+        final_oid := to_regclass('bigname_phase.' || reviewed.index_name);
+        candidate_oid := to_regclass('bigname_phase.' || reviewed.candidate_name);
+        final_matches := false;
+        IF final_oid IS NOT NULL THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_index
+                WHERE indexrelid = final_oid
+                  AND indrelid = 'bigname_phase.normalized_events'::regclass
+            ) THEN
+                RAISE EXCEPTION '% is not an index on bigname_phase.normalized_events; follow ops/address-history-catalogue-indexes/README.md', reviewed.index_name;
+            END IF;
+            SELECT indisvalid AND indisready
+                   AND pg_get_indexdef(indexrelid) = format('CREATE INDEX %I %s', reviewed.index_name, reviewed.definition)
+            INTO final_matches FROM pg_index WHERE indexrelid = final_oid;
+        END IF;
+        -- A replacement has a separate temporary name. The two new discovery
+        -- indexes are prebuilt under their final names and must already be exact.
+        IF candidate_oid IS NOT NULL THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_index
+                WHERE indexrelid = candidate_oid
+                  AND indrelid = 'bigname_phase.normalized_events'::regclass
+                  AND indisvalid AND indisready
+                  AND pg_get_indexdef(indexrelid) = format('CREATE INDEX %I %s', reviewed.candidate_name, reviewed.definition)
+            ) THEN
+                RAISE EXCEPTION 'prebuilt index % is not the valid, ready reviewed index on bigname_phase.normalized_events; follow ops/address-history-catalogue-indexes/README.md', reviewed.candidate_name;
+            END IF;
+        END IF;
+        IF final_matches THEN
+            -- A complete final index wins. Remove only a verified redundant
+            -- temporary candidate left by an interrupted/manual adoption.
+            IF candidate_oid IS NOT NULL AND candidate_oid <> final_oid THEN
+                commands := array_append(commands, format('DROP INDEX bigname_phase.%I', reviewed.candidate_name));
+            END IF;
+            CONTINUE;
+        END IF;
+        IF has_events AND candidate_oid IS NULL THEN
+            RAISE EXCEPTION 'missing prebuilt index % on populated normalized_events; run ops/address-history-catalogue-indexes/install.sql before the catalogue migration', reviewed.candidate_name;
+        END IF;
+        IF final_oid IS NOT NULL THEN
+            commands := array_append(commands, format('DROP INDEX bigname_phase.%I', reviewed.index_name));
+        END IF;
+        IF candidate_oid IS NOT NULL THEN
+            commands := array_append(commands, format('ALTER INDEX bigname_phase.%I RENAME TO %I', reviewed.candidate_name, reviewed.index_name));
+        ELSE
+            commands := array_append(commands, format('CREATE INDEX %I %s', reviewed.index_name, reviewed.definition));
+        END IF;
+    END LOOP;
+    -- No DROP, rename or build has run until all six definitions have passed.
+    FOREACH command IN ARRAY commands LOOP
+        EXECUTE command;
+    END LOOP;
+    PERFORM set_config('search_path', previous_search_path, true);
+    PERFORM set_config('quote_all_identifiers', previous_quote_all_identifiers, true);
 -- Compact address-history catalogue. See docs/storage.md table ownership.
 
 CREATE TABLE IF NOT EXISTS bigname_phase.project_address_history_anchor (
@@ -252,91 +343,5 @@ CREATE INDEX IF NOT EXISTS project_address_history_current_resource_idx ON bigna
 CREATE INDEX IF NOT EXISTS project_history_edge_source_idx ON bigname_phase.project_history_source_edge (chain_id, source_kind, source_key, source_resolver);
 
 CREATE INDEX IF NOT EXISTS project_history_edge_resolver_node_idx ON bigname_phase.project_history_source_edge (chain_id, pointer_resolver, node);
-
-
--- Preserve the existing source equality prefixes and replace their order suffixes.
-DROP INDEX IF EXISTS bigname_phase.normalized_events_name_history_idx;
-
-CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
-    ON bigname_phase.normalized_events (
-        logical_name_id,
-        block_number DESC NULLS LAST,
-        chain_id ASC NULLS LAST,
-        block_hash DESC NULLS LAST,
-        transaction_index DESC NULLS LAST,
-        log_index DESC NULLS LAST,
-        event_identity DESC
-    )
-    WHERE logical_name_id IS NOT NULL
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
-
-DROP INDEX IF EXISTS bigname_phase.normalized_events_resource_history_idx;
-
-CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
-    ON bigname_phase.normalized_events (
-        resource_id,
-        block_number DESC NULLS LAST,
-        chain_id ASC NULLS LAST,
-        block_hash DESC NULLS LAST,
-        transaction_index DESC NULLS LAST,
-        log_index DESC NULLS LAST,
-        event_identity DESC
-    )
-    WHERE resource_id IS NOT NULL
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
-
-DROP INDEX IF EXISTS bigname_phase.normalized_events_project_node_history_idx;
-
-CREATE INDEX IF NOT EXISTS normalized_events_project_node_history_idx
-    ON bigname_phase.normalized_events (
-        chain_id, lower(after_state ->> 'node'),
-        block_number DESC NULLS LAST,
-        block_hash DESC NULLS LAST,
-        transaction_index DESC NULLS LAST,
-        log_index DESC NULLS LAST,
-        event_identity DESC
-    )
-    WHERE logical_name_id IS NULL
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state ->> 'node' IS NOT NULL
-      AND ((event_kind IN ('RecordChanged', 'RecordVersionChanged')
-            AND source_family IN ('ens_v1_resolver_l1', 'ens_v2_resolver_l1', 'basenames_base_resolver'))
-           OR (event_kind = 'ResolverChanged'
-               AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')));
-
-DROP INDEX IF EXISTS bigname_phase.normalized_events_record_id_write_idx;
-
-CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
-    ON bigname_phase.normalized_events (
-        chain_id,
-        lower(after_state ->> 'resolver'),
-        (after_state ->> 'resolver_record_id'),
-        block_number DESC NULLS LAST,
-        block_hash DESC NULLS LAST,
-        transaction_index DESC NULLS LAST,
-        log_index DESC NULLS LAST,
-        event_identity DESC
-    )
-    WHERE event_kind = 'RecordChanged'
-      AND after_state ->> 'storage_model' = 'resolver_record_id'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized');
--- Complement readable serving indexes without duplicating canonical entries.
-CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_name_idx
-    ON bigname_phase.normalized_events (chain_id, logical_name_id, block_number)
-    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
-      AND canonicality_state NOT IN (
-          'canonical'::bigname_phase.canonicality_state,
-          'safe'::bigname_phase.canonicality_state,
-          'finalized'::bigname_phase.canonicality_state);
-
-CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_resource_idx
-    ON bigname_phase.normalized_events (chain_id, resource_id, block_number)
-    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
-      AND canonicality_state NOT IN (
-          'canonical'::bigname_phase.canonicality_state,
-          'safe'::bigname_phase.canonicality_state,
-          'finalized'::bigname_phase.canonicality_state);
 END
 $migration$;

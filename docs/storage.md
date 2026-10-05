@@ -540,7 +540,9 @@ An ordinary publication between API admission and the read snapshot retains the 
 bound through the authoritative history reader in that same transaction.
 
 The catalogue migration replaces four existing normalized-event index definitions, preserving
-their equality prefixes and readable-row predicates. Their order suffix is the full public
+their equality prefixes and readable-row predicates. On populated databases it adopts
+validated [concurrent prebuilds](../ops/address-history-catalogue-indexes/README.md) by name;
+it refuses missing candidates before dropping any old index. Their order suffix is the full public
 history comparator, so a bounded source prefix needs no complete source-history sort:
 
 | Index | Additional statement served |

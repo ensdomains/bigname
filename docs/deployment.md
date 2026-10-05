@@ -218,7 +218,14 @@ run rebuilds.
 `20261005170000_project_address_history_catalogue.sql` installs the compact Project
 address-history tables, replaces four source-event indexes with the full public history
 order, and adds two complementary noncanonical name/resource indexes for conservative work
-discovery. Installing it alone publishes no catalogue. This producer changes the interpreter
+discovery. On a populated database, first follow the
+[concurrent prebuild and adoption runbook](../ops/address-history-catalogue-indexes/README.md).
+It retains the four old indexes while building their replacements under temporary names,
+and builds the two new indexes concurrently. The migration validates all six before any
+old-index drop and adopts the replacements by a short transactional rename; missing or
+invalid prebuilt candidates fail before old-index loss. Empty databases can build directly.
+Record the preceding migration versions before prebuilding, and budget the temporary index,
+WAL and sort-file space described in the runbook. Installing it alone publishes no catalogue. This producer changes the interpreter
 content hash: use matching runner/API binaries and complete the full-history Interpret redo
 and the Project redo it installs before serving with the new binary. Existing interpreted
 inputs are replayed through the normal lifecycle; no request backfill, manual marker edit or
@@ -2400,7 +2407,10 @@ These statements are the historical definition required by that target version. 
 `20261005170000_project_address_history_catalogue.sql` replaces the write index with the full
 history order. Apply migrations in order; do not prebuild the later definition before this
 historical migration has been recorded. The current walk-index installer uses the later
-catalogue definition and belongs after that upgrade.
+catalogue definition and belongs after that upgrade. The dedicated
+[catalogue prebuild](../ops/address-history-catalogue-indexes/README.md) instead builds
+replacement candidates after this historical version is recorded and before the catalogue
+migration; its temporary names preserve the historical indexes until adoption.
 
 Then apply the schema-migrations with `--target-version 20261003120000` and the same
 `lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
