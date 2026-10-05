@@ -3024,10 +3024,12 @@ introduces it rebuilds Project from full history before serving the option; see
   registration: `registration_id`, `name` and `authority_context` are the
   values the registration's other rows carry, `grant_scope` is the same `root`
   object, and `powers` are the holder's root powers. `can_transfer_admin`
-  held on the root does not let the holder transfer a name or make one
-  transferable, because a transfer checks that role only among the token
-  owner's own roles on the token; it does let the holder revoke that role from
-  an account on a live name. With `address` the read returns that account's
+  held on the root has three effects. It does not pass the transfer gate,
+  which checks that role only among the token owner's own roles on the token,
+  and it gives no ERC-1155 approval to move a token. It lets the holder revoke
+  that role from an account on a live name. And while any account holds it on
+  the root the registry is not emancipated, so `safeTransferFrom` of every
+  name of the registry reverts; `unsafeTransfer` skips that check. With `address` the read returns that account's
   rows on the registration, its root row included. An `address` read without
   `name` or `registration_id` lists a root holder once, on the root resource,
   and does not repeat it for each name of the registry. A registration whose
@@ -3040,6 +3042,10 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 
@@ -3187,9 +3193,13 @@ introduces it rebuilds Project from full history before serving the option; see
   but neither the page nor a role summary is an authoritative permission
   enumeration while the partial marker is present. Registrar ERC-721 approvals,
   resolver approvals/delegates, and parent control of non-emancipated wrapped
-  subnames remain absent. ENSv2 registry operators also remain absent, and an
-  ENSv2 registration names that gap as `ens_v2_registry_operators`.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
+  subnames remain absent. ENSv2 registry operators are served as rows. A
+  registration of a manifest-declared ENSv2 registry reports only
+  `resolver_approvals`; a registration of a discovered registry serves the
+  same operator rows and also reports `ens_v2_registry_operators`, because its
+  code may let further accounts act that the rows do not list.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. An ENSv2 reservation does

@@ -14,15 +14,20 @@
 //! - Root-holder rows. A role check on a token reads the caller's roles on the registry root
 //!   together with its roles on the token, so every root holder acts on every token of the
 //!   registry. A read bound to one token resource lists the registry's root grants as rows of
-//!   that resource, with every root power. `can_transfer_admin` held on the root does not let
-//!   its holder transfer a token or make one transferable, because a transfer checks that role
-//!   only among the token owner's own roles on the token; it does let the holder revoke that
-//!   role from an account on a live token, since revocable roles are computed from the root and
-//!   token roles together.
+//!   that resource, with every root power. `can_transfer_admin` held on the root does not pass
+//!   the transfer gate, which checks that role only among the token owner's own roles on the
+//!   token, and gives no ERC-1155 approval. It lets the holder revoke that role from an account
+//!   on a live token, since revocable roles are computed from the root and token roles
+//!   together. While any account holds it on the root the registry is not emancipated, so
+//!   `safeTransferFrom` of every token reverts; `unsafeTransfer` skips that check.
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
 //!   A registration whose rows the path-expiry drop removes lists no root holders either. A
 //!   root `renew` holder can still revive an expired entry; that holder is a row of the root.
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)

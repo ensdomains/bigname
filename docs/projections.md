@@ -789,13 +789,20 @@ live in the registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 A read bound to one ENSv2 registry token resource also serves the registry's
 root grants as rows of that resource, under the same path-expiry drop. A
-root holder of `can_transfer_admin` cannot transfer a token, since a transfer
-checks that role only among the token owner's own roles on the token, but can
-revoke it from an account on a live token.
+root holder of `can_transfer_admin` does not pass the transfer gate, which
+checks that role only among the token owner's own roles on the token, and has
+no ERC-1155 approval from it. The holder can revoke the role from an account
+on a live token. While any account holds it on the root the registry is not
+emancipated, so `safeTransferFrom` of every token reverts; `unsafeTransfer`
+skips that check.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
 An expired registration lists no root holder, although a root `renew` holder
 can still revive the entry; that holder is a row of the root resource.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)

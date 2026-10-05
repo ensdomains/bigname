@@ -1,7 +1,9 @@
-// ENSv2 registry operators and root holders on a registration read, from the registry's own logs
-// through the adapter and the family runner. `_register` emits LabelRegistered, mints, emits
-// TokenResource and grants the owner's roles; a transfer moves the owner's roles with the token;
-// a role grant regenerates the token; a root renewer revives an expired entry with `renew`.
+// ENSv2 registry operators and root holders on a registration read: adapter and family
+// integration tests over hand-encoded registry logs. No contract is executed. Each sequence is
+// written to be one the pinned registry can emit: `_register` emits LabelRegistered, mints,
+// emits TokenResource and grants the owner's roles; a transfer moves the owner's roles with the
+// token; a role grant regenerates the token; a root renewer revives an expired entry with
+// `renew`.
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L448-L514 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578-L588 @ ens_v2_sepolia_20261001@07e55a05)
@@ -102,9 +104,15 @@ fn registry_family() -> (ManifestInput, AddressAdmissionInput) {
 
 /// The registry's logs, each block's in emission order.
 #[derive(Default)]
-struct Logs(Vec<RawLogInput>);
+struct Logs(Vec<RawLogInput>, Option<&'static str>);
 
 impl Logs {
+    /// The account that registers, unregisters and sends each role change: the root holder
+    /// unless the fixture names another registrar.
+    fn sender(&self) -> &'static str {
+        self.1.unwrap_or(ROOT_HOLDER)
+    }
+
     fn push(&mut self, block: i64, data: LogData) -> &mut Self {
         let log_index = self.0.iter().filter(|raw| raw.block_number == block).count() as i64;
         self.0.push(RawLogInput {
@@ -128,8 +136,11 @@ impl Logs {
             oldRoleBitmap: old, newRoleBitmap: new }.encode_log_data())
     }
 
+    /// A mint or burn is sent by the account that registers, unregisters or changes roles;
+    /// the owner sends its own transfer.
     fn transfer(&mut self, block: i64, token: U256, from: &str, to: &str) -> &mut Self {
-        self.push(block, TransferSingle { operator: account(ROOT_HOLDER), from: account(from),
+        let operator = if from == ZERO || to == ZERO { self.sender() } else { from };
+        self.push(block, TransferSingle { operator: account(operator), from: account(from),
             to: account(to), id: token, value: U256::from(1) }.encode_log_data())
     }
 
@@ -140,26 +151,29 @@ impl Logs {
 
     /// `_register` of the label to Alice, expiring at `expiry`.
     fn register(&mut self, block: i64, expiry: u64) -> &mut Self {
-        self.register_as(block, expiry, (0, 0), ALICE)
+        self.register_as(block, expiry, (0, 0), ALICE, owner_roles())
     }
 
-    /// `_register` of the label to `owner` at token and role version `versions`.
-    fn register_as(&mut self, block: i64, expiry: u64, versions: (u32, u32), owner: &str) -> &mut Self {
+    /// `_register` of the label to `owner` at token and role version `versions`, granting
+    /// `roles`.
+    fn register_as(&mut self, block: i64, expiry: u64, versions: (u32, u32), owner: &str,
+        roles: U256) -> &mut Self {
         let (token, resource) = (versioned(versions.0), versioned(versions.1));
+        let sender = account(self.sender());
         self.push(block, LabelRegistered { tokenId: token, labelHash: keccak256(LABEL.as_bytes()),
-            label: LABEL.into(), owner: account(owner), expiry,
-            sender: account(ROOT_HOLDER) }.encode_log_data())
+            label: LABEL.into(), owner: account(owner), expiry, sender }.encode_log_data())
             .transfer(block, token, ZERO, owner)
             .push(block, TokenResource { tokenId: token, resource }.encode_log_data())
-            .roles(block, resource, owner, U256::ZERO, owner_roles())
+            .roles(block, resource, owner, U256::ZERO, roles)
     }
 }
 
 fn registry_logs() -> Logs {
     let mut logs = Logs::default();
     let (resource, token) = (versioned(0), versioned(0));
-    // The root holder is the registrar and holds root `renew`, which lets it revive an entry.
-    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(16) | bit(128))
+    // The root holder is the registrar and holds root `renew`, which lets it revive an entry,
+    // and root `admin_set_subregistry`, which lets it grant the operator's own role.
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(16) | bit(128) | bit(148))
         .roles(120, U256::ZERO, ROOT_MIXED, U256::ZERO, bit(16) | bit(156))
         .roles(120, U256::ZERO, ROOT_TRANSFER_ONLY, U256::ZERO, bit(156))
         .register(121, EXPIRY)
@@ -377,7 +391,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     let owner_powers = json!(["renew", "set_resolver", "admin_set_resolver", "can_transfer_admin"]);
     let operator_own = row(OPERATOR, "registry", None, json!(["set_subregistry"]));
     let root_rows = [
-        row(ROOT_HOLDER, "root", None, json!(["registrar", "renew", "admin_registrar"])),
+        row(ROOT_HOLDER, "root", None, json!(["registrar", "renew", "admin_registrar", "admin_set_subregistry"])),
         row(ROOT_MIXED, "root", None, json!(["renew", "can_transfer_admin"])),
         row(ROOT_TRANSFER_ONLY, "root", None, json!(["can_transfer_admin"])),
     ];
@@ -518,8 +532,10 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
 async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
     const FAR: u64 = 1_800_000_000;
     let database = TestDatabase::new_migrated().await?;
-    let mut logs = Logs::default();
-    logs.roles(120, U256::ZERO, ALICE, U256::ZERO, bit(0) | bit(128))
+    // Alice is the registrar. Her root `admin_renew` lets her revoke her own token `renew`;
+    // the other token roles she revokes through their own admin bits.
+    let mut logs = Logs(Vec::new(), Some(ALICE));
+    logs.roles(120, U256::ZERO, ALICE, U256::ZERO, bit(0) | bit(128) | bit(144))
         .register(121, FAR)
         .approve(122, ALICE, OPERATOR, true)
         .approve(122, OPERATOR, BOB, true)
@@ -533,7 +549,7 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
     let (token, output) = seed(&database, logs, false).await?;
     let uri = format!("/v1/permissions?registration_id={token}");
     let owner_powers = json!(["renew", "set_resolver", "admin_set_resolver", "can_transfer_admin"]);
-    let alice_root = row(ALICE, "root", None, json!(["registrar", "admin_registrar"]));
+    let alice_root = row(ALICE, "root", None, json!(["registrar", "admin_registrar", "admin_renew"]));
 
     publish(&database, &output, 123).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
@@ -552,11 +568,11 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
     publish(&database, &output, 124).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![alice_root], "{page:#}");
-    // A registration whose only rows are root holders still has its restriction block: no
-    // admin of any token role is left on the token or the root.
+    // A registration whose only rows are root holders still has its restriction block: the
+    // root `admin_renew` is the only admin of a token role left on the token or the root.
     assert_eq!(page["restrictions"], json!({
         "kind": "ens_v2_registry",
-        "locked_roles": ["unregister", "renew", "set_subregistry", "set_resolver", "transfer"],
+        "locked_roles": ["unregister", "set_subregistry", "set_resolver", "transfer"],
         "registration_id": token.to_string(),
     }), "{page:#}");
     let by_operator = v2_permissions_payload_for_database(&database,
@@ -574,16 +590,21 @@ async fn operator_rows_follow_the_entry_through_unregister_and_a_new_registratio
     const FAR: u64 = 1_800_000_000;
     let database = TestDatabase::new_migrated().await?;
     let mut logs = Logs::default();
-    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(16) | bit(128))
+    // The root holder is the registrar and holds root `register_reserved`, `unregister` and
+    // `renew`: it unregisters the name, revives the entry and registers the reservation.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L474-L484 @ ens_v2_sepolia_20261001@07e55a05)
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO,
+            bit(0) | bit(4) | bit(12) | bit(16) | bit(128))
         .register(121, FAR)
         .approve(122, ALICE, OPERATOR, true)
-        .push(124, LabelUnregistered { tokenId: versioned(0), sender: account(ALICE) }.encode_log_data())
+        .push(124, LabelUnregistered { tokenId: versioned(0), sender: account(ROOT_HOLDER) }.encode_log_data())
         .transfer(124, versioned(0), ALICE, ZERO)
         // The root renewer revives the unregistered entry: it is held again, with no token.
         .push(125, ExpiryUpdated { tokenId: versioned(1), newExpiry: FAR,
             sender: account(ROOT_HOLDER) }.encode_log_data())
         // Unregister advanced both versions, so the next registration has token 1 and resource 1.
-        .register_as(126, FAR, (1, 1), BOB)
+        // Registering a reservation adds `was_reserved` (bit 32) to the owner's roles.
+        .register_as(126, FAR, (1, 1), BOB, owner_roles() | bit(32))
         .approve(128, BOB, OPERATOR, true);
     let (first, output) = seed(&database, logs, true).await?;
     let second = output
@@ -675,8 +696,8 @@ async fn operator_rows_page_across_candidate_batches_and_need_a_stated_expiry() 
     }
 
     // The same entry as a registry leaves it when only a transfer was retained: owner known,
-    // expiry never stated. It cannot be shown live, so its operators are not served, and a
-    // small page still reaches the row after seventy dropped candidates.
+    // expiry never stated. It cannot be shown live, so its operators are not served and the
+    // rows on either side of them stay.
     sqlx::query("UPDATE bigname_phase.project_ens_v2_entry_owner SET expiry = NULL
                  WHERE chain_id = $1 AND registry = $2")
         .bind(CHAIN).bind(REGISTRY).execute(&database.pool).await?;

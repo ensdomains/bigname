@@ -233,16 +233,22 @@ lists the holders of the registry's
 [root resource](glossary.md#registry-root-resource), because a role held there
 passes the same role check on every token of the registry. Each is a row of
 that registration with `grant_scope.kind` `root` and the holder's root powers.
-`can_transfer_admin` held on the root does not let the holder transfer a name
-or make one transferable, because a transfer checks that role only among the
-token owner's own roles on the token. It does let the holder revoke that role
-from an account on a live name.
+`can_transfer_admin` held on the root has three effects. It does not pass the
+transfer gate, which checks that role only among the token owner's own roles
+on the token, and it gives no ERC-1155 approval to move a token. It lets the
+holder revoke that role from an account on a live name. And while any account
+holds it on the root the registry is not emancipated, so `safeTransferFrom`
+of every name of the registry reverts; `unsafeTransfer` skips that check.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
 An expired registration serves no rows, root rows included. A holder of root
 `renew` can still revive the expired entry; such holders are listed on the
 registry's own read (`registry=<chain_id>:<address>`).
