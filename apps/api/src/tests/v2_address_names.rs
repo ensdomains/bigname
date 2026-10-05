@@ -2099,6 +2099,45 @@ async fn v2_wrapper_expiries_are_read_once_per_chain_per_request() -> Result<()>
     database.cleanup().await
 }
 
+/// Search reads its page and wrapper expiries on one snapshot and releases it before the namespace
+/// revalidation, which reads through the pool, so a one-connection pool serves both a bare and
+/// a namespace-scoped search.
+#[tokio::test]
+async fn v2_search_serves_wrapper_expiries_on_a_one_connection_pool() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    let config = database.database_config(1)?;
+    let options = PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?
+        .options([("search_path", "bigname_phase".to_owned())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    for uri in [
+        "/v1/search?q=alice",
+        "/v1/search?q=alice&namespace=ens",
+    ] {
+        let state =
+            AppState::new_with_rpc_urls(pool.clone(), bigname_lookup::ChainRpcUrls::default())
+                .with_public_namespaces_for_test(["ens"]);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            app_router(state).oneshot(Request::builder().uri(uri).body(Body::empty())?),
+        )
+        .await
+        .with_context(|| format!("{uri} stalled on a one-connection pool"))??;
+        let status = response.status();
+        let body: Value = read_json(response).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        assert!(
+            body["data"][0]["ens_v1"]["wrapper_expires_at"].is_string(),
+            "{uri}: {body}"
+        );
+    }
+    pool.close().await;
+    database.cleanup().await
+}
+
 /// TYR-134: a wrapped subname serves its token holder as `manager` on name detail, lookup detail
 /// and its parent's subnames row, before and after it is emancipated, and the `manager` relation
 /// lists the subname for that holder.

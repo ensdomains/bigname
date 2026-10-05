@@ -301,6 +301,56 @@ async fn v2_ens_v1_wrapper_expiry_classifies_the_maximum_and_zero() -> Result<()
     Ok(())
 }
 
+/// Lookup reads the wrapper expiries after its rows. When Project undoes the wrapping in between,
+/// the wrapper's stored row is gone by then; the lookup answers stale, as for any served data
+/// that moved under it, not an internal error.
+#[tokio::test]
+async fn v2_lookup_answers_stale_when_the_wrapper_is_undone_before_its_expiry_is_read() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    let (_guard, control) =
+        crate::v2::lookup_served_head_revalidation_test_hooks::install(&database.lookup_pool)
+            .await?;
+    let state = database.app_state();
+    let request_task = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/lookup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"profile": "feed",
+                            "inputs": [{"name": "alice.eth"}]}))
+                        .expect("body must serialize"),
+                    ))
+                    .expect("request must build"),
+            )
+            .await
+    });
+
+    control.wait_until_reached().await;
+    sqlx::query("DELETE FROM normalized_events WHERE source_family = 'ens_v1_wrapper_l1'")
+        .execute(&database.pool)
+        .await?;
+    republish_fixture_chain(&database, "ethereum-mainnet").await?;
+    sqlx::query("DELETE FROM bigname_phase.project_wrapper_state")
+        .execute(&database.pool)
+        .await?;
+    control.resume().await;
+
+    let response = request_task
+        .await
+        .context("lookup request task panicked")?
+        .context("lookup request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], json!("stale"), "{payload:#}");
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_ens_v1_object_on_an_unwrapped_lease_and_its_absence_under_ens_v2() -> Result<()> {
     let unwrapped = v2_name_record_payload("/v1/names/alice.eth").await?;

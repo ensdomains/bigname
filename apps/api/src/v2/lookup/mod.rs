@@ -135,13 +135,16 @@ pub(crate) async fn get_lookup(
     .await?;
     apply_migrated_at(&state, &mut results).await?;
     apply_record_abis(&state, &mut results).await?;
-    apply_wrapper_expiries(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;
+    // The expiries are a later read than the rows: when the served data moved in between, the
+    // revalidation's stale answer takes precedence over whatever this read then found.
+    let wrapper_expiries = apply_wrapper_expiries(&state, &mut results).await;
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.pool, served_head).await?;
     }
+    wrapper_expiries?;
     let data = results
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
@@ -214,7 +217,7 @@ async fn apply_record_abis(state: &AppState, results: &mut [Option<LookupResult>
 }
 
 /// Reads the wrapper expiry of every rendered `ens_v1` once per chain across name results and
-/// reverse rows, before the served head is revalidated.
+/// reverse rows.
 async fn apply_wrapper_expiries(
     state: &AppState,
     results: &mut [Option<LookupResult>],
