@@ -517,7 +517,17 @@ impl TestDatabase {
         _initialize_name_current_schema: bool,
     ) -> Result<Self> {
         let fingerprint = PHASE_BASELINE.map(str::as_bytes);
-        Self::from_template("api_phase", &fingerprint, |pool| async move {
+        Self::from_template("api_phase", None, &fingerprint, |pool| async move {
+            initialize_phase_schema(&pool).await
+        })
+        .await
+    }
+
+    /// [`Self::new_migrated`] on a database whose default collation is ICU `en-US`, which
+    /// orders names differently from their bytes.
+    async fn new_migrated_icu() -> Result<Self> {
+        let fingerprint = PHASE_BASELINE.map(str::as_bytes);
+        Self::from_template("api_phase_icu", Some("en-US"), &fingerprint, |pool| async move {
             initialize_phase_schema(&pool).await
         })
         .await
@@ -529,13 +539,23 @@ impl TestDatabase {
         Self::new(false).await
     }
 
-    async fn from_template<F, Fut>(key: &str, fingerprint: &[&[u8]], build: F) -> Result<Self>
+    async fn from_template<F, Fut>(
+        key: &str,
+        icu_locale: Option<&str>,
+        fingerprint: &[&[u8]],
+        build: F,
+    ) -> Result<Self>
     where
         F: FnOnce(PgPool) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        let config = TestDatabaseConfig::new("bigname_api_test");
+        let config = match icu_locale {
+            Some(locale) => config.icu_locale(locale),
+            None => config,
+        };
         let database = bigname_test_support::TestDatabase::create_from_template(
-            TestDatabaseConfig::new("bigname_api_test")
+            config
                 .admin_database_from_url()
                 .pool_max_connections(1)
                 .parse_context("failed to parse database URL for API tests")

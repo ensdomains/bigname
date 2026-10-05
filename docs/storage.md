@@ -438,9 +438,14 @@ Family indexes serve these concrete readers:
   there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
   recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
   reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
-  start from `project_address_name_index`.
-- Each of those three walks runs its statement for the surfaces with raw bytes unchanged, as
-  the first arm of a `UNION ALL`. The second arm walks the surfaces without raw bytes: it
+  start from `project_address_name_index`. They order and continue by name, namespace and
+  namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
+  before its cursor by comparing the same keys as bytes, and the route builds its cursor the
+  same way, so a database collation that orders names differently from their bytes would
+  otherwise skip names between pages. Search and bound names order, filter and continue in
+  SQL alone, under the database collation throughout.
+- Each of those three walks runs its statement for the surfaces with raw bytes as the first
+  arm of a `UNION ALL`; for search and bound names that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
   computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
   the same filters and keyset cursor to that name, and has no length bound. The two arms are
   merged in served-name order. The second arm is guarded by a test that any surface without

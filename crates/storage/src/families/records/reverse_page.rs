@@ -320,8 +320,13 @@ fn key_tuple(cursor: &ReverseIdentityCursor) -> (bool, i16, &str, &str, &str) {
 }
 
 /// The candidates with raw bytes, in page order; `candidates_sql` runs it as its first arm.
+/// The page order is bytewise (`COLLATE "C"`) whatever the database collation: `group_on` and
+/// the route's cursor compare the same keys as Rust strings.
 const REVERSE_CANDIDATES_SQL: &str = "/* storage:families.records.reverse_candidates */
-         SELECT DISTINCT surface.logical_name_id, surface.raw_name, surface.namespace, surface.namehash
+         SELECT DISTINCT surface.logical_name_id COLLATE \"C\" AS logical_name_id,
+                surface.raw_name COLLATE \"C\" AS raw_name,
+                surface.namespace COLLATE \"C\" AS namespace,
+                surface.namehash COLLATE \"C\" AS namehash
          FROM bigname_phase.name_surfaces surface
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
@@ -339,8 +344,10 @@ const REVERSE_CANDIDATES_SQL: &str = "/* storage:families.records.reverse_candid
                  AND indexed.logical_name_id = surface.logical_name_id
                  AND indexed.chain_id = surface.chain_id AND indexed.relation = ANY($5)
            )
-           AND ($6::text IS NULL OR (surface.raw_name, surface.namespace, surface.namehash) > ($6, $7, $8))
-         ORDER BY surface.raw_name, surface.namespace, surface.namehash, surface.logical_name_id
+           AND ($6::text IS NULL
+                OR (surface.raw_name COLLATE \"C\", surface.namespace COLLATE \"C\",
+                    surface.namehash COLLATE \"C\") > ($6, $7, $8))
+         ORDER BY raw_name, namespace, namehash, logical_name_id
          LIMIT $9";
 
 /// The statement `candidates_on` runs: [`REVERSE_CANDIDATES_SQL`], unchanged, then the same
@@ -351,7 +358,10 @@ fn candidates_sql() -> String {
     format!(
         "({REVERSE_CANDIDATES_SQL})
          UNION ALL
-         (SELECT DISTINCT surface.logical_name_id, rendered.name, surface.namespace, surface.namehash
+         (SELECT DISTINCT surface.logical_name_id COLLATE \"C\" AS logical_name_id,
+                 rendered.name COLLATE \"C\" AS raw_name,
+                 surface.namespace COLLATE \"C\" AS namespace,
+                 surface.namehash COLLATE \"C\" AS namehash
           FROM bigname_phase.name_surfaces surface
           JOIN bigname_phase.chain_lineage lineage
             ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
@@ -370,8 +380,10 @@ fn candidates_sql() -> String {
                   AND indexed.logical_name_id = surface.logical_name_id
                   AND indexed.chain_id = surface.chain_id AND indexed.relation = ANY($5)
             )
-            AND ($6::text IS NULL OR (rendered.name, surface.namespace, surface.namehash) > ($6, $7, $8))
-          ORDER BY rendered.name, surface.namespace, surface.namehash, surface.logical_name_id
+            AND ($6::text IS NULL
+                 OR (rendered.name COLLATE \"C\", surface.namespace COLLATE \"C\",
+                     surface.namehash COLLATE \"C\") > ($6, $7, $8))
+          ORDER BY raw_name, namespace, namehash, logical_name_id
           LIMIT $9)
          ORDER BY raw_name, namespace, namehash, logical_name_id
          LIMIT $9",

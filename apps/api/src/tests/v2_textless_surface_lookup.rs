@@ -361,3 +361,93 @@ async fn v2_textless_names_page_alike_on_the_capped_address_walk() -> Result<()>
 
     database.cleanup().await
 }
+
+/// Reverse lookup pages its names in bytewise order whatever the database collation: the
+/// statement that picks candidates, the continuation test and the cursor all use that order.
+/// ICU `en-US` sorts the emoji names before the ASCII ones and their bytes sort after.
+#[tokio::test]
+async fn v2_reverse_lookup_pages_every_name_on_a_database_with_an_icu_collation() -> Result<()> {
+    let database = TestDatabase::new_migrated_icu().await?;
+    let icu_before: bool = sqlx::query_scalar("SELECT '🅰🅱.alpha.eth' < 'alpha.eth'")
+        .fetch_one(&database.pool)
+        .await?;
+    assert!(icu_before, "the database collation orders these names as their bytes do");
+    seed_textless_fixture_with(&database, true, true).await?;
+
+    let read = |page_size: usize, cursor: Option<Value>| {
+        let database = &database;
+        async move {
+            let mut input = json!({"address": RC_OWNER, "page_size": page_size});
+            if let Some(cursor) = cursor {
+                input["cursor"] = cursor;
+            }
+            let response = v2_lookup_response_for_database_with_public_namespaces(
+                database,
+                "/v1/lookup",
+                json!({"inputs": [input]}),
+                &["ens"],
+            )
+            .await?;
+            anyhow::ensure!(response.status() == StatusCode::OK, "{}", response.status());
+            let body: Value = read_json(response).await?;
+            anyhow::Ok(body["data"][0].clone())
+        }
+    };
+    let names_of = |result: &Value| -> Vec<String> {
+        let records = result["records"].as_array().expect("records");
+        records.iter().map(|record| record["name"].as_str().expect("name").to_owned()).collect()
+    };
+
+    let whole = names_of(&read(50, None).await?);
+    assert_eq!(whole.len(), 8, "{whole:?}");
+    assert!(whole.contains(&format!("{TL_DECODED_LABEL}.alpha.eth")), "{whole:?}");
+    assert!(whole.contains(&"alpha.eth".to_owned()), "{whole:?}");
+    for page_size in [1, 3] {
+        let (mut walked, mut cursor) = (Vec::new(), None);
+        for _ in 0..=whole.len() {
+            let result = read(page_size, cursor).await?;
+            walked.extend(names_of(&result));
+            cursor = result["page"]["next_cursor"].as_str().map(|cursor| json!(cursor));
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(walked, whole, "page_size={page_size}");
+    }
+
+    // The walks that order and continue in SQL alone serve the same pages at any page size.
+    let search = "/v1/search?q=alpha&match=contains";
+    let found = tl_column(&read_family_pages(&database, &format!("{search}&page_size=50")).await?, "name");
+    assert_eq!(found.len(), 8, "{found:?}");
+    for page_size in [1, 3] {
+        let uri = format!("{search}&page_size={page_size}");
+        let paged = read_family_pages(&database, &uri).await?;
+        assert_eq!(tl_column(&paged, "name"), found, "{uri}");
+    }
+    for order in ["asc", "desc"] {
+        for page_size in [1, 3] {
+            let uri = format!(
+                "/v1/addresses/{RC_OWNER}/names?namespace=ens&sort=name&order={order}&page_size={page_size}"
+            );
+            let exact = walk_all_pages(&database, &uri).await?;
+            let (walked, paths) =
+                with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
+            assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
+            let walked = walked?;
+            assert_eq!(
+                exact.iter().map(page_body).collect::<Vec<_>>(),
+                walked.iter().map(page_body).collect::<Vec<_>>(),
+                "{uri}"
+            );
+            let rows = exact.iter().map(|page| page["data"].as_array().map_or(0, Vec::len));
+            assert_eq!(rows.sum::<usize>(), 8, "{uri}");
+        }
+    }
+    for page_size in [1, 3, 50] {
+        let uri = format!("/v1/names/alpha.eth/subnames?page_size={page_size}");
+        let names = tl_column(&read_family_pages(&database, &uri).await?, "name");
+        assert_eq!(names.len(), 2, "{uri}: {names:?}");
+    }
+
+    database.cleanup().await
+}
