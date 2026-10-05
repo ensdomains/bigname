@@ -226,7 +226,10 @@ const CUTOVER_NAMES: &str = r#"/* project:families.derived.cutover_names */
           SELECT 1 FROM name_surfaces parent
           WHERE parent.logical_name_id = ANY($3)
             AND parent.namespace = 'ens' AND cardinality(parent.labelhashes) = 2
-            AND split_part(parent.raw_name, '.', 2) = 'eth'
+            -- keccak256 of the label eth: a .eth second-level parent, whether or not its
+            -- surface stores the label text.
+            AND lower(parent.labelhashes[2]) =
+                '0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0'
             AND child.labelhashes[cardinality(child.labelhashes)-1:] = parent.labelhashes
       )
       AND EXISTS (
@@ -241,3 +244,14 @@ const CUTOVER_NAMES: &str = r#"/* project:families.derived.cutover_names */
             AND event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
       )
 "#;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_cutover_parent_test_names_the_eth_labelhash() {
+        assert!(super::CUTOVER_NAMES.contains(&format!(
+            "'{}'",
+            bigname_storage::families::control::lifecycle::ETH_LABELHASH
+        )));
+    }
+}

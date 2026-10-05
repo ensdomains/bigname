@@ -76,7 +76,7 @@ async fn seed_bulk_address_names(database: &TestDatabase, count: usize) -> Resul
             input_name: name.clone(),
             canonical_display_name: normalized.canonical_display_name,
             normalized_name: normalized.normalized_name.clone(),
-            dns_encoded_name: normalized.dns_encoded_name,
+            dns_encoded_name: Some(normalized.dns_encoded_name),
             namehash,
             labelhashes: vec![],
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.into(),

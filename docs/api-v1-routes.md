@@ -706,11 +706,12 @@ collection route carry neither header.
   `authority=ens_v0,ens_v1` matches both. Rows that serve no `authority`
   (Basenames rows and ownerless registry rows) match no set.
   `parent` keeps only names exactly one label below the given name, compared
-  by normalized name spelling after the ENSIP-15 normalization name routes
+  by served name spelling after the ENSIP-15 normalization name routes
   apply to a path name, not by node or registry topology: a bracketed labelhash
-  label matches only names stored with that bracketed spelling, never a name
-  that spells the label as text, except the labelhashes of `eth` and `base`,
-  which that normalization spells as text. `parent=eth` selects the `.eth`
+  label matches only names served with that bracketed spelling (a
+  [rendered name](glossary.md#rendered-name) whose label has no verified
+  text), never a name that spells the label as text, except the labelhashes of
+  `eth` and `base`, which that normalization spells as text. `parent=eth` selects the `.eth`
   second-level names before and after the
   [Universal Resolver cutover](glossary.md#universal-resolver-cutover), ENSv1
   BaseRegistrar leases
@@ -1000,7 +1001,9 @@ collection route carry neither header.
   registration and no classified serving path, for example a released name, a
   reservation, or an unbound `current_authority_not_projected` row) requests
   no key, dispatches no call, and returns `status=unsupported` with
-  `verified_records_not_supported`. An inventory-derived set above 200 keys
+  `verified_records_not_supported`. So does a name whose surface stores no raw
+  label bytes unless every label has verified bytes (see the refusal reasons
+  under [`GET /v1/names/{name}/records`](#get-v1namesnamerecords)). An inventory-derived set above 200 keys
   also dispatches no call: the request fails with `422 unsupported`. An
   eligible name is not in that group just because it has no exact resolver:
   an ENS name whose exact resolver is null executes the same key set through
@@ -1381,7 +1384,8 @@ its value map:
   exact-name detail route: `verified_records_not_supported` when the projected
   row carries no topology the engine admits (a bound name without a record
   inventory row, a null-resolver row outside the discovery shape below, an
-  out-of-class shape, or no admitted execution entrypoint), and
+  out-of-class shape, or no admitted execution entrypoint) or when the name's
+  surface stores no raw label bytes and bigname cannot supply them, and
   `exact_name_authority_not_verifiable` when the row's selected
   [authority arm](glossary.md#authority-epoch) is outside the
   `verified_authority_arms` the selected `ens_execution` manifest declares
@@ -1390,6 +1394,17 @@ its value map:
   admitted on the official `sepolia` profile). A name served as
   `authority=ens_v0` is on the stored `ens_v1` arm and is admitted wherever
   `ens_v1` is. Neither refusal dispatches a provider call.
+  A name whose surface stores no raw label bytes is verified only when every
+  label of its label-hash path has a preimage that passed normalization, each
+  1 to 255 bytes long, and those label bytes hash to the name's node; the
+  lookup then builds the DNS wire name from them. Otherwise it is refused with
+  `verified_records_not_supported` before any provider call, and the
+  exact-name detail route still serves its indexed registration and identity
+  fields. A bracketed labelhash cannot stand in for the missing bytes on the
+  ENSv1 path, because the library the ENSv1 Universal Resolver's registry walk
+  uses hashes the literal bytes of each label of the wire name
+  (upstream: .refs/ens_v1/contracts/utils/NameCoder.sol:L126-L137 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L32 @ ens_v1@91c966f).
   Bound ENS names of either arm with a non-null exact resolver carry a
   projected direct topology (`execution.md` § Resolver-record lookup), so an
   admitted arm executes the direct route and compares against the indexed
@@ -1890,6 +1905,13 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   bigname cannot name is absent from the page instead. The placeholder label
   is a [name input](api-v1.md#name-inputs) for its node. That node has no name
   row while it has no name surface, so name routes answer it `404 not_found`.
+  A child whose own name surface stores no raw label bytes has a name row. It
+  is listed once, as that row serves it, under its
+  [rendered name](glossary.md#rendered-name), and name routes answer that
+  spelling with the row. Its row never takes the escape form: a label whose
+  preimage is not valid text reads as the placeholder. A parent whose surface
+  stores no raw label bytes lists and counts its children under its own
+  rendered name, at any depth. No adapter writes such a surface yet.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
@@ -3805,8 +3827,8 @@ introduces it rebuilds Project from full history before serving the option; see
   too when the registrar retains no lease; the lease token's `Transfer` moves
   `owner`
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
-  Once a surface names the
-  child, only its ordinary row is listed; the surface counts from the family
+  Once the child has a name surface, with or without raw label bytes, only its
+  ordinary row is listed; the surface counts from the family
   publication that includes its block, so a surface Interpret commits after the
   served publication leaves the child listed here until Project publishes it.
   A label preimage can arrive without a new publication and rename such a row,
@@ -4337,7 +4359,13 @@ introduces it rebuilds Project from full history before serving the option; see
   required; a missing or empty `q` returns `400 invalid_input`. The API treats
   `q` as an ENSIP-15 name fragment, normalizes it, and then applies the selected
   `match=prefix|contains` byte comparison directly to stored names. Invalid
-  normalization returns `400 invalid_input`. A single trailing dot remains
+  normalization returns `400 invalid_input`. A name whose surface stores no
+  raw label bytes is compared by its
+  [rendered name](glossary.md#rendered-name) and is not subject to the
+  2000-byte bound. The normalizer rejects `[` and `]`, so `q` cannot spell a
+  bracketed labelhash label: such a name is found through its labels that have
+  verified text, and a `match=contains` fragment of hex digits also matches
+  those digits inside a bracketed label. A single trailing dot remains
   preserved as a label boundary after the preceding nonempty name is normalized,
   matching the address-names `q` behavior documented above. With
   `match=contains`, one leading dot is also accepted when it is followed by a

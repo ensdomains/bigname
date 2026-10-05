@@ -13,6 +13,7 @@ use super::{
     name_summary::{serving, zero_owner},
     shims::{effective_child_fuses, row_position},
 };
+use crate::families::name::rendered::rendered_name_sql;
 
 pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";
 const ZERO_ADDRESS: &str = "'0x0000000000000000000000000000000000000000'";
@@ -105,7 +106,10 @@ pub(super) fn push_selected<'a>(
     builder.push(format!(
         "
         ), parent AS (
-            SELECT surface.logical_name_id, surface.namespace, surface.chain_id, surface.raw_name,
+            -- `raw_name` is the parent's served name: its stored name, or the name built from
+            -- its label hashes when it stores no raw bytes. A child's name ends in it.
+            SELECT surface.logical_name_id, surface.namespace, surface.chain_id,
+                   {parent_name} AS raw_name,
                    lower(surface.namehash) AS node, surface.labelhashes
             FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id
             WHERE surface.visibility_state = 'active' AND {parent_readable}
@@ -207,6 +211,7 @@ pub(super) fn push_selected<'a>(
             LEFT JOIN bigname_phase.normalized_events registration_event
               ON registration_event.event_identity = registration.event_identity
             WHERE parent.raw_name <> ''",
+        parent_name = rendered_name_sql("surface"),
         parent_readable = readable_surface("surface"),
         child_readable = readable_surface("child"),
         migration_address = active_instance(
@@ -402,10 +407,14 @@ fn label_decoded_name(under_root: &str) -> String {
 
 /// The served child name: decoded, else the escaped raw bytes, else the labelhash placeholder
 /// under the parent's spelling (crates/storage/src/children/reads.rs,
-/// `CHILD_DISPLAY_NAME_EXPR`).
+/// `CHILD_DISPLAY_NAME_EXPR`). A child whose surface at the clock stores no raw bytes has a name
+/// row, which never serves the escaped form (`name::rendered`), so this one skips it too and the
+/// two routes name the child alike.
 pub(super) const CHILD_DISPLAY_NAME: &str = "COALESCE(
     selected.decoded_name,
-    encode(selected.raw_name, 'escape'),
+    CASE WHEN child_surface.logical_name_id IS NOT NULL AND child_surface.raw_name IS NULL
+              AND child_surface.block_number <= clock.block_number THEN NULL
+         ELSE encode(selected.raw_name, 'escape') END,
     '[' || substring(lower(selected.labelhash) FROM 3) || '].' || parent.raw_name
 )";
 

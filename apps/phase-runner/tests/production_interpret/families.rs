@@ -117,7 +117,20 @@ pub async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
             logical_name_id: name.into(),
             namehash: row.namehash.clone(),
             selection: AuthoritySelection::from_provenance(&row.provenance),
-            place: NamePlace::of(&row.namespace, &row.normalized_name, &[]),
+            place: NamePlace::of(
+                &row.namespace,
+                &row.normalized_name
+                    .split('.')
+                    .map(|label| {
+                        format!(
+                            "{:#x}",
+                            alloy_primitives::B256::from(
+                                bigname_storage::rendered_name::label_hash(label)
+                            )
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         }],
     )
     .await?;

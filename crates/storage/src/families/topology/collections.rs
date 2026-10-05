@@ -17,7 +17,10 @@ use crate::families::{
         lifecycle::Clock,
         permissions::{ResourceInput, load_shadow_permissions_on, resolver_grant_evidence},
     },
-    name::{FamilyPublication, FamilyPublicationUnavailable, publication_on},
+    name::{
+        FamilyPublication, FamilyPublicationUnavailable, publication_on,
+        rendered::rendered_name_sql,
+    },
 };
 
 /// One page of a resolver collection: `(key1, key2, item)` rows in key order, and the total.
@@ -52,7 +55,8 @@ pub async fn load_resolver_links_shadow(
     after: Option<&(String, String)>,
     limit: i64,
 ) -> Result<FamilyCollectionPage> {
-    let items = "WITH clock AS (
+    let items = format!(
+        "WITH clock AS (
             SELECT current_block_number AS block_number
             FROM bigname_phase.project_family_marker WHERE chain_id = $1
         ), items AS (
@@ -62,6 +66,7 @@ pub async fn load_resolver_links_shadow(
                     'default', link.node =
                         '0x0000000000000000000000000000000000000000000000000000000000000000',
                     'logical_name_id', named.logical_name_id, 'name', named.raw_name,
+                    'name_is_rendered', NULLIF(named.rendered, false),
                     'namespace', named.namespace, 'normalized_event_id', link.normalized_event_id,
                     'chain_position', jsonb_strip_nulls(jsonb_build_object(
                         'chain_id', link.chain_id, 'block_number', link.block_number,
@@ -78,7 +83,8 @@ pub async fn load_resolver_links_shadow(
              AND lineage.block_number = event.block_number
             LEFT JOIN LATERAL (
                 -- Only an active readable surface is a name; the default node's is the root.
-                SELECT surface.logical_name_id, surface.raw_name, surface.namespace
+                SELECT surface.logical_name_id, {name} AS raw_name, surface.namespace,
+                       surface.raw_name IS NULL AS rendered
                 FROM bigname_phase.name_surfaces surface
                 JOIN bigname_phase.chain_lineage surface_lineage
                   ON surface_lineage.chain_id = surface.chain_id
@@ -94,13 +100,15 @@ pub async fn load_resolver_links_shadow(
             ) named ON TRUE
             WHERE link.chain_id = $1 AND link.resolver_address = $2
               AND link.record_id <> '0'
-        )";
+        )",
+        name = rendered_name_sql("surface")
+    );
     let address = resolver_address.to_ascii_lowercase();
     let mut snapshot = db.into().snapshot().await?;
     marker(&mut snapshot, chain_id).await?;
     let page = page(
         &mut snapshot,
-        items,
+        &items,
         (chain_id, &address, Some(namespace)),
         after,
         limit,

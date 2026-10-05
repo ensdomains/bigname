@@ -26,6 +26,7 @@ use crate::{
     NameCurrentExpiringFilter, NameCurrentExpiryWindow, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentListPage, UnixSeconds,
     families::name::CoverageShape,
+    families::name::rendered::{self, composed_surface_sql, rendered_name_sql},
     name_current::{expiring_page_from, push_parent_predicate},
 };
 
@@ -108,8 +109,11 @@ pub async fn load_family_expiring_page(
 /// A name is selected when its summary marks it listable and its surface is one the composition
 /// reads (`loaders::surfaces`, at or before its chain's family block). The keys are the ones the
 /// page statement orders by: a listable summary's `expires_at` is the expiry the composed row
-/// serves, and an active surface's `raw_name` is its normalized name. They compare in the
-/// database's own collation and as exact numerics, as the page statement compares them.
+/// serves, and the name is the surface's served name (`rendered_name_sql`): its `raw_name`,
+/// which for an active surface is its normalized name, or for a surface that stores no raw
+/// bytes the name built from its label hashes, the text the composition serves for it. They
+/// compare in the database's own collation and as exact numerics, as the page statement
+/// compares them.
 pub(crate) async fn select_expiring_names(
     conn: &mut PgConnection,
     selection: &ExpiringSelection<'_>,
@@ -162,6 +166,7 @@ fn expiring_union_query<'a>(
     } else {
         "DESC"
     });
+    // `raw_name` is each arm's served name, so the merge orders as every arm does.
     builder.push(", namespace ASC, raw_name ASC, namehash ASC LIMIT ");
     builder.push_bind(i64::try_from(limit).context("expiring union limit exceeds i64")?);
     Ok(builder)
@@ -178,10 +183,13 @@ fn push_expiring_selection<'a>(
         Some(_) => bail!("name_current expiring page cursor must carry an expiry timestamp"),
     };
     let ascending = selection.order == NameCurrentListOrder::Asc;
-    builder.push(
+    // The served name: the key of this arm's order, cursor and `parent` test, and the
+    // `raw_name` column a union of arms merges by.
+    let name = rendered_name_sql("surface");
+    builder.push(format!(
         "/* storage:families.name.expiring_names */
          SELECT summary.logical_name_id, summary.expires_at, summary.namespace,
-                surface.raw_name, surface.namehash
+                {name} AS raw_name, surface.namehash
          FROM bigname_phase.project_name_summary summary
          JOIN bigname_phase.name_surfaces surface
            ON surface.chain_id = summary.chain_id
@@ -190,12 +198,13 @@ fn push_expiring_selection<'a>(
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
          JOIN bigname_phase.project_family_marker marker ON marker.chain_id = summary.chain_id
          WHERE summary.expiry_listable AND summary.expires_at IS NOT NULL
-           AND surface.visibility_state = 'active' AND surface.raw_name <> ''
+           AND {composed}
            AND surface.block_number <= marker.current_block_number
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND summary.namespace = ",
-    );
+        composed = composed_surface_sql("surface")
+    ));
     builder.push_bind(selection.namespace);
     match selection.authorities {
         None => {}
@@ -211,7 +220,7 @@ fn push_expiring_selection<'a>(
         }
     }
     if let Some(parent) = selection.parent {
-        push_parent_predicate(builder, "surface.raw_name", parent);
+        push_parent_predicate(builder, &format!("({name})"), parent);
     }
     if let Some(expires_after) = selection.expires_after {
         builder.push(" AND summary.expires_at >= ");
@@ -236,7 +245,9 @@ fn push_expiring_selection<'a>(
         builder.push_bind(at);
         builder.push(" OR (summary.expires_at = ");
         builder.push_bind(at);
-        builder.push(" AND (summary.namespace, surface.raw_name, surface.namehash) > (");
+        builder.push(format!(
+            " AND (summary.namespace, {name}, surface.namehash) > ("
+        ));
         builder.push_bind(&cursor.namespace);
         builder.push(", ");
         builder.push_bind(&cursor.normalized_name);
@@ -246,7 +257,9 @@ fn push_expiring_selection<'a>(
     }
     builder.push(" ORDER BY summary.expires_at ");
     builder.push(if ascending { "ASC" } else { "DESC" });
-    builder.push(", summary.namespace ASC, surface.raw_name ASC, surface.namehash ASC LIMIT ");
+    builder.push(format!(
+        ", summary.namespace ASC, {name} ASC, surface.namehash ASC LIMIT "
+    ));
     builder.push_bind(i64::try_from(limit).context("expiring selection limit exceeds i64")?);
     Ok(())
 }
@@ -273,7 +286,8 @@ pub(crate) async fn compose_expiring_page(
         });
     }
     crate::families::name::seams::note_composed_names(names.len());
-    let composed = batch::load_base(conn, names, CoverageShape::Plain).await?;
+    let mut composed = batch::load_base(conn, names, CoverageShape::Plain).await?;
+    rendered::enrich(conn, &mut composed).await?;
     let source = Value::Array(composed.values().map(source_row).collect());
     crate::families::name::seams::note_submitted_rows(composed.len());
     let page = expiring_page_from(&mut *conn, filter, order, cursor, page_size, &source).await?;

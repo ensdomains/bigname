@@ -1,4 +1,6 @@
 use super::*;
+// One parser for the bracketed spelling, shared with the readers that render it.
+use bigname_storage::rendered_name::{bracketed_label, label_hash};
 
 /// A route's normalized name. A label of it spelled as a bracketed labelhash stands for that
 /// labelhash: the normalizer rejects `[` and `]`, so the spelling is unambiguous in the text.
@@ -31,16 +33,7 @@ pub(crate) fn route_logical_name_id(namespace: &str, name: &str) -> String {
         return bigname_storage::logical_name_id_for_name(namespace, name);
     }
     let node = name.split('.').rev().fold([0u8; 32], |node, label| {
-        let labelhash = match bracketed_label(label) {
-            Some(hex) => {
-                let mut labelhash = [0u8; 32];
-                alloy_primitives::hex::decode_to_slice(hex, &mut labelhash)
-                    .expect("64 hex digits decode to 32 bytes");
-                labelhash
-            }
-            None => alloy_primitives::keccak256(label.as_bytes()).0,
-        };
-        alloy_primitives::keccak256([node, labelhash].concat()).0
+        alloy_primitives::keccak256([node, label_hash(label)].concat()).0
     });
     format!("{namespace}:0x{}", alloy_primitives::hex::encode(node))
 }
@@ -91,15 +84,6 @@ pub(crate) fn normalize_inferred_route_name(
     })
 }
 
-/// The hex digits of a label spelled `[<64 hex digits>]`, either case. The normalizer rejects `[`
-/// and `]`, so no normalized label takes this form.
-fn bracketed_label(label: &str) -> Option<&str> {
-    label
-        .strip_prefix('[')?
-        .strip_suffix(']')
-        .filter(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-}
-
 /// A name with at least one bracketed labelhash, which is kept; the other labels are normalized
 /// one by one.
 fn normalize_bracketed_route_name(
@@ -113,9 +97,7 @@ fn normalize_bracketed_route_name(
                     message: format!("bracketed labelhash {label} must be lowercase hex"),
                 });
             }
-            let mut labelhash = [0u8; 32];
-            alloy_primitives::hex::decode_to_slice(hex, &mut labelhash)
-                .expect("64 hex digits decode to 32 bytes");
+            let labelhash = label_hash(label);
             // Namespace inference reads `eth` and `base` as text, so they are spelled out.
             let known = ["eth", "base"]
                 .into_iter()

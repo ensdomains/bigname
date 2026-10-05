@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row, types::Uuid};
 
-use crate::ChildrenCurrentPageFilter;
+use crate::{ChildrenCurrentPageFilter, families::name::rendered::composed_surface_sql};
 
 use super::{children::Parents, children_page::push_children, require_publication};
 
@@ -162,8 +162,8 @@ pub(super) fn owned_children_query<'a>(
 }
 
 /// The published-surface test of a name id, as SQL with `$block` naming the publication block
-/// parameter: a surface the ordinary compositor would read (active, named, canonical in a
-/// canonical block, `name::loaders::surfaces`) written at or before the publication
+/// parameter: a surface the ordinary compositor would read (`composed_surface_sql`, canonical in
+/// a canonical block, `name::loaders::surfaces`) written at or before the publication
 /// (`name::batch::load_base`). A registry child is surface-less for a publication exactly when
 /// this is false, so the two paths hand a child over at the publication that composes it.
 pub(crate) fn published_surface_exists(id: &str, block: &str) -> String {
@@ -172,10 +172,11 @@ pub(crate) fn published_surface_exists(id: &str, block: &str) -> String {
                  JOIN bigname_phase.chain_lineage lineage
                    ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
                  WHERE surface.logical_name_id = {id}
-                   AND surface.visibility_state = 'active' AND surface.raw_name <> ''
+                   AND {composed}
                    AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                   AND surface.block_number <= {block})"
+                   AND surface.block_number <= {block})",
+        composed = composed_surface_sql("surface")
     )
 }
 

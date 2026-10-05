@@ -27,7 +27,14 @@ const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
 /// and below `aXb.eth` and `a%b.eth`, which a `LIKE` taking the parent as a pattern would
 /// also match; one label and two labels below a bracketed labelhash parent; and a name of
 /// about 6.6 KB, longer than any index on names admits.
+///
+/// Two more, ROWS + 8 and ROWS + 9, store no raw bytes and also share [`TIE`]: `tlknown.eth`,
+/// whose labels all have usable preimages, and a label with no preimage one label below
+/// `p.eth`. Each is listed under the name built from its label hashes.
 pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
+    raw_sql(include_str!("../../../../schema/baseline/07_labels.sql"))
+        .execute(&mut *connection)
+        .await?;
     let opaque = format!("[{}].eth", "ab".repeat(32));
     raw_sql(&format!(
         "INSERT INTO chain_lineage
@@ -62,7 +69,22 @@ pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()>
                 '{CHAIN}', 'block-' || block_number, block_number,
                 (CASE WHEN block_number % 70 = 0 THEN 'orphaned' ELSE 'canonical' END)
                     ::canonicality_state
-         FROM fixture_name;
+         FROM fixture_name WHERE raw_name IS NOT NULL;
+         INSERT INTO label_preimages (labelhash, raw_label, decoded_label, normalizer_version,
+             normalized_under_version, source_kind, source_priority)
+         SELECT '0x' || repeat(digit, 64), convert_to(label, 'UTF8'), label, 'v1', true,
+                'fixture', 0
+         FROM (VALUES ('1', 'eth'), ('2', 'p'), ('3', 'tlknown')) known(digit, label);
+         INSERT INTO fixture_name VALUES ({ROWS} + 8, NULL, 1), ({ROWS} + 9, NULL, 1);
+         INSERT INTO name_surfaces (logical_name_id, namespace, namehash, labelhashes,
+             normalizer_version, visibility_state, chain_id, block_hash, block_number,
+             canonicality_state)
+         SELECT 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', '0x' || lpad(to_hex(n), 64, '0'),
+                path, 'v1', 'active', '{CHAIN}', 'block-1', 1, 'canonical'
+         FROM (VALUES
+             ({ROWS} + 8, ARRAY['0x' || repeat('3', 64), '0x' || repeat('1', 64)]),
+             ({ROWS} + 9, ARRAY['0x' || repeat('c', 64), '0x' || repeat('2', 64),
+                                '0x' || repeat('1', 64)])) textless(n, path);
          INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
              zero_owner, expires_at, expiry_listable, public_authority)
          SELECT '{CHAIN}', 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', TRUE, FALSE,
@@ -89,7 +111,7 @@ pub(super) async fn listed(
     descending: bool,
 ) -> Result<Vec<(String, String, String, String)>> {
     let rows = raw_sql(&format!(
-        "SELECT summary.logical_name_id, summary.expires_at::text AS at, surface.raw_name,
+        "SELECT summary.logical_name_id, summary.expires_at::text AS at, {name} AS raw_name,
                 surface.namehash
          FROM project_name_summary summary
          JOIN name_surfaces surface USING (logical_name_id)
@@ -98,8 +120,9 @@ pub(super) async fn listed(
          WHERE summary.expiry_listable AND surface.visibility_state = 'active'
            AND surface.block_number <= {ROWS}
            AND lineage.canonicality_state = 'canonical'
-         ORDER BY summary.expires_at {}, surface.raw_name, surface.namehash",
-        if descending { "DESC" } else { "ASC" }
+         ORDER BY summary.expires_at {direction}, {name}, surface.namehash",
+        name = rendered_name_sql("surface"),
+        direction = if descending { "DESC" } else { "ASC" }
     ))
     .fetch_all(&mut *connection)
     .await?;
@@ -280,6 +303,13 @@ async fn expiring_selection_reads_the_selector_indexes_in_the_public_order() -> 
             ensure!(
                 all.iter().any(|(_, _, name, _)| name.len() > 6_000),
                 "the fixture's long name is not listed"
+            );
+            let textless_child = format!("[{}].p.eth", "c".repeat(64));
+            ensure!(
+                ["tlknown.eth", textless_child.as_str()]
+                    .iter()
+                    .all(|served| all.iter().any(|(_, _, name, _)| name == served)),
+                "the fixture's names without bytes are not listed under their served names"
             );
             let authority_of = |id: &str| -> Option<&'static str> {
                 let n =

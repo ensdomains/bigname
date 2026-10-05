@@ -217,14 +217,15 @@ pub async fn load_family_names_by_resource_ids(
     .fetch_all(&mut *snapshot)
     .await
     .context("failed to load the names bound to resources")?;
-    // The served pick orders by raw name then name id in the database's collation, so the
+    // The served pick orders by served name then name id in the database's collation, so the
     // order is taken from the database too.
-    let ordered: Vec<String> = sqlx::query_scalar(
+    let ordered: Vec<String> = sqlx::query_scalar(&format!(
         "/* storage:families.name.by_resource_order */
          SELECT surface.logical_name_id FROM bigname_phase.name_surfaces surface
          WHERE surface.logical_name_id = ANY($1)
-         ORDER BY surface.raw_name ASC, surface.logical_name_id ASC",
-    )
+         ORDER BY {name} ASC, surface.logical_name_id ASC",
+        name = super::rendered::rendered_name_sql("surface")
+    ))
     .bind(&names)
     .fetch_all(&mut *snapshot)
     .await
@@ -251,6 +252,8 @@ pub(crate) async fn load(
     shape: CoverageShape,
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
     let mut rows = load_base(conn, logical_name_ids, shape).await?;
+    // The topology below copies each row's name, so the name is settled first.
+    super::rendered::enrich(conn, &mut rows).await?;
     super::topology::enrich_all(conn, &mut rows).await?;
     Ok(rows)
 }
@@ -342,7 +345,7 @@ pub(super) async fn load_chain(
             logical_name_id: surface.logical_name_id.clone(),
             namehash: surface.namehash.to_ascii_lowercase(),
             selection: AuthoritySelection::default(),
-            place: NamePlace::of(&surface.namespace, &surface.raw_name, &surface.labelhashes),
+            place: NamePlace::of(&surface.namespace, &surface.labelhashes),
         })
         .collect();
     let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
