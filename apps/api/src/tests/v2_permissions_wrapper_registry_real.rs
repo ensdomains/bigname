@@ -10,6 +10,8 @@ use bigname_interpret::{BatchRequest, Engine, RunMode};
 
 #[path = "v2_permissions_wrapper_registry_role.rs"]
 mod api_role;
+#[path = "v2_permissions_wrapper_registry_batch.rs"]
+mod batch;
 #[path = "v2_permissions_wrapper_registry_history.rs"]
 mod history;
 #[path = "v2_permissions_wrapper_registry_lifecycle.rs"]

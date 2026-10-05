@@ -13,7 +13,7 @@ use super::{
     facts::authority_facts,
     masked_grants,
     page::{direct_row, operator_row},
-    registry_support::{self, Model},
+    registry_support::{self, Model, SupportedRegistry},
 };
 use crate::{
     EffectivePermissionRow, PermissionGrantRelation,
@@ -153,25 +153,23 @@ pub(super) async fn compose(
         return Ok(());
     }
     let declarations = registry_support::Declarations::load(conn, publication).await?;
-    let mut supported = BTreeMap::new();
-    for (_, registry, parent, _, parent_instance) in &parents {
-        for (address, instance) in [
-            (registry, None),
-            (
-                parent,
-                parent_instance
-                    .as_deref()
-                    .and_then(|value| value.parse::<Uuid>().ok()),
-            ),
-        ] {
-            if !supported.contains_key(address) {
-                let support =
-                    registry_support::load(conn, publication, &declarations, address, instance)
-                        .await?;
-                supported.insert(address.clone(), support);
-            }
-        }
-    }
+    let supported = load_supported(
+        conn,
+        publication,
+        &declarations,
+        parents
+            .iter()
+            .flat_map(|(_, registry, parent, _, instance)| {
+                [
+                    (registry.clone(), None),
+                    (
+                        parent.clone(),
+                        instance.as_deref().and_then(|value| value.parse().ok()),
+                    ),
+                ]
+            }),
+    )
+    .await?;
     let states: BTreeMap<Uuid, Maxima> = sqlx::query_scalar::<_, Value>(
         "/* storage:families.control.permissions.wrapper_key_states */
          SELECT to_jsonb(state) FROM bigname_phase.project_lifecycle_key_state state
@@ -190,24 +188,25 @@ pub(super) async fn compose(
     })
     .collect();
     for (root, registry, parent, entry_key, parent_instance) in parents {
-        let (Some(Some(wrapper)), Some(Some(parent_model))) =
-            (supported.get(&registry), supported.get(&parent))
-        else {
+        let parent_instance = parent_instance
+            .as_deref()
+            .and_then(|value| value.parse::<Uuid>().ok());
+        let (Some(Some(wrapper)), Some(Some(parent_model))) = (
+            supported.get(&(registry, None)),
+            supported.get(&(parent.clone(), parent_instance)),
+        ) else {
             continue;
         };
         if wrapper.model != Model::Wrapper
             || wrapper.root != root
             || wrapper.namespace != parent_model.namespace
-            || parent_instance
-                .as_deref()
-                .and_then(|value| value.parse::<Uuid>().ok())
-                .is_none_or(|instance| {
-                    parent_model.root
-                        != crate::identity::ens_v2_registry_root_resource_id(
-                            &publication.chain_id,
-                            instance,
-                        )
-                })
+            || parent_instance.is_none_or(|instance| {
+                parent_model.root
+                    != crate::identity::ens_v2_registry_root_resource_id(
+                        &publication.chain_id,
+                        instance,
+                    )
+            })
         {
             continue;
         }
@@ -340,3 +339,29 @@ pub(super) async fn compose(
     }
     Ok(())
 }
+
+// Each map belongs to one held publication. Instance-less child recognition and recognition
+// using a parent's Project instance are distinct inputs, including when either returns None.
+type SupportCache = BTreeMap<(String, Option<Uuid>), Option<SupportedRegistry>>;
+
+async fn load_supported(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    declarations: &registry_support::Declarations,
+    lookups: impl IntoIterator<Item = (String, Option<Uuid>)>,
+) -> Result<SupportCache> {
+    let mut supported = SupportCache::new();
+    for key in lookups {
+        if let std::collections::btree_map::Entry::Vacant(entry) = supported.entry(key) {
+            let (address, instance) = entry.key();
+            let support =
+                registry_support::load(conn, publication, declarations, address, *instance).await?;
+            entry.insert(support);
+        }
+    }
+    Ok(supported)
+}
+
+#[cfg(test)]
+#[path = "wrapper_registry_cache_tests.rs"]
+mod cache_tests;
