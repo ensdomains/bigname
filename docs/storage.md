@@ -421,10 +421,14 @@ inside) also lie at or below the read's published block, so a grant Interpret ha
 the publication a read is bound to does not turn that publication's older rows, count, or cursor
 anchors into registration history.
 
-Address history (`GET /v1/addresses/{address}/history`) runs three statements in
-`crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
-resources the address holds now, through the family address-name reader, and held in the past from three kinds
-of activated, canonical events. A current relation row counts only when the event Project cites
+Address history (`GET /v1/addresses/{address}/history`) keeps one read-only repeatable-read
+transaction in `crates/storage/src/history/address_walk/`. Address-indexed SQL joins enumerate
+narrow event keys and the name/resource evidence that can admit each event. A non-holdable
+PostgreSQL cursor returns at most 256 such rows per batch. Only those names requiring current
+membership are composed, using the base address composer without topology or record inventory;
+compact membership and attribution caches each retain at most 1,024 answers. Historical
+membership reuses `address_matches.rs`: it finds names and resources held in the past from
+three kinds of activated, canonical events. A current relation row counts only when the event Project cites
 for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
 published block of that chain, so a relation acquired after that block cannot admit the
 resource's older events; a row without a cited block does not count under a bound. The name's
@@ -453,15 +457,29 @@ is the address, each compared lowercased. One partial expression index per kind 
 by the lowercased value: `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`, and
 `normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
-identical to the query text. The capped count and the page then read the rows of those names and
-resources plus the resolver record writes attributed to the resources (`attribution.rs`,
-described below). That filter is an OR of `logical_name_id`, `resource_id`, and
-`normalized_event_id` conditions. The attributed event ids do not depend on the row, so the read
-loads them once, inside the page's repeatable-read transaction, and binds them as an array
-(`= ANY($ids)`); PostgreSQL then answers each branch from
-`normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
-key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
-condition inside the OR, and the planner reads every canonical row to keep the few that match.
+identical to the query text. Each candidate arm probes the name, resource, node, resolver/record
+key, or selected link through the corresponding index. A lateral planning boundary keeps event
+probes keyed by that address's evidence even at large cardinalities. The database may sort and
+spill all address-specific candidates before returning the first batch; this bounds API memory,
+not the amount of address-specific SQL work.
+
+The same batched validator determines page membership and counts. Record attribution accepts
+only requested `(resource_id, normalized_event_id)` pairs, materializes those event IDs once,
+and retains all pointer/link boundary evidence needed to evaluate them correctly. It never loads
+the resource's complete attributed-event set for this route. An event reached through several
+names, resources, or attribution paths counts once. Fallback handoff copies choose the least
+eligible event identity across the complete peer group, independently of the public cursor or
+batch boundary. The API retains at most `page_size + 1` accepted IDs, one scalar count, and the
+final page's payloads. Default counting stops after 10,001 eligible events and returns a null
+total above 10,000; `include=total_count` walks the complete collection. Page and count walks
+share the transaction and compact caches. Name display enrichment loads base names only.
+The cursor closes on success and the transaction releases it on error or cancellation. There
+is no full-address application-side anchor, payload, or attribution collection. A single name
+can still require many retained facts during composition; the fixed name batch does not impose
+a new bound on that name's lifecycle evidence.
+
+The legacy full-selector reader remains in use for unpaged/diagnostic storage calls and
+`GET /v1/events?address=...`; this bounded route does not change those contracts.
 The three indexes cover only activated rows in readable canonicality states, so an anchor read
 that drops either condition cannot use them and falls back to a broad scan, such as
 `normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
@@ -475,8 +493,8 @@ whose before or after state assigns `resource_control` to the address and
 state-derived registry-only `SurfaceBound` owner evidence. This intentionally
 includes former-controller audit history after revocation or replacement; it does
 not assert current ownership. The bounded product path keeps the current-relation
-and publication checks above. No parallel current-state cache is introduced.
-`GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
+and publication checks above; its compact caches exist only within one request snapshot.
+`GET /v1/names/{name}/history` with `scope=both` keeps its existing selector filter. The registration-scoped
 read keeps a correlated `IN` because its attribution check refers to the row. These are access
 paths only: no stored row, response, or [interpreter content
 hash](glossary.md#interpreter-content-hash) input changes. Existing installations receive the

@@ -71,7 +71,9 @@ pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use history::history_anchor_read_test_hooks;
+pub use history::{
+    AddressHistoryWorkingSet, history_anchor_read_test_hooks, with_address_history_working_set,
+};
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
     HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
@@ -122,11 +124,12 @@ pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentExpiringFilter,
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
     NameCurrentListPage, NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
-    load_current_names_by_resource_ids, load_name_current, load_name_current_by_logical_name_ids,
-    load_name_current_for_snapshot, load_name_migration_transition_timestamps,
-    name_current_authority_arm, name_current_is_ownerless_registry,
-    name_current_list_cursor_from_row, name_current_public_authority,
-    name_current_registry_generation, name_current_registry_handoff_block_number,
+    load_current_names_by_resource_ids, load_current_normalized_names, load_name_current,
+    load_name_current_by_logical_name_ids, load_name_current_for_snapshot,
+    load_name_migration_transition_timestamps, name_current_authority_arm,
+    name_current_is_ownerless_registry, name_current_list_cursor_from_row,
+    name_current_public_authority, name_current_registry_generation,
+    name_current_registry_handoff_block_number,
 };
 pub use normalized_events::*;
 pub use permissions::{

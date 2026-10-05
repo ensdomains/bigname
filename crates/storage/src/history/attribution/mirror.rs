@@ -43,8 +43,11 @@ pub(super) async fn load_mirror_attribution(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) -> Result<BTreeMap<Uuid, Option<BTreeSet<i64>>>> {
     let mirrors = load_mirror_pointers(connection, resource_ids, published).await?;
+    let _pointers_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_pointers", mirrors.len()));
     let mut attribution = mirrors
         .iter()
         .map(|mirror| (mirror.resource_id, None))
@@ -58,14 +61,22 @@ pub(super) async fn load_mirror_attribution(
     }
 
     let walk = MirrorWalk::new(&followable);
+    let _suffixes_live = requested.map(|_| {
+        super::super::address_walk::seams::Live::new("mirror_suffixes", walk.resource_ids.len())
+    });
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_mirror_writes(&mut builder, &walk, published);
-    for row in builder
+    push_mirror_writes(&mut builder, &walk, published, requested);
+    let rows = builder
         .build()
         .fetch_all(&mut *connection)
         .await
-        .context("failed to load mirrored resolver record writes")?
-    {
+        .context("failed to load mirrored resolver record writes")?;
+    let _rows_live = requested
+        .map(|_| super::super::address_walk::seams::Live::new("mirror_sql_rows", rows.len()));
+    if requested.is_some() {
+        super::super::address_walk::seams::count("mirror_rows_returned", rows.len());
+    }
+    for row in rows {
         let resource_id: Uuid = row.try_get("resource_id")?;
         let writes = attribution
             .entry(resource_id)
@@ -206,7 +217,7 @@ pub(super) fn push_empty_mirror_writes_for_test(
     published: Option<&BTreeMap<String, i64>>,
 ) {
     let walk: &'static MirrorWalk = Box::leak(Box::default());
-    push_mirror_writes(builder, walk, published);
+    push_mirror_writes(builder, walk, published, None);
 }
 
 /// The mirror substitution statement over one consulted node, the queried name itself, for plan
@@ -228,7 +239,7 @@ pub(super) fn push_exact_node_mirror_writes_for_test(
         labels: vec![Value::from(raw_labels.to_vec())],
         queried_nodes: vec![node.to_owned()],
     }));
-    push_mirror_writes(builder, walk, published);
+    push_mirror_writes(builder, walk, published, None);
 }
 
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
@@ -237,7 +248,13 @@ fn push_mirror_writes<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     walk: &'a MirrorWalk,
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) {
+    let record_source = if requested.is_some() {
+        "requested_history_records"
+    } else {
+        "bigname_phase.normalized_events"
+    };
     builder.push("WITH walk AS (SELECT * FROM unnest(");
     builder.push_bind(&walk.resource_ids);
     builder.push("::uuid[], ");
@@ -254,9 +271,13 @@ fn push_mirror_writes<'a>(
     builder.push_bind(&walk.queried_nodes);
     builder.push(
         "::text[]) AS walk(resource_id, chain_id, namespace, ancestor_depth, node, labels,
-                           queried_node)
-        ),
-        candidates AS (
+                           queried_node))",
+    );
+    if let Some(requested) = requested {
+        requested.push_event_cte(builder);
+    }
+    builder.push(
+        ", candidates AS (
             SELECT walk.resource_id, walk.chain_id, walk.ancestor_depth, walk.queried_node,
                    registry.mirrored_pointer_namespace, registry.mirrored_resolver_address,
                    registry.mirrored_pointer_position
@@ -346,7 +367,7 @@ fn push_mirror_writes<'a>(
         UNION ALL
         SELECT followed.resource_id, record.normalized_event_id
         FROM followed
-        JOIN bigname_phase.normalized_events record
+        JOIN __requested_record_source__ record
           ON record.chain_id = followed.chain_id
          AND record.logical_name_id IS NULL
          AND record.source_family = 'ens_v1_resolver_l1'
@@ -356,7 +377,15 @@ fn push_mirror_writes<'a>(
                  NULLIF(record.after_state ->> 'resolver', ''),
                  NULLIF(record.raw_fact_ref ->> 'emitting_address', '')
              )) = followed.mirrored_resolver_address
-        WHERE TRUE",
+        WHERE TRUE"
+            .replace("__requested_record_source__", record_source),
     );
     push_readable_event(builder, "record", published);
+    if let Some(requested) = requested {
+        requested.push_filter(
+            builder,
+            "followed.resource_id",
+            "record.normalized_event_id",
+        );
+    }
 }

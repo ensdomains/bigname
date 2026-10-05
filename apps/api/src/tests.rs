@@ -425,6 +425,10 @@ include!("tests/v2_verified_name_detail.rs");
 include!("tests/record_id_resolver.rs");
 include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
+#[path = "tests/v2_address_history_perf.rs"]
+mod v2_address_history_perf;
+#[path = "tests/v2_address_history_walk.rs"]
+mod v2_address_history_walk;
 include!("tests/v2_history_registration_identity.rs");
 include!("tests/v2_history_publication_bounds.rs");
 include!("tests/v2_history_bounded_membership.rs");

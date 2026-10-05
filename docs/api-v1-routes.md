@@ -3999,6 +3999,12 @@ introduces it rebuilds Project from full history before serving the option; see
   nonterminal page contains `page_size` rows; only the terminal page may be
   shorter. `page.total_count` follows the shared anchored-count contract:
   capped by default, exact and uncapped with `include=total_count`.
+  Address candidates remain in SQL; the reader validates fixed-size event and
+  anchor batches, including resolver-record attribution, and retains only the
+  requested page and one lookahead row. Counting uses the same matching rules
+  without retaining the matched history. The default count stops after 10,001
+  matches; an exact count can scan the entire matching history and cost more.
+  Neither mode truncates the collection or changes its cursor order.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so

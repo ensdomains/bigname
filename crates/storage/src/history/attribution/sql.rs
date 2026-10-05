@@ -16,7 +16,7 @@ pub(super) const CLEARED: &str = "('0x0000000000000000000000000000000000000000',
 
 /// `alias` is an activated, canonical event on a readable block at or below the bound of its
 /// chain, or an event with no chain position at all.
-pub(super) fn push_readable_event(
+pub(in crate::history) fn push_readable_event(
     builder: &mut QueryBuilder<'_, Postgres>,
     alias: &str,
     published: Option<&BTreeMap<String, i64>>,
@@ -38,7 +38,7 @@ pub(super) fn push_readable_event(
 
 /// `alias` is a name surface readable at the bound: canonical, on a readable block at
 /// or below the bound of its chain.
-pub(super) fn push_readable_surface(
+pub(in crate::history) fn push_readable_surface(
     builder: &mut QueryBuilder<'_, Postgres>,
     alias: &str,
     published: Option<&BTreeMap<String, i64>>,
@@ -189,8 +189,17 @@ pub(super) fn push_pointer_window_attribution<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) {
     push_pointer_ctes(builder, resource_ids, published);
+    if let Some(requested) = requested {
+        requested.push_event_cte(builder);
+    }
+    let record_source = if requested.is_some() {
+        "requested_history_records"
+    } else {
+        "bigname_phase.normalized_events"
+    };
     push_record_link_ctes(builder, published);
     // ENSv1 and Basenames: a registry-side pointer attributes the node-keyed writes on its
     // resolver made before the next pointer; the latest pointer is open-ended. Each arm names its
@@ -211,7 +220,7 @@ pub(super) fn push_pointer_window_attribution<'a>(
             "
         SELECT pointer.resource_id, record.normalized_event_id
         FROM pointers pointer
-        JOIN bigname_phase.normalized_events record
+        JOIN {record_source} record
           ON {}
          AND record.source_family = '{record_family}'
         WHERE pointer.pointer_source_family IN {pointer_families}
@@ -220,11 +229,14 @@ pub(super) fn push_pointer_window_attribution<'a>(
             inside("pointer"),
         ));
         push_readable_event(builder, "record", published);
+        if let Some(requested) = requested {
+            requested.push_filter(builder, "pointer.resource_id", "record.normalized_event_id");
+        }
         builder.push("\n        UNION");
     }
-    push_declared_resolver_arm(builder, published);
+    push_declared_resolver_arm(builder, published, requested);
     builder.push("\n        UNION");
-    push_record_link_arm(builder, published);
+    push_record_link_arm(builder, published, requested);
 }
 
 /// ENSv2-origin writes: an ENSv2 registry or root pointer attributes the node-keyed writes of a
@@ -235,7 +247,13 @@ pub(super) fn push_pointer_window_attribution<'a>(
 fn push_declared_resolver_arm(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) {
+    let record_source = if requested.is_some() {
+        "requested_history_records"
+    } else {
+        "bigname_phase.normalized_events"
+    };
     builder.push(
         "
         SELECT pointer.resource_id, record.normalized_event_id
@@ -267,7 +285,7 @@ fn push_declared_resolver_arm(
     builder.push(format!(
         "
           ON declaration.active AND declaration.namespace = pointer.pointer_namespace
-        JOIN bigname_phase.normalized_events record
+        JOIN {record_source} record
           ON {}
          AND record.source_family =
              resolver.declared_summary #>> '{{classification,source_family}}'
@@ -281,6 +299,9 @@ fn push_declared_resolver_arm(
         inside("pointer"),
     ));
     push_readable_event(builder, "record", published);
+    if let Some(requested) = requested {
+        requested.push_filter(builder, "pointer.resource_id", "record.normalized_event_id");
+    }
 }
 
 /// `, links, link_boundaries, link_spans, link_selections`: on a record-ID resolver each pointer's
@@ -369,12 +390,18 @@ fn push_record_link_ctes(
 fn push_record_link_arm(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&super::RequestedPairs>,
 ) {
+    let record_source = if requested.is_some() {
+        "requested_history_records"
+    } else {
+        "bigname_phase.normalized_events"
+    };
     builder.push(format!(
         "
         SELECT selection.resource_id, record.normalized_event_id
         FROM link_selections selection
-        JOIN bigname_phase.normalized_events record
+        JOIN {record_source} record
           ON record.chain_id = selection.chain_id
          AND lower(record.after_state ->> 'resolver') = selection.resolver_address
          AND record.after_state ->> 'storage_model' = 'resolver_record_id'
@@ -385,6 +412,13 @@ fn push_record_link_arm(
         inside("selection"),
     ));
     push_readable_event(builder, "record", published);
+    if let Some(requested) = requested {
+        requested.push_filter(
+            builder,
+            "selection.resource_id",
+            "record.normalized_event_id",
+        );
+    }
     builder.push(
         "
         UNION
@@ -394,4 +428,7 @@ fn push_record_link_arm(
                                    (selection.default_link_event_id)) link(event_id)
         WHERE link.event_id IS NOT NULL",
     );
+    if let Some(requested) = requested {
+        requested.push_filter(builder, "selection.resource_id", "link.event_id");
+    }
 }

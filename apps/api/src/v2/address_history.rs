@@ -166,7 +166,7 @@ pub(crate) async fn get_address_history(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let names = bigname_storage::load_name_current_by_logical_name_ids(
+    let names = bigname_storage::load_current_normalized_names(
         &state.pool,
         &logical_name_ids,
     )
@@ -191,7 +191,7 @@ pub(crate) async fn get_address_history(
                 .logical_name_id
                 .as_ref()
                 .and_then(|logical_name_id| names.get(logical_name_id))
-                .map(|row| row.normalized_name.as_str());
+                .map(String::as_str);
             build_event(row, name, include, &context)
         })
         .collect();

@@ -13,7 +13,9 @@
 mod mirror;
 mod sql;
 
-pub(in crate::history) use sql::ENS_V1_POINTER_FAMILIES;
+pub(in crate::history) use sql::{
+    ENS_V1_POINTER_FAMILIES, push_readable_event, push_readable_surface,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +32,7 @@ pub(in crate::history) fn push_pointer_window_attribution_for_test<'a>(
     resource_ids: &'a [Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) {
-    sql::push_pointer_window_attribution(builder, resource_ids, published);
+    sql::push_pointer_window_attribution(builder, resource_ids, published, None);
 }
 
 /// The mirror substitution statement with an empty walk, for plan tests.
@@ -68,7 +70,7 @@ pub(in crate::history) struct AttributedRecords {
 }
 
 impl AttributedRecords {
-    fn from_map(map: BTreeMap<Uuid, BTreeSet<i64>>) -> Self {
+    pub(in crate::history) fn from_map(map: BTreeMap<Uuid, BTreeSet<i64>>) -> Self {
         let mut records = Self::default();
         for (resource_id, event_ids) in map {
             for event_id in event_ids {
@@ -141,31 +143,124 @@ pub(crate) async fn load_attribution_map(
     resource_ids: &[Uuid],
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
+    load_attribution_map_restricted(connection, resource_ids, published, None).await
+}
+
+/// The parallel arrays are a set of requested resource/event pairs, not their Cartesian
+/// product. Each SQL result arm is restricted before rows cross the database connection.
+struct RequestedPairs {
+    resources: Vec<Uuid>,
+    events: Vec<i64>,
+}
+
+impl RequestedPairs {
+    fn push_event_cte(&self, builder: &mut QueryBuilder<'_, Postgres>) {
+        // Materialize at most this batch's events once. This prevents each pointer from
+        // scanning its complete write history before applying the requested-pair filter.
+        builder.push(", requested_history_records AS MATERIALIZED (SELECT * FROM bigname_phase.normalized_events WHERE normalized_event_id = ANY(");
+        builder.push_bind(self.events.clone()).push("::bigint[]))");
+    }
+    fn push_filter(&self, builder: &mut QueryBuilder<'_, Postgres>, resource: &str, event: &str) {
+        // The standalone event predicate exposes the bounded primary-key probe before the
+        // pair check. Pointer and link window evidence is deliberately not filtered here.
+        builder.push(format!(" AND {event} = ANY("));
+        builder
+            .push_bind(self.events.clone())
+            .push("::bigint[]) AND (");
+        builder.push(resource).push(", ").push(event);
+        builder.push(") IN (SELECT * FROM unnest(");
+        builder.push_bind(self.resources.clone());
+        builder.push("::uuid[], ");
+        builder.push_bind(self.events.clone());
+        builder.push("::bigint[]))");
+    }
+}
+
+#[cfg(test)]
+pub(in crate::history) fn push_paired_attribution_for_test<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource_ids: &'a [Uuid],
+    event_ids: &[i64],
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    assert_eq!(resource_ids.len(), event_ids.len());
+    let requested = RequestedPairs {
+        resources: resource_ids.to_vec(),
+        events: event_ids.to_vec(),
+    };
+    sql::push_pointer_window_attribution(builder, resource_ids, published, Some(&requested));
+}
+
+/// Validate a bounded set of resource/event pairs with the full historical attribution rules.
+/// Pointer and link boundaries are unchanged; unrelated attributed events never leave SQL.
+pub(in crate::history) async fn matching_attribution_pairs(
+    connection: &mut PgConnection,
+    pairs: &[(Uuid, i64)],
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<BTreeSet<(Uuid, i64)>> {
+    let resources: Vec<Uuid> = pairs
+        .iter()
+        .map(|(resource, _)| *resource)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let requested = RequestedPairs {
+        resources: pairs.iter().map(|(resource, _)| *resource).collect(),
+        events: pairs.iter().map(|(_, event)| *event).collect(),
+    };
+    Ok(
+        load_attribution_map_restricted(connection, &resources, published, Some(&requested))
+            .await?
+            .into_iter()
+            .flat_map(|(resource, events)| events.into_iter().map(move |event| (resource, event)))
+            .collect(),
+    )
+}
+
+async fn load_attribution_map_restricted(
+    connection: &mut PgConnection,
+    resource_ids: &[Uuid],
+    published: Option<&BTreeMap<String, i64>>,
+    requested: Option<&RequestedPairs>,
+) -> Result<BTreeMap<Uuid, BTreeSet<i64>>> {
     let mut attributed = BTreeMap::<Uuid, BTreeSet<i64>>::new();
-    if resource_ids.is_empty() {
+    if resource_ids.is_empty() || requested.is_some_and(|pairs| pairs.events.is_empty()) {
         return Ok(attributed);
     }
 
     ensure_classification_publications(connection, resource_ids, published).await?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    sql::push_pointer_window_attribution(&mut builder, resource_ids, published);
-    for row in builder
+    sql::push_pointer_window_attribution(&mut builder, resource_ids, published, requested);
+    let rows = builder
         .build()
         .fetch_all(&mut *connection)
         .await
-        .context("failed to load pointer-attributed record writes")?
-    {
+        .context("failed to load pointer-attributed record writes")?;
+    let _rows_live = requested
+        .map(|_| super::address_walk::seams::Live::new("attribution_sql_rows", rows.len()));
+    let mut map_live =
+        requested.map(|_| super::address_walk::seams::Live::new("attribution_map_pairs", 0));
+    if requested.is_some() {
+        super::address_walk::seams::count("attribution_rows_returned", rows.len());
+    }
+    for row in rows {
         attributed
             .entry(row.try_get("resource_id")?)
             .or_default()
             .insert(row.try_get("normalized_event_id")?);
     }
 
+    drop(_rows_live);
+    if let Some(live) = map_live.as_mut() {
+        live.set(attributed.values().map(BTreeSet::len).sum());
+    }
+
     // A resource whose latest pointer is a mirror resolver serves, and attributes, the writes of
     // the ENSv1 resolver the mirror would call. When the mirror cannot be followed, the resource
     // has no attributed writes at all, superseded pointers included.
-    let mirrored = mirror::load_mirror_attribution(connection, resource_ids, published).await?;
+    let mirrored =
+        mirror::load_mirror_attribution(connection, resource_ids, published, requested).await?;
     for (resource_id, substitution) in mirrored {
         match substitution {
             Some(event_ids) => attributed.entry(resource_id).or_default().extend(event_ids),

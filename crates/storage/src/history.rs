@@ -1,4 +1,8 @@
 mod address_matches;
+mod address_walk;
+pub use address_walk::load_address_history_page_for_relations;
+#[cfg(any(test, feature = "test-support"))]
+pub use address_walk::seams::{AddressHistoryWorkingSet, with_address_history_working_set};
 mod attribution;
 mod binding_anchors;
 mod block_window;
@@ -460,73 +464,6 @@ pub async fn load_address_history_page(
         false,
     )
     .await
-}
-
-/// Load one SQL-keyset page for one address-derived anchor set.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_address_history_page_for_relations(
-    pool: &PgPool,
-    address: &str,
-    namespace: Option<&str>,
-    relations: Option<&[AddressNameRelation]>,
-    scope: HistoryScope,
-    canonical_only: bool,
-    cursor: Option<&HistoryCursor>,
-    page_size: u64,
-    summary_mode: HistorySummaryMode,
-    options: &HistoryPageOptions,
-    require_interpret_not_redo: bool,
-) -> Result<HistoryPage> {
-    let interpret_redo_fence = redo::capture_fence_if(pool, require_interpret_not_redo).await?;
-    let normalized_address = address.to_ascii_lowercase();
-    let selector = load_address_history_selector(
-        pool,
-        &normalized_address,
-        namespace,
-        relations,
-        scope,
-        canonical_only,
-        false,
-        options.publication_block_bounds.as_ref(),
-    )
-    .await?;
-
-    #[cfg(any(test, feature = "test-support"))]
-    history_anchor_read_test_hooks::run_if(pool, require_interpret_not_redo).await?;
-
-    paging::load_history_page(
-        pool,
-        EventHistoryReadFilter {
-            selectors: vec![selector],
-            ..EventHistoryReadFilter::default()
-        }
-        .with_page_options(options),
-        canonical_only,
-        cursor,
-        page_size,
-        summary_mode,
-        false,
-        interpret_redo_fence.as_ref(),
-    )
-    .await
-    .with_context(|| {
-        let mut parts = vec![format!("address {}", normalized_address)];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
-            parts.push(format!(
-                "relations {}",
-                relations
-                    .iter()
-                    .map(|relation| relation.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
-        }
-        parts.push(format!("scope {}", scope.as_str()));
-        format!("failed to load history page for {}", parts.join(" "))
-    })
 }
 
 /// Load canonical normalized events by row id in the shared chain-position
