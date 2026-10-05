@@ -885,7 +885,9 @@ collection route carry neither header.
   in the past, after an emancipated or locked position lapses and the two
   fields above are omitted. A plain wrapped position past expiry keeps
   `wrapper_state: wrapped` and serves the past expiry beside it. A name with no
-  NameWrapper entry omits it. It is not the lease plus 90 days: a renewal
+  NameWrapper entry omits it, and so does a registry child listed without a
+  name row, whose `ens_v1` carries no wrapper fields, so absence alone does
+  not prove the name is unwrapped. It is not the lease plus 90 days: a renewal
   through an ENSv1 `ETHRegistrarController` that calls only
   `BaseRegistrar.renew` leaves it unchanged while `ens_v1.expires_at` moves on.
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)

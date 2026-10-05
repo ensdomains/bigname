@@ -54,8 +54,8 @@ const WRAPPER_EXPIRY_KEY: &str = "wrapper_expiry_seconds";
 
 /// Write the stored expiry of the name's NameWrapper entry beside the composed wrapper fields:
 /// on a row that serves a wrapper state, and on a row whose emancipated or locked wrapper has
-/// passed its expiry, which composition masks (`wrapper_masked`) instead. One read per chain,
-/// only for the rows that carry either flag.
+/// passed its expiry, which composition masks (`wrapper_masked`) instead. One read per chain in
+/// each composed batch, only for the rows that carry either flag.
 async fn attach_wrapper_expiries(
     conn: &mut PgConnection,
     rows: &mut BTreeMap<String, NameCurrentRow>,
