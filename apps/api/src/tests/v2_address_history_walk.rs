@@ -731,18 +731,23 @@ async fn address_history_walk_applies_mirror_substitution_to_requested_pairs() -
         (MirrorFixtureSource::Ancestor, 0),
         (MirrorFixtureSource::Absent, 0),
     ] {
+        let database = v2_mirror_records_database(
+            "alice.eth",
+            "0x1010101010101010101010101010101010101010",
+            source,
+            "resolver",
+        )
+        .await?;
         let mut text_ids = None;
         for textless in [false, true] {
-            let database = v2_mirror_records_database(
-                "alice.eth",
-                "0x1010101010101010101010101010101010101010",
-                source,
-                "resolver",
-            )
-            .await?;
             if textless {
-                sqlx::query("UPDATE name_surfaces SET raw_name=NULL, raw_labels=NULL, dns_encoded_name=NULL, preimage_event_identity=NULL WHERE chain_id='ethereum-sepolia'")
-                .execute(&database.pool).await?;
+                sqlx::query(
+                    "UPDATE name_surfaces SET raw_name=NULL, raw_labels=NULL,
+                     dns_encoded_name=NULL, preimage_event_identity=NULL
+                     WHERE chain_id='ethereum-sepolia'",
+                )
+                .execute(&database.pool)
+                .await?;
                 rebuild_fixture_families(&database.pool, "ethereum-sepolia", 21000003, "0xmirror")
                     .await?;
             }
@@ -806,8 +811,8 @@ async fn address_history_walk_applies_mirror_substitution_to_requested_pairs() -
             } else {
                 text_ids = Some(ids);
             }
-            database.cleanup().await?;
         }
+        database.cleanup().await?;
     }
     Ok(())
 }
