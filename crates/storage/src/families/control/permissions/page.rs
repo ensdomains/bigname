@@ -137,14 +137,13 @@ async fn page_rows(
     limit: usize,
     root_holders: bool,
 ) -> Result<Vec<EffectivePermissionRow>> {
-    if let Some(resource) = resource {
-        if let Some(namespace) = namespace
-            && !in_namespace(conn, &[resource], namespace)
-                .await?
-                .contains(&resource)
-        {
-            return Ok(Vec::new());
-        }
+    if let Some(resource) = resource
+        && let Some(namespace) = namespace
+        && !in_namespace(conn, &[resource], namespace)
+            .await?
+            .contains(&resource)
+    {
+        return Ok(Vec::new());
     }
     // A read bound to an ENSv2 registry token resource also lists the registry's root holders.
     let mut token = None;
