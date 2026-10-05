@@ -73,6 +73,47 @@ pub(super) fn push_selector_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     selector: &'a HistorySelector,
     attributed: &AttributedRecords,
+    product: bool,
+) {
+    match selector {
+        HistorySelector::OrRootPermissionSubject {
+            anchors,
+            subject,
+            namespace,
+        } => {
+            builder.push("(");
+            push_selector_filter(builder, anchors, attributed, product);
+            // Keyed by `normalized_events_address_root_permission_idx`; keep the expression
+            // identical to it.
+            builder.push(
+                " OR (ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ",
+            );
+            builder.push_bind(subject.as_str());
+            if let Some(namespace) = namespace {
+                builder.push(" AND ne.namespace = ");
+                builder.push_bind(namespace.as_str());
+            }
+            builder.push("))");
+        }
+        HistorySelector::None => {
+            builder.push("FALSE");
+        }
+        // A registry root role change reaches an anchored product read only through its
+        // subject: a name or resource it carries never makes it part of that name's or
+        // resource's history.
+        anchors if product => {
+            builder.push("(ne.event_kind <> 'RootPermissionChanged' AND ");
+            push_anchor_filter(builder, anchors, attributed);
+            builder.push(")");
+        }
+        anchors => push_anchor_filter(builder, anchors, attributed),
+    }
+}
+
+fn push_anchor_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    selector: &'a HistorySelector,
+    attributed: &AttributedRecords,
 ) {
     match selector {
         HistorySelector::LogicalNames(logical_name_ids) => {
@@ -99,19 +140,8 @@ pub(super) fn push_selector_filter<'a>(
         HistorySelector::ProductRegistration { .. } => {
             builder.push("TRUE");
         }
-        HistorySelector::OrRootPermissionSubject { anchors, subject } => {
-            builder.push("(");
-            push_selector_filter(builder, anchors, attributed);
-            // Keyed by `normalized_events_address_root_permission_idx`; keep the expression
-            // identical to it.
-            builder.push(
-                " OR (ne.event_kind = 'RootPermissionChanged' AND lower(ne.after_state ->> 'subject') = ",
-            );
-            builder.push_bind(subject.as_str());
-            builder.push("))");
-        }
-        HistorySelector::None => {
-            builder.push("FALSE");
+        HistorySelector::OrRootPermissionSubject { .. } | HistorySelector::None => {
+            push_selector_filter(builder, selector, attributed, false);
         }
     }
 }

@@ -2638,7 +2638,7 @@ nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
 `drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 16 indexes on the table instead of 49, and `install.sql` rebuilds them concurrently with their
+maintains 17 indexes on the table instead of 51, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -2765,9 +2765,11 @@ change only there.
 `normalized_events_address_root_permission_idx`, keyed by the lowercased subject, then the block
 and log position, and partial on activated, readable `RootPermissionChanged` rows. Address
 history needs it: without it every address history page and count scans `normalized_events`. It
-joins the walk index set's drop list. The index holds only root role changes, so it stays small
-(no rows on a chain without ENSv2 sources) and the build needs no meaningful extra disk; its cost
-is one scan of `normalized_events`. The schema-migration is a plain `CREATE INDEX` that holds a
+joins the walk index set's drop list. The index holds one entry per retained root role change and
+none on a chain without ENSv2 sources, so its size, and the disk the build needs, follow the
+number of root role changes rather than the size of `normalized_events`; check that count first
+(`SELECT count(*) FROM bigname_phase.normalized_events WHERE event_kind = 'RootPermissionChanged'`,
+which itself scans the table). The build's other cost is one scan of `normalized_events`. The schema-migration is a plain `CREATE INDEX` that holds a
 SHARE lock on the table for that scan, which blocks Interpret's writes, so on a large
 initialized database rerun [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md)
 first, outside a transaction, while the phase runner and API keep running. It finds the three

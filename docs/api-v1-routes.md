@@ -2372,13 +2372,17 @@ A role change on an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource
 `0`, whose roles apply to every resource of the registry) is a `permission` row with
 raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`. Its subject
 `address` is the account whose root roles changed, `powers` is that account's
-whole root role set right after the change (`[]` when everything was revoked),
-and, because the log states the old bitmap, `added_powers` and
-`removed_powers` are always present; either may be `[]`. It has no `name` and
-no `registration_id`, and its `contract_address` (with `include=data`) is the
-registry. `GET /v1/events?contract_address=<registry>` lists a registry's root
-role changes, and an account's own root role changes on every registry are in
-its [address history](#get-v1addressesaddresshistory).
+named root roles right after the change in the permission powers vocabulary
+(`[]` when none remain; role bits with no name are omitted, as on every
+permission row), and, because the log states the old bitmap, `added_powers`
+and `removed_powers` are always present; either may be `[]`. It has no `name`
+and no `registration_id`, and its `contract_address` (with `include=data`) is
+the registry. `GET /v1/events?contract_address=<registry>` lists a registry's
+root role changes, and an account's own root role changes on every registry are
+in its [address history](#get-v1addressesaddresshistory). A root role change
+is never part of a name's or registration's history, nor of an address's
+history through a name or registration it relates to, even when a registry
+ties a name to its root resource.
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L19-L21 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2@a971bd64)
 

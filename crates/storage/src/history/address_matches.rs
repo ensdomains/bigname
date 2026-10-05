@@ -162,6 +162,7 @@ pub(super) async fn load_address_history_selector(
         HistorySelector::OrRootPermissionSubject {
             anchors: Box::new(anchors),
             subject: address.to_owned(),
+            namespace: namespace.map(str::to_owned),
         }
     } else {
         anchors

@@ -1061,19 +1061,28 @@ where
 // new label to the count.
 /// Registry root role changes are `permission` events of the registry: the overview's event
 /// count includes them and still equals the feed total, while the history of a name the
-/// registry holds does not gain them.
+/// registry holds does not gain them, even one that carries that name and its registration.
 #[tokio::test]
 async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_fixture(&database).await?;
-    let name_history = "/v1/names/one.alpha.eth/history?scope=both&include=total_count";
-    let before = registry_payload(&database, name_history).await?;
+    let one_resource = Uuid::from_u128(0xA100);
+    let anchored_reads = [
+        "/v1/names/one.alpha.eth/history?scope=both&include=total_count".to_owned(),
+        format!("/v1/events?registration_id={one_resource}&include=total_count"),
+        "/v1/events?name=one.alpha.eth&include=total_count".to_owned(),
+    ];
+    let mut before = Vec::new();
+    for uri in &anchored_reads {
+        before.push(registry_payload(&database, uri).await?);
+    }
     let root = Uuid::from_u128(0xA300);
     upsert_test_resources(
         &database.pool,
         &[address_name_resource(root, None, "0xregistry66", 66)],
     )
     .await?;
+    let one = registry_logical_name_id("one.alpha.eth");
     let root_change = |id: &str, account: u8, log_index: i64| {
         let mut event = registry_event(
             id,
@@ -1102,6 +1111,14 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         &[
             root_change("alpha-root-grant-1", 1, 3),
             root_change("alpha-root-grant-2", 2, 4),
+            // A nonconforming registry could tie a label's name and registration to its root
+            // resource; the root change still belongs to no name history.
+            {
+                let mut stray = root_change("alpha-root-grant-named", 3, 5);
+                stray.logical_name_id = Some(one.clone());
+                stray.resource_id = Some(one_resource);
+                stray
+            },
         ],
     )
     .await?;
@@ -1116,7 +1133,7 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         &format!("/v1/events?contract_address={ALPHA_REGISTRY}&include=total_count&page_size=1"),
     )
     .await?;
-    assert_eq!(feed["page"]["total_count"], json!(7), "{feed}");
+    assert_eq!(feed["page"]["total_count"], json!(8), "{feed}");
     assert_eq!(
         overview["data"]["counts"]["events"], feed["page"]["total_count"],
         "{overview}"
@@ -1128,7 +1145,7 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         ),
     )
     .await?;
-    assert_eq!(root_feed["page"]["total_count"], json!(2), "{root_feed}");
+    assert_eq!(root_feed["page"]["total_count"], json!(3), "{root_feed}");
     assert!(
         root_feed["data"]
             .as_array()
@@ -1136,9 +1153,14 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
         "{root_feed}"
     );
 
-    let after = registry_payload(&database, name_history).await?;
-    assert_eq!(after["data"], before["data"], "{after}");
-    assert_eq!(after["page"]["total_count"], before["page"]["total_count"]);
+    for (uri, before) in anchored_reads.iter().zip(before) {
+        let after = registry_payload(&database, uri).await?;
+        assert_eq!(after["data"], before["data"], "{uri}: {after}");
+        assert_eq!(
+            after["page"]["total_count"], before["page"]["total_count"],
+            "{uri}"
+        );
+    }
     database.cleanup().await
 }
 

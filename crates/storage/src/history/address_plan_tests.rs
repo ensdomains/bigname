@@ -31,7 +31,8 @@ const TARGET_RESOLVER: &str = "0x0000000000000000000000000000000000000c11";
 const UNRELATED_NAMES: i64 = 300;
 /// The target's rows: a registrant grant and a registry owner transfer on its name, a token
 /// transfer on its resource with no name, a resolver pointer on both, and one node-keyed record
-/// write that pointer attributes to its resource.
+/// write that pointer attributes to its resource. A root role change of another account that
+/// carries the target's name and resource (`stray:root`) is not one of them.
 const TARGET_ROWS: i64 = 5;
 const ANCHOR_INDEXES: [&str; 3] = [
     "normalized_events_address_registrant_match_idx",
@@ -191,13 +192,14 @@ async fn check_selector_plans(connection: &mut PgConnection) -> Result<()> {
 /// selector of an address with no other anchor must read that index alone.
 async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
     let mut plan_failures = Vec::new();
-    for (case, anchors, expected) in [
+    for (case, anchors, namespace, expected) in [
         (
             "anchored",
             HistorySelector::logical_names_or_resources(
                 vec![target_name()],
                 vec![target_resource()],
             ),
+            "ens",
             &[
                 "target:root",
                 "target:pointer",
@@ -207,7 +209,19 @@ async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
                 "target:grant",
             ][..],
         ),
-        ("root-only", HistorySelector::None, &["target:root"][..]),
+        (
+            "root-only",
+            HistorySelector::None,
+            "ens",
+            &["target:root"][..],
+        ),
+        // The root branch keeps the read's namespace even with no anchor to imply it.
+        (
+            "other-namespace",
+            HistorySelector::None,
+            "basenames",
+            &[][..],
+        ),
     ] {
         let mut keyed: Vec<&str> = vec![ROOT_ROLE_INDEX];
         if case == "anchored" {
@@ -217,6 +231,7 @@ async fn check_root_role_plans(connection: &mut PgConnection) -> Result<()> {
             selectors: vec![HistorySelector::OrRootPermissionSubject {
                 anchors: Box::new(anchors),
                 subject: TARGET.to_owned(),
+                namespace: Some(namespace.to_owned()),
             }],
             ..EventHistoryReadFilter::default()
         }
@@ -1093,7 +1108,13 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         SELECT 'target:root', 'ens', NULL, '{root_resource}'::uuid, 'RootPermissionChanged',
                'ens_v2_registry_l1', 1, 'ethereum-mainnet', 'block-{sixth}', {sixth},
                'tx-target-root', 0, 0, 'ens_v2_permissions', 'canonical'::canonicality_state,
-               jsonb_build_object('subject', upper('{TARGET}'));
+               jsonb_build_object('subject', upper('{TARGET}'))
+        UNION ALL
+        SELECT 'stray:root', 'ens', '{target_name}', '{target_resource}'::uuid,
+               'RootPermissionChanged', 'ens_v2_registry_l1', 1, 'ethereum-mainnet',
+               'block-{sixth}', {sixth}, 'tx-stray-root', 0, 1, 'ens_v2_permissions',
+               'canonical'::canonicality_state,
+               jsonb_build_object('subject', '0x00000000000000000000000000000000000000b0');
 
         "#,
         blocks = UNRELATED_NAMES + 10,

@@ -486,7 +486,11 @@ add one more branch to the same OR: `RootPermissionChanged` rows whose lowercase
 `after_state ->> 'subject'` is the address. `normalized_events_address_root_permission_idx`
 keys that branch by the lowercased subject, then the block and log position, over activated
 rows in readable canonicality states, so a page whose address has no other anchor reads it in
-history order. Diagnostics reads do not add the branch. Existing installations receive the
+history order. That branch also carries the read's namespace. Every name, resource and
+registration branch of a product read excludes `RootPermissionChanged` rows, so a root role change reaches an
+anchored read only through its subject, even when a nonconforming registry tied a name or
+registration to its root resource. Diagnostics reads neither add the branch nor exclude those
+rows. Existing installations receive the
 index through `20261005120000_normalized_events_address_root_permission_idx.sql`; the same
 `ops/address-history-indexes/install.sql` prebuilds it concurrently.
 

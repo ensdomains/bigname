@@ -17,11 +17,13 @@ pub(super) enum HistorySelector {
         logical_name_ids: Vec<String>,
         resource_ids: Vec<Uuid>,
     },
-    /// An address read's anchors, or a registry root role change whose subject is `subject`.
-    /// The root resource is shared by every holder of the registry, so it cannot be an anchor.
+    /// An address read's anchors, or a registry root role change whose subject is `subject`
+    /// (in `namespace`, when the read has one). The root resource is shared by every holder of
+    /// the registry, so it cannot be an anchor.
     OrRootPermissionSubject {
         anchors: Box<HistorySelector>,
         subject: String,
+        namespace: Option<String>,
     },
 }
 
