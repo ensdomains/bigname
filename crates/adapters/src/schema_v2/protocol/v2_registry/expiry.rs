@@ -98,3 +98,30 @@ fn transition_scope(transition: &V2NameTransition) -> String {
         transition.token_id
     )
 }
+
+/// An `ExpiryUpdated` for an entry with no token state. `renew` lets a root renewer revive an
+/// entry `unregister` left without a token, and names the entry's current token id. No name or
+/// resource is bound, so the log is kept as the registry's own expiry fact after `output` and
+/// moves no name state.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05)
+pub(super) fn tokenless(
+    selected: &crate::schema_v2::catalog::Selected,
+    mut output: super::Interpreted,
+    event: &super::ExpiryUpdated,
+) -> anyhow::Result<super::Interpreted> {
+    super::ensure_declared(selected, &["ExpiryChanged"])?;
+    output.append(&mut super::single_event(
+        "ExpiryChanged",
+        None,
+        None,
+        serde_json::json!({
+            "source_event": "ExpiryUpdated",
+            "token_id": crate::evm_abi::u256_word_hex(event.tokenId),
+            "expiry": event.newExpiry,
+            "sender": crate::evm_abi::address_hex(event.sender),
+            "token_state_absent": true,
+            "registry_contract_instance_id": selected.contract_instance_id.to_string(),
+        }),
+    ));
+    Ok(output)
+}

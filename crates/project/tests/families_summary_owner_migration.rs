@@ -58,8 +58,9 @@ fn reset_literal(migration: &str) -> BTreeSet<String> {
 }
 
 /// The family inventory when this historical migration was introduced. The Universal Resolver
-/// table was added later by 20260929200000_project_universal_resolver_proxy.sql, so the owner
-/// migration cannot reset it. Keep it installed for the current family runner used below, but
+/// table was added later by 20260929200000_project_universal_resolver_proxy.sql and the ENSv2
+/// registry entry tables by 20261005140000_project_ens_v2_registry_entries.sql, so the owner
+/// migration cannot reset them. Keep it installed for the current family runner used below, but
 /// do not seed it as predecessor state or include it in the historical reset assertion.
 fn reset_tables() -> Vec<String> {
     families::family_tables()
@@ -67,6 +68,8 @@ fn reset_tables() -> Vec<String> {
             !matches!(
                 *table,
                 "project_universal_resolver_proxy"
+                    | "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
                     | "project_text_hydration_work"
                     | "project_reverse_hydration_work"
             )

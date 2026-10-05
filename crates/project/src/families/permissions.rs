@@ -5,7 +5,8 @@
 //! keeps, per holder with a registry or root scope, the admin powers that holder's latest grant
 //! carries (resource_summary.rs, `v2_admin_powers`); the read takes their union. An approval row
 //! keeps the latest AccountPermissionChanged of its six-part key, an explicit `false` included
-//! (account_permissions.rs).
+//! (account_permissions.rs), for an ENSv1 or Basenames registry, a NameWrapper or an ENSv2
+//! registry.
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -244,8 +245,8 @@ fn approval_key(event: &BlockEvent) -> Option<Vec<Value>> {
     }
     let after = &event.after;
     let scope = after.get("scope")?;
-    let kind =
-        raw_text(scope, "authority_kind").filter(|kind| kind == "registry" || kind == "wrapper")?;
+    let kind = raw_text(scope, "authority_kind")
+        .filter(|kind| matches!(kind.as_str(), "registry" | "wrapper" | "ens_v2_registry"))?;
     Some(vec![
         json!(kind),
         json!(raw_lower(scope, "authority_contract")?),

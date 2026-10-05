@@ -1129,6 +1129,8 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
     let approval_for_all =
         "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)";
     let approved = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)";
+    let ens_v2_approval_for_all =
+        "event ApprovalForAll(address indexed account, address indexed operator, bool approved)";
     let expected = [
         (
             "mainnet",
@@ -1263,6 +1265,20 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
             approved,
             &['h'][..],
         ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v2_registry_l1/v2.toml",
+            "ApprovalForAll",
+            ens_v2_approval_for_all,
+            &['a'][..],
+        ),
+        (
+            "sepolia",
+            "ethereum/ens/ens_v2_root_l1/v2.toml",
+            "ApprovalForAll",
+            ens_v2_approval_for_all,
+            &['i'][..],
+        ),
     ];
     let role_sets = std::collections::BTreeMap::from([
         ('a', &["registry"][..]),
@@ -1280,6 +1296,7 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
         ('f', &["name_wrapper"][..]),
         ('g', &["registry"][..]),
         ('h', &["resolver"][..]),
+        ('i', &["root_registry"][..]),
     ]);
     let repositories = std::collections::BTreeMap::from([
         (
@@ -1332,7 +1349,7 @@ fn checked_in_adapter_owned_approval_inventory_is_exact() -> Result<()> {
         })
         .count();
     assert_eq!(
-        declared, 19,
+        declared, 21,
         "approval declaration inventory must stay exact"
     );
     Ok(())

@@ -27,7 +27,11 @@ fn reset_tables() -> BTreeSet<&'static str> {
         .filter(|table| {
             !matches!(
                 *table,
-                "project_text_hydration_work" | "project_reverse_hydration_work"
+                "project_text_hydration_work"
+                    | "project_reverse_hydration_work"
+                    // Added later, by 20261005140000_project_ens_v2_registry_entries.sql.
+                    | "project_ens_v2_entry_owner"
+                    | "project_ens_v2_registry_parent"
             )
         })
         .chain(CONTROL_TABLES)

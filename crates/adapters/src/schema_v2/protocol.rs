@@ -400,7 +400,7 @@ pub(super) fn validate_manifest(
                 event.signature
             );
         }
-        if bigname_manifests::is_address_scoped_approval(&source.source_family, &event.signature)
+        if bigname_manifests::is_standard_approval(&source.source_family, &event.signature)
             && !event.normalized_events.is_empty()
         {
             bail!(
@@ -451,7 +451,7 @@ pub(super) fn is_match_all(
 }
 
 fn supports_signature(source_family: &str, signature: &str) -> bool {
-    if bigname_manifests::is_address_scoped_approval(source_family, signature) {
+    if bigname_manifests::is_standard_approval(source_family, signature) {
         return true;
     }
     match source_family {

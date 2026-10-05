@@ -2574,6 +2574,69 @@ with the same rows and counts. The change is breaking for clients that relied on
 counting under `owner`. A released lease, and a child the NameWrapper that named it holds,
 are still served for no one.
 
+### ENSv2 registry operator approvals and registry entries
+
+The build that captures ENSv2 registry `ApprovalForAll` and keeps each registry
+entry's current token owner (TYR-236, see
+[ENSv2 registry operator approvals](manifests.md#ensv2-registry-operator-approvals)
+and [ENSv2 registry entries](projections.md#ensv2-registry-entries)) changes
+`crates/manifests/src`, `crates/adapters/src`, `crates/project/src` and the
+Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Permissions exposure is unchanged: `GET /v1/permissions` still names
+`ens_v2_registry_operators` as an unlisted surface. The shared product-history
+reader excludes the marked tokenless expiry described below from listing and
+counting before pagination; that reader change does not by itself rotate the
+interpreter content hash. Besides the approval rows,
+stored events gain one kind of row: an `ExpiryChanged` with no name, no resource
+and `token_state_absent = true` for an `ExpiryUpdated` whose token the adapter
+holds no state for, such as a renewal that revives an unregistered entry or a
+renewal of an entry registered before the registry's retained history. It
+updates the registry entry row and creates no named lifecycle or ownership
+state. `/v1/diagnostics/events` shows it. `GET /v1/events` and the other
+product history reads neither list nor count it: the shared history query
+omits it before pagination (see
+[`GET /v1/events`](api-v1-routes.md#get-v1events)). That reader change is
+outside the interpreter content hash. The Mainnet and Base
+manifests are unchanged, so those chains get the hash rotation and its
+Interpret and Project redo pair and no Ingest redo.
+
+On Sepolia the two manifest payloads change and the
+[compiled watch plan](glossary.md#compiled-watch-plan) widens by the registry
+family's `ApprovalForAll` entry, from block `10893181`, and by the same event at
+the declared ETHRegistry and RootRegistry from their own start blocks. Roll it
+out in this order:
+
+1. Apply schema-migration `20261005140000_project_ens_v2_registry_entries.sql`.
+   It adds the empty tables `project_ens_v2_entry_owner` and
+   `project_ens_v2_registry_parent` with three indexes and corrects one column
+   comment. It rewrites no existing row and needs no prebuild.
+2. Start the build. Manifest synchronization records a
+   [manifest-authority marker](glossary.md#manifest-authority-marker) on
+   Sepolia's Interpret and Project rows and stamps a required Ingest redo from
+   block `10893181`, clamped to the chain's first ingest cursor, to the
+   published head. That is the same lower bound the
+   [Sepolia ENSv2 redeploy](#sepolia-ensv2-redeploy-of-2026-10-01) stamped. The
+   redo fetches the one added topic at the admitted registries; size it from
+   the range `chain_phase_state` records.
+3. Complete that Ingest redo, then the full-history Interpret redo with
+   `--attest-watch-set-coverage`, then the Project redo it installs, before the
+   matching API serves. This build targets the next hash-rotating release; when
+   it ships with other rotating changes, one Interpret and Project redo pair
+   discharges them all.
+
+The floor is one value for the family, the earliest start of any admitted
+registry on a database that retains Sepolia's history; the manifests document
+says how to re-derive it. A deployment whose admitted registries start earlier
+must lower the manifest value before it starts the build, or approvals below
+the floor stay unfetched. An approval a registry emitted before its own
+admission start is not fetched either way; on Sepolia every admitted registry's
+first retained log is at its admission start. After the redo, check that
+`project_account_approval` holds `authority_kind = 'ens_v2_registry'` rows with
+an empty `effective_powers`, that `project_ens_v2_entry_owner` has a row for a
+known ETHRegistry name with its current owner, and that no
+`AccountPermissionChanged` row names a resolver as its authority contract.
+
 ### v0.4.0 rollout
 
 v0.4.0 carries four hash-rotating builds: the end of NameWrapper authority

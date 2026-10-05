@@ -19,7 +19,7 @@ pub(super) fn interpret(
     raw: &RawLogInput,
     state: &mut State,
 ) -> anyhow::Result<Option<Interpreted>> {
-    if !bigname_manifests::is_address_scoped_approval(
+    if !bigname_manifests::is_standard_approval(
         &selected.source.source_family,
         &selected.event.signature,
     ) {
@@ -56,6 +56,15 @@ pub(super) fn interpret(
 /// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L108-L118 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L222 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
+///
+/// An ENSv2 registry keeps its own owner-to-operator approvals, and an approved operator gets
+/// the roles the current token owner holds on a token's own resource, so the power depends on
+/// the token and none is stored with the approval: `approved` alone carries the fact. The
+/// approval reads no registry state, so it is interpreted before the registry adapter settles
+/// its pending name transitions.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L351-L357 @ ens_v2_sepolia_20261001@07e55a05)
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 fn operator_event(
     selected: &Selected,
     raw: &RawLogInput,
@@ -65,11 +74,16 @@ fn operator_event(
         selected.source.source_family.as_str(),
         selected.emitter_role.as_deref(),
     ) {
-        ("ens_v1_registry_l1" | "basenames_base_registry", Some("registry" | "registry_old")) => {
-            ("registry", "registry_control", "on_registry_owner_change")
-        }
+        ("ens_v1_registry_l1" | "basenames_base_registry", Some("registry" | "registry_old")) => (
+            "registry",
+            Some("registry_control"),
+            "on_registry_owner_change",
+        ),
         ("ens_v1_wrapper_l1", Some("name_wrapper")) => {
-            ("wrapper", "wrapper_control", "on_holder_change")
+            ("wrapper", Some("wrapper_control"), "on_holder_change")
+        }
+        ("ens_v2_registry_l1" | "ens_v2_root_l1", _) => {
+            ("ens_v2_registry", None, "on_holder_change")
         }
         _ => return None,
     };
@@ -78,7 +92,11 @@ fn operator_event(
     let authority_contract = raw.emitting_address.to_ascii_lowercase();
     let source = json!({"kind": "raw_log", "source_event": "ApprovalForAll"});
     let (powers, grant_source, revocation_source) = if event.approved {
-        (json!([power]), source, serde_json::Value::Null)
+        (
+            power.map_or_else(|| json!([]), |power| json!([power])),
+            source,
+            serde_json::Value::Null,
+        )
     } else {
         (json!([]), json!({}), source)
     };
