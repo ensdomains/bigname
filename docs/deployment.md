@@ -215,7 +215,7 @@ table exists. It opens the same `409 stale` window until the rebuild finishes,
 and, as above, a family run in flight when it applies fails once and the next
 run rebuilds.
 
-`20261005140000_project_address_history_catalogue.sql` installs the compact Project
+`20261005160000_project_address_history_catalogue.sql` installs the compact Project
 address-history tables, replaces four source-event indexes with the full public history
 order, and adds two complementary noncanonical name/resource indexes for conservative work
 discovery. Installing it alone publishes no catalogue. This producer changes the interpreter
@@ -2373,7 +2373,7 @@ ANALYZE bigname_phase.normalized_events;
 ```
 
 These statements are the historical definition required by that target version. The later
-`20261005140000_project_address_history_catalogue.sql` replaces the write index with the full
+`20261005160000_project_address_history_catalogue.sql` replaces the write index with the full
 history order. Apply migrations in order; do not prebuild the later definition before this
 historical migration has been recorded. The current walk-index installer uses the later
 catalogue definition and belongs after that upgrade.
@@ -2655,8 +2655,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 36 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 53, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 37 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 54, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the
@@ -2803,3 +2803,72 @@ stopped. The schema-migration checks that the name is an index on `normalized_ev
 `indisvalid` and `indisready` with the reviewed `pg_get_indexdef`, and fails without recording
 itself otherwise; the runbook's recovery applies. Start the new API only after the
 schema-migration has applied. API standbys receive the index through replication.
+
+### Name surfaces without raw label bytes
+
+The build that lets a [name surface](glossary.md#surface-name-surface) exist before the raw
+bytes of its labels are known changes the identity baseline, one schema-migration, the adapter
+surface model and Interpret's surface writer, redo re-anchoring and flag recompute
+([storage](storage.md#name-identity-and-raw-evidence)). Those sources are inside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
+every chain. No adapter produces a surface without raw bytes yet: a re-derivation under this
+build writes the same surfaces, bindings and normalized events as before, and each surface
+additionally names its [preimage witness](glossary.md#preimage-witness).
+
+`20261005130000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
+`name_surfaces.raw_name`, `raw_labels` and `dns_encoded_name`, adds the nullable
+`preimage_event_identity` column, replaces the label-count check with
+`name_surfaces_raw_evidence_check`, and fills the new column for each existing row that has
+a canonical `PreimageObserved` event on a canonical block, from the earliest one. A row with
+no such event keeps a NULL witness; the full-range Interpret redo below fills it if the
+replay observes the name's bytes. No existing row loses a value. The
+schema-migration takes an ACCESS EXCLUSIVE lock on `name_surfaces` and holds it while the
+backfill and the new check's validation of every row run. The backfill is one statement: it
+reads every canonical `PreimageObserved` event with a name, joins each to its
+`chain_lineage` row, keeps the earliest per chain and name, and joins that result to
+`name_surfaces`. Its cost follows the amount of preimage history as well as the number of
+surfaces, and the plan PostgreSQL chooses has not been measured at production size; time it
+on a copy of the database first. Apply it with
+the phase runner, redo processes and API stopped, with the same `lock_timeout`,
+`statement_timeout` and retry procedure as the other schema-migrations and `--target-version
+20261005130000`; it is not a concurrent step.
+A binary from before this build can still read and write the migrated table, because it
+writes all three raw columns on every row.
+
+After the schema-migration, an existing deployment finishes the full-range Interpret redo and
+the stamped Project redo the rotation installs before the matching API serves, as the
+[handoff](#phase-runner-configuration) describes. This build targets the next hash-rotating
+release; when it ships with other rotating changes, one redo pair discharges them all.
+
+### Expiry selector on the name summary
+
+`20261005150000_project_name_summary_expiry_selector.sql` adds two columns to the
+[name summary](glossary.md#name-summary), `project_name_summary.expiry_listable` and
+`project_name_summary.public_authority`, and two partial indexes over them,
+`project_name_summary_expiry_idx` on `(namespace, expires_at, logical_name_id, chain_id)` and
+`project_name_summary_authority_expiry_idx` on
+`(namespace, public_authority, expires_at, logical_name_id, chain_id)`, both
+`WHERE expiry_listable AND expires_at IS NOT NULL`. The family step fills the columns from the
+same composition as the rest of the summary. No route reads them yet:
+[`GET /v1/names`](api-v1-routes.md#get-v1names) keeps its current behaviour in this build.
+
+The composition that fills the columns lives in hashed storage sources
+(`crates/storage/src/families`), so this build rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) and needs a full re-derivation.
+Stop the phase runner, apply the schema-migration, then start the new build. On a database
+without the columns the schema-migration resets every owned key family with the
+[family marker](glossary.md#family-marker), undo journal and repair records, exactly as
+[the owner column's schema-migration](#registry-label-owner-filters) does and under the same
+`EXCLUSIVE` lock on the marker table, held to commit. It is a blocking maintenance
+schema-migration: in one transaction it waits for the locks it needs behind any transaction
+already holding them, deletes every family row, alters the summary table and builds both
+indexes (on the emptied summary), so how long it runs depends on those transactions and on the
+volume of family data. Run it in a maintenance window. The next family run
+rebuilds the families and writes every selector; fenced routes answer `409 stale` until it
+finishes. The reset adds no second rebuild, because the rotated hash rebuilds the families
+anyway. Do not run the previous build against the migrated schema: its family writer inserts
+summary rows by column name and fails on the new `NOT NULL` column. The reverse order does
+not fail: the new build's writer run against a schema without the columns drops the two values
+it has no column for and publishes summaries with no selector, so apply the schema-migration
+before the new build ever starts. API requests that read the
+name summary or lock the marker wait for the schema-migration, up to their timeouts.

@@ -488,3 +488,24 @@ async fn v2_address_names_roles_fixture_is_identical_across_paths() -> Result<()
     }
     database.cleanup().await
 }
+
+/// Surface-less registry children the index also lists do not push a capped address off the walk.
+#[tokio::test]
+async fn v2_address_names_walk_serves_registry_children() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_children_fixture(&database).await?;
+    for query in ["", "order=desc&dedupe=registration", "sort=expires_at", "sort=registered_at&order=desc"] {
+        let uri = format!("/v1/addresses/{RC_OWNER}/names?namespace=ens&page_size=2&{query}");
+        let exact = walk_all_pages(&database, &uri).await?;
+        let (walked, paths) =
+            with_paths(with_exact_total_cap(0, walk_all_pages(&database, &uri))).await;
+        let walked = walked?;
+        assert!(paths.iter().all(|path| *path == "walk"), "{uri}: {paths:?}");
+        assert_eq!(
+            exact.iter().map(page_body).collect::<Vec<_>>(),
+            walked.iter().map(page_body).collect::<Vec<_>>(),
+            "{uri}"
+        );
+    }
+    database.cleanup().await
+}

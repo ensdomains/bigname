@@ -3,20 +3,23 @@
 
 use std::collections::BTreeMap;
 
-use bigname_storage::NameCurrentRow;
+use bigname_storage::{NameCurrentRow, RegistryRootResource};
 use sqlx::types::Uuid;
 
 use crate::AppState;
 
+use super::super::collection_snapshot::CollectionSnapshot;
 use super::super::name_record::{name_registration_fields, registration_id, string_field};
+use super::super::params::ContractSelector;
 use super::super::support::normalize_inferred_route_name;
 use super::super::{
     QueryParams, V2Result,
+    permission_support::PermissionRequestScope,
     vocab::{AuthorityContext, RegistrationStatus},
 };
 use super::{
     ADDRESS_FILTER_KEY, INCLUDE_FILTER_KEY, NAME_FILTER_KEY, NAMESPACE_FILTER_KEY,
-    REGISTRATION_ID_FILTER_KEY, V2Error, load_current_name_row,
+    REGISTRATION_ID_FILTER_KEY, REGISTRY_FILTER_KEY, V2Error, load_current_name_row,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +30,8 @@ pub(super) enum EmptyPermissionsSelection {
     /// The requested id is the NameWrapper resource of a wrapped `.eth` name, whose
     /// registration is its BaseRegistrar lease. History rejects the same value.
     ResourceIsNotARegistration,
+    /// No active contract instance holds the requested registry address.
+    UnknownRegistry,
 }
 
 #[derive(Debug)]
@@ -40,6 +45,7 @@ pub(super) struct ResolvedPermissionsFilter {
     /// keeps its raw resource classification.
     pub(super) pair_support_resource_id: Option<Uuid>,
     pub(super) authority_context: AuthorityContext,
+    pub(super) scope: PermissionRequestScope,
     pub(super) cursor_filters: BTreeMap<String, String>,
 }
 
@@ -59,9 +65,18 @@ pub(super) struct PermissionsFilterInputs {
 
 pub(super) fn permissions_filter_inputs(params: &QueryParams) -> V2Result<PermissionsFilterInputs> {
     let name_filter = normalized_name_filter(params)?;
-    if name_filter.is_none() && params.registration_id.is_none() && params.address.is_none() {
+    if name_filter.is_none()
+        && params.registration_id.is_none()
+        && params.address.is_none()
+        && params.registry.is_none()
+    {
         return Err(V2Error::invalid_input(
-            "at least one of name, registration_id, or address is required",
+            "at least one of name, registration_id, address, or registry is required",
+        ));
+    }
+    if params.registry.is_some() && (name_filter.is_some() || params.registration_id.is_some()) {
+        return Err(V2Error::invalid_input(
+            "registry cannot be combined with name or registration_id",
         ));
     }
 
@@ -92,8 +107,13 @@ pub(super) async fn resolve_permissions_filter(
     params: &QueryParams,
     include_lineage: bool,
     inputs: &PermissionsFilterInputs,
-    block_bounds: &BTreeMap<String, i64>,
+    snapshot: &mut CollectionSnapshot,
 ) -> V2Result<ResolvedPermissionsFilter> {
+    let block_bounds = &snapshot.block_bounds();
+    let registry_root = match params.registry.as_ref() {
+        Some(registry) => Some(load_registry_root(snapshot, registry).await?),
+        None => None,
+    };
     let resolved_name_row = match inputs.name_filter.as_ref() {
         Some(name_filter) => Some(
             load_current_name_row(
@@ -137,6 +157,7 @@ pub(super) async fn resolve_permissions_filter(
     let namespace = inputs.namespace.clone();
     let mut resource_is_not_a_registration = false;
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {
+        _ if registry_root.is_some() => registry_root.flatten().map(|root| root.resource_id),
         (Some(name_resource_id), _) => Some(name_resource_id),
         (None, Some(requested)) if inputs.name_filter.is_none() => {
             let control_resource =
@@ -146,7 +167,9 @@ pub(super) async fn resolve_permissions_filter(
         }
         (None, requested) => requested,
     };
-    let empty_selection = if superseded_pair {
+    let empty_selection = if registry_root == Some(None) {
+        Some(EmptyPermissionsSelection::UnknownRegistry)
+    } else if superseded_pair {
         Some(EmptyPermissionsSelection::SupersededNameRegistrationPair)
     } else if resource_is_not_a_registration {
         Some(EmptyPermissionsSelection::ResourceIsNotARegistration)
@@ -155,11 +178,14 @@ pub(super) async fn resolve_permissions_filter(
     } else {
         None
     };
+    // A registry read leaves the namespace to the page read, so its empty page keeps the
+    // registry's support classification.
     let empty_selection = if empty_selection.is_none()
         && inputs.name_filter.is_none()
+        && registry_root.is_none()
         && let (Some(resource_id), Some(namespace)) = (resource_id, params.namespace.as_deref())
         && !bigname_storage::permission_resource_matches_namespace(
-            &state.pool,
+            snapshot.conn().await?,
             resource_id,
             namespace,
         )
@@ -175,6 +201,15 @@ pub(super) async fn resolve_permissions_filter(
     } else {
         AuthorityContext::ResourceAudit
     };
+    let scope = if let Some(root) = registry_root {
+        PermissionRequestScope::RegistryRoot {
+            manifest_declared: root.is_some_and(|root| root.manifest_declared),
+        }
+    } else if resource_id.is_some() {
+        PermissionRequestScope::ResourceBound
+    } else {
+        PermissionRequestScope::AccountWide
+    };
     let namespace_filter =
         (params.namespace.is_some() || inputs.name_filter.is_some()).then_some(namespace.clone());
     let mut cursor_filters = BTreeMap::new();
@@ -189,6 +224,9 @@ pub(super) async fn resolve_permissions_filter(
     }
     if let Some(address) = params.address.as_ref() {
         cursor_filters.insert(ADDRESS_FILTER_KEY.to_owned(), address.clone());
+    }
+    if let Some(registry) = params.registry.as_ref() {
+        cursor_filters.insert(REGISTRY_FILTER_KEY.to_owned(), registry.canonical());
     }
     // Bind only an explicit registration selector. A name-only query follows its current
     // registration, which may change between pages without changing the query.
@@ -208,6 +246,7 @@ pub(super) async fn resolve_permissions_filter(
         empty_selection,
         pair_support_resource_id,
         authority_context,
+        scope,
         cursor_filters,
     })
 }
@@ -331,6 +370,29 @@ async fn control_resource_for_registration(
         return Ok(None);
     }
     Ok(Some(registration_id))
+}
+
+/// The root resource `registry` selects, read on the request's snapshot at the captured
+/// publication's block, so an instance the interpreter admitted or retired after it does not select
+/// a resource the published rows do not describe. A chain without a captured bound selects nothing.
+async fn load_registry_root(
+    snapshot: &mut CollectionSnapshot,
+    registry: &ContractSelector,
+) -> V2Result<Option<RegistryRootResource>> {
+    let Some(&block) = snapshot.block_bounds().get(registry.chain_slug) else {
+        return Ok(None);
+    };
+    bigname_storage::load_registry_root_resource(
+        snapshot.conn().await?,
+        registry.chain_slug,
+        &registry.address,
+        block,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(?error, "failed to resolve a registry root resource");
+        V2Error::internal_error("failed to resolve registry root resource")
+    })
 }
 
 fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {

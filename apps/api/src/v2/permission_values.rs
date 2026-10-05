@@ -21,7 +21,16 @@ pub(crate) fn permission_grant_relation(
 
 pub(crate) fn permission_scope_value(scope: &PermissionScope) -> V2Result<Value> {
     let detail = match scope {
-        PermissionScope::Root | PermissionScope::Registry | PermissionScope::Resource => json!({}),
+        PermissionScope::Registry | PermissionScope::Resource => json!({}),
+        PermissionScope::Root {
+            chain_id,
+            registry_address,
+        } => json!({
+            "registry": {
+                "chain_id": permission_scope_chain_id(chain_id)?,
+                "address": registry_address.to_ascii_lowercase(),
+            }
+        }),
         PermissionScope::Resolver {
             chain_id,
             resolver_address,
@@ -521,6 +530,19 @@ mod tests {
             json!({"kind":"account","detail":{"chain_id":1,"authority_kind":"registry",
                 "authority_contract":"0x0000000000000000000000000000000000000c33",
                 "owner":"0x0000000000000000000000000000000000000a11"}})
+        );
+    }
+
+    #[test]
+    fn root_scope_value_names_its_registry() {
+        let scope = EffectivePermissionScope::Direct(bigname_storage::PermissionScope::Root {
+            chain_id: "ethereum-sepolia".to_owned(),
+            registry_address: "0xD4EBCBBDF463C9C45784603DB0DDD499BC44A8B4".to_owned(),
+        });
+        assert_eq!(
+            effective_permission_scope_value(&scope).unwrap(),
+            json!({"kind":"root","detail":{"registry":{"chain_id":11155111,
+                "address":"0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4"}}})
         );
     }
 }

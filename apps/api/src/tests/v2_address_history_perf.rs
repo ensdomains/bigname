@@ -4,6 +4,8 @@
 
 use super::*;
 use std::path::PathBuf;
+#[path = "v2_address_history_publication_perf.rs"]
+mod publication_perf;
 
 const ADDRESS: &str = "0x000000000000000000000000000000000000a235";
 const OTHER: &str = "0x000000000000000000000000000000000000b235";
@@ -179,7 +181,10 @@ async fn address_history_rebuild_retained_performance_fixture() -> Result<()> {
         "requires disposable API fixture"
     );
     let (number, hash): (i64, String) = sqlx::query_as(
-        "SELECT current_block_number,current_block_hash FROM project_family_marker WHERE chain_id=$1",
+        "SELECT current_block_number,current_block_hash FROM project_family_marker WHERE chain_id=$1
+         UNION ALL SELECT current_block_number,current_block_hash FROM chain_phase_state
+         WHERE chain_id=$1 AND phase_name='interpret'
+           AND NOT EXISTS (SELECT 1 FROM project_family_marker WHERE chain_id=$1) LIMIT 1",
     )
     .bind(CHAIN)
     .fetch_one(&pool)

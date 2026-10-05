@@ -46,6 +46,7 @@ pub enum HistoryReadHookPoint {
     AfterAnchors,
     AfterPublicationCheck,
     AfterPage,
+    AfterContext,
 }
 
 static HOOKS: OnceLock<Mutex<HashMap<(String, HistoryReadHookPoint), HistoryAnchorReadHook>>> =

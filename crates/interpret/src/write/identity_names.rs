@@ -1,6 +1,6 @@
-use bigname_adapters::schema_v2::BatchOutput;
+use bigname_adapters::schema_v2::{BatchOutput, seam::PREIMAGE_OBSERVATION_EVENT_KIND};
 use sqlx::{Postgres, QueryBuilder, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
 
@@ -106,10 +106,55 @@ fn preimages_for_submission(
         .filter(|preimage| !preimage.raw_label.is_empty())
 }
 
+/// A surface's raw evidence moves only to an incoming bundle: onto a row that has none, onto
+/// one whose preimage witness a redo released, or with the identity anchor itself.
+const TAKES_INCOMING_EVIDENCE: &str = "(
+    EXCLUDED.raw_name IS NOT NULL
+    AND (
+        name_surfaces.raw_name IS NULL
+        OR name_surfaces.preimage_event_identity IS NULL
+        OR name_surfaces.canonicality_state = 'orphaned'
+        OR EXCLUDED.block_number < name_surfaces.block_number
+    )
+)";
+
+/// A preimage observation's transaction and log position, and its event identity.
+type BlockWitness<'a> = ((Option<i64>, Option<i64>), &'a str);
+
+/// The earliest preimage observation of each name in each block of the output, in the
+/// transaction and log order the redo repair uses. Surfaces reach the writer in interpretation
+/// order, which a recovered same-block observation can leave behind a later one.
+fn block_witnesses(output: &BatchOutput) -> HashMap<(&str, &str), BlockWitness<'_>> {
+    let mut witnesses = HashMap::<_, BlockWitness<'_>>::new();
+    for event in &output.normalized_events {
+        let (Some(logical_name_id), Some(block_hash)) = (
+            event.logical_name_id.as_deref(),
+            event.block_hash.as_deref(),
+        ) else {
+            continue;
+        };
+        if event.event_kind != PREIMAGE_OBSERVATION_EVENT_KIND {
+            continue;
+        }
+        let position = (event.transaction_index, event.log_index);
+        let candidate = (position, event.event_identity.as_str());
+        witnesses
+            .entry((logical_name_id, block_hash))
+            .and_modify(|earliest| {
+                if position < earliest.0 {
+                    *earliest = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+    witnesses
+}
+
 async fn write_surfaces(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
+    let witnesses = block_witnesses(output);
     for (start, batch) in conflict_free_batches(&output.name_surfaces, |surface| {
         surface.logical_name_id.clone()
     }) {
@@ -120,15 +165,15 @@ async fn write_surfaces(
                 dns_encoded_name, namehash, labelhashes, normalizer_version,
                 visibility_state, normalization_errors, deactivation_reason,
                 deactivated_at, chain_id, block_hash, block_number,
-                provenance, canonicality_state
+                provenance, canonicality_state, preimage_event_identity
             ) ",
         );
         query.push_values(batch, |mut row, surface| {
             row.push_bind(&surface.logical_name_id)
                 .push_bind(&surface.namespace)
-                .push_bind(&surface.raw_name)
-                .push_bind(&surface.raw_labels)
-                .push_bind(&surface.dns_encoded_name)
+                .push_bind(surface.raw_name())
+                .push_bind(surface.raw_labels())
+                .push_bind(surface.dns_encoded_name())
                 .push_bind(&surface.namehash)
                 .push_bind(&surface.labelhashes)
                 .push_bind(&surface.normalizer_version)
@@ -141,42 +186,71 @@ async fn write_surfaces(
                 .push_bind(surface.block_number)
                 .push_bind(&surface.provenance)
                 .push_bind(&surface.canonicality_state)
-                .push_unseparated("::canonicality_state");
+                .push_unseparated("::canonicality_state")
+                .push_bind(surface.preimage_event_identity().map(|own| {
+                    witnesses
+                        .get(&(
+                            surface.logical_name_id.as_str(),
+                            surface.block_hash.as_str(),
+                        ))
+                        .map_or(own, |(_, earliest)| *earliest)
+                }));
         });
-        query.push(
+        let take = TAKES_INCOMING_EVIDENCE;
+        let keep = format!("(name_surfaces.raw_name IS NOT NULL AND NOT {take})");
+        let anchor_moves = "(
+            name_surfaces.canonicality_state = 'orphaned'
+            OR EXCLUDED.block_number < name_surfaces.block_number
+        )";
+        query.push(format!(
             "
             ON CONFLICT (logical_name_id) DO UPDATE
-            SET normalizer_version = EXCLUDED.normalizer_version,
-                visibility_state = EXCLUDED.visibility_state,
-                normalization_errors = EXCLUDED.normalization_errors,
-                deactivation_reason = EXCLUDED.deactivation_reason,
+            SET raw_name = CASE WHEN {take} THEN EXCLUDED.raw_name ELSE name_surfaces.raw_name END,
+                raw_labels = CASE WHEN {take} THEN EXCLUDED.raw_labels ELSE name_surfaces.raw_labels END,
+                dns_encoded_name = CASE
+                    WHEN {take} THEN EXCLUDED.dns_encoded_name
+                    ELSE name_surfaces.dns_encoded_name
+                END,
+                preimage_event_identity = CASE
+                    WHEN {take} THEN EXCLUDED.preimage_event_identity
+                    ELSE name_surfaces.preimage_event_identity
+                END,
+                normalizer_version = CASE
+                    WHEN {keep} THEN name_surfaces.normalizer_version
+                    ELSE EXCLUDED.normalizer_version
+                END,
+                visibility_state = CASE
+                    WHEN {keep} THEN name_surfaces.visibility_state
+                    ELSE EXCLUDED.visibility_state
+                END,
+                normalization_errors = CASE
+                    WHEN {keep} THEN name_surfaces.normalization_errors
+                    ELSE EXCLUDED.normalization_errors
+                END,
+                deactivation_reason = CASE
+                    WHEN {keep} THEN name_surfaces.deactivation_reason
+                    ELSE EXCLUDED.deactivation_reason
+                END,
                 block_hash = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
-                        THEN EXCLUDED.block_hash
+                    WHEN {anchor_moves} THEN EXCLUDED.block_hash
                     ELSE name_surfaces.block_hash
                 END,
                 block_number = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
-                        THEN EXCLUDED.block_number
+                    WHEN {anchor_moves} THEN EXCLUDED.block_number
                     ELSE name_surfaces.block_number
                 END,
                 provenance = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
-                        THEN EXCLUDED.provenance
+                    WHEN {anchor_moves} THEN EXCLUDED.provenance
                     ELSE name_surfaces.provenance
                 END,
                 deactivated_at = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
+                    WHEN {keep} THEN name_surfaces.deactivated_at
+                    WHEN {anchor_moves} OR name_surfaces.deactivated_at IS NULL
                         THEN EXCLUDED.deactivated_at
                     ELSE name_surfaces.deactivated_at
                 END,
                 canonicality_state = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
+                    WHEN {anchor_moves}
                       OR (
                           EXCLUDED.block_number = name_surfaces.block_number
                           AND EXCLUDED.block_hash = name_surfaces.block_hash
@@ -185,30 +259,35 @@ async fn write_surfaces(
                     ELSE name_surfaces.canonicality_state
                 END,
                 observed_at = CASE
-                    WHEN name_surfaces.canonicality_state = 'orphaned'
-                      OR EXCLUDED.block_number < name_surfaces.block_number
-                        THEN now()
+                    WHEN {anchor_moves} THEN now()
                     ELSE name_surfaces.observed_at
                 END
             WHERE name_surfaces.namespace = EXCLUDED.namespace
-              AND name_surfaces.raw_name = EXCLUDED.raw_name
-              AND name_surfaces.raw_labels = EXCLUDED.raw_labels
-              AND name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
               AND name_surfaces.namehash = EXCLUDED.namehash
               AND name_surfaces.labelhashes = EXCLUDED.labelhashes
               AND name_surfaces.chain_id = EXCLUDED.chain_id
               AND (
-                    name_surfaces.canonicality_state = 'orphaned'
-                OR (
-                    name_surfaces.normalizer_version = EXCLUDED.normalizer_version
-                AND name_surfaces.visibility_state = EXCLUDED.visibility_state
-                AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
-                AND name_surfaces.deactivation_reason IS NOT DISTINCT FROM EXCLUDED.deactivation_reason
-                  )
+                    name_surfaces.raw_name IS NULL
+                 OR EXCLUDED.raw_name IS NULL
+                 OR (
+                        name_surfaces.raw_name = EXCLUDED.raw_name
+                    AND name_surfaces.raw_labels = EXCLUDED.raw_labels
+                    AND name_surfaces.dns_encoded_name = EXCLUDED.dns_encoded_name
+                    AND (
+                            name_surfaces.canonicality_state = 'orphaned'
+                         OR (
+                                name_surfaces.normalizer_version = EXCLUDED.normalizer_version
+                            AND name_surfaces.visibility_state = EXCLUDED.visibility_state
+                            AND name_surfaces.normalization_errors = EXCLUDED.normalization_errors
+                            AND name_surfaces.deactivation_reason
+                                IS NOT DISTINCT FROM EXCLUDED.deactivation_reason
+                            )
+                        )
+                    )
               )
             RETURNING logical_name_id
-            ",
-        );
+            "
+        ));
         let written = query
             .build_query_scalar::<String>()
             .fetch_all(&mut **transaction)
@@ -242,7 +321,7 @@ async fn write_surfaces(
 
 #[cfg(test)]
 mod tests {
-    use bigname_adapters::schema_v2::{LabelPreimage, NameSurface};
+    use bigname_adapters::schema_v2::{LabelPreimage, NameSurface, RawNameEvidence};
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use serde_json::json;
 
@@ -320,9 +399,12 @@ mod tests {
                     NameSurface {
                         logical_name_id: format!("ens:{namehash}"),
                         namespace: "ens".to_owned(),
-                        raw_name: format!("name-{index:03}.eth"),
-                        raw_labels: vec![format!("name-{index:03}"), "eth".to_owned()],
-                        dns_encoded_name: vec![index as u8],
+                        raw: Some(RawNameEvidence {
+                            raw_name: format!("name-{index:03}.eth"),
+                            raw_labels: vec![format!("name-{index:03}"), "eth".to_owned()],
+                            dns_encoded_name: vec![index as u8],
+                            preimage_event_identity: format!("preimage-{index:03}"),
+                        }),
                         namehash,
                         labelhashes: vec![format!("0xlabel{index:03}"), "0xeth".to_owned()],
                         normalizer_version: "test".to_owned(),
@@ -377,3 +459,7 @@ mod tests {
 #[cfg(test)]
 #[path = "identity_names/coverage_tests.rs"]
 mod coverage_tests;
+
+#[cfg(test)]
+#[path = "identity_names/raw_evidence_tests.rs"]
+mod raw_evidence_tests;

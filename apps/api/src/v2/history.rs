@@ -209,6 +209,9 @@ pub(crate) async fn get_history(
     )
     .await?;
 
+    bigname_storage::revalidate_interpret_redo_fence(&state.pool, &interpret_redo_fence)
+        .await
+        .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
     let next_cursor = storage_page
         .next_cursor
         .as_ref()
@@ -373,6 +376,7 @@ pub(crate) fn build_history_event(
     row: &StorageHistoryEvent,
     anchor_name: &str,
     include: HistoryInclude,
+    context: &super::history_context::HistoryRowContext,
 ) -> Option<HistoryEvent> {
     let event_type = history_event_type(&row.event_kind)?;
 
@@ -389,15 +393,9 @@ pub(crate) fn build_history_event(
         timestamp: row.block_timestamp.map(format_timestamp),
         transaction_hash: row.transaction_hash.clone(),
         log_index: row.log_index,
-        // Primary-name rows carry no name or resource, so they never reach name history; no
-        // row context is needed.
-        detail: include.data.then(|| {
-            build_event_detail(
-                row,
-                event_type,
-                &super::history_context::HistoryRowContext::default(),
-            )
-        }),
+        detail: include
+            .data
+            .then(|| build_event_detail(row, event_type, context)),
         kind: raw_event_kind(row, include),
     })
 }

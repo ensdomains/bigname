@@ -32,6 +32,7 @@ mod projection_helpers;
 mod read_db;
 mod record_inventory;
 mod registries;
+mod registry_token_ids;
 mod resolution_state;
 mod resolution_support;
 mod resolver;
@@ -87,7 +88,8 @@ pub use history::{
     load_address_history_page_for_relations, load_bounded_record_attribution,
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
-    load_history_events_by_ids, load_name_history, load_name_history_head, load_name_history_page,
+    load_history_events_by_ids, load_history_payment_values, load_history_token_ids,
+    load_name_history, load_name_history_head, load_name_history_page,
     load_name_history_page_with_child_registrations, load_recorded_primary_names,
     load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
@@ -167,10 +169,11 @@ pub use record_inventory::{
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
-    RegistryReferencePage, SubregistryPointer, load_registry_contract,
-    load_registry_references_page, load_registry_serving_pointer,
+    RegistryReferencePage, RegistryRootResource, SubregistryPointer, load_registry_contract,
+    load_registry_references_page, load_registry_root_resource, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };
+pub use registry_token_ids::load_ens_v2_token_ids;
 pub use resolution_state::{Protocol, ResolutionState, load_resolution_state_on};
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

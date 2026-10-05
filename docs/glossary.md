@@ -701,6 +701,23 @@ shapes are in [api-v1.md](api-v1.md#resource-restrictions); the derivation is in
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
 
+## Registry root resource
+
+The ENSv2 Enhanced Access Control resource `0` of a registry contract
+(`ROOT_RESOURCE`), whose role grants apply to the registry as a whole rather
+than to one name's token. Registry-wide roles such as `registrar` and
+`set_parent` are granted there, and a role held there also satisfies the same
+role check on every name in that registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L177 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2_sepolia_20261001@07e55a05)
+bigname stores its role changes as `RootPermissionChanged` events and serves
+its current holders as permission rows with `grant_scope.kind` `root`, through
+`GET /v1/permissions?registry=<chain_id>:<address>`. Its `resource_id` is
+derived from the registry's contract instance, so it changes when the address
+moves to a new contract instance.
+
 ## ENSv1→ENSv2 migration
 
 the on-chain move of an existing ENS name from the
@@ -1965,6 +1982,17 @@ may serve as a name — see [non-name form](#non-name-form) for what serves when
 it may not. A preimage improves display only; it never
 creates ownership, resolver, record, or primary-name truth.
 
+## Preimage witness
+
+the `PreimageObserved` event a [name surface](#surface-name-surface) names in
+`preimage_event_identity` as the source of its raw label bytes: the earliest
+canonical preimage observation of that name. It is kept apart from the surface's
+own first-observation block, because a node can be established by its label-hash
+path before any event states its bytes. A reorg or redo that removes the witness
+moves it to the next surviving preimage observation, or removes the raw bytes
+when none survives and a label-hash-path observation still establishes the
+surface. See [storage](storage.md#name-identity-and-raw-evidence).
+
 ## Pre-surface
 
 a name whose registry events were observed before any plaintext [name
@@ -2419,8 +2447,11 @@ statistics.
 
 an on-chain name identity
 (`logical_name_id = namespace:namehash`), distinct from whatever authority
-currently backs it. Raw labels and their normalization flags are observations,
-not identity; display names are derived when read, following the audit's
+currently backs it. The identity is the node and the label-hash path that
+proves it. Raw labels and their normalization flags are observations,
+not identity: a surface stores the raw bytes of its labels only once all of
+them are known, with the [preimage witness](#preimage-witness) that carried
+them, and stores none until then. Display names are derived when read, following the audit's
 [normalization-as-a-gate decision](internal/archive/simplification-audit-20260730.md#normalization-as-a-gate-not-stored-identity-maintainer-2026-07-30).
 A **surface binding** is the time-ranged record of which resource backed a
 surface when. Surfaces survive re-registration; resources rotate.
@@ -2647,8 +2678,13 @@ child counts and the registry labels filter, sort and count by inside one
 statement, which a list cannot compose at read for every child: the selected
 authority arm, whether the name has a serving resource, its registration
 status, expiry and registration times, the owner it serves, and whether the
-latest registry Transfer attributed to it names the zero owner. Each but the
-last is the value
+latest registry Transfer attributed to it names the zero owner. It also stores
+the expiry selector of [`GET /v1/names`](api-v1-routes.md#get-v1names): whether
+the name's row is listed by expiry (`expiry_listable`: the name composes a row,
+its coverage is not unsupported and its registration carries a finite expiry)
+and the public `authority` the row serves (`public_authority`: `ens_v0`,
+`ens_v1`, `ens_v2`, or none). Each but the zero-owner flag
+is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
 latest named registry event of any kind of its resource, else an active surface

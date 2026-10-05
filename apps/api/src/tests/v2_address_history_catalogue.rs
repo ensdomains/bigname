@@ -3,6 +3,76 @@ use super::*;
 use bigname_storage::history_anchor_read_test_hooks::{self, HistoryReadHookPoint};
 
 #[tokio::test]
+async fn address_history_new_owner_reads_old_shared_history_without_backfill() -> Result<()> {
+    const NEW_OWNER: &str = "0x000000000000000000000000000000000000d235";
+    let database = TestDatabase::new_migrated().await?;
+    seed_names(&database, 2).await?;
+    let uri = format!(
+        "/v1/addresses/{NEW_OWNER}/history?relation=owner&order=asc&page_size=200&include=total_count"
+    );
+    let (before, _) = measured(&database, &uri, 200).await?;
+    assert!(hk_ids(&before).is_empty());
+    let shared_counts = |pool: PgPool| async move {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT (SELECT count(*) FROM project_history_source),
+                    (SELECT count(*) FROM project_history_source_edge)",
+        )
+        .fetch_one(&pool)
+        .await
+    };
+    let old_shared = shared_counts(database.pool.clone()).await?;
+    publish_bounded_membership_at(&database, 241).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "walk-0000.eth");
+    let event = address_fixture_event(
+        "catalogue-new-owner",
+        Some(&logical),
+        Some(Uuid::from_u128(0x235000)),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        241,
+        "0xhistory241",
+        0,
+        json!({"from":ADDRESS,"to":NEW_OWNER}),
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    let retained = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT md5(string_agg(to_jsonb(event)::text, E'\\n' ORDER BY event_identity))
+             FROM normalized_events event",
+        )
+        .fetch_one(&pool)
+        .await
+    };
+    let before_project = retained(database.pool.clone()).await?;
+    publish_test_families(&database, 241).await?;
+    assert_eq!(retained(database.pool.clone()).await?, before_project);
+    assert_eq!(shared_counts(database.pool.clone()).await?, old_shared);
+    let new_anchors: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM project_address_history_anchor WHERE address=$1")
+            .bind(NEW_OWNER)
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(
+        new_anchors, 2,
+        "one name and one resource membership share old sources"
+    );
+    let (after, stats) = measured(&database, &uri, 200).await?;
+    assert_eq!(stats.counters.get("catalogue"), Some(&1));
+    assert_eq!(after["page"]["total_count"], json!(5));
+    let mut expected = [
+        "RegistrationGranted",
+        "AuthorityTransferred",
+        "ResolverChanged",
+        "RecordChanged",
+    ]
+    .map(|kind| hkw_id(&format!("relation-235000-{kind}")))
+    .to_vec();
+    expected.push(hkw_id("catalogue-new-owner"));
+    assert_eq!(hk_ids(&after), expected);
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_history_catalogue_publication_change_uses_original_bounds() -> Result<()> {
     for (point, change, path) in [
         (

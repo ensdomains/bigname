@@ -6,8 +6,8 @@ use crate::schema_v2::{
     common::{dns_encode, hash_hex, normalization_flag},
     manifest::ManifestSource,
     model::{
-        BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawBlockInput, Resource,
-        SurfaceBinding, TokenLineage,
+        BatchOutput, BindingClosure, LabelPreimage, NameSurface, RawBlockInput, RawNameEvidence,
+        Resource, SurfaceBinding, TokenLineage,
     },
     normalized::boundary_preimage_event,
     protocol::Interpreted,
@@ -32,6 +32,7 @@ pub(in crate::schema_v2) fn materialize_v2_boundary(
             && interpreted.discovery.is_empty()
             && interpreted.migration_events.is_empty()
             && interpreted.migration_observations.is_empty()
+            && interpreted.node_identities.is_empty()
             && interpreted.names.len() == 1,
         "ENSv2 boundary reassertion produced an unsupported draft shape"
     );
@@ -80,12 +81,30 @@ pub(in crate::schema_v2) fn materialize_v2_boundary(
             provenance: provenance.clone(),
         });
     }
+    let preimage = boundary_preimage_event(
+        source,
+        block,
+        Some(logical_name_id.clone()),
+        &name.namehash,
+        json!({
+            "source_event":"RegistryPathExpired",
+            "raw_name":name.labels.join("."),
+            "raw_labels":name.labels,
+            "namehash":name.namehash,
+            (ARM_WIDE_BINDING_CLOSE_KEY):true,
+            (CLOSED_AUTHORITY_ARM_KEY):"ens_v2",
+            (SURFACE_BINDING_ID_KEY):surface_binding_id.to_string(),
+        }),
+    );
     output.name_surfaces.push(NameSurface {
         logical_name_id: logical_name_id.clone(),
         namespace: source.namespace.clone(),
-        raw_name: name.labels.join("."),
-        raw_labels: name.labels.clone(),
-        dns_encoded_name: dns_encode(&name.labels)?,
+        raw: Some(RawNameEvidence {
+            raw_name: name.labels.join("."),
+            raw_labels: name.labels.clone(),
+            dns_encoded_name: dns_encode(&name.labels)?,
+            preimage_event_identity: preimage.event_identity.clone(),
+        }),
         namehash: name.namehash.clone(),
         labelhashes: name
             .labels
@@ -147,20 +166,6 @@ pub(in crate::schema_v2) fn materialize_v2_boundary(
         provenance,
         canonicality_state: block.canonicality_state.clone(),
     });
-    output.normalized_events.push(boundary_preimage_event(
-        source,
-        block,
-        Some(logical_name_id),
-        &name.namehash,
-        json!({
-            "source_event":"RegistryPathExpired",
-            "raw_name":name.labels.join("."),
-            "raw_labels":name.labels,
-            "namehash":name.namehash,
-            (ARM_WIDE_BINDING_CLOSE_KEY):true,
-            (CLOSED_AUTHORITY_ARM_KEY):"ens_v2",
-            (SURFACE_BINDING_ID_KEY):surface_binding_id.to_string(),
-        }),
-    ));
+    output.normalized_events.push(preimage);
     Ok(())
 }

@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=385
+expected_refusal_assertions=399
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=65
+expected_predecessor_shape_proof_count=68
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -641,6 +641,11 @@ check_served_projection_removal() {
             emit_phase_migration "$ROOT/migrations/20261001110000_project_child_registration_registry_index.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261001110100_project_child_edge_candidate_child_index.sql" baseline-first
             emit_phase_migration "$ROOT/migrations/20261001120000_name_surfaces_name_order_index.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" preceding-shape
+            else
+                emit_phase_migration "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" baseline-first
+            fi
             # Absent from the pre-7c fixture, present in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261001120100_normalized_events_basenames_lookahead_indexes.sql" preceding-shape
@@ -682,9 +687,25 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first
             fi
             if [ "$suffix" = removal ]; then
-                emit_phase_migration "$ROOT/migrations/20261005140000_project_address_history_catalogue.sql" preceding-shape
+                # Restore name_surfaces' exact predecessor shape before testing the upgrade.
+                printf 'ALTER TABLE name_surfaces DROP CONSTRAINT name_surfaces_raw_evidence_check, DROP COLUMN preimage_event_identity, ALTER COLUMN raw_name SET NOT NULL, ALTER COLUMN raw_labels SET NOT NULL, ALTER COLUMN dns_encoded_name SET NOT NULL, ADD CHECK (cardinality(raw_labels) = cardinality(labelhashes));\n'
+                printf "COMMENT ON TABLE name_surfaces IS 'This table stores raw names and their visibility state.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_name IS 'This value is the verbatim name.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_labels IS 'This array stores the verbatim labels.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.dns_encoded_name IS 'This value is the DNS wire name.';\n"
+                emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            # The expiry selector columns and indexes: added to the pre-7c shape, already in the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" baseline-first
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" preceding-shape
             else
-                emit_phase_migration "$ROOT/migrations/20261005140000_project_address_history_catalogue.sql" baseline-first
+                emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" baseline-first
             fi
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
@@ -817,8 +838,11 @@ for migration_file in \
     "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
+    "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" \
     "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" \
-    "$ROOT/migrations/20261005140000_project_address_history_catalogue.sql"
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" \
+    "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1162,7 +1186,9 @@ for migration_file in \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -1170,9 +1196,72 @@ done
 # application builds it and the second finds it.
 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" baseline-first | run_psql
+emit_phase_migration "$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql" preceding-shape | run_psql
 # The same fixture lacks the address root permission index.
 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" preceding-shape | run_psql
 emit_phase_migration "$ROOT/migrations/20261005120000_normalized_events_address_root_permission_idx.sql" baseline-first | run_psql
+# The expiry selector on project_name_summary. From a populated summary without the two
+# columns, the schema-migration must clear the summaries, add both columns and build both
+# partial indexes with the reviewed definitions and the baseline's comments, then accept
+# that shape on a rerun without clearing anything.
+summary_selector_migration="$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+ALTER TABLE project_name_summary
+    DROP COLUMN IF EXISTS expiry_listable, DROP COLUMN IF EXISTS public_authority;
+INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving, zero_owner)
+VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE);
+SQL
+    emit_phase_migration "$summary_selector_migration" preceding-shape
+    cat <<SQL
+DO \$\$
+DECLARE
+    selector_index text;
+    selector_definition text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM project_name_summary) THEN
+        RAISE EXCEPTION 'the expiry selector upgrade kept a summary written without it';
+    END IF;
+    IF (SELECT count(*) FROM pg_attribute
+        WHERE attrelid = 'project_name_summary'::regclass AND NOT attisdropped
+          AND ((attname = 'expiry_listable' AND atttypid = 'boolean'::regtype AND attnotnull)
+            OR (attname = 'public_authority' AND atttypid = 'text'::regtype AND NOT attnotnull))
+          AND col_description(attrelid, attnum) IS NOT NULL) <> 2 THEN
+        RAISE EXCEPTION 'the expiry selector upgrade left the wrong columns';
+    END IF;
+    FOR selector_index, selector_definition IN VALUES
+        ('project_name_summary_expiry_idx',
+         'CREATE INDEX project_name_summary_expiry_idx ON $scratch_schema.project_name_summary USING btree (namespace, expires_at, logical_name_id, chain_id) WHERE (expiry_listable AND (expires_at IS NOT NULL))'),
+        ('project_name_summary_authority_expiry_idx',
+         'CREATE INDEX project_name_summary_authority_expiry_idx ON $scratch_schema.project_name_summary USING btree (namespace, public_authority, expires_at, logical_name_id, chain_id) WHERE (expiry_listable AND (expires_at IS NOT NULL))')
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index
+            WHERE indexrelid = to_regclass(selector_index) AND indisvalid AND indisready
+              AND pg_get_indexdef(indexrelid) = selector_definition
+        ) THEN
+            RAISE EXCEPTION '% differs from its reviewed definition: %', selector_index,
+                pg_get_indexdef(to_regclass(selector_index));
+        END IF;
+    END LOOP;
+    INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
+        zero_owner, expiry_listable)
+    VALUES ('apply-check', 'ens:0x01', 'ens', FALSE, FALSE, TRUE);
+END \$\$;
+SQL
+    emit_phase_migration "$summary_selector_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM project_name_summary) <> 1 THEN
+        RAISE EXCEPTION 'the expiry selector rerun cleared a summary that carries it';
+    END IF;
+    DELETE FROM project_name_summary;
+END $$;
+SQL
+    emit_phase_migration "$summary_selector_migration" baseline-first
+} | run_psql
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.
@@ -2779,8 +2868,8 @@ assert_index_install_hint address-match-index-on-another-table-hint \
 # validated. The walk installer and remaining structural checks need today's indexes.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    emit_phase_migration "$ROOT/migrations/20261005140000_project_address_history_catalogue.sql" preceding-shape
-    emit_phase_migration "$ROOT/migrations/20261005140000_project_address_history_catalogue.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20261005160000_project_address_history_catalogue.sql" baseline-first
 } | run_psql
 # ops/walk-index-set/drop.sql must refuse while a chain may be served: its Project
 # is running, has a current block or a live family marker and its Interpret is not redoing,
@@ -2809,8 +2898,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 36 THEN
-        RAISE EXCEPTION 'drop.sql does not list 36 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 37 THEN
+        RAISE EXCEPTION 'drop.sql does not list 37 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -3632,6 +3721,161 @@ do
         "$events_order_index exists but does not have the reviewed definition; found \"CREATE INDEX $events_order_index ON $scratch_schema.normalized_events USING btree ($events_order_wrong_keys)\", expected \"$events_order_reviewed_definition\"; $events_order_recovery" <<SQL
 DROP INDEX $events_order_index;
 CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys);
+SQL
+done
+# Recreate the registry token index from its preceding schema shape. Compare
+# the resulting catalog definition to the fresh baseline, then prove a rerun
+# leaves it unchanged.
+registry_token_migration="$ROOT/migrations/20261005090000_normalized_events_registry_token_index.sql"
+registry_token_install="$ROOT/ops/registry-token-index/install.sql"
+registry_token_readme=ops/registry-token-index/README.md
+registry_token_index=normalized_events_registry_token_idx
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_registry_token_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'normalized_events_registry_token_idx'::regclass;
+DROP INDEX normalized_events_registry_token_idx;
+SQL
+    emit_phase_migration "$registry_token_migration" preceding-shape
+    emit_phase_migration "$registry_token_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_registry_token_index expected
+        WHERE indexrelid = 'normalized_events_registry_token_idx'::regclass
+          AND indrelid = 'normalized_events'::regclass
+          AND indisvalid AND indisready AND indpred IS NOT NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'registry token index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_registry_token_index;
+SQL
+} | run_psql
+# The schema-migration adopts an existing relation by name alone, so its check
+# must accept the index it just rebuilt, under the phase schema and under
+# public as sqlx runs it, leave the search_path as it found it in the session
+# and inside one transaction, and give a caller with quote_all_identifiers on
+# the same answer while keeping that setting.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$registry_token_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$registry_token_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$registry_token_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$registry_token_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$registry_token_migration" empty-schema 1
+assert_migration_context_count "$registry_token_migration" preceding-shape 3
+assert_migration_context_count "$registry_token_migration" baseline-first 4
+# The live prebuild in ops/registry-token-index/install.sql must build the
+# baseline definition, refuse an invalid index, a valid index with other keys,
+# and a table under the name, and recover as its README says. The definition
+# has no JSON key literal.
+assert_concurrent_index_installer registry-token \
+    "$registry_token_index" \
+    "$registry_token_install" \
+    "$registry_token_readme" \
+    normalized_events \
+    "block_number, chain_id" \
+    no-json-key-literal
+# An invalid index must be refused with the drop-and-rerun hint, and an index on
+# another table under the name with its own hint.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$registry_token_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_hint registry-token-invalid-index-hint \
+    "$registry_token_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$registry_token_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX CONCURRENTLY $registry_token_index;" \
+        "CREATE INDEX $registry_token_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal registry-token-index-on-another-table \
+    "$registry_token_install" \
+    "$registry_token_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $registry_token_readme before retrying"
+assert_index_install_hint registry-token-index-on-another-table-hint \
+    "$registry_token_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $registry_token_index;"
+    render_phase_migration "$registry_token_install"
+} | run_psql >/dev/null
+# Put the index into every shape CREATE INDEX IF NOT EXISTS skips, inside a
+# transaction that rolls back, and require the schema-migration to fail rather
+# than record success. The expected definition it names must be how the
+# fresh-baseline index prints, read under search_path pg_catalog.
+registry_token_recovery="follow the recovery steps in $registry_token_readme, then run the schema-migrations again"
+assert_migration_refusal "invalid-$registry_token_index" \
+    "$registry_token_migration" \
+    "$registry_token_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $registry_token_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$registry_token_index'::regclass;
+SQL
+assert_migration_refusal "not-ready-$registry_token_index" \
+    "$registry_token_migration" \
+    "$registry_token_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $registry_token_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$registry_token_index'::regclass;
+SQL
+assert_migration_refusal "table-named-$registry_token_index" \
+    "$registry_token_migration" \
+    "$scratch_schema.$registry_token_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $registry_token_index;
+CREATE TABLE $registry_token_index ();
+SQL
+assert_migration_refusal "view-named-$registry_token_index" \
+    "$registry_token_migration" \
+    "$scratch_schema.$registry_token_index is a view, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $registry_token_index;
+CREATE VIEW $registry_token_index AS SELECT 1 AS occupied;
+SQL
+assert_migration_refusal "other-table-$registry_token_index" \
+    "$registry_token_migration" \
+    "$registry_token_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $registry_token_recovery" <<SQL
+DROP INDEX $registry_token_index;
+CREATE INDEX $registry_token_index ON discovery_edges (chain_id);
+SQL
+registry_token_reviewed_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            "SET search_path TO pg_catalog;" \
+            "SELECT pg_get_indexdef('$scratch_schema.$registry_token_index'::regclass);"
+    } | run_psql
+)"
+# The keys alone are not enough: the ascending index, which read backward puts
+# rows without a block first, and a descending index with the default NULLS
+# FIRST cannot serve the page order, so both must be refused.
+for registry_token_wrong_keys in \
+    "block_number, chain_id" \
+    "chain_id, block_number" \
+    "chain_id, block_number DESC"
+do
+    assert_migration_refusal "wrong-keys-$registry_token_wrong_keys" \
+        "$registry_token_migration" \
+        "$registry_token_index exists but does not have the reviewed definition; found \"CREATE INDEX $registry_token_index ON $scratch_schema.normalized_events USING btree ($registry_token_wrong_keys)\", expected \"$registry_token_reviewed_definition\"; $registry_token_recovery" <<SQL
+DROP INDEX $registry_token_index;
+CREATE INDEX $registry_token_index ON normalized_events ($registry_token_wrong_keys);
 SQL
 done
 # Recreate the mirror pointer index from its preceding schema shape. Compare the

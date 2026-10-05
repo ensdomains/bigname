@@ -27,6 +27,7 @@ mod keyset;
 mod lineage;
 mod options;
 mod paging;
+mod payment_values;
 mod primary_values;
 #[cfg(any(test, feature = "test-support"))]
 mod query_plan;
@@ -36,6 +37,7 @@ mod registration_identity;
 mod selectors;
 mod source;
 mod summary;
+mod token_ids;
 mod wrapped_registrar;
 
 use anyhow::{Context, Result};
@@ -66,12 +68,14 @@ pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryCataloguePublication,
     HistoryCataloguePublicationFence, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
+pub use payment_values::load_history_payment_values;
 pub use primary_values::load_recorded_primary_names;
 pub use redo::{
     InterpretRedoFence, InterpretRedoInProgress, capture_interpret_redo_fence,
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+pub use token_ids::load_history_token_ids;
 pub use wrapped_registrar::{
     load_bounded_registration_resource_ids, load_registrar_grant_resource_ids_by_logical_name_id,
     load_wrapped_registrar_resource_ids_by_logical_name_id,

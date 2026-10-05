@@ -1057,3 +1057,13 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_addressed_node_i
       AND COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node') IS NOT NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+-- API serving: latest published ENSv2 token per registration resource.
+CREATE INDEX IF NOT EXISTS normalized_events_registry_token_idx
+ON normalized_events
+    (chain_id, resource_id, block_number DESC, transaction_index DESC, log_index DESC)
+WHERE source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+  AND event_kind IN ('TokenResourceLinked', 'TokenRegenerated')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND resource_id IS NOT NULL AND block_number IS NOT NULL
+  AND transaction_index IS NOT NULL AND log_index IS NOT NULL;
