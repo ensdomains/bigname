@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 use crate::snapshot_selection::{
     ChainPosition, ChainPositions, SnapshotProjectionRead, SnapshotSelectionError,
@@ -19,19 +19,27 @@ use super::NameCurrentRow;
 /// the publication (an `at` below it) is stale: no per-row position is kept to prove an older
 /// read.
 pub async fn load_name_current_for_snapshot(
-    pool: &PgPool,
+    db: impl Into<crate::ReadDb<'_>>,
     logical_name_id: &str,
     selected_chain_positions: &ChainPositions,
 ) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
-    family_name_for_snapshot(pool, logical_name_id, selected_chain_positions).await
+    let mut snapshot = db.into().snapshot().await.map_err(|error| {
+        SnapshotSelectionError::internal(format!("failed to open name snapshot: {error}"))
+    })?;
+    let result =
+        family_name_for_snapshot(&mut snapshot, logical_name_id, selected_chain_positions).await;
+    snapshot.close().await.map_err(|error| {
+        SnapshotSelectionError::internal(format!("failed to close name snapshot: {error}"))
+    })?;
+    result
 }
 
 async fn family_name_for_snapshot(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     logical_name_id: &str,
     selected_chain_positions: &ChainPositions,
 ) -> std::result::Result<SnapshotProjectionRead<NameCurrentRow>, SnapshotSelectionError> {
-    let row = crate::families::name::load_family_name(pool, logical_name_id)
+    let row = crate::families::name::load_family_name(&mut *conn, logical_name_id)
         .await
         .map_err(|error| {
             if crate::families::name::is_publication_unavailable(&error) {
@@ -52,19 +60,20 @@ async fn family_name_for_snapshot(
             .values()
             .map(|position| position.chain_id.clone())
             .collect();
-        let publications = crate::families::name::ensure_family_publications(pool, &chain_ids)
-            .await
-            .map_err(|error| {
-                if crate::families::name::is_publication_unavailable(&error) {
-                    return SnapshotSelectionError::stale(format!(
-                        "name data is unavailable while the families rebuild: {error}"
-                    ));
-                }
-                SnapshotSelectionError::internal(format!(
-                    "failed to read the family markers for logical_name_id {logical_name_id}: \
+        let publications =
+            crate::families::name::ensure_family_publications(&mut *conn, &chain_ids)
+                .await
+                .map_err(|error| {
+                    if crate::families::name::is_publication_unavailable(&error) {
+                        return SnapshotSelectionError::stale(format!(
+                            "name data is unavailable while the families rebuild: {error}"
+                        ));
+                    }
+                    SnapshotSelectionError::internal(format!(
+                        "failed to read the family markers for logical_name_id {logical_name_id}: \
                      {error}"
-                ))
-            })?;
+                    ))
+                })?;
         // As for a composed row: only the publication itself can say the name is absent.
         let selected = positions_by_chain_id(selected_chain_positions)?;
         let at_publication = publications.iter().all(|publication| {

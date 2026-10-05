@@ -468,6 +468,8 @@ mod v2_history_bounded_rebinding;
 mod v2_history_bounded_regeneration;
 #[path = "tests/v2_registry_permission_identity.rs"]
 mod v2_registry_permission_identity;
+#[path = "tests/v2_registry_token_ids.rs"]
+mod v2_registry_token_ids;
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_resolver_generation_races.rs");
