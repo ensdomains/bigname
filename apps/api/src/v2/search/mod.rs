@@ -234,6 +234,21 @@ pub(crate) async fn get_search(
         params.page_size,
     )
     .await?;
+    let mut data = storage_page
+        .rows
+        .iter()
+        .map(build_search_name)
+        .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        &mut *reads,
+        data.iter_mut().filter_map(|name| name.ens_v1.as_mut()),
+    )
+    .await?;
+    // Closed before the revalidation below, which reads through the pool.
+    reads
+        .commit()
+        .await
+        .map_err(|_| V2Error::internal_error("failed to load search results"))?;
     #[cfg(test)]
     if public_namespace_set.is_none() {
         public_namespace_read_test_hooks::run(&state.pool).await?;
@@ -265,20 +280,6 @@ pub(crate) async fn get_search(
         .map(|cursor| search_position(cursor).map(|position| list.next(position)))
         .transpose()?;
     let has_more = next_cursor.is_some();
-    let mut data = storage_page
-        .rows
-        .iter()
-        .map(build_search_name)
-        .collect::<V2Result<Vec<_>>>()?;
-    crate::v2::name_record::fill_wrapper_expiries(
-        &mut *reads,
-        data.iter_mut().filter_map(|name| name.ens_v1.as_mut()),
-    )
-    .await?;
-    reads
-        .commit()
-        .await
-        .map_err(|_| V2Error::internal_error("failed to load search results"))?;
     Ok(Json(Envelope {
         data,
         page: Some(Page {
