@@ -3447,7 +3447,7 @@
             "name": "name",
             "in": "query",
             "required": false,
-            "description": "Name anchor. At least one of name, registration_id or address is required.",
+            "description": "Name anchor. At least one of name, registration_id, address or registry is required.",
             "schema": {
               "type": "string"
             }
@@ -3466,6 +3466,15 @@
             "in": "query",
             "required": false,
             "description": "EVM address in hexadecimal form.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "registry",
+            "in": "query",
+            "required": false,
+            "description": "ENSv2 registry as `<chain_id>:<address>` with a supported numeric chain ID; selects the grants on its root resource. Cannot be combined with name or registration_id.",
             "schema": {
               "type": "string"
             }
@@ -8460,7 +8469,7 @@
           },
           "detail": {
             "$ref": "#/components/schemas/GrantScopeDetail",
-            "description": "Scope-specific fields; empty for root, registry and registration. Registrar-controller is history-only."
+            "description": "Scope-specific fields; empty for registry and registration. Root names its registry. Registrar-controller is history-only."
           }
         },
         "additionalProperties": false,
@@ -8475,6 +8484,10 @@
           "resolver": {
             "$ref": "#/components/schemas/ContractRef",
             "description": "Resolver contract for this answer."
+          },
+          "registry": {
+            "$ref": "#/components/schemas/ContractRef",
+            "description": "ENSv2 registry whose root resource the grant is on, only for root scope."
           },
           "chain_id": {
             "type": "integer",
