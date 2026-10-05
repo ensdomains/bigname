@@ -12,6 +12,7 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::pointers::load_family_wildcard_source_on as load_family_wildcard_source;
+use crate::families::name::rendered::rendered_name_sql;
 
 /// A name's selected binding: its `project_binding_candidate` row.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,10 +106,13 @@ pub(crate) async fn load_name_topology_on(
 }
 
 async fn load_surface(conn: &mut PgConnection, logical_name_id: &str) -> Result<Option<Surface>> {
-    let row: Option<(String, String, String, String)> = sqlx::query_as(
-        "SELECT logical_name_id, namespace, raw_name, namehash
-         FROM bigname_phase.name_surfaces WHERE logical_name_id = $1",
-    )
+    // A surface without raw bytes is read under its served name. Its ancestors are still found
+    // by their stored names below, so only the suffixes that render as text can match.
+    let row: Option<(String, String, String, String)> = sqlx::query_as(&format!(
+        "SELECT surface.logical_name_id, surface.namespace, {name}, surface.namehash
+         FROM bigname_phase.name_surfaces surface WHERE surface.logical_name_id = $1",
+        name = rendered_name_sql("surface")
+    ))
     .bind(logical_name_id)
     .fetch_optional(&mut *conn)
     .await

@@ -59,6 +59,7 @@ pub use links::{
     DEFAULT_RECORD_NODE, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_link_selection, load_family_wildcard_source,
 };
+pub(crate) use mirror::{SAME_LABELS, lowercase_hashes, suffix_namehash};
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
 pub use primary::{load_family_primary_name_snapshot, load_family_primary_name_snapshots};
 pub(crate) use registry_children::{load_registry_children, registry_child_rows};

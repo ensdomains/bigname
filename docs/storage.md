@@ -180,6 +180,32 @@ State restore and redo re-anchoring accept that event as an observation of the
 identity, as they accept `PreimageObserved`. No adapter emits it yet, so every
 surface written today carries its raw bundle and a witness.
 
+The readers serve a row without raw bytes. The name compositor reads every
+`active` surface whose `raw_name` is not the empty string, so it composes a
+[name row](glossary.md#composed-name-row) for a row whose `raw_name` is NULL
+as it does for one with a name, and every reader that asks whether a node has
+a name row applies the same test, so no node is served both by its name row
+and by a reader for nodes without one. The row is served under its
+[rendered name](glossary.md#rendered-name), computed at read time from
+`labelhashes` and `label_preimages`: each label is its `decoded_label` when
+that is present and `normalized_under_version` is true, else
+`[<64 lowercase hex digits of the labelhash>]`. A row with raw bytes is served
+under `raw_name` and the read does not consult `label_preimages` for it. The
+composition Project's name summary step shares uses only the bracketed form
+and reads no label preimage, and the summary stores no name text, so a
+preimage import changes the served name on the next read and changes no
+stored row. The same rendered name orders such a row in name-sorted lists,
+names it as a parent of its children, and is what the `parent` and `q` filters
+compare.
+
+Where a name sits relative to the registrars (a `.eth` second-level name, a
+name below one, or a Basenames second-level name) is read from `labelhashes`
+for every surface, not from name text. That placement selects the registrar
+grace period and resolver withholding a name is composed with, so a surface
+without raw bytes is placed as the same node with bytes would be. The mirror
+walks compare a surface with a walked label suffix by raw labels when both
+sides store them and by lower-cased label hashes when either does not.
+
 The normalization-flag recompute (`phase-runner redo --phase recompute-flags`)
 gives a row without raw bytes no verdict: it stays `active` with no errors and
 only takes the current normalizer version. When it newly rejects a row's
@@ -372,8 +398,10 @@ Family indexes serve these concrete readers:
 - Expiring names select from the name summary's expiry selector through
   `project_name_summary_expiry_idx` (a namespace's listable names by expiry) and
   `project_name_summary_authority_expiry_idx` (the same within one public authority), joined
-  to `name_surfaces` by its primary key for the name order within one expiry. The family step
-  maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
+  to `name_surfaces` by its primary key for the name order within one expiry. A name is
+  ordered, matched against `parent` and continued by its served name: its raw name, or for a
+  surface that stores no raw bytes the name built from its label hashes, the same text its
+  composed row carries. The family step maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
   and `project_registry_pointer_resolver_idx`.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
@@ -410,7 +438,24 @@ Family indexes serve these concrete readers:
   there. A `LIKE` prefix becomes an index range only on a database whose collation PostgreSQL
   recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
   reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
-  start from `project_address_name_index`.
+  start from `project_address_name_index`. They order and continue by name, namespace and
+  namehash under `COLLATE "C"`, on any database: the reverse page then drops the names at or
+  before its cursor by comparing the same keys as bytes, and the route builds its cursor the
+  same way, so a database collation that orders names differently from their bytes would
+  otherwise skip names between pages. Search and bound names order, filter and continue in
+  SQL alone, under the database collation throughout.
+- Each of those three walks runs its statement for the surfaces with raw bytes as the first
+  arm of a `UNION ALL`; for search and bound names that statement's text is unchanged. The second arm walks the surfaces without raw bytes: it
+  computes each one's [rendered name](glossary.md#rendered-name) before its `LIMIT`, applies
+  the same filters and keyset cursor to that name, and has no length bound. The two arms are
+  merged in served-name order. The second arm is guarded by a test that any surface without
+  raw bytes exists; the test reads no column of the statement around it, so it runs once, and
+  the arm is not executed when it is false. The test steps through the namespaces and, for
+  each, probes `name_surfaces_project_suffix_hash_idx`, whose expression
+  `hash_array_extended(raw_labels, 0)` is NULL exactly for a row without raw bytes; the arm
+  can reach its rows through the same index when the statement names the namespace. With no
+  such surface the cost is those probes. The cost of rendering before `LIMIT` with a large
+  population of such surfaces has not been measured.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
   key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
@@ -465,6 +510,12 @@ row:
 | Index | Serves |
 | --- | --- |
 | `name_surfaces_name_order_idx` | `storage:families.name.search_candidates` and `storage:families.name.bound_candidates`: readable surfaces in name order after the keyset cursor |
+
+The same readers, and `storage:families.records.reverse_candidates`, also read
+`name_surfaces_project_suffix_hash_idx`, which the identity baseline and
+`20260923140000_project_name_surfaces_label_indexes.sql` install on
+`(namespace, hash_array_extended(raw_labels, 0))`. They use it to find the surfaces that
+store no raw bytes, whose indexed expression is NULL, and to learn that none exists.
 
 History's record attribution (`crates/storage/src/history/attribution`) adds two read-only
 indexes on `normalized_events`, installed by the normalized-events baseline and
@@ -1351,6 +1402,12 @@ bump, not automatically. A false or error verdict keeps the proven bytes in the
 store but withholds the text from names, so serving falls back to the
 documented [non-name forms](glossary.md#non-name-form) — the escape-encoded raw
 bytes when the label does not decode, the labelhash placeholder when it does.
+For a name surface that stores no raw bytes the serving read applies the
+verdict itself, each time it computes the
+[rendered name](glossary.md#rendered-name): a label is text only when its
+preimage decodes and its verdict is true, and is the labelhash placeholder
+otherwise, undecodable bytes included. No Project redo is involved, so a new
+preimage or a changed verdict shows on the next read.
 
 ## Rainbow-table preimage import
 

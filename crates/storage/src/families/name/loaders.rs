@@ -8,13 +8,14 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use super::{
-    FamilyPublication, NameHistory, compose::Surface, selection::MigrationProof,
-    serving::PointerRow,
+    FamilyPublication, NameHistory, compose::Surface, rendered::composed_surface_sql,
+    selection::MigrationProof, serving::PointerRow,
 };
 use crate::families::position::Position as FamilyPosition;
 
+/// The readable surfaces of `ids` the compositor serves, with or without raw bytes.
 pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<Vec<Surface>> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "/* storage:families.name.surfaces */
          SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash,
                 surface.labelhashes, surface.chain_id, surface.block_number
@@ -22,10 +23,11 @@ pub(super) async fn surfaces(conn: &mut PgConnection, ids: &[String]) -> Result<
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
          WHERE surface.logical_name_id = ANY($1::text[])
-           AND surface.visibility_state = 'active' AND surface.raw_name <> ''
+           AND {composed}
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
+        composed = composed_surface_sql("surface")
+    ))
     .bind(ids)
     .fetch_all(&mut *conn)
     .await

@@ -1,4 +1,4 @@
-use bigname_storage::{NameCurrentRow, SelectedSnapshot};
+use bigname_storage::{NameCurrentRow, SelectedSnapshot, rendered_name::label_hash};
 use serde_json::Value;
 
 use crate::v2::chains::slug_to_numeric;
@@ -191,17 +191,20 @@ fn eth_2ld_labelhash_token_id(
     if namespace != "ens" {
         return None;
     }
+    // A served name can spell a label as its bracketed hash, `eth` included, so the name is read
+    // by the labelhash each label stands for.
     let mut labels = normalized_name.split('.');
     let label = labels.next()?;
-    if labels.next() != Some("eth") || labels.next().is_some() || label.trim().is_empty() {
+    let parent = labels.next()?;
+    if labels.next().is_some()
+        || label.trim().is_empty()
+        || label_hash(parent) != alloy_primitives::keccak256(b"eth").0
+    {
         return None;
     }
-    let labelhash = labelhash.map(str::to_owned).unwrap_or_else(|| {
-        format!(
-            "0x{}",
-            alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
-        )
-    });
+    let labelhash = labelhash
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("0x{}", alloy_primitives::hex::encode(label_hash(label))));
     let hex = labelhash.strip_prefix("0x").unwrap_or(&labelhash);
     alloy_primitives::U256::from_str_radix(hex, 16)
         .ok()

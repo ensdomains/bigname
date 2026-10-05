@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
-use crate::{IdentityNameRecordRow, NameCurrentRow};
+use crate::{IdentityNameRecordRow, NameCurrentRow, rendered_name::RenderedName};
 
 pub async fn load_phase_identity_records_by_ids(
     pool: &PgPool,
@@ -96,24 +96,18 @@ pub(crate) const BOUND_NAME_PREDICATES: &str = r#"
   )
 "#;
 
-pub(super) fn normalize_phase_name(
-    logical_name_id: &str,
-    raw_name: &str,
-) -> Result<bigname_domain::normalization::NormalizedEnsName> {
-    bigname_domain::normalization::normalize_name(raw_name).with_context(|| {
+/// The served name of a composed row split into labels. A name whose surface stores no raw
+/// bytes may carry bracketed labelhash labels, which are kept.
+pub(super) fn normalize_phase_name(logical_name_id: &str, name: &str) -> Result<RenderedName> {
+    crate::rendered_name::parse(name).with_context(|| {
         format!("phase name row {logical_name_id} has an unreadable active raw_name")
     })
 }
 
-pub(super) fn phase_labelhash(
-    normalized: &bigname_domain::normalization::NormalizedEnsName,
-) -> Option<String> {
-    normalized.normalized_labels.first().map(|label| {
-        format!(
-            "0x{}",
-            alloy_primitives::hex::encode(alloy_primitives::keccak256(label.as_bytes()))
-        )
-    })
+pub(super) fn phase_labelhash(name: &RenderedName) -> Option<String> {
+    name.labelhashes
+        .first()
+        .map(|labelhash| format!("0x{}", alloy_primitives::hex::encode(labelhash)))
 }
 
 fn dedupe(values: &[String]) -> Vec<String> {

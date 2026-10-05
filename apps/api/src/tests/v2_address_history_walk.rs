@@ -731,65 +731,83 @@ async fn address_history_walk_applies_mirror_substitution_to_requested_pairs() -
         (MirrorFixtureSource::Ancestor, 0),
         (MirrorFixtureSource::Absent, 0),
     ] {
-        let database = v2_mirror_records_database(
-            "alice.eth",
-            "0x1010101010101010101010101010101010101010",
-            source,
-            "resolver",
-        )
-        .await?;
-        let uri = format!(
-            "/v1/addresses/{V2_ADDRESS}/history?relation=owner&scope=registration&kind=RecordChanged&page_size=200&include=total_count"
-        );
-        // The shared history fixture helper pins ENS to Mainnet. This fixture publishes
-        // Sepolia, so use production manifest-derived collection admission.
-        let stats = Arc::new(Mutex::new(bigname_storage::AddressHistoryWorkingSet {
-            batch_size: 7,
-            ..Default::default()
-        }));
-        let body = bigname_storage::with_address_history_working_set(stats.clone(), async {
-            let state = AppState::new_with_rpc_urls(
-                database.lookup_pool.clone(),
-                bigname_lookup::ChainRpcUrls::default(),
+        let mut text_ids = None;
+        for textless in [false, true] {
+            let database = v2_mirror_records_database(
+                "alice.eth",
+                "0x1010101010101010101010101010101010101010",
+                source,
+                "resolver",
+            )
+            .await?;
+            if textless {
+                sqlx::query("UPDATE name_surfaces SET raw_name=NULL, raw_labels=NULL, dns_encoded_name=NULL, preimage_event_identity=NULL WHERE chain_id='ethereum-sepolia'")
+                .execute(&database.pool).await?;
+                rebuild_fixture_families(&database.pool, "ethereum-sepolia", 21000003, "0xmirror")
+                    .await?;
+            }
+            let uri = format!(
+                "/v1/addresses/{V2_ADDRESS}/history?relation=owner&scope=registration&kind=RecordChanged&page_size=200&include=total_count"
             );
-            let response = app_router(state)
-                .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
-                .await?;
-            let status = response.status();
-            let body: Value = read_json(response).await?;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            Ok::<_, anyhow::Error>(body)
-        })
-        .await?;
-        let stats = stats.lock().unwrap().clone();
-        assert!(stats.live.values().all(|n| *n == 0), "{stats:?}");
-        assert!(stats.peak.get("witness_rows").copied().unwrap_or_default() <= 7);
-        assert!(
-            stats
-                .peak
-                .get("attribution_sql_rows")
-                .copied()
-                .unwrap_or_default()
-                <= 7
-        );
-        assert_eq!(
-            body["page"]["total_count"],
-            json!(expected),
-            "{body}; {stats:?}"
-        );
-        assert_eq!(body["data"].as_array().unwrap().len(), expected);
-        if expected > 0 {
-            assert_eq!(stats.peak.get("mirror_pointers"), Some(&1), "{stats:?}");
+            // The shared history fixture helper pins ENS to Mainnet. This fixture publishes
+            // Sepolia, so use production manifest-derived collection admission.
+            let stats = Arc::new(Mutex::new(bigname_storage::AddressHistoryWorkingSet {
+                batch_size: 7,
+                ..Default::default()
+            }));
+            let body = bigname_storage::with_address_history_working_set(stats.clone(), async {
+                let state = AppState::new_with_rpc_urls(
+                    database.lookup_pool.clone(),
+                    bigname_lookup::ChainRpcUrls::default(),
+                );
+                let response = app_router(state)
+                    .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+                    .await?;
+                let status = response.status();
+                let body: Value = read_json(response).await?;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                Ok::<_, anyhow::Error>(body)
+            })
+            .await?;
+            let stats = stats.lock().unwrap().clone();
+            assert!(stats.live.values().all(|n| *n == 0), "{stats:?}");
+            assert!(stats.peak.get("witness_rows").copied().unwrap_or_default() <= 7);
             assert!(
                 stats
                     .peak
-                    .get("mirror_sql_rows")
+                    .get("attribution_sql_rows")
                     .copied()
                     .unwrap_or_default()
-                    <= 8
+                    <= 7
             );
+            assert_eq!(
+                body["page"]["total_count"],
+                json!(expected),
+                "{body}; {stats:?}"
+            );
+            assert_eq!(body["data"].as_array().unwrap().len(), expected);
+            if expected > 0 {
+                assert_eq!(stats.peak.get("mirror_pointers"), Some(&1), "{stats:?}");
+                assert!(
+                    stats
+                        .peak
+                        .get("mirror_sql_rows")
+                        .copied()
+                        .unwrap_or_default()
+                        <= 8
+                );
+            }
+            let ids = hk_ids(&body);
+            if let Some(expected_ids) = &text_ids {
+                assert_eq!(
+                    &ids, expected_ids,
+                    "textless mirror must keep the same attributed event order"
+                );
+            } else {
+                text_ids = Some(ids);
+            }
+            database.cleanup().await?;
         }
-        database.cleanup().await?;
     }
     Ok(())
 }

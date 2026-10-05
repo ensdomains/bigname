@@ -6,8 +6,10 @@
 //! stored:
 //!
 //! - search walks the readable name surfaces (an input table) in the page order, which is the
-//!   surface's raw name then namespace and namehash, so the first `page_size + 1` composed rows
-//!   that pass the filters are final;
+//!   surface's served name then namespace and namehash, so the first `page_size + 1` composed
+//!   rows that pass the filters are final. A surface with raw bytes is served under its raw name
+//!   and one without under the name built from its label hashes (`rendered`), and each kind has
+//!   its own arm of the walk;
 //! - the expiring listing (`expiring`) selects its page's names from the stored name summary,
 //!   which carries each name's exact listing selector, and composes only those.
 //!
@@ -21,9 +23,12 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
 
-use super::{CoverageShape, batch};
+use super::{CoverageShape, batch, rendered::composed_surface_sql};
 pub use expiring::load_family_expiring_page;
 
+use crate::families::topology::{
+    rendered_lateral_sql, textless_surface_sql, textless_surfaces_exist_sql,
+};
 use crate::{
     NameCurrentListCursor, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
     NameCurrentListSort, NameCurrentRow,
@@ -165,8 +170,42 @@ pub(crate) const SEARCH_CANDIDATES_SQL: &str = r"/* storage:families.name.search
      ORDER BY surface.raw_name ASC, surface.namespace ASC, surface.namehash ASC
      LIMIT $7";
 
+/// The statement `search_candidates` runs: [`SEARCH_CANDIDATES_SQL`], unchanged, for the surfaces
+/// with raw bytes, then the same walk over the surfaces without them under their served name,
+/// merged in page order. The second arm has no length bound, which only the first arm's index
+/// needs.
+pub(crate) fn search_candidates_sql() -> String {
+    format!(
+        r"({SEARCH_CANDIDATES_SQL})
+     UNION ALL
+     (SELECT surface.logical_name_id, rendered.name, surface.namespace, surface.namehash
+      FROM bigname_phase.name_surfaces surface
+      JOIN bigname_phase.chain_lineage lineage
+        ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+      JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+      {rendered}
+      WHERE {exist} AND {textless} AND {composed}
+        AND surface.block_number <= marker.current_block_number
+        AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND ($1::text[] IS NULL OR surface.namespace = ANY($1))
+        AND ($2::text IS NULL OR rendered.name = $2)
+        AND ($3::text IS NULL OR rendered.name LIKE $3 ESCAPE '\')
+        AND (rendered.name, surface.namespace, surface.namehash)
+            > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
+      ORDER BY rendered.name ASC, surface.namespace ASC, surface.namehash ASC
+      LIMIT $7)
+     ORDER BY raw_name ASC, namespace ASC, namehash ASC
+     LIMIT $7",
+        rendered = rendered_lateral_sql(),
+        exist = textless_surfaces_exist_sql(),
+        textless = textless_surface_sql("surface"),
+        composed = composed_surface_sql("surface"),
+    )
+}
+
 /// The next readable surfaces after `after` in the search page's order that the filter's name
-/// predicates admit: (logical_name_id, raw_name, namespace, namehash).
+/// predicates admit: (logical_name_id, served name, namespace, namehash).
 async fn search_candidates(
     conn: &mut PgConnection,
     filter: &NameCurrentListFilter,
@@ -193,7 +232,7 @@ async fn search_candidates(
                 format!("%{}%", escape_like_pattern(&contains.to_ascii_lowercase()))
             })
         });
-    let rows = sqlx::query(SEARCH_CANDIDATES_SQL)
+    let rows = sqlx::query(&search_candidates_sql())
         .bind(namespaces)
         .bind(filter.name.as_deref())
         .bind(like)
@@ -244,7 +283,8 @@ pub async fn load_family_expiring_page_unbounded(
     .fetch_all(&mut *snapshot)
     .await
     .context("failed to load the namespace's names")?;
-    let composed = batch::load_base(&mut snapshot, &names, CoverageShape::Plain).await?;
+    let mut composed = batch::load_base(&mut snapshot, &names, CoverageShape::Plain).await?;
+    super::rendered::enrich(&mut snapshot, &mut composed).await?;
     let source = Value::Array(composed.values().map(source_row).collect());
     let page =
         expiring_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;

@@ -35,6 +35,7 @@ mod heads;
 mod list;
 mod list_keys;
 mod loaders;
+pub mod rendered;
 mod resolvability;
 pub mod seams;
 pub mod selection;

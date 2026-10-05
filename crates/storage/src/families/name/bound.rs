@@ -5,7 +5,7 @@
 //! `resolver_block`): an F5 resource pointer or an F4 registry-node pointer whose event names the
 //! name, or, for an ENSv2 root-registry TLD, an F5 root-registry pointer at the name's namehash.
 //! The candidates are therefore the names those pointers reach when they name the resolver,
-//! walked through the readable surfaces in the page order (raw name, namespace, namehash). Each
+//! walked through the readable surfaces in the page order (served name, namespace, namehash). Each
 //! batch is composed and bound as the name relation under the predicate text
 //! (`BOUND_NAME_PREDICATES`), so the rows a batch admits are final and the walk stops once the
 //! page is full.
@@ -21,7 +21,10 @@ use sqlx::{PgConnection, Row};
 use super::{CoverageShape, batch};
 use crate::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
-    families::topology::{FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY},
+    families::topology::{
+        FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY, rendered_lateral_sql,
+        textless_surface_sql, textless_surfaces_exist_sql,
+    },
     name_current::{COMPOSED_NC_COLUMNS, DEFAULT_NAME_CURRENT_LINEAGE_JOINS},
     phase_projection_reads::BOUND_NAME_PREDICATES,
 };
@@ -150,16 +153,57 @@ pub(crate) const BOUND_CANDIDATES_SQL: &str = "/* storage:families.name.bound_ca
      ORDER BY surface.raw_name, surface.namespace, surface.namehash
      LIMIT $7";
 
+/// The statement `candidates` runs: [`BOUND_CANDIDATES_SQL`], unchanged, for the surfaces with raw
+/// bytes, then the reached surfaces without them under their served name (`rendered`), merged in
+/// page order. The second arm repeats the first arm's `reached` text rather than sharing one
+/// CTE, which the planner would materialize for both, and is not run while no surface lacks its
+/// bytes (`textless_surfaces_exist_sql`).
+pub(crate) fn bound_candidates_sql() -> String {
+    let (tagged_reached, _) = BOUND_CANDIDATES_SQL
+        .split_once("\n     SELECT surface.")
+        .expect("the bound candidates select from their reached names");
+    let (_, reached) = tagged_reached
+        .split_once("*/")
+        .expect("the bound candidates statement is tagged");
+    format!(
+        "({BOUND_CANDIDATES_SQL})
+     UNION ALL
+     ({reached}
+      SELECT surface.logical_name_id, rendered.name, surface.namespace, surface.namehash
+      FROM reached
+      JOIN bigname_phase.name_surfaces surface
+        ON surface.logical_name_id = reached.logical_name_id
+      JOIN bigname_phase.chain_lineage lineage
+        ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+      JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+      {rendered}
+      WHERE {exist} AND {textless} AND surface.visibility_state = 'active'
+        AND surface.block_number <= marker.current_block_number
+        AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND ($3::text IS NULL OR surface.namespace = $3)
+        AND (rendered.name, surface.namespace, surface.namehash)
+            > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
+      ORDER BY rendered.name, surface.namespace, surface.namehash
+      LIMIT $7)
+     ORDER BY raw_name, namespace, namehash
+     LIMIT $7",
+        rendered = rendered_lateral_sql(),
+        exist = textless_surfaces_exist_sql(),
+        textless = textless_surface_sql("surface"),
+    )
+}
+
 /// The next names after `after` in the page order that a pointer naming the resolver reaches:
-/// (logical_name_id, raw_name, namespace, namehash). A candidate is a superset: `admitted` keeps
-/// the names whose composed row serves the resolver.
+/// (logical_name_id, served name, namespace, namehash). A candidate is a superset: `admitted`
+/// keeps the names whose composed row serves the resolver.
 async fn candidates(
     conn: &mut PgConnection,
     (chain_id, resolver_address, namespace): (&str, &str, Option<&str>),
     after: Option<&(String, String, String)>,
     limit: i64,
 ) -> Result<Vec<(String, String, String, String)>> {
-    let rows = sqlx::query(BOUND_CANDIDATES_SQL)
+    let rows = sqlx::query(&bound_candidates_sql())
         .bind(chain_id)
         .bind(resolver_address)
         .bind(namespace)
