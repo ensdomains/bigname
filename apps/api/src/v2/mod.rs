@@ -19,6 +19,8 @@ mod list_cursor;
 pub(crate) mod lookup;
 mod name_filter;
 mod name_record;
+#[cfg(test)]
+pub(crate) use name_record::tokens::test_hooks as registry_token_read_test_hooks;
 mod name_records;
 #[cfg(test)]
 pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;

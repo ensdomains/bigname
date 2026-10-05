@@ -1014,6 +1014,53 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
         "revoke must remove the current subject row"
     );
 
+    // `GET /v1/permissions?registry=` derives the root resource from the registry's active
+    // contract instance; it must be the resource the interpreter wrote the root grants on. The
+    // deployer's constructor grant remains and the revoked grantee is absent.
+    let registry = format!("{:#x}", deployment.eth_registry.address);
+    let root = bigname_storage::load_registry_root_resource(
+        &mut *run.db.pool.acquire().await?,
+        "ethereum-sepolia",
+        &registry,
+        i64::MAX,
+    )
+    .await?
+    .context("the ETH registry has an active contract instance")?;
+    assert!(
+        root.manifest_declared,
+        "the ETH registry is manifest-declared"
+    );
+    let written: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT resource_id FROM normalized_events \
+         WHERE event_kind = 'RootPermissionChanged' AND canonicality_state = 'canonical' \
+           AND lower(raw_fact_ref->>'emitting_address') = $1",
+    )
+    .bind(&registry)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        written,
+        vec![root.resource_id],
+        "root grants must be on the derived resource"
+    );
+    let holders = families::resource_permissions(&run.db.pool, root.resource_id).await?;
+    let deployer = format!("{:#x}", deployment.deployer);
+    assert!(
+        holders.iter().any(|row| row.subject == deployer),
+        "the deployer's root grant must be listed: {holders:?}"
+    );
+    let root_scope =
+        bigname_storage::EffectivePermissionScope::Direct(bigname_storage::PermissionScope::Root {
+            chain_id: "ethereum-sepolia".to_owned(),
+            registry_address: registry.clone(),
+        });
+    assert!(
+        holders
+            .iter()
+            .all(|row| row.subject != grantee_hex && row.scope == root_scope),
+        "every row must be a current root grant on the ETH registry: {holders:?}"
+    );
+
     let parent_changes: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE event_kind = 'ParentChanged' AND canonicality_state = 'canonical'",

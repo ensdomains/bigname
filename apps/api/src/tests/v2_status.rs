@@ -138,10 +138,11 @@ async fn v2_status_maps_phase_lifecycle_and_heartbeat_to_readiness() -> Result<(
     let chain_rpc_urls = bigname_lookup::ChainRpcUrls::from_entries(&[
         "ethereum-mainnet=http://rpc.test".to_owned(),
     ])?;
+    // Keep the normal heartbeat window while this fixture rebuilds several publications.
+    // Expiry is exercised below with an explicitly old heartbeat, not elapsed test time.
     let state = database
         .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
-        .await?
-        .with_phase_heartbeat_max_age_secs(1);
+        .await?;
     state
         .status_freshness
         .seed_success(
