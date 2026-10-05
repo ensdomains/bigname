@@ -56,6 +56,8 @@ struct SurfaceRow {
     block_timestamp: OffsetDateTime,
     provenance: Value,
     fallback_raw_labels_hex: Option<Value>,
+    later_witness_block_timestamp: Option<OffsetDateTime>,
+    later_witness_log_index: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -224,7 +226,9 @@ async fn load_surfaces(
                 surface.deactivation_reason, surface.deactivated_at,
                 surface.block_number, lineage.block_timestamp,
                 surface.provenance,
-                fallback.after_state -> 'raw_labels_hex' AS fallback_raw_labels_hex
+                fallback.after_state -> 'raw_labels_hex' AS fallback_raw_labels_hex,
+                later_witness.block_timestamp AS later_witness_block_timestamp,
+                later_witness.log_index AS later_witness_log_index
          FROM name_surfaces surface
          JOIN chain_lineage lineage
            ON lineage.chain_id = surface.chain_id
@@ -249,6 +253,19 @@ async fn load_surfaces(
                       event.normalized_event_id DESC
              LIMIT 1
          ) fallback ON true
+         LEFT JOIN LATERAL (
+             SELECT witness_lineage.block_timestamp, witness.log_index
+             FROM normalized_events witness
+             JOIN chain_lineage witness_lineage
+               ON witness_lineage.chain_id = witness.chain_id
+              AND witness_lineage.block_hash = witness.block_hash
+              AND witness_lineage.block_number = witness.block_number
+             WHERE witness.event_identity = surface.preimage_event_identity
+               AND witness.chain_id = surface.chain_id
+               AND witness.block_number > surface.block_number
+               AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND witness_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ) later_witness ON true
          WHERE surface.chain_id = $1
            AND surface.block_number BETWEEN $2 AND $3
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -347,10 +364,17 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
     let deactivated_at = if active {
         None
     } else {
+        // Bytes first observed after the identity's anchor deactivate it at their own event.
         surface.deactivated_at.or_else(|| {
-            let log_index = surface_log_index(&surface.provenance);
+            let (block_timestamp, log_index) = match surface.later_witness_block_timestamp {
+                Some(timestamp) => (timestamp, surface.later_witness_log_index.unwrap_or(-1)),
+                None => (
+                    surface.block_timestamp,
+                    surface_log_index(&surface.provenance),
+                ),
+            };
             Some(bigname_adapters::schema_v2::seam::event_time(
-                surface.block_timestamp,
+                block_timestamp,
                 log_index,
             ))
         })

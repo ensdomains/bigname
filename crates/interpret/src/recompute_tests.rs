@@ -44,6 +44,8 @@ fn missing_surface_position_uses_the_conventional_sentinel() {
         block_timestamp: timestamp,
         provenance: json!({}),
         fallback_raw_labels_hex: None,
+        later_witness_block_timestamp: None,
+        later_witness_log_index: None,
     };
     assert_eq!(surface_log_index(&surface.provenance), -1);
     let desired = surface_normalization(&surface).unwrap();
@@ -177,6 +179,68 @@ async fn recompute_keeps_a_surface_without_raw_bytes_visible_and_unknown() -> Te
             ENS_NORMALIZER_VERSION.to_owned(),
             "active".to_owned(),
             json!([])
+        )
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Bytes first observed after the identity's anchor deactivate the name at their own event.
+#[tokio::test]
+async fn recompute_deactivates_at_the_later_preimage_witness() -> TestResult {
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("recompute_later_witness"),
+    )
+    .await?;
+    for sql in [
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    sqlx::raw_sql(
+        &"INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('recompute', 'anchor', 10, to_timestamp(10), 'canonical'),
+                ('recompute', 'evidence', 12, to_timestamp(12), 'canonical');
+         INSERT INTO name_surfaces
+             (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+              labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
+              block_number, provenance, canonicality_state, preimage_event_identity)
+         VALUES ('ens:0xchild', 'ens', 'Alice', ARRAY['Alice'], '\\x05416c69636500', '0xchild',
+                 ARRAY['0xalice'], 'old', 'active', 'recompute', 'anchor', 10,
+                 '{\"log_index\": 1}', 'canonical', 'preimage-12');
+         INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
+             after_state
+         ) VALUES ('preimage-12', 'ens', 'ens:0xchild', 'PREIMAGE_KIND', 'ens_v1_registry_l1',
+                   1, 'recompute', 12, 'evidence', '0xtx', 0, 4, '{}',
+                   'raw_log_preimage_observation', 'canonical', '{}')"
+            .replace("PREIMAGE_KIND", PREIMAGE_OBSERVATION_EVENT_KIND),
+    )
+    .execute(database.pool())
+    .await?;
+
+    let mut transaction = database.pool().begin().await?;
+    finalize_recompute_flags(&mut transaction, "recompute", 0, 20).await?;
+    transaction.commit().await?;
+
+    let row: (String, Option<OffsetDateTime>) =
+        sqlx::query_as("SELECT visibility_state, deactivated_at FROM name_surfaces")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        row,
+        (
+            "shadow".to_owned(),
+            Some(bigname_adapters::schema_v2::seam::event_time(
+                OffsetDateTime::from_unix_timestamp(12)?,
+                4
+            ))
         )
     );
     database.cleanup().await?;

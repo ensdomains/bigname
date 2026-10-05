@@ -1,6 +1,6 @@
-use bigname_adapters::schema_v2::BatchOutput;
+use bigname_adapters::schema_v2::{BatchOutput, seam::PREIMAGE_OBSERVATION_EVENT_KIND};
 use sqlx::{Postgres, QueryBuilder, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{InterpretError, NORMALIZATION_STATE_REPAIR_REASON, Result};
 
@@ -118,10 +118,43 @@ const TAKES_INCOMING_EVIDENCE: &str = "(
     )
 )";
 
+/// A preimage observation's transaction and log position, and its event identity.
+type BlockWitness<'a> = ((Option<i64>, Option<i64>), &'a str);
+
+/// The earliest preimage observation of each name in each block of the output, in the
+/// transaction and log order the redo repair uses. Surfaces reach the writer in interpretation
+/// order, which a recovered same-block observation can leave behind a later one.
+fn block_witnesses(output: &BatchOutput) -> HashMap<(&str, &str), BlockWitness<'_>> {
+    let mut witnesses = HashMap::<_, BlockWitness<'_>>::new();
+    for event in &output.normalized_events {
+        let (Some(logical_name_id), Some(block_hash)) = (
+            event.logical_name_id.as_deref(),
+            event.block_hash.as_deref(),
+        ) else {
+            continue;
+        };
+        if event.event_kind != PREIMAGE_OBSERVATION_EVENT_KIND {
+            continue;
+        }
+        let position = (event.transaction_index, event.log_index);
+        let candidate = (position, event.event_identity.as_str());
+        witnesses
+            .entry((logical_name_id, block_hash))
+            .and_modify(|earliest| {
+                if position < earliest.0 {
+                    *earliest = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+    witnesses
+}
+
 async fn write_surfaces(
     transaction: &mut Transaction<'_, Postgres>,
     output: &BatchOutput,
 ) -> Result<()> {
+    let witnesses = block_witnesses(output);
     for (start, batch) in conflict_free_batches(&output.name_surfaces, |surface| {
         surface.logical_name_id.clone()
     }) {
@@ -154,7 +187,14 @@ async fn write_surfaces(
                 .push_bind(&surface.provenance)
                 .push_bind(&surface.canonicality_state)
                 .push_unseparated("::canonicality_state")
-                .push_bind(surface.preimage_event_identity());
+                .push_bind(surface.preimage_event_identity().map(|own| {
+                    witnesses
+                        .get(&(
+                            surface.logical_name_id.as_str(),
+                            surface.block_hash.as_str(),
+                        ))
+                        .map_or(own, |(_, earliest)| *earliest)
+                }));
         });
         let take = TAKES_INCOMING_EVIDENCE;
         let keep = format!("(name_surfaces.raw_name IS NOT NULL AND NOT {take})");

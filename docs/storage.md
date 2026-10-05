@@ -134,7 +134,8 @@ state; it is never identity.
 
 A `name_surfaces` row is a node's [name surface](glossary.md#surface-name-surface).
 Its identity columns are always present: `logical_name_id`, `namehash`, and
-`labelhashes`, the complete label-hash path, leaf first. `block_hash`,
+`labelhashes`, the complete label-hash path, leaf first, with the one legacy
+exception described below. `block_hash`,
 `block_number` and `provenance` anchor the first canonical observation that
 established the node.
 
@@ -149,15 +150,26 @@ earliest canonical `PreimageObserved` event of that name, and is NULL whenever
 the bundle is. It is the deterministic event identity, not the sequence-assigned
 `normalized_event_id`, and is not a foreign key, because a redo deletes and
 rewrites its range's events. The `name_surfaces_raw_evidence_check` constraint
-holds these rules. A shadow surface whose observed bytes have no
-PostgreSQL-safe text decoding keeps the empty bundle it has always stored,
-with the bytes in its `PreimageObserved` event.
+holds these rules.
+
+The exception is a shadow surface whose observed bytes have no PostgreSQL-safe
+text decoding. It keeps the row it has always stored: an empty-string
+`raw_name`, an empty `raw_labels` array and an empty `labelhashes` array, with
+the bytes in its `PreimageObserved` event. Its stored path is therefore not
+the node's label-hash path. The writer rejects a later observation of the same
+node that carries the complete path, as a conflicting path, and the row cannot
+become one without raw bytes, because that shape requires a non-empty path.
+No adapter emits such a complete-path observation of an existing surface yet;
+these rows need a repair before one does.
 
 Interpret's surface writer accepts a second observation of a stored surface
 when the namespace, namehash, label-hash path and chain match and, where both
 sides carry raw bytes, the bytes match too. An observation with raw bytes
 enriches a row that has none and takes the incoming normalization verdict; an
-observation without them leaves stored bytes, witness and verdict alone. The
+observation without them leaves stored bytes, witness and verdict alone. When
+one batch observes a name's bytes more than once in a block, the writer stores
+the earliest of those events by transaction and log position as the witness,
+whichever observation it writes first. The
 identity anchor moves on its own rule, to a strictly earlier observation or
 onto an orphaned row, whichever kind of observation arrives. Anything else is
 a data-integrity error.
@@ -170,7 +182,9 @@ surface written today carries its raw bundle and a witness.
 
 The normalization-flag recompute (`phase-runner redo --phase recompute-flags`)
 gives a row without raw bytes no verdict: it stays `active` with no errors and
-only takes the current normalizer version. A rainbow-table import never fills
+only takes the current normalizer version. When it newly rejects a row's
+bytes, `deactivated_at` comes from the row's anchor, or from its preimage
+witness when that event lies in a later block than the anchor. A rainbow-table import never fills
 the raw bundle; it writes `label_preimages` only.
 
 ### Binding intervals and authority arms
@@ -2003,7 +2017,9 @@ orphaned when none survives. A shadow surface's `deactivated_at` follows its
 earliest surviving `PreimageObserved` row.
 Outside that orphan replacement, a name surface's `deactivated_at` moves only
 for a strictly lower incoming block, so the stored value does not depend on the
-order emissions arrive in.
+order emissions arrive in. The one other case is enrichment: a row without raw
+bytes that first receives bytes failing the normalization gate takes the
+incoming `deactivated_at`, at whatever block those bytes arrive.
 
 A surface's [preimage witness](glossary.md#preimage-witness) is repaired
 separately from its anchor, so raw bytes learned after the node was established

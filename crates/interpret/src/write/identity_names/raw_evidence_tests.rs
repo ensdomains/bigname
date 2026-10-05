@@ -1,6 +1,8 @@
 //! A name surface may be written before the raw bytes of its labels are known, and gains
 //! them from a later hash-consistent observation.
-use bigname_adapters::schema_v2::{BatchOutput, NameSurface};
+use bigname_adapters::schema_v2::{
+    BatchOutput, NameSurface, NormalizedEvent, seam::PREIMAGE_OBSERVATION_EVENT_KIND,
+};
 use bigname_test_support::TestDatabase;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -294,6 +296,70 @@ async fn absent_raw_bytes_are_not_empty_bytes_or_a_partial_bundle() -> TestResul
         "shadow",
     )
     .await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+fn preimage_event(identity: &str, logical_name_id: &str, log_index: i64) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: None,
+        event_kind: PREIMAGE_OBSERVATION_EVENT_KIND.to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: "batch-test".to_owned(),
+        block_number: Some(1),
+        block_hash: Some("0x01".to_owned()),
+        transaction_hash: Some("0xtx".to_owned()),
+        transaction_index: Some(0),
+        log_index: Some(log_index),
+        raw_fact_ref: json!({}),
+        derivation_kind: "raw_log_preimage_observation".to_owned(),
+        canonicality_state: "canonical".to_owned(),
+        before_state: json!({}),
+        after_state: json!({}),
+        migration_correlation_ids: Vec::new(),
+        consumer_visibility: "internal".to_owned(),
+        before_state_explicit: false,
+    }
+}
+
+/// A recovered same-block observation reaches the writer after a later one of the same name.
+#[tokio::test]
+async fn witness_is_the_earliest_same_block_preimage_not_the_first_written() -> TestResult {
+    let database = database("interpret_surface_witness_order").await?;
+    let id = "ens:0xrecovered";
+    let observed_at = |identity: &str| {
+        let mut row = surface(id, "recovered");
+        if let Some(raw) = row.raw.as_mut() {
+            raw.preimage_event_identity = identity.to_owned();
+        }
+        row
+    };
+    let output = BatchOutput {
+        name_surfaces: vec![observed_at("preimage:log-7"), observed_at("preimage:log-3")],
+        normalized_events: vec![
+            preimage_event("preimage:log-3", id, 3),
+            preimage_event("preimage:other-name", "ens:0xother", 1),
+            preimage_event("preimage:log-7", id, 7),
+        ],
+        ..BatchOutput::default()
+    };
+
+    write_output(&database, &output).await?;
+    assert_eq!(
+        stored(&database, id).await?.3.as_deref(),
+        Some("preimage:log-3")
+    );
+    write_output(&database, &output).await?;
+    assert_eq!(
+        stored(&database, id).await?.3.as_deref(),
+        Some("preimage:log-3")
+    );
+
     database.cleanup().await?;
     Ok(())
 }
