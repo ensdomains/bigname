@@ -125,3 +125,60 @@ async fn surface_loader_ignores_orphaned_surfaces_and_fallback_events() -> TestR
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn recompute_keeps_a_surface_without_raw_bytes_visible_and_unknown() -> TestResult {
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("recompute_surface_without_raw_bytes"),
+    )
+    .await?;
+    for sql in [
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    sqlx::raw_sql(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ('recompute', 'block', 10, to_timestamp(10), 'canonical');
+         INSERT INTO name_surfaces
+             (logical_name_id, namespace, namehash, labelhashes, normalizer_version,
+              visibility_state, chain_id, block_hash, block_number, canonicality_state)
+         VALUES ('ens:0xchild', 'ens', '0xchild', ARRAY['0xchildlabel', '0xeth'], 'old',
+                 'active', 'recompute', 'block', 10, 'canonical')",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let mut transaction = database.pool().begin().await?;
+    let summary = finalize_recompute_flags(&mut transaction, "recompute", 0, 20).await?;
+    transaction.commit().await?;
+
+    assert_eq!(
+        summary,
+        RecomputeSummary {
+            same_class_names: 1,
+            ..RecomputeSummary::default()
+        }
+    );
+    let row: (Option<String>, String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT raw_name, normalizer_version, visibility_state, normalization_errors
+         FROM name_surfaces",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (
+            None,
+            ENS_NORMALIZER_VERSION.to_owned(),
+            "active".to_owned(),
+            json!([])
+        )
+    );
+    database.cleanup().await?;
+    Ok(())
+}

@@ -164,9 +164,9 @@ pub(super) async fn release_preimage_witnesses(
 }
 
 /// At redo completion, point each surface whose witness was released, or whose preimage the
-/// range observed, at its earliest surviving preimage observation. A canonical
-/// surface left without one keeps its identity but loses the raw evidence, which a
-/// label-hash-path observation alone established; an orphaned one is left as it is.
+/// range observed, at its earliest surviving preimage observation. A canonical surface left
+/// without one loses the raw evidence when a surviving label-hash-path observation still
+/// establishes its identity; any other surface is left as it is.
 async fn repair_preimage_witnesses(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -252,6 +252,20 @@ async fn repair_preimage_witnesses(
               OR (
                   repaired.event_identity IS NULL
                   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM normalized_events observation
+                      JOIN chain_lineage lineage
+                        ON lineage.chain_id = observation.chain_id
+                       AND lineage.block_hash = observation.block_hash
+                       AND lineage.block_number = observation.block_number
+                      WHERE observation.chain_id = surface.chain_id
+                        AND observation.logical_name_id = surface.logical_name_id
+                        AND observation.after_state
+                            @> jsonb_build_object('{NAME_IDENTITY_OBSERVED_KEY}', true)
+                        AND observation.canonicality_state IN ('canonical', 'safe', 'finalized')
+                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  )
               )
           )
         "
@@ -270,3 +284,6 @@ async fn repair_preimage_witnesses(
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
