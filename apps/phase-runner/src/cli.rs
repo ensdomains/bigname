@@ -477,13 +477,23 @@ fn validate_heartbeat_threshold(heartbeat_stale_after_secs: i64) -> RunnerResult
     Ok(())
 }
 
+/// How long a hydration RPC connection, and a whole hydration RPC request, may take. Project
+/// bounds each call and each block's reads itself; these keep the HTTP client from holding a
+/// socket past that.
+const HYDRATION_RPC_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const HYDRATION_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn resolve_hydration_rpc_urls(entries: &[String]) -> RunnerResult<bigname_lookup::ChainRpcUrls> {
-    bigname_lookup::ChainRpcUrls::from_entries(entries).map_err(|error| {
-        RunnerError::new(
-            ErrorKind::Configuration,
-            format!("invalid hydration RPC configuration: {error:#}"),
-        )
-    })
+    bigname_lookup::ChainRpcUrls::from_entries(entries)
+        .and_then(|urls| {
+            urls.with_http_timeouts(HYDRATION_RPC_CONNECT_TIMEOUT, HYDRATION_RPC_TIMEOUT)
+        })
+        .map_err(|error| {
+            RunnerError::new(
+                ErrorKind::Configuration,
+                format!("invalid hydration RPC configuration: {error:#}"),
+            )
+        })
 }
 
 fn resolve_instance_id(instance_id: Option<String>) -> RunnerResult<String> {

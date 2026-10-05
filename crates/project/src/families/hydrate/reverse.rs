@@ -1,5 +1,18 @@
 //! F12 refresh work owns the tuple's existing hydration columns. Empty string is a successful
 //! not-found response; null is no overlay (a failed call or a no-longer-eligible selector).
+//!
+//! `hydrated_name`, `attempt_block`, `attempt_hash` and `baseline` belong together: the name, the
+//! block it was observed at and the selector it was observed for. `attempt_ordinal` only orders
+//! the rolling refresh. What a read writes (`batch::Read`):
+//! - an answered call that succeeded, with a name or empty, writes all five;
+//! - an answered call that itself failed inside the aggregate writes a null name with the
+//!   attempt's block. This is a fail-closed policy, not evidence that the name was cleared: the
+//!   reader falls back to the event-derived claim;
+//! - a deferred tuple (its aggregate failed while the endpoint served the block) keeps its name
+//!   and the block it was observed at, and takes only a new `attempt_ordinal`, so it cannot hold
+//!   the oldest cohort's place. The name stays the last one successfully observed;
+//! - an unobserved tuple (the RPC batch failed and the endpoint did not serve the block) is not
+//!   written at all.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
@@ -11,13 +24,14 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::super::{
-    input::BlockHeader,
     reduce::{Context, key_of, set},
     store::{Row, RowSet, key_text},
     tables,
 };
 use super::ETHEREUM;
 use super::admission::EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES;
+use super::batch::{Aggregate, Kind, Read, Session};
+use super::outcome::Writes;
 use crate::{ProjectError, Result};
 
 pub(super) struct Candidate {
@@ -29,7 +43,7 @@ pub(super) struct Candidate {
 }
 
 pub(super) struct Prepared {
-    work: Vec<(Candidate, Option<EnsReverseNameMulticallResult>)>,
+    work: Vec<(Candidate, Option<Read<EnsReverseNameMulticallResult>>)>,
 }
 
 fn changed(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
@@ -167,68 +181,77 @@ pub(super) async fn refresh(
     .await
 }
 
+struct Call<'a> {
+    rpc_urls: &'a ChainRpcUrls,
+    block: EnsReverseNameMulticallBlock,
+}
+
+impl Aggregate for Call<'_> {
+    type Request = EnsReverseNameMulticallRequest;
+    type Answer = EnsReverseNameMulticallResult;
+
+    async fn send(
+        &self,
+        chunk: &[Self::Request],
+    ) -> std::result::Result<Vec<Self::Answer>, String> {
+        execute_ens_reverse_name_multicall(
+            self.rpc_urls,
+            ETHEREUM,
+            MULTICALL3_ADDRESS,
+            &self.block,
+            chunk,
+        )
+        .await
+        .map_err(|error| format!("{error:#}"))
+    }
+}
+
 pub(super) async fn execute(
     candidates: Vec<Candidate>,
-    rpc_urls: &ChainRpcUrls,
-    head: &BlockHeader,
+    session: &mut Session<'_>,
 ) -> Result<Prepared> {
-    let active: Vec<_> = candidates
+    // Every tuple the block changed is read, beyond the rolling share, in as many aggregates as
+    // they need.
+    let requests: Vec<_> = candidates
         .iter()
         .filter(|candidate| candidate.active)
+        .map(|candidate| EnsReverseNameMulticallRequest {
+            resolver_address: candidate.resolver.clone().expect("active resolver"),
+            reverse_node: candidate.node.clone().expect("active node"),
+        })
         .collect();
-    if !active.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
+    let rpc_urls = session.rpc_urls;
+    if !requests.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
         return Err(ProjectError::configuration(
             "family reverse hydration requires an RPC URL for ethereum-mainnet",
         ));
     }
-    let block = EnsReverseNameMulticallBlock {
-        block_number: head.number,
-        block_hash: head.hash.clone(),
+    let call = Call {
+        rpc_urls,
+        block: EnsReverseNameMulticallBlock {
+            block_number: session.head.number,
+            block_hash: session.head.hash.clone(),
+        },
     };
-    let mut results = Vec::with_capacity(active.len());
-    for chunk in active.chunks(250) {
-        let requests: Vec<_> = chunk
-            .iter()
-            .map(|candidate| EnsReverseNameMulticallRequest {
-                resolver_address: candidate.resolver.clone().expect("active resolver"),
-                reverse_node: candidate.node.clone().expect("active node"),
-            })
-            .collect();
-        match execute_ens_reverse_name_multicall(
-            rpc_urls,
-            ETHEREUM,
-            MULTICALL3_ADDRESS,
-            &block,
-            &requests,
-        )
-        .await
-        {
-            Ok(chunk_results) => results.extend(chunk_results),
-            Err(error) => {
-                results.extend(
-                    requests
-                        .iter()
-                        .map(|_| EnsReverseNameMulticallResult::Failed {
-                            message: format!("{error:#}"),
-                        }),
-                )
-            }
-        }
-    }
-    if results.len() != active.len() {
-        return Err(ProjectError::data_integrity(
-            "family reverse hydration outcome count differs from its candidates",
-        ));
-    }
-    let mut results = results.into_iter();
+    let reads = session.read(Kind::Reverse, &requests, &call).await;
+    session.stats.reverse.failed_calls += reads
+        .iter()
+        .filter(|read| {
+            matches!(
+                read,
+                Read::Answered(EnsReverseNameMulticallResult::Failed { .. })
+            )
+        })
+        .count() as u64;
+    let mut reads = reads.into_iter();
     Ok(Prepared {
         work: candidates
             .into_iter()
             .map(|candidate| {
-                let result = candidate
+                let read = candidate
                     .active
-                    .then(|| results.next().expect("count checked"));
-                (candidate, result)
+                    .then(|| reads.next().expect("one read per request"));
+                (candidate, read)
             })
             .collect(),
     })
@@ -241,7 +264,7 @@ impl Prepared {
         context: &Context<'_>,
         rows: &mut RowSet,
         ordinal: i64,
-    ) -> Result<()> {
+    ) -> Result<Writes> {
         // Re-select from the actual post-reducer rows. The block fences also reject another
         // publisher or a revision change between preparation and this transaction.
         let current = select(transaction, context, rows).await?;
@@ -261,6 +284,7 @@ impl Prepared {
             current.iter().map(|candidate| candidate.key.clone()),
         )
         .await?;
+        let mut writes = Writes::default();
         for candidate in current {
             let matching = prepared
                 .get(&key_text(&tables::REVERSE_TUPLE, &candidate.key))
@@ -269,16 +293,29 @@ impl Prepared {
                         && prior.resolver == candidate.resolver
                         && prior.active == candidate.active
                 });
-            let Some((_, result)) = matching else {
+            let Some((_, read)) = matching else {
                 continue;
             };
             let Some(mut row) = rows.get(&tables::REVERSE_TUPLE, &candidate.key).cloned() else {
                 continue;
             };
-            let name = match result {
-                Some(EnsReverseNameMulticallResult::Success { value }) => json!(value),
-                Some(EnsReverseNameMulticallResult::NotFound) => json!(""),
-                Some(EnsReverseNameMulticallResult::Failed { .. }) | None => Value::Null,
+            let before = row.clone();
+            let name = match read {
+                Some(Read::Unobserved) => continue,
+                Some(Read::Deferred) => {
+                    set(&mut row, "attempt_ordinal", json!(ordinal));
+                    writes.schedules += u64::from(row != before);
+                    rows.put(&tables::REVERSE_TUPLE, row)?;
+                    continue;
+                }
+                Some(Read::Answered(EnsReverseNameMulticallResult::Success { value })) => {
+                    json!(value)
+                }
+                Some(Read::Answered(EnsReverseNameMulticallResult::NotFound)) => json!(""),
+                // `None` is a tuple no longer eligible, whose name is cleared.
+                Some(Read::Answered(EnsReverseNameMulticallResult::Failed { .. })) | None => {
+                    Value::Null
+                }
             };
             set(&mut row, "hydrated_name", name);
             set(
@@ -319,8 +356,9 @@ impl Prepared {
                     Value::Null
                 },
             );
+            writes.values += u64::from(row != before);
             rows.put(&tables::REVERSE_TUPLE, row)?;
         }
-        Ok(())
+        Ok(writes)
     }
 }

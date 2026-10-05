@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use self::transitions::Transition;
 
 use super::{
-    FamilyMode, FamilyOptions, FamilyOutcome, block,
+    FamilyMode, FamilyOptions, FamilyOutcome, block, hydrate,
     input::{self, InputToken, Revision},
     manifests,
     marker::{self, FamilyMarker},
@@ -47,6 +47,8 @@ struct Run<'a> {
     target: &'a Marker,
     options: &'a FamilyOptions,
     budget: Budget,
+    /// The highest readable block when the run started, for a run that may hydrate.
+    head: Option<Marker>,
 }
 
 pub(super) async fn run(
@@ -66,6 +68,7 @@ pub(super) async fn run(
         budget: Budget {
             left: options.max_blocks_per_run,
         },
+        head: hydrate::head(pool, chain_id, options).await?,
     };
     let token = input::input_token(pool, chain_id).await?;
     let family = marker::read(pool, chain_id).await?;
@@ -304,10 +307,18 @@ impl Run<'_> {
                 revision,
                 role,
                 manifests: &manifests,
+                head: self.head.as_ref().filter(|_| attempt.is_none()),
             };
-            let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
-                .await
-                .map_err(|error| at_block(number, error))?;
+            let (next, stats) = block::apply(
+                self.pool,
+                self.chain_id,
+                number,
+                &plan,
+                self.options,
+                &mut outcome.hydration,
+            )
+            .await
+            .map_err(|error| at_block(number, error))?;
             outcome.record(stats);
             family = next;
         }

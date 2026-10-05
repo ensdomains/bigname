@@ -12,7 +12,9 @@ use crate::{
     phase::{PhaseBatchOutcome, PhaseContext, PhaseProgress, RedoAttemptFence, RunMode},
 };
 
-/// The chain whose follow blocks hydrate reverse names and text records from RPC.
+/// The chain whose head blocks hydrate reverse names and text records from RPC. This phase only
+/// supplies the endpoint: which block hydrates is Project's rule (the highest readable block,
+/// published as an ordinary follow block), whatever target a batch asks for.
 const HYDRATED_CHAIN: &str = "ethereum-mainnet";
 
 /// A family batch that answered `Continue`. The next batch of the same run and redo attempt
@@ -33,9 +35,9 @@ impl ProjectPhase {
         context: PhaseContext,
     ) -> RunnerResult<PhaseBatchOutcome> {
         let chain_id = context.chain_id.as_str();
-        // Follow blocks on this chain hydrate from RPC. A configured runner without its URL is
+        // Head blocks on this chain hydrate from RPC. A configured runner without its URL is
         // stopped before any publication, so a rebuild cannot publish values that the first
-        // follow block would then fail to refresh. The one-shot redo, which only undoes and
+        // head block would then fail to refresh. The one-shot redo, which only undoes and
         // replays, runs without it (`FamilySettings::require_hydration_url`).
         if let Some(rpc_urls) = &self.hydration_rpc_urls
             && self.families.require_hydration_url

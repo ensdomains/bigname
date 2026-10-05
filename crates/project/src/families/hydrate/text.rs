@@ -1,10 +1,21 @@
 //! F6 text enrichment keeps the event-derived columns intact. The existing JSON overlay records
 //! the outcome and the selectors it was read for; null restores the missing-value baseline.
 //!
-//! A block reads at most [`ROLLING_LIMIT`] selectors, as the reverse refresh does: those the block
-//! changed first, then the backlog a rebuild leaves (every overlay null) in a stable rolling order,
-//! never-read selectors before the oldest attempts. A failed read keeps the null overlay but
-//! stamps `hydrated_at_block` with the attempt, so it waits behind the rest of the backlog.
+//! A hydrating block reads at most [`ROLLING_LIMIT`] selectors: those the block changed first,
+//! then the backlog a rebuild leaves (every overlay null) in a stable rolling order, never-read
+//! selectors before the oldest attempts.
+//!
+//! What a read writes (`batch::Read`):
+//! - an answered call that succeeded, with a value or empty, writes the overlay and its block;
+//! - an answered call that itself failed inside the aggregate writes a null overlay and stamps
+//!   `hydrated_at_block` with the attempt. This is a fail-closed policy, not evidence that the
+//!   record is empty: nothing is served for the selector and it waits behind the rest of the
+//!   backlog;
+//! - a deferred selector (its aggregate failed while the endpoint served the block) is written
+//!   the same way. Every selected selector is work, so its overlay, if it has one, was already
+//!   not served for the selector as it now stands; the stamp is what moves it back;
+//! - an unobserved selector (the RPC batch failed and the endpoint did not serve the block) is
+//!   not written at all.
 //!
 //! `text.sql` decides which selectors need work and cuts the block's share, so a block never
 //! transfers the selectors that are already current. Every row it returns is work: a read stamps
@@ -24,17 +35,18 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::super::{
-    input::BlockHeader,
     reduce::{Context, key_of, set},
     store::{Row, RowSet, key_text},
     tables,
 };
 use super::ETHEREUM;
 use super::admission::TEXT_RESOLVERS;
+use super::batch::{Aggregate, BATCH_LIMIT, Kind, Read, Session};
+use super::outcome::Writes;
 use crate::{ProjectError, Result};
 
-/// The most selectors one block reads, one Multicall3 batch: the reverse refresh's bound.
-pub(super) const ROLLING_LIMIT: usize = 250;
+/// The most selectors one block reads, one Multicall3 aggregate.
+pub(super) const ROLLING_LIMIT: usize = BATCH_LIMIT;
 
 pub(super) struct Candidate {
     key: Row,
@@ -43,7 +55,7 @@ pub(super) struct Candidate {
 }
 
 pub(super) struct Prepared {
-    work: BTreeMap<String, (Candidate, Option<EnsTextRecordMulticallResult>)>,
+    work: BTreeMap<String, (Candidate, Option<Read<EnsTextRecordMulticallResult>>)>,
 }
 
 fn changes(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
@@ -197,68 +209,78 @@ fn candidate(value: Value) -> Result<Candidate> {
     })
 }
 
+struct Call<'a> {
+    rpc_urls: &'a ChainRpcUrls,
+    block: EnsTextRecordMulticallBlock,
+}
+
+impl Aggregate for Call<'_> {
+    type Request = EnsTextRecordMulticallRequest;
+    type Answer = EnsTextRecordMulticallResult;
+
+    async fn send(
+        &self,
+        chunk: &[Self::Request],
+    ) -> std::result::Result<Vec<Self::Answer>, String> {
+        execute_ens_text_record_multicall(
+            self.rpc_urls,
+            ETHEREUM,
+            MULTICALL3_ADDRESS,
+            &self.block,
+            chunk,
+        )
+        .await
+        .map_err(|error| format!("{error:#}"))
+    }
+}
+
 pub(super) async fn execute(
     candidates: Vec<Candidate>,
-    rpc_urls: &ChainRpcUrls,
-    head: &BlockHeader,
+    session: &mut Session<'_>,
 ) -> Result<Prepared> {
     let requests: Vec<_> = candidates
         .iter()
         .filter_map(|candidate| candidate.request.clone())
         .collect();
+    let rpc_urls = session.rpc_urls;
     if !requests.is_empty() && rpc_urls.url_for(ETHEREUM).is_none() {
         return Err(ProjectError::configuration(
             "family text hydration requires an RPC URL for ethereum-mainnet",
         ));
     }
-    let block = EnsTextRecordMulticallBlock {
-        block_number: head.number,
-        block_hash: head.hash.clone(),
+    let call = Call {
+        rpc_urls,
+        block: EnsTextRecordMulticallBlock {
+            block_number: session.head.number,
+            block_hash: session.head.hash.clone(),
+        },
     };
-    let mut results = Vec::with_capacity(requests.len());
-    for chunk in requests.chunks(ROLLING_LIMIT) {
-        match execute_ens_text_record_multicall(
-            rpc_urls,
-            ETHEREUM,
-            MULTICALL3_ADDRESS,
-            &block,
-            chunk,
-        )
-        .await
-        {
-            Ok(found) => results.extend(found),
-            Err(error) => {
-                results.extend(chunk.iter().map(|_| EnsTextRecordMulticallResult::Failed {
-                    message: format!("{error:#}"),
-                }))
-            }
-        }
-    }
-    if results.len() != requests.len() {
-        return Err(ProjectError::data_integrity(
-            "family text hydration outcome count differs from its candidates",
-        ));
-    }
-    Ok(prepared(candidates, results))
-}
-
-fn prepared(candidates: Vec<Candidate>, results: Vec<EnsTextRecordMulticallResult>) -> Prepared {
-    let mut results = results.into_iter();
-    Prepared {
+    let reads = session.read(Kind::Text, &requests, &call).await;
+    session.stats.text.failed_calls += reads
+        .iter()
+        .filter(|read| {
+            matches!(
+                read,
+                Read::Answered(EnsTextRecordMulticallResult::Failed { .. })
+            )
+        })
+        .count() as u64;
+    let mut reads = reads.into_iter();
+    Ok(Prepared {
         work: candidates
             .into_iter()
             .map(|candidate| {
-                let result = candidate
+                let read = candidate
                     .request
                     .as_ref()
-                    .map(|_| results.next().expect("count checked"));
+                    .map(|_| reads.next().expect("one read per request"));
                 (
                     key_text(&tables::NODE_RECORD_VALUE, &candidate.key),
-                    (candidate, result),
+                    (candidate, read),
                 )
             })
             .collect(),
-    }
+    })
 }
 
 impl Prepared {
@@ -268,7 +290,7 @@ impl Prepared {
         context: &Context<'_>,
         rows: &mut RowSet,
         _ordinal: i64,
-    ) -> Result<()> {
+    ) -> Result<Writes> {
         let current = select(transaction, context, rows).await?;
         rows.load(
             transaction,
@@ -276,6 +298,7 @@ impl Prepared {
             current.iter().map(|candidate| candidate.key.clone()),
         )
         .await?;
+        let mut writes = Writes::default();
         for candidate in current {
             let prepared = self
                 .work
@@ -291,31 +314,44 @@ impl Prepared {
                 continue;
             };
             let mut overlay = candidate.selector.clone();
-            let result = matched.and_then(|(_, result)| result.as_ref());
-            match result {
-                Some(EnsTextRecordMulticallResult::Success { value }) => {
+            // `None` is a selector with no read to make: one no longer eligible, whose overlay
+            // is cleared, or one that changed between preparation and this transaction.
+            let read = matched.and_then(|(_, read)| read.as_ref());
+            match read {
+                Some(Read::Unobserved) => continue,
+                Some(Read::Answered(EnsTextRecordMulticallResult::Success { value })) => {
                     overlay["status"] = json!("success");
                     overlay["value"] = json!(value);
                 }
-                Some(EnsTextRecordMulticallResult::NotFound) => {
+                Some(Read::Answered(EnsTextRecordMulticallResult::NotFound)) => {
                     overlay["status"] = json!("not_found")
                 }
-                Some(EnsTextRecordMulticallResult::Failed { .. }) | None => overlay = Value::Null,
+                Some(Read::Answered(EnsTextRecordMulticallResult::Failed { .. }))
+                | Some(Read::Deferred)
+                | None => overlay = Value::Null,
             }
             if !overlay.is_null() {
                 overlay["block_hash"] = json!(context.block.hash);
             }
-            // A failed read stamps its attempt with a null overlay, which nothing serves.
-            let height = if result.is_some() {
+            // A failed or deferred read stamps its attempt with a null overlay, which nothing
+            // serves.
+            let height = if read.is_some() {
                 json!(context.block.number)
             } else {
                 Value::Null
             };
+            let before = row.clone();
             set(&mut row, "hydrated_value", overlay);
             set(&mut row, "hydrated_at_block", height);
+            if row != before {
+                match read {
+                    Some(Read::Deferred) => writes.schedules += 1,
+                    _ => writes.values += 1,
+                }
+            }
             rows.put(&tables::NODE_RECORD_VALUE, row)?;
         }
-        Ok(())
+        Ok(writes)
     }
 }
 

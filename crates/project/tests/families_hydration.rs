@@ -4,7 +4,7 @@ mod rpc;
 mod support;
 
 use anyhow::Result;
-use bigname_project::families::{self, FamilyMode, FamilyOptions};
+use bigname_project::families::{self, FamilyMode, FamilyOptions, FamilyOutcome};
 use serde_json::{Value, json};
 use support::{CONTENT_HASH, Event, Fixture, hash, marker};
 
@@ -29,9 +29,17 @@ fn node(index: i64) -> String {
     format!("{hash:#x}")
 }
 
-async fn run(fixture: &Fixture, block: i64, mode: FamilyMode, rpc: &rpc::Rpc) -> Result<()> {
-    let token = families::input_token(&fixture.pool, CHAIN).await?;
-    families::apply(
+/// One family run to `block` with hydration configured, whatever the readable head is.
+async fn apply(
+    fixture: &Fixture,
+    block: i64,
+    mode: FamilyMode,
+    rpc: &rpc::Rpc,
+) -> (FamilyOutcome, Option<bigname_project::ProjectError>) {
+    let token = families::input_token(&fixture.pool, CHAIN)
+        .await
+        .expect("input token");
+    families::run(
         &fixture.pool,
         CHAIN,
         &marker(block),
@@ -39,8 +47,22 @@ async fn run(fixture: &Fixture, block: i64, mode: FamilyMode, rpc: &rpc::Rpc) ->
         &token,
         &FamilyOptions::new(CONTENT_HASH).with_hydration(rpc.urls()),
     )
-    .await?;
-    Ok(())
+    .await
+}
+
+/// Make `block` the highest readable block, then run the families to it.
+async fn run(
+    fixture: &Fixture,
+    block: i64,
+    mode: FamilyMode,
+    rpc: &rpc::Rpc,
+) -> Result<FamilyOutcome> {
+    rpc::head(&fixture.pool, block).await?;
+    let (outcome, error) = apply(fixture, block, mode, rpc).await;
+    if let Some(error) = error {
+        return Err(error.into());
+    }
+    Ok(outcome)
 }
 
 async fn seed(fixture: &Fixture, block: i64, index: i64) -> Result<()> {
@@ -145,24 +167,31 @@ async fn follow_hydrates_same_block_and_empty_blocks_and_undo_restores_overlay()
         claim(&fixture).await?.row.claim_status.as_str(),
         "not_found"
     );
+    // The endpoint fails every aggregate sent at block 3. The batch observed nothing, so the
+    // empty answer and the block it was observed at stay, and no hydration row is journalled.
+    let observed = tuple(&fixture).await?;
     rpc.answer(3, None);
-    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
-    let failed = tuple(&fixture).await?;
-    assert!(
-        failed["hydrated_name"].is_null(),
-        "failure retracts the previous answer"
-    );
-    assert_eq!(failed["attempt_block"], 3);
+    let outcome = run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(tuple(&fixture).await?, observed, "not observed is no write");
+    assert_eq!(observed["attempt_block"], 2);
     assert_eq!(
         claim(&fixture).await?.row.claim_status.as_str(),
         "not_found"
     );
-    let journal: Value = sqlx::query_scalar("SELECT before_image FROM project_family_undo WHERE chain_id=$1 AND block_number=3 AND family='project_reverse_tuple'")
+    let journalled: i64 = sqlx::query_scalar("SELECT count(*) FROM project_family_undo WHERE chain_id=$1 AND block_number=3 AND family='project_reverse_tuple'")
         .bind(CHAIN).fetch_one(&fixture.pool).await?;
+    assert_eq!(journalled, 0);
+    let reverse = outcome.hydration.reverse;
     assert_eq!(
-        journal["hydrated_name"], "",
-        "empty-block work is journalled"
+        (
+            reverse.rpc_calls,
+            reverse.rpc_failures,
+            reverse.not_observed,
+            reverse.value_writes + reverse.schedule_writes
+        ),
+        (1, 1, 1, 0)
     );
+    assert_eq!((outcome.hydration.unserved_passes, rpc.probes()), (1, 1));
 
     let calls = rpc.calls().len();
     run(&fixture, 3, FamilyMode::Redo { from: 3, to: 3 }, &rpc).await?;
@@ -170,7 +199,7 @@ async fn follow_hydrates_same_block_and_empty_blocks_and_undo_restores_overlay()
     assert_eq!(
         tuple(&fixture).await?["hydrated_name"],
         "",
-        "undo restored N-1 overlay"
+        "undo and replay keep the last observed overlay"
     );
     rpc.answer(4, Some("invalid..eth"));
     run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
@@ -218,11 +247,27 @@ async fn rebuild_skips_rpc_and_failed_rolling_page_does_not_starve_next_tuple() 
     }
     run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
     assert!(rpc.calls().is_empty());
-    rpc.answer(2, None);
-    run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    // Block 2's aggregate is answered, but every resolver call in it fails. Each of the 250
+    // tuples takes a null name stamped with the attempt (fail closed), so the page has had its
+    // turn and block 3 reads the tuple behind it.
+    rpc.answer(2, Some("unused"));
+    rpc.fail_call(SILENT);
+    let outcome = run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
+    rpc.clear_faults();
+    let reverse = outcome.hydration.reverse;
+    assert_eq!(
+        (
+            reverse.rpc_calls,
+            reverse.rpc_failures,
+            reverse.failed_calls,
+            reverse.value_writes
+        ),
+        (1, 0, 250, 250)
+    );
     rpc.answer(3, Some("next.eth"));
     run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
     assert_eq!(rpc.calls(), vec![(hash(2), 250), (hash(3), 1)]);
+    assert_eq!(rpc.probes(), 0);
     let attempted: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_reverse_tuple WHERE attempt_block IS NOT NULL",
     )
@@ -247,6 +292,8 @@ async fn replayed_resolver_change_cannot_reuse_the_old_hydrated_claim() -> Resul
     seed(&fixture, 1, 1).await?;
     rpc.answer(1, Some("alice.eth"));
     rpc.answer(2, Some("alice.eth"));
+    // Each block is the head when it is published, so each hydrates.
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
     run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
     assert_eq!(
         claim(&fixture).await?.row.raw_claim_name.as_deref(),
@@ -305,9 +352,17 @@ async fn preparation_releases_transaction_and_changed_inputs_refuse_publication(
         seed(&fixture, 1, 1).await?;
         rpc.answer(1, Some("must-not-publish.eth"));
         rpc.before_reply(&fixture.pool, statement);
-        let error = run(&fixture, 1, FamilyMode::Normal, &rpc).await.unwrap_err();
+        rpc::head(&fixture.pool, 1).await?;
+        let (outcome, error) = apply(&fixture, 1, FamilyMode::Normal, &rpc).await;
+        let error = error.expect("the publication fence refuses the block");
         assert!(error.to_string().contains(if label == "revision" { "revision changed" } else { "prepared block changed" }), "{error:#}");
         assert_eq!(rpc.calls().len(), 1);
+        // The RPC attempt is reported although nothing it read was committed.
+        let reverse = outcome.hydration.reverse;
+        assert_eq!(
+            (outcome.hydration.passes, reverse.rpc_calls, reverse.answered, reverse.value_writes),
+            (1, 1, 1, 0)
+        );
         let position: i64 = sqlx::query_scalar("SELECT current_block_number FROM project_family_marker WHERE chain_id=$1")
             .bind(CHAIN).fetch_one(&fixture.pool).await?;
         assert_eq!(position, 0);

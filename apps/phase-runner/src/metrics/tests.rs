@@ -374,6 +374,123 @@ fn progress_context(mode: RunMode) -> PhaseContext {
     }
 }
 
+#[test]
+fn hydration_counts_rpc_attempts_apart_from_committed_writes() -> Result<()> {
+    use bigname_project::families::{FamilyOutcome, HydrationKindOutcome, HydrationOutcome};
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let feed = RunnerMetricsFeed::default();
+    // A run whose head block read 250 reverse selectors and then failed its publication fence:
+    // the calls are reported, and no write is.
+    let refused = FamilyOutcome {
+        hydration: HydrationOutcome {
+            passes: 1,
+            reverse: HydrationKindOutcome {
+                rpc_calls: 1,
+                answered: 250,
+                ..Default::default()
+            },
+            rpc_ms: 900,
+            head_age_seconds: Some(7),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // A run whose endpoint did not serve the head: one failed aggregate, one failed probe.
+    let unserved = FamilyOutcome {
+        hydration: HydrationOutcome {
+            passes: 1,
+            unserved_passes: 1,
+            probes: 1,
+            probe_failures: 1,
+            reverse: HydrationKindOutcome {
+                rpc_calls: 1,
+                rpc_failures: 1,
+                not_observed: 250,
+                ..Default::default()
+            },
+            text: HydrationKindOutcome {
+                not_observed: 250,
+                ..Default::default()
+            },
+            rpc_ms: 1_500,
+            head_age_seconds: Some(40_000),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // A committed head with one failed call, one deferred selector and their writes.
+    let committed = FamilyOutcome {
+        hydration: HydrationOutcome {
+            passes: 1,
+            text: HydrationKindOutcome {
+                rpc_calls: 3,
+                rpc_failures: 2,
+                answered: 249,
+                failed_calls: 1,
+                deferred: 1,
+                value_writes: 249,
+                schedule_writes: 1,
+                ..Default::default()
+            },
+            rpc_ms: 250,
+            head_age_seconds: Some(12),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for outcome in [&refused, &unserved, &committed, &FamilyOutcome::default()] {
+        feed.project_families("ethereum-mainnet", outcome);
+    }
+    metrics.project_writes.apply(feed.take_project_writes());
+
+    let scrape = metrics.registry.encode()?;
+    let chain = "chain=\"ethereum-mainnet\"";
+    for line in [
+        format!("phase_runner_project_hydration_passes_total{{{chain},result=\"served\"}} 2\n"),
+        format!("phase_runner_project_hydration_passes_total{{{chain},result=\"unserved\"}} 1\n"),
+        format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"reverse\"}} 2\n"),
+        format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"text\"}} 3\n"),
+        format!("phase_runner_project_hydration_rpc_calls_total{{{chain},kind=\"probe\"}} 1\n"),
+        format!(
+            "phase_runner_project_hydration_rpc_failures_total{{{chain},kind=\"reverse\"}} 1\n"
+        ),
+        format!("phase_runner_project_hydration_rpc_failures_total{{{chain},kind=\"text\"}} 2\n"),
+        format!(
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"reverse\",outcome=\"observed\"}} 250\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"reverse\",outcome=\"not_observed\"}} 250\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"text\",outcome=\"observed\"}} 248\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"text\",outcome=\"failed_call\"}} 1\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_selectors_total{{{chain},kind=\"text\",outcome=\"deferred\"}} 1\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_writes_total{{{chain},kind=\"reverse\",write=\"value\"}} 0\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_writes_total{{{chain},kind=\"text\",write=\"value\"}} 249\n"
+        ),
+        format!(
+            "phase_runner_project_hydration_writes_total{{{chain},kind=\"text\",write=\"schedule\"}} 1\n"
+        ),
+        format!("phase_runner_project_hydration_rpc_seconds{{{chain}}} 0.25\n"),
+        format!("phase_runner_project_hydration_head_age_seconds{{{chain}}} 12\n"),
+    ] {
+        assert!(scrape.contains(&line), "missing {line}\n{scrape}");
+    }
+    Ok(())
+}
+
 fn pinned_outcome() -> PhaseBatchOutcome {
     PhaseBatchOutcome::Continue(PhaseProgress {
         current: Some(BlockMarker::new(1, "one").expect("marker")),
