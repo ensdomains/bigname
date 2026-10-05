@@ -310,8 +310,11 @@ pub async fn load_family_expiring_page(
     }
 }
 
-/// The expiring page over every name of `filter.namespace` composed at once: what the walk must
-/// return, whatever it costs. A test oracle only.
+/// The expiring page over every name of the `ens` namespace composed at once: what the walk
+/// must return, whatever it costs. A test oracle only. It composes without the declared
+/// topology, which changes fields the listing does not serve; for `ens` that is one
+/// `declared_summary` key, for Basenames it also rewrites row metadata, so other namespaces are
+/// refused rather than compared.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn load_family_expiring_page_unbounded(
     db: impl Into<crate::ReadDb<'_>>,
@@ -321,6 +324,10 @@ pub async fn load_family_expiring_page_unbounded(
     page_size: u64,
     chains: &[String],
 ) -> Result<NameCurrentListPage> {
+    anyhow::ensure!(
+        filter.namespace == "ens",
+        "the unbounded expiring oracle covers only the ens namespace"
+    );
     let mut snapshot = db.into().snapshot().await?;
     batch::ensure_published(&mut snapshot, chains).await?;
     let names: Vec<String> = sqlx::query_scalar(

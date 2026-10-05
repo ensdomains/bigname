@@ -1,5 +1,5 @@
-// `GET /v1/names` storage pages against the unbounded oracle: every name of the namespace
-// composed at once and run through the same page statement. Each page the listing serves, and
+// `GET /v1/names` storage pages against the unbounded oracle: every name of the `ens` namespace
+// composed at once and run through the same page statement. The oracle covers `ens` only. Each page the listing serves, and
 // each continuation cursor, must equal the oracle's at the same cursor.
 
 const ORACLE_HOLDER: &str = "0x00000000000000000000000000000000000000d7";
@@ -221,7 +221,7 @@ fn oracle_filter(
 }
 
 /// A page with the declared topology removed: the listing never serves it, so the walk and the
-/// oracle may compose it or not.
+/// oracle may compose it or not. For an `ens` row that key is all topology enrichment changes.
 fn oracle_comparable(
     page: &bigname_storage::NameCurrentListPage,
 ) -> (Vec<bigname_storage::NameCurrentListRow>, Option<bigname_storage::NameCurrentListCursor>) {
@@ -394,14 +394,53 @@ async fn oracle_counted_page(
 // the counts are printed, not bounded.
 #[tokio::test]
 async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    use bigname_storage::families::name::seams;
     let database = TestDatabase::new_migrated().await?;
     let mut fixture = seed_expiry_oracle_fixture(&database).await?;
     let filter = oracle_filter(Some("0"), None, Some(&["ens_v0"]), None)?;
     let (page, composed, peak, submitted) = oracle_counted_page(&database, &filter, 2).await?;
     eprintln!("expiring page_size=2 ens_v0: composed={composed} peak={peak} submitted={submitted}");
+    // A reader may or may not bind composed rows to a statement; it must compose what it serves.
     assert_eq!(page.rows.len(), 2);
-    assert!(peak >= 2 && peak <= submitted, "peak {peak} submitted {submitted}");
-    assert!(composed >= peak, "composed {composed} peak {peak}");
+    assert!(composed >= 2 && peak <= submitted, "composed {composed} peak {peak} of {submitted}");
+
+    // The search listing binds its composed rows to its page statement: the peak is the largest
+    // such source and the submitted count their sum.
+    let (peak, submitted) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let search = bigname_storage::NameCurrentListFilter {
+        namespace: Some("ens".to_owned()),
+        supported_only: true,
+        ..Default::default()
+    };
+    let searched = seams::with_peak_source_counter(
+        peak.clone(),
+        seams::with_submitted_rows_counter(
+            submitted.clone(),
+            seams::with_batch_size(
+                3,
+                bigname_storage::families::name::load_family_search_page(
+                    &database.pool, &search, None, 5,
+                ),
+            ),
+        ),
+    )
+    .await?;
+    let (peak, submitted) = (peak.load(Ordering::Relaxed), submitted.load(Ordering::Relaxed));
+    assert_eq!(searched.rows.len(), 5);
+    assert!(peak >= 5 && submitted > peak, "search peak {peak} of {submitted} submitted");
+
+    // The oracle refuses a namespace it does not cover.
+    let mut basenames = filter.clone();
+    basenames.namespace = "basenames".to_owned();
+    assert!(
+        seams::load_family_expiring_page_unbounded(
+            &database.pool, &basenames, bigname_storage::NameCurrentListOrder::Asc, None, 2,
+            &[FAMILY_CHAIN.to_owned()],
+        )
+        .await
+        .is_err()
+    );
 
     // late.eth renews twenty times through a window it then leaves.
     let (late, resource) = fixture.names["late.eth"].clone();
