@@ -53,6 +53,7 @@ pub(super) fn materialize(
             draft.namehash
         );
         if v1_surface {
+            state.remember_v1_path(namespace, &draft.namehash, &draft.labelhashes)?;
             state.materialize_v1_surface(namespace, &draft.namehash, true, false);
         }
         output.name_surfaces.push(NameSurface {

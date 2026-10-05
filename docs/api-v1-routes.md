@@ -1925,7 +1925,8 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   spelling with the row. Its row never takes the escape form: a label whose
   preimage is not valid text reads as the placeholder. A parent whose surface
   stores no raw label bytes lists and counts its children under its own
-  rendered name, at any depth. No adapter writes such a surface yet.
+  rendered name, at any depth. Admitted ENSv1 `NewOwner` events create these
+  surfaces when the complete labelhash path is proven back to the root.
   The escape form is never a name input. Resolver records are not included here;
   use `GET /v1/names/{name}` for `resolver` and grouped `records`, or `GET /v1/names/{name}/records` for per-key record
   answers.
@@ -3779,12 +3780,15 @@ introduces it rebuilds Project from full history before serving the option; see
   row is served `status=ok` and `registration_status=unregistered`.
   A name bigname has never materialized as a
   [name surface](glossary.md#surface-name-surface) has no current name row.
-  On the ENSv1 arm a surface comes from a
-  label-bearing registrar or NameWrapper event; a node known only from registry
-  owner events — a subname written with `setSubnodeOwner` or
-  `setSubnodeRecord`, which emit the labelhash and not the label, and never
-  wrapped — has a registry-only resource but no surface, whether or not a
-  label preimage for it exists
+  On the ENSv1 arm an admitted `NewOwner` creates a surface without raw label
+  bytes when its complete labelhash path is known from the root or a fully
+  proven ancestor. Such a child uses the ordinary name row and is `registered`
+  while it has active registry control, a current nonzero owner and a binding;
+  a child without a registrar lease omits the corresponding dates. A
+  label-bearing registrar or NameWrapper event can also establish the surface.
+  An isolated owner event whose ancestry is unproven, or known invalid bytes,
+  still leaves only the registry resource; a label preimage import alone does
+  not establish a surface
   ([ADR 0002](adrs/0002-surface-resource-identity.md), ENSv1 authority-anchor
   rules)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)

@@ -115,6 +115,31 @@ const TAKES_INCOMING_EVIDENCE: &str = "(
         OR name_surfaces.preimage_event_identity IS NULL
         OR name_surfaces.canonicality_state = 'orphaned'
         OR EXCLUDED.block_number < name_surfaces.block_number
+        OR (
+            name_surfaces.raw_name = ''
+            AND cardinality(name_surfaces.raw_labels) = 0
+            AND name_surfaces.visibility_state = 'shadow'
+            AND (
+                cardinality(name_surfaces.labelhashes) = 0
+                OR (
+                    NOT EXISTS (
+                        SELECT 1 FROM submitted_witnesses
+                        WHERE event_identity = name_surfaces.preimage_event_identity
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM normalized_events witness
+                        JOIN chain_lineage lineage
+                          ON lineage.chain_id = witness.chain_id
+                         AND lineage.block_hash = witness.block_hash
+                         AND lineage.block_number = witness.block_number
+                        WHERE witness.chain_id = name_surfaces.chain_id
+                          AND witness.event_identity = name_surfaces.preimage_event_identity
+                          AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
+                          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    )
+                )
+            )
+        )
     )
 )";
 
@@ -141,7 +166,7 @@ fn block_witnesses(output: &BatchOutput) -> HashMap<(&str, &str), BlockWitness<'
         witnesses
             .entry((logical_name_id, block_hash))
             .and_modify(|earliest| {
-                if position < earliest.0 {
+                if candidate < *earliest {
                     *earliest = candidate;
                 }
             })
@@ -155,12 +180,22 @@ async fn write_surfaces(
     output: &BatchOutput,
 ) -> Result<()> {
     let witnesses = block_witnesses(output);
+    let submitted_witnesses = output
+        .normalized_events
+        .iter()
+        .filter(|event| event.event_kind == PREIMAGE_OBSERVATION_EVENT_KIND)
+        .map(|event| event.event_identity.clone())
+        .collect::<Vec<_>>();
     for (start, batch) in conflict_free_batches(&output.name_surfaces, |surface| {
         surface.logical_name_id.clone()
     }) {
-        let mut query = QueryBuilder::<Postgres>::new(
-            "
-            INSERT INTO name_surfaces (
+        let mut query =
+            QueryBuilder::<Postgres>::new("WITH submitted_witnesses AS (SELECT unnest(");
+        query
+            .push_bind(&submitted_witnesses)
+            .push("::text[]) AS event_identity) ");
+        query.push(
+            "INSERT INTO name_surfaces (
                 logical_name_id, namespace, raw_name, raw_labels,
                 dns_encoded_name, namehash, labelhashes, normalizer_version,
                 visibility_state, normalization_errors, deactivation_reason,
@@ -205,7 +240,8 @@ async fn write_surfaces(
         query.push(format!(
             "
             ON CONFLICT (logical_name_id) DO UPDATE
-            SET raw_name = CASE WHEN {take} THEN EXCLUDED.raw_name ELSE name_surfaces.raw_name END,
+            SET labelhashes = CASE WHEN {take} THEN EXCLUDED.labelhashes ELSE name_surfaces.labelhashes END,
+                raw_name = CASE WHEN {take} THEN EXCLUDED.raw_name ELSE name_surfaces.raw_name END,
                 raw_labels = CASE WHEN {take} THEN EXCLUDED.raw_labels ELSE name_surfaces.raw_labels END,
                 dns_encoded_name = CASE
                     WHEN {take} THEN EXCLUDED.dns_encoded_name
@@ -245,9 +281,7 @@ async fn write_surfaces(
                 END,
                 deactivated_at = CASE
                     WHEN {keep} THEN name_surfaces.deactivated_at
-                    WHEN {anchor_moves} OR name_surfaces.deactivated_at IS NULL
-                        THEN EXCLUDED.deactivated_at
-                    ELSE name_surfaces.deactivated_at
+                    ELSE EXCLUDED.deactivated_at
                 END,
                 canonicality_state = CASE
                     WHEN {anchor_moves}
@@ -264,7 +298,16 @@ async fn write_surfaces(
                 END
             WHERE name_surfaces.namespace = EXCLUDED.namespace
               AND name_surfaces.namehash = EXCLUDED.namehash
-              AND name_surfaces.labelhashes = EXCLUDED.labelhashes
+              AND (
+                    name_surfaces.labelhashes = EXCLUDED.labelhashes
+                 OR (
+                        name_surfaces.visibility_state = 'shadow'
+                    AND name_surfaces.raw_name = ''
+                    AND cardinality(name_surfaces.raw_labels) = 0
+                    AND cardinality(name_surfaces.labelhashes) = 0
+                    AND cardinality(EXCLUDED.labelhashes) > 0
+                 )
+              )
               AND name_surfaces.chain_id = EXCLUDED.chain_id
               AND (
                     name_surfaces.raw_name IS NULL
@@ -365,6 +408,8 @@ mod tests {
         for sql in [
             include_str!("../../../storage/schema/baseline/01_chain.sql"),
             include_str!("../../../storage/schema/baseline/03_identity.sql"),
+            include_str!("../../../storage/schema/baseline/04_manifests.sql"),
+            include_str!("../../../storage/schema/baseline/05_normalized_events.sql"),
             include_str!("../../../storage/schema/baseline/07_labels.sql"),
         ] {
             sqlx::raw_sql(sql).execute(database.pool()).await?;

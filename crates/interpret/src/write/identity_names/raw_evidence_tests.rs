@@ -286,7 +286,7 @@ async fn absent_raw_bytes_are_not_empty_bytes_or_a_partial_bundle() -> TestResul
             "unexpected error: {error}"
         );
     }
-    // The empty bundle a shadow surface with undecodable bytes stores today stays valid.
+    // The legacy empty bundle for a shadow with undecodable bytes stays valid until re-derived.
     insert(
         Some(""),
         Some(Vec::new()),
@@ -360,6 +360,60 @@ async fn witness_is_the_earliest_same_block_preimage_not_the_first_written() -> 
         Some("preimage:log-3")
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_byte_shadow_gains_its_path_only_with_the_rederived_raw_bundle() -> TestResult {
+    use alloy_primitives::{B256, keccak256};
+    let database = database("interpret_surface_legacy_byte_path").await?;
+    add_block(&database, 2).await?;
+    let labels = [b"\xff".as_slice(), b"eth"];
+    let hashes = labels
+        .map(|label| format!("{:#x}", keccak256(label)))
+        .to_vec();
+    let namehash = labels.iter().rev().fold(B256::ZERO, |node, label| {
+        keccak256([node.as_slice(), keccak256(label).as_slice()].concat())
+    });
+    let id = format!("ens:{namehash:#x}");
+    let mut legacy = shadow(at(surface(&id, ""), 2), 2)?;
+    legacy.labelhashes.clear();
+    let raw = legacy.raw.as_mut().unwrap();
+    raw.raw_labels.clear();
+    raw.dns_encoded_name = vec![1, 0xff, 3, b'e', b't', b'h', 0];
+    raw.preimage_event_identity = "legacy-witness".into();
+    write_one(&database, legacy.clone()).await?;
+    let mut structural = hash_path_only(&id, "");
+    structural.labelhashes = hashes.clone();
+    write_one(&database, structural.clone()).await?;
+    let path: Vec<String> =
+        sqlx::query_scalar("SELECT labelhashes FROM name_surfaces WHERE logical_name_id=$1")
+            .bind(&id)
+            .fetch_one(database.pool())
+            .await?;
+    assert!(
+        path.is_empty(),
+        "a hash-only observation must not repair a legacy raw bundle"
+    );
+    assert_eq!(stored(&database, &id).await?.4, "shadow");
+    let mut rederived = legacy;
+    rederived.labelhashes = hashes.clone();
+    rederived.raw.as_mut().unwrap().preimage_event_identity = "rederived-witness".into();
+    write_one(&database, rederived).await?;
+    write_one(&database, structural).await?;
+    let path: Vec<String> =
+        sqlx::query_scalar("SELECT labelhashes FROM name_surfaces WHERE logical_name_id=$1")
+            .bind(&id)
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(path, hashes);
+    let row = stored(&database, &id).await?;
+    assert_eq!(row.0.as_deref(), Some(""));
+    assert_eq!(row.1, Some(Vec::new()));
+    assert_eq!(row.3.as_deref(), Some("rederived-witness"));
+    assert_eq!(row.4, "shadow");
+    assert_eq!(row.5, 1);
     database.cleanup().await?;
     Ok(())
 }

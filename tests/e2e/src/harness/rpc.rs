@@ -205,7 +205,12 @@ impl RpcClient {
 
     /// Warp chain time forward and mine one block so the new timestamp is observable.
     pub async fn increase_time(&self, seconds: u64) -> Result<()> {
-        self.call("evm_increaseTime", json!([seconds])).await?;
+        let timestamp = self.block_timestamp().await? + u128::from(seconds.max(1));
+        self.call(
+            "evm_setNextBlockTimestamp",
+            json!([u64::try_from(timestamp)?]),
+        )
+        .await?;
         self.call("evm_mine", json!([])).await?;
         Ok(())
     }

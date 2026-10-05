@@ -32,6 +32,10 @@ pub(in crate::schema_v2) fn observes_name_identity(event: &PriorEventInput) -> b
 }
 
 pub(in crate::schema_v2) fn restore_preimage(state: &mut State, event: &PriorEventInput) {
+    if let Err(error) = state.restore_v1_path(event) {
+        state.record_restore_error(error);
+        return;
+    }
     if observes_name_identity(event)
         && let Some(namehash) = event
             .logical_name_id

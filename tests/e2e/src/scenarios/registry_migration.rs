@@ -559,14 +559,21 @@ async fn assert_legacy_2ld_public_state(run: &support::PipelineRun, name: &str) 
         families::served_child_rows(&run.db.pool, &format!("{:#x}", ens_v1::namehash(name)))
             .await?;
     assert_eq!(
-        child_rows, 0,
-        "legacy-only 2LD {name} should derive SubregistryChanged but no served child row because eth has no exact parent surface"
+        child_rows, 1,
+        "the legacy child edge is served under the proven eth parent surface"
     );
 
-    let (status, body) = run.api.get_json("/v1/names/ens/eth/children").await?;
+    let eth_id = format!("ens:{:#x}", ens_v1::namehash("eth"));
+    families::required_name(&run.db.pool, &eth_id).await?;
+    let children = families::children(&run.db.pool, &eth_id).await?;
+    let child_node = format!("{:#x}", ens_v1::namehash(name));
     assert_eq!(
-        status, 404,
-        "eth parent should not expose a children route without an exact parent surface; body: {body}"
+        children
+            .iter()
+            .filter(|child| child.namehash == child_node)
+            .count(),
+        1,
+        "the proven eth parent exposes this direct child: {children:?}"
     );
 
     Ok(())

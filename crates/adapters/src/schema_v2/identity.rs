@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::hex;
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use bigname_domain::normalization::ENS_NORMALIZER_VERSION;
 use serde_json::{Value, json};
 
@@ -275,17 +275,24 @@ pub(super) fn materialize(
                 name.bind,
             );
         }
+        if !active && !v1_surface {
+            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
+        }
         let labelhashes = name
             .labels
             .iter()
             .map(|label| hash_hex(label.as_bytes()))
             .collect::<Vec<_>>();
+        if !labelhashes.is_empty() {
+            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+        }
         represented.extend(name.labels.iter().map(|label| label.as_bytes().to_vec()));
         let mut after_state = json!({
             "source_event": selected.event.name,
             "raw_name": name.labels.join("."),
             "raw_labels": name.labels,
             "namehash": name.namehash,
+            "visibility_state": if active { "active" } else { "shadow" },
         });
         if let (Some(after), Some(metadata)) =
             (after_state.as_object_mut(), name.preimage_metadata.as_ref())
@@ -376,11 +383,13 @@ pub(super) fn materialize(
         output.normalized_events.push(preimage);
     }
     for name in &interpreted.shadow_names {
+        ensure!(
+            super::common::namehash_raw(name.raw_labels.iter().map(Vec::as_slice)) == name.namehash,
+            "shadow raw-label path does not hash to its observed node"
+        );
         represented.extend(name.raw_labels.iter().cloned());
         let logical_name_id = format!("{}:{}", selected.source.namespace, name.namehash);
-        if v1_surface {
-            state.observe_v1_surface(&selected.source.namespace, &name.namehash);
-        }
+        state.observe_v1_surface(&selected.source.namespace, &name.namehash);
         let decoded_labels = name
             .raw_labels
             .iter()
@@ -388,15 +397,18 @@ pub(super) fn materialize(
             .collect::<Option<Vec<_>>>();
         let postgres_text_labels =
             decoded_labels.filter(|labels| labels.iter().all(|label| !label.contains('\0')));
-        let (raw_name, raw_labels, labelhashes) = postgres_text_labels
+        let labelhashes = name
+            .raw_labels
+            .iter()
+            .map(|label| hash_hex(label))
+            .collect::<Vec<_>>();
+        if !labelhashes.is_empty() {
+            state.remember_v1_path(&selected.source.namespace, &name.namehash, &labelhashes)?;
+        }
+        let (raw_name, raw_labels) = postgres_text_labels
             .map(|labels| {
                 let raw_name = labels.join(".");
-                let labelhashes = name
-                    .raw_labels
-                    .iter()
-                    .map(|label| hash_hex(label))
-                    .collect();
-                (raw_name, labels, labelhashes)
+                (raw_name, labels)
             })
             .unwrap_or_default();
         let normalization_errors = name

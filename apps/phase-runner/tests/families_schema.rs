@@ -338,6 +338,11 @@ async fn optional_raw_evidence_upgrade_matches_the_baseline_on_a_populated_schem
         sqlx::raw_sql(OPTIONAL_RAW_EVIDENCE)
             .execute(upgraded.pool())
             .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/20261005190000_name_surfaces_byte_shadow_path.sql"
+        ))
+        .execute(upgraded.pool())
+        .await?;
         assert_eq!(
             name_surfaces_structure(upgraded.pool()).await?,
             name_surfaces_structure(installed.pool()).await?,
@@ -384,4 +389,88 @@ async fn optional_raw_evidence_upgrade_matches_the_baseline_on_a_populated_schem
 
     installed.cleanup().await?;
     upgraded.cleanup().await
+}
+
+/// The extra representation is confined to byte-oriented shadows; unknown bytes and active
+/// raw-backed names retain their independent complete shapes.
+#[tokio::test]
+async fn byte_shadow_path_constraint_rejects_partial_or_active_raw_bundles() -> Result<()> {
+    let database = database("byte_shadow_constraint").await?;
+    initialize_schema_v2(database.pool()).await?;
+    sqlx::query("INSERT INTO bigname_phase.chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ('constraint','block',1,to_timestamp(1),'canonical')")
+        .execute(database.pool()).await?;
+    for (raw, labels, dns, witness, visibility, accepted) in [
+        (
+            Some(""),
+            Some(Vec::<String>::new()),
+            Some(Vec::<u8>::new()),
+            Some("witness"),
+            "shadow",
+            true,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            None,
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("  "),
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("witness"),
+            "active",
+            false,
+        ),
+        (
+            Some("invented"),
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some("witness"),
+            "shadow",
+            false,
+        ),
+        (
+            Some(""),
+            None,
+            Some(Vec::new()),
+            Some("witness"),
+            "shadow",
+            false,
+        ),
+        (None, None, None, None, "active", true),
+        (None, None, None, Some("witness"), "active", false),
+        (None, None, None, None, "shadow", false),
+    ] {
+        let mut transaction = database.pool().begin().await?;
+        let result = sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id,namespace,namehash,labelhashes,raw_name,raw_labels,dns_encoded_name,preimage_event_identity,normalizer_version,visibility_state,deactivation_reason,deactivated_at,chain_id,block_hash,block_number,canonicality_state) VALUES ('ens:node','ens','node',ARRAY['child','eth'],$1,$2,$3,$4,'test',$5,CASE WHEN $5='shadow' THEN 'normalization_gate' END,CASE WHEN $5='shadow' THEN to_timestamp(1) END,'constraint','block',1,'canonical')")
+            .bind(raw).bind(labels).bind(dns).bind(witness).bind(visibility).execute(&mut *transaction).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "raw={raw:?} witness={witness:?} visibility={visibility}: {result:?}"
+        );
+        if !accepted {
+            assert_eq!(
+                result
+                    .unwrap_err()
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("name_surfaces_raw_evidence_check")
+            );
+        }
+        transaction.rollback().await?;
+    }
+    database.cleanup().await?;
+    Ok(())
 }

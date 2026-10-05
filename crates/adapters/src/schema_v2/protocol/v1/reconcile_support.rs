@@ -1,4 +1,5 @@
 mod event_index;
+mod node_identity;
 mod owner_timeline;
 mod side_index;
 mod unwrapped_migration;
@@ -29,7 +30,8 @@ pub(super) fn reconcile(output: &mut BatchOutput) {
     let mut bindings = BindingIndex::new(output);
     let mut closures = ClosureIndex::new(output);
 
-    for registration in registrations {
+    for mut registration in registrations {
+        node_identity::name_registration(output, &events, &mut registration);
         reconcile_registration(
             output,
             &mut events,
@@ -241,21 +243,14 @@ fn reconcile_registration(
         refresh_interpreter_state_key(event);
     }
 
-    // A replay of a pre-surface resolver onto the surface the naming event
-    // created sits at that event's position on the registration's resource, but
-    // it is the surface being named, not a successor epoch of the resource.
-    let redundant_successor_positions = target_candidates
-        .iter()
-        .filter_map(|index| {
-            let fields = &events.fields[*index];
-            (fields.resource_id == Some(registration.resource_id)
-                && !fields.surface_materialization
-                && fields
-                    .position
-                    .is_some_and(|position| position > registration.position && eligible(fields)))
-            .then_some(fields.position?)
-        })
-        .collect::<BTreeSet<_>>();
+    let materializations = node_identity::materialization_positions(events, registration);
+    let redundant_successor_positions = node_identity::redundant_successor_positions(
+        events,
+        &target_candidates,
+        registration,
+        &materializations,
+        eligible,
+    );
     let wrapped_resources = target_candidates
         .iter()
         .filter(|index| events.active[**index])
@@ -293,6 +288,9 @@ fn reconcile_registration(
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
         // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1009-L1019 @ ens_v1@91c966f)
         let fields = &events.fields[index];
+        if fields.surface_materialization && fields.resource_id == Some(registration.resource_id) {
+            continue;
+        }
         let on_wrapped_resource = fields.family == SourceFamily::Registry
             && !matches!(
                 fields.source_event,
@@ -353,6 +351,7 @@ fn reconcile_registration(
             continue;
         }
         if fields.family == SourceFamily::Registry
+            && !fields.surface_materialization
             && matches!(
                 fields.source_event,
                 SourceEvent::NewOwner | SourceEvent::Transfer
@@ -366,8 +365,8 @@ fn reconcile_registration(
             continue;
         }
         let event = &mut output.normalized_events[index];
-        event.logical_name_id = registration
-            .surface_known
+        event.logical_name_id = (registration.surface_known
+            || event.after_state[crate::schema_v2::seam::NAME_IDENTITY_OBSERVED_KEY] == true)
             .then(|| registration.logical_name_id.clone());
         event.resource_id = Some(registration.resource_id);
         if let Some(authority_key) = registration.authority_key.as_deref() {
@@ -408,7 +407,13 @@ fn reconcile_registration(
         &target_candidates,
         &redundant_successor_positions,
     );
-    closures.remove(&registration.logical_name_id, &pending_positions);
+    closures.remove(
+        &registration.logical_name_id,
+        &pending_positions
+            .difference(&materializations)
+            .copied()
+            .collect(),
+    );
     closures.remove(
         &registration.logical_name_id,
         &redundant_successor_positions,

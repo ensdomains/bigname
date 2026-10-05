@@ -3058,6 +3058,35 @@ After the schema-migrations and until the family rebuild publishes, the listing 
 listing after the indexes are dropped, by scanning the two tables, so it is slower there and
 nowhere else; replace it rather than leave it running.
 
+
+### ENSv1 registry node identity production
+
+The producer now establishes a name identity from an admitted ENSv1 `NewOwner`
+whose complete labelhash path is proven from the root or a directly witnessed
+ancestor. This changes Interpret output and Project's named inputs. Rollout
+requires a full Interpret re-derivation followed by full Project re-derivation
+under the new interpreter content hash; a bounded replay of recent owner changes
+cannot recover all historical ancestor paths or repair all older same-block
+preimage witnesses. Keep the preceding compatible publication until both phases
+finish and ordinary publication admission accepts the new generation.
+
+Apply `20261005190000_name_surfaces_byte_shadow_path.sql` with the normal schema
+upgrade. It narrowly permits a shadow with empty decoded text, a nonempty full
+hash path and a nonempty byte witness. It neither backfills a path nor relaxes
+active raw-backed or unknown-byte bundles. Full Interpret re-derivation repairs
+legacy paths from the actual bytes. Witness repair uses the earliest surviving
+byte observation's plain block timestamp and orders event identities separately,
+including replacement within one block.
+
+Admitted registry histories must begin at their declared deployment bounds.
+Missing ancestry is not synthesized from imports, arbitrary owner/resolver logs,
+or guessed `.eth` suffixes. A deployment that omits the ancestor's actual path
+must restore that intake coverage before claiming complete node production.
+The shared reader policies for imports, bracketed exact inputs, search fragments,
+parent filters and between-page spelling changes remain as documented in
+[API v1](api-v1.md). Capacity and full rebuild measurements remain separate
+release gates; the schema upgrade alone does not satisfy them.
+
 ### Hydration only at the head
 
 The build that makes [hydration](glossary.md#hydration) run only on the head

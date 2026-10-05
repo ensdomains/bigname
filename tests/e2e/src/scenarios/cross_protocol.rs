@@ -518,8 +518,26 @@ async fn composed_mainnet_profile_serves_both_protocols_without_leakage() -> Res
     .await?;
     assert_eq!(status, 200, "ens address names failed: {ens_names}");
     let ens_entries = ens_names["data"].as_array().cloned().unwrap_or_default();
-    assert_eq!(ens_entries.len(), 1, "exactly alice.eth: {ens_names}");
-    assert_eq!(ens_entries[0]["normalized_name"], "alice.eth");
+    let reverse_name = format!("{:x}.addr.reverse", alice);
+    let expected_nodes = ["alice.eth", reverse_name.as_str()]
+        .map(|name| format!("{:#x}", ens_v1::namehash(name)))
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual_nodes = ens_entries
+        .iter()
+        .filter_map(|entry| entry["namehash"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_nodes, expected_nodes,
+        "only alice.eth and its owned reverse node: {ens_names}"
+    );
+    assert_eq!(ens_entries.len(), 2, "{ens_names}");
+    assert!(ens_entries.iter().all(|entry| entry["namespace"] == "ens"));
+    assert!(
+        ens_entries
+            .iter()
+            .any(|entry| entry["normalized_name"] == "alice.eth")
+    );
     let (status, base_names) = body(
         &composed,
         &format!("/v1/addresses/{alice:#x}/names?namespace=basenames&relation=token_holder"),

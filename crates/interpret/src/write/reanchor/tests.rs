@@ -351,3 +351,63 @@ async fn redo_completion_orders_same_block_witnesses_by_log_position() -> TestRe
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn byte_shadow_keeps_a_valid_bundle_during_prepare_and_drops_it_at_completion() -> TestResult
+{
+    let database = database("interpret_byte_shadow_prepare").await?;
+    let pool = database.pool();
+    insert_surface(pool, 1, Some(3), true).await?;
+    insert_hash_path_observation(pool, 1).await?;
+    insert_preimage(pool, 3).await?;
+    sqlx::query(
+        "UPDATE name_surfaces SET raw_name='', raw_labels='{}', dns_encoded_name=''::bytea",
+    )
+    .execute(pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    super::super::prepare_redo_range(&mut transaction, CHAIN, 3, 3).await?;
+    transaction.commit().await?;
+    let prepared = stored(pool).await?;
+    assert_eq!(prepared.0, Some(String::new()));
+    assert_eq!(
+        prepared.1,
+        Some("preimage-3".into()),
+        "the strict byte-shadow check requires a nonempty witness during unpublished repair"
+    );
+    let mut transaction = pool.begin().await?;
+    super::stable_identities(&mut transaction, CHAIN, 3, 3).await?;
+    transaction.commit().await?;
+    assert_eq!(
+        stored(pool).await?,
+        (None, None, "active".into(), 1, "canonical".into(), None)
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_block_null_positions_repair_identity_and_plain_timestamp() -> TestResult {
+    let database = database("interpret_null_witness_repair").await?;
+    let pool = database.pool();
+    insert_surface(pool, 1, Some(3), true).await?;
+    insert_hash_path_observation(pool, 1).await?;
+    insert_preimage(pool, 3).await?;
+    insert_event(
+        pool,
+        "earliest-null",
+        PREIMAGE_OBSERVATION_EVENT_KIND,
+        3,
+        json!({"raw_labels_hex":["6368696c64","657468"]}),
+    )
+    .await?;
+    sqlx::raw_sql("UPDATE normalized_events SET transaction_index=NULL,log_index=NULL WHERE event_identity='earliest-null'; UPDATE name_surfaces SET deactivated_at=to_timestamp(3)+interval '9 microseconds'").execute(pool).await?;
+    let mut transaction = pool.begin().await?;
+    super::stable_identities(&mut transaction, CHAIN, 3, 3).await?;
+    transaction.commit().await?;
+    let row = stored(pool).await?;
+    assert_eq!(row.1, Some("earliest-null".into()));
+    assert_eq!(row.5, Some(time::OffsetDateTime::from_unix_timestamp(3)?));
+    database.cleanup().await?;
+    Ok(())
+}

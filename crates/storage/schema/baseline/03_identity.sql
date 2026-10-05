@@ -291,7 +291,17 @@ CREATE TABLE IF NOT EXISTS name_surfaces (
             raw_name IS NOT NULL
             AND raw_labels IS NOT NULL
             AND dns_encoded_name IS NOT NULL
-            AND cardinality(raw_labels) = cardinality(labelhashes)
+            AND (
+                cardinality(raw_labels) = cardinality(labelhashes)
+                OR (
+                    visibility_state = 'shadow'
+                    AND raw_name = ''
+                    AND cardinality(raw_labels) = 0
+                    AND cardinality(labelhashes) > 0
+                    AND preimage_event_identity IS NOT NULL
+                    AND btrim(preimage_event_identity) <> ''
+                )
+            )
             AND (preimage_event_identity IS NULL OR btrim(preimage_event_identity) <> '')
         )
     ),

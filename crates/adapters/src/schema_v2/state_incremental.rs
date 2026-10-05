@@ -58,6 +58,10 @@ impl State {
             restore_error: None,
             v1_migrated_nodes: OrdSet::new(),
             v1_materialized_surfaces: OrdSet::new(),
+            v1_node_paths: OrdMap::new(),
+            v1_shadow_surfaces: OrdSet::new(),
+            v1_shadow_sources: OrdMap::new(),
+            v1_shadow_counts: OrdMap::new(),
             known_surfaces: OrdSet::new(),
             restored_surface_sources: OrdMap::new(),
             restored_surface_counts: OrdMap::new(),
@@ -133,6 +137,10 @@ impl State {
         self.v1_resolver_write_marks = replayed.v1_resolver_write_marks;
         self.v1_migrated_nodes = replayed.v1_migrated_nodes;
         self.v1_materialized_surfaces = replayed.v1_materialized_surfaces;
+        self.v1_node_paths = replayed.v1_node_paths;
+        self.v1_shadow_surfaces = replayed.v1_shadow_surfaces;
+        self.v1_shadow_sources = replayed.v1_shadow_sources;
+        self.v1_shadow_counts = replayed.v1_shadow_counts;
     }
 
     pub(in crate::schema_v2) fn commit_v2_batch_boundary(&mut self, at_unix_timestamp: i64) {
@@ -306,6 +314,7 @@ impl State {
     }
 
     fn replace_restored_surface_source(&mut self, state_key: &str) {
+        self.replace_v1_shadow_source(state_key);
         let Some(surfaces) = self.restored_surface_sources.remove(state_key) else {
             return;
         };
@@ -316,7 +325,9 @@ impl State {
     }
 
     pub(super) fn remember_known_surface(&mut self, logical_name_id: String) {
-        self.known_surfaces.insert(logical_name_id.clone());
+        if !self.v1_shadow_surfaces.contains(&logical_name_id) {
+            self.known_surfaces.insert(logical_name_id.clone());
+        }
         let Some(state_key) = self.restoring_state_key.clone() else {
             return;
         };

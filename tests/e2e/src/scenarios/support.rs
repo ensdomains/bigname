@@ -634,8 +634,10 @@ pub async fn ingest_ens_v1_v2_migration_sepolia_and_serve(
     .await
 }
 
-/// Declare the local plain registration controller before validating/hashing the
-/// [deployment profile](../../../../docs/glossary.md#deployment-profile). This fixture declaration does not admit a public Sepolia controller.
+/// Declare the local plain controller as name evidence before validating/hashing the
+/// [deployment profile](../../../../docs/glossary.md#deployment-profile). The shipped
+/// Sepolia numeric registrar remains the only registration authority. This fixture
+/// declaration does not admit a public Sepolia controller.
 pub async fn prove_plain_migration_http(
     harness: &ConnectedMigrationHarness,
     name: &str,
@@ -684,10 +686,13 @@ pub async fn prove_plain_migration_http(
                 .as_array()
                 .is_some_and(|roles| roles.iter().any(|value| value.as_str() == Some(role)))
             {
+                let mut evidence = event.clone();
+                evidence["normalized_events"] =
+                    toml::Value::Array(vec![toml::Value::String("PreimageObserved".into())]);
                 local["abi"]["events"]
                     .as_array_mut()
                     .context("local ABI")?
-                    .push(event.clone());
+                    .push(evidence);
             }
         }
         std::fs::write(path, toml::to_string(&local)?)?;

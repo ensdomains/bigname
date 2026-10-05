@@ -47,7 +47,16 @@ impl Anvil {
                     .wait_ready(chain_id, deadline, ready_timeout_secs)
                     .await
                 {
-                    Ok(()) => return Ok(instance),
+                    Ok(()) => {
+                        // Instant mining otherwise permits equal timestamps in different blocks.
+                        // Ethereum requires the child timestamp to exceed its parent's.
+                        // (upstream: .refs/reth/crates/consensus/common/src/validation.rs:L350-L361 @ reth@189c0df)
+                        instance
+                            .client()
+                            .call("anvil_setBlockTimestampInterval", serde_json::json!([1]))
+                            .await?;
+                        return Ok(instance);
+                    }
                     Err(error) => {
                         last_error = Some(error.context(format!(
                             "anvil chain {chain_id} startup attempt {attempt}/{SPAWN_ATTEMPTS} failed after binding"

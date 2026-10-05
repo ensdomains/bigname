@@ -2,7 +2,8 @@
 // the ordinary name routes, named at read time: each label its verified preimage text, else
 // `[<64 hex labelhash>]`.
 //
-// No adapter writes such a surface yet. The fixture inserts the rows one would: the surface, the
+// This reader fixture inserts the rows directly; v2_registry_token_ids/node_identity.rs
+// separately exercises actual Interpret output: the surface, the
 // node's registry-only resource, an open `declared_registry_path` binding, and the events a
 // registry NewOwner of a node with a surface produces today (`SubregistryChanged`,
 // `AuthorityTransferred` and the `SurfaceBound` of the registry-only binding, all naming the

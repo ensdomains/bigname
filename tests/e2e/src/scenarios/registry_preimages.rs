@@ -298,8 +298,8 @@ async fn label_preimage_revealed_later_upgrades_child_listing() -> Result<()> {
             .fetch_one(&second.db.pool)
             .await?;
     assert_eq!(
-        child_surfaces, 0,
-        "label proof repairs the child display but must not mint exact-name authority"
+        child_surfaces, 1,
+        "the registry child keeps its existing name surface when label proof repairs its display"
     );
 
     second.db.cleanup().await?;

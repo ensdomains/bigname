@@ -29,7 +29,7 @@ fn label_flag_matches_the_interpreter_normalization_gate() {
 }
 
 #[test]
-fn missing_surface_position_uses_the_conventional_sentinel() {
+fn missing_surface_position_does_not_change_the_block_timestamp() {
     let timestamp = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
     let surface = SurfaceRow {
         logical_name_id: "ens:test".to_owned(),
@@ -42,18 +42,14 @@ fn missing_surface_position_uses_the_conventional_sentinel() {
         deactivated_at: None,
         block_number: 1,
         block_timestamp: timestamp,
-        provenance: json!({}),
+        preimage_event_identity: None,
         fallback_raw_labels_hex: None,
-        witness_block_number: None,
+        fallback_block_timestamp: None,
+        witness_event_identity: None,
         witness_block_timestamp: None,
-        witness_log_index: None,
     };
-    assert_eq!(surface_log_index(&surface.provenance), -1);
     let desired = surface_normalization(&surface).unwrap();
-    assert_eq!(
-        desired.deactivated_at,
-        Some(bigname_adapters::schema_v2::seam::event_time(timestamp, -1))
-    );
+    assert_eq!(desired.deactivated_at, Some(timestamp));
 }
 
 #[tokio::test]
@@ -242,13 +238,55 @@ async fn recompute_deactivates_at_the_later_preimage_witness() -> TestResult {
             row,
             (
                 "shadow".to_owned(),
-                Some(bigname_adapters::schema_v2::seam::event_time(
-                    OffsetDateTime::from_unix_timestamp(witness_block)?,
-                    4
-                ))
+                Some(OffsetDateTime::from_unix_timestamp(witness_block)?)
             )
         );
         database.cleanup().await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recompute_reads_later_raw_hex_and_repairs_same_block_null_position_witness() -> TestResult
+{
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new("recompute_later_raw_hex"),
+    )
+    .await?;
+    for sql in [
+        include_str!("../../storage/schema/baseline/01_chain.sql"),
+        include_str!("../../storage/schema/baseline/03_identity.sql"),
+        include_str!("../../storage/schema/baseline/04_manifests.sql"),
+        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+    ] {
+        sqlx::raw_sql(sql).execute(database.pool()).await?;
+    }
+    sqlx::raw_sql(&"INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ('recompute','anchor',10,to_timestamp(10),'canonical'),('recompute','bytes',12,to_timestamp(12),'canonical');
+        INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state,preimage_event_identity,deactivation_reason,deactivated_at)
+        VALUES ('ens:node','ens','','{}','','node',ARRAY['label'],'old','shadow','recompute','anchor',10,'canonical','later','normalization_gate',to_timestamp(12)+interval '7 microseconds');
+        INSERT INTO normalized_events (event_identity,namespace,logical_name_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state)
+        VALUES ('later','ens','ens:node','PREIMAGE_KIND','ens_v1_wrapper_l1',1,'recompute',12,'bytes','tx',0,7,'raw_log_preimage_observation','canonical','{\"raw_labels_hex\":[\"ff\"]}'),
+               ('null-earlier','ens','ens:node','PREIMAGE_KIND','ens_v1_wrapper_l1',1,'recompute',12,'bytes','tx',NULL,NULL,'raw_log_preimage_observation','canonical','{\"raw_labels_hex\":[\"ff\"]}');".replace("PREIMAGE_KIND", PREIMAGE_OBSERVATION_EVENT_KIND))
+        .execute(database.pool()).await?;
+    let mut transaction = database.pool().begin().await?;
+    let surfaces = load_surfaces(&mut transaction, "recompute", 10, 10).await?;
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0].fallback_raw_labels_hex, Some(json!(["ff"])));
+    finalize_recompute_flags(&mut transaction, "recompute", 10, 10).await?;
+    transaction.commit().await?;
+    let row: (String, Option<String>, Option<OffsetDateTime>) = sqlx::query_as(
+        "SELECT visibility_state,preimage_event_identity,deactivated_at FROM name_surfaces",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "shadow".into(),
+            Some("null-earlier".into()),
+            Some(OffsetDateTime::from_unix_timestamp(12)?)
+        )
+    );
+    database.cleanup().await?;
     Ok(())
 }
