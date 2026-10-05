@@ -1,8 +1,8 @@
 //! Namespace-wide listing of current names by exact registration expiry.
 //!
-//! The family reader walks indexed lifecycle and wrapper expiry candidates before composing a
-//! bounded batch. This statement applies the exact half-open window and keyset order to that
-//! batch. Registration expiry may be a decimal JSON string or number; neither is narrowed to
+//! The family reader selects a page's names from the stored name summary and composes only
+//! those. This statement applies the exact half-open window and keyset order to the composed
+//! rows. Registration expiry may be a decimal JSON string or number; neither is narrowed to
 //! a calendar timestamp or floating-point value.
 
 use anyhow::{Context, Result, bail};

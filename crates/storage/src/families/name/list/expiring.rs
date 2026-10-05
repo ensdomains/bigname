@@ -108,13 +108,27 @@ pub(crate) async fn select_expiring_names(
     selection: &ExpiringSelection<'_>,
     limit: u64,
 ) -> Result<Vec<String>> {
+    expiring_names_query("", selection, limit)?
+        .build_query_scalar()
+        .fetch_all(conn)
+        .await
+        .context("failed to select the expiring names")
+}
+
+/// The statement of [`select_expiring_names`] after `prefix` (`EXPLAIN` in the plan test).
+fn expiring_names_query<'a>(
+    prefix: &str,
+    selection: &ExpiringSelection<'a>,
+    limit: u64,
+) -> Result<QueryBuilder<'a, Postgres>> {
     let after = match selection.cursor.map(|cursor| &cursor.sort_value) {
         None => None,
         Some(NameCurrentListCursorValue::Timestamp(Some(at))) => Some(*at),
         Some(_) => bail!("name_current expiring page cursor must carry an expiry timestamp"),
     };
     let ascending = selection.order == NameCurrentListOrder::Asc;
-    let mut builder = QueryBuilder::<Postgres>::new(
+    let mut builder = QueryBuilder::<Postgres>::new(prefix);
+    builder.push(
         "/* storage:families.name.expiring_names */
          SELECT summary.logical_name_id
          FROM bigname_phase.project_name_summary summary
@@ -132,10 +146,18 @@ pub(crate) async fn select_expiring_names(
            AND summary.namespace = ",
     );
     builder.push_bind(selection.namespace);
-    if let Some(authorities) = selection.authorities {
-        builder.push(" AND summary.public_authority = ANY(");
-        builder.push_bind(authorities);
-        builder.push(")");
+    match selection.authorities {
+        None => {}
+        // One value as an equality, so the authority index can return it in expiry order.
+        Some([authority]) => {
+            builder.push(" AND summary.public_authority = ");
+            builder.push_bind(authority);
+        }
+        Some(authorities) => {
+            builder.push(" AND summary.public_authority = ANY(");
+            builder.push_bind(authorities);
+            builder.push(")");
+        }
     }
     if let Some(parent) = selection.parent {
         push_parent_predicate(&mut builder, "surface.raw_name", parent);
@@ -168,11 +190,7 @@ pub(crate) async fn select_expiring_names(
     builder.push(if ascending { "ASC" } else { "DESC" });
     builder.push(", summary.namespace ASC, surface.raw_name ASC, surface.namehash ASC LIMIT ");
     builder.push_bind(i64::try_from(limit).context("expiring selection limit exceeds i64")?);
-    builder
-        .build_query_scalar()
-        .fetch_all(conn)
-        .await
-        .context("failed to select the expiring names")
+    Ok(builder)
 }
 
 /// The page over `names`, which [`select_expiring_names`] returned for `page_size + 1`: composes
@@ -220,4 +238,237 @@ pub(crate) async fn compose_expiring_page(
             .collect::<Vec<_>>()
     );
     Ok(page)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The selection on a table too small to need its indexes, with sequential scans off to
+    //! stand in for a large one: the assertions are about which access paths the planner can
+    //! use at all and about the rows returned under either plan mode, not about costs. The
+    //! selection may sort the names that share one expiry; it must not sort the namespace.
+    use sqlx::{Row, raw_sql};
+
+    use super::*;
+    use crate::families::id_index_plan_tests::{PLAN_MODES, with_database};
+
+    const CHAIN: &str = "ethereum-sepolia";
+    const ROWS: i64 = 3_000;
+    const TIE: i64 = 1_850_000_000;
+
+    /// Name n of `ens`, n from 1: listable unless n is a multiple of 11; names with n % 4 == 0
+    /// share [`TIE`], every 97th expires half a second past its slot, and every 501st past the
+    /// largest bigint; the authority cycles ens_v0, ens_v1, ens_v2 and none; n % 9 == 0 is one
+    /// label below `p.eth`. Names with n % 50 == 0 are not active and every 70th block is
+    /// orphaned. One further name sits on a block after the family marker.
+    async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
+        raw_sql(&format!(
+            "INSERT INTO chain_lineage
+                 (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+             SELECT '{CHAIN}', 'block-' || n, n, to_timestamp(n),
+                    (CASE WHEN n % 70 = 0 THEN 'orphaned' ELSE 'canonical' END)::canonicality_state
+             FROM generate_series(1, {ROWS} + 1) n;
+             INSERT INTO project_family_marker (chain_id, current_block_number,
+                 current_block_hash, state)
+             VALUES ('{CHAIN}', {ROWS}, 'block-{ROWS}', 'live');
+             INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+                 deactivation_reason, deactivated_at, chain_id, block_hash, block_number,
+                 canonicality_state)
+             SELECT 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', raw_name, ARRAY[raw_name], '\\x00',
+                    '0x' || lpad(to_hex(n), 64, '0'), ARRAY['0x' || lpad(to_hex(n), 64, '0')],
+                    'v1', CASE WHEN n % 50 = 0 THEN 'shadow' ELSE 'active' END,
+                    CASE WHEN n % 50 = 0 THEN 'invalid' END, CASE WHEN n % 50 = 0 THEN now() END,
+                    '{CHAIN}', 'block-' || n, n,
+                    (CASE WHEN n % 70 = 0 THEN 'orphaned' ELSE 'canonical' END)::canonicality_state
+             FROM generate_series(1, {ROWS} + 1) n,
+             LATERAL (SELECT substr(md5(n::text), 1, 8)
+                 || CASE WHEN n % 9 = 0 THEN '.p.eth' ELSE '.eth' END AS raw_name) surface;
+             INSERT INTO project_name_summary (chain_id, logical_name_id, namespace, serving,
+                 zero_owner, expires_at, expiry_listable, public_authority)
+             SELECT '{CHAIN}', 'ens:0x' || lpad(to_hex(n), 64, '0'), 'ens', TRUE, FALSE,
+                    CASE WHEN n % 501 = 0 THEN 9223372036854775808 + n
+                         WHEN n % 4 = 0 THEN {TIE}
+                         ELSE 1800000000 + n * 1000 + CASE WHEN n % 97 = 0 THEN 0.5 ELSE 0 END
+                    END,
+                    n % 11 <> 0,
+                    (ARRAY['ens_v0', 'ens_v1', 'ens_v2', NULL])[n % 4 + 1]
+             FROM generate_series(1, {ROWS} + 1) n;
+             ANALYZE name_surfaces; ANALYZE project_name_summary; ANALYZE chain_lineage;"
+        ))
+        .execute(&mut *connection)
+        .await
+        .context("failed to install the expiring selection fixture")?;
+        Ok(())
+    }
+
+    /// What the selection must return, read without its indexes or keyset: every readable,
+    /// listable name of the fixture in the public order as (id, expiry, name, namehash).
+    async fn listed(
+        connection: &mut PgConnection,
+        descending: bool,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let rows = raw_sql(&format!(
+            "SELECT summary.logical_name_id, summary.expires_at::text AS at, surface.raw_name,
+                    surface.namehash
+             FROM project_name_summary summary
+             JOIN name_surfaces surface USING (logical_name_id)
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+             WHERE summary.expiry_listable AND surface.visibility_state = 'active'
+               AND surface.block_number <= {ROWS}
+               AND lineage.canonicality_state = 'canonical'
+             ORDER BY summary.expires_at {}, surface.raw_name, surface.namehash",
+            if descending { "DESC" } else { "ASC" }
+        ))
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                ))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn expiring_selection_reads_the_selector_indexes_in_the_public_order() -> Result<()> {
+        with_database("family_expiring_selection", async |connection| {
+            install_fixture(connection).await?;
+            raw_sql("SET enable_seqscan = off")
+                .execute(&mut *connection)
+                .await?;
+            let ens_v1 = ["ens_v1".to_owned()];
+            let both = ["ens_v0".to_owned(), "ens_v2".to_owned()];
+            let after: UnixSeconds = "1800500000.5".parse()?;
+            let before: UnixSeconds = "9223372036854777000".parse()?;
+            for descending in [false, true] {
+                let order = if descending {
+                    NameCurrentListOrder::Desc
+                } else {
+                    NameCurrentListOrder::Asc
+                };
+                let all = listed(connection, descending).await?;
+                let authority_of = |id: &str| -> Option<&'static str> {
+                    let n = usize::from_str_radix(id.trim_start_matches("ens:0x"), 16)
+                        .expect("fixture id");
+                    [Some("ens_v0"), Some("ens_v1"), Some("ens_v2"), None][n % 4]
+                };
+                for (label, authorities, parent, index) in [
+                    ("plain", None, None, "project_name_summary_expiry_idx"),
+                    (
+                        "one authority",
+                        Some(&ens_v1[..]),
+                        None,
+                        "project_name_summary_authority_expiry_idx",
+                    ),
+                    (
+                        "two authorities",
+                        Some(&both[..]),
+                        None,
+                        "project_name_summary_",
+                    ),
+                    (
+                        "parent",
+                        None,
+                        Some("p.eth"),
+                        "project_name_summary_expiry_idx",
+                    ),
+                ] {
+                    let expected: Vec<_> = all
+                        .iter()
+                        .filter(|(id, at, name, _)| {
+                            let at: UnixSeconds = at.parse().expect("fixture expiry");
+                            at >= after
+                                && at < before
+                                && authorities.is_none_or(|listed| {
+                                    authority_of(id).is_some_and(|authority| {
+                                        listed.iter().any(|value| value == authority)
+                                    })
+                                })
+                                && parent.is_none_or(|parent| {
+                                    name.strip_suffix(&format!(".{parent}"))
+                                        .is_some_and(|label| !label.contains('.'))
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                    ensure!(
+                        expected.len() > 14,
+                        "{label}: the fixture lists too few names"
+                    );
+                    let selection = ExpiringSelection {
+                        namespace: "ens",
+                        expires_after: Some(after),
+                        expires_before: Some(before),
+                        authorities,
+                        parent,
+                        order,
+                        cursor: None,
+                    };
+                    let plan: Vec<String> =
+                        expiring_names_query("EXPLAIN (COSTS OFF) ", &selection, 8)?
+                            .build()
+                            .fetch_all(&mut *connection)
+                            .await?
+                            .iter()
+                            .map(|row| row.try_get(0).map_err(anyhow::Error::from))
+                            .collect::<Result<_>>()?;
+                    let plan_text = plan.join("\n");
+                    ensure!(
+                        plan_text.contains(index)
+                            && !plan_text.contains("Seq Scan on project_name_summary"),
+                        "{label} {order:?} does not read {index}:\n{plan_text}"
+                    );
+                    // Paged seven at a time under either plan mode, the selection returns every
+                    // listed name once, in order, through the shared second and the fractional
+                    // and past-bigint expiries.
+                    for mode in PLAN_MODES {
+                        raw_sql(&format!("SET plan_cache_mode = {mode}"))
+                            .execute(&mut *connection)
+                            .await?;
+                        let mut selected = Vec::new();
+                        let mut cursor: Option<NameCurrentListCursor> = None;
+                        loop {
+                            let paged = ExpiringSelection {
+                                cursor: cursor.as_ref(),
+                                ..selection
+                            };
+                            let names = select_expiring_names(connection, &paged, 8).await?;
+                            let more = names.len() > 7;
+                            selected.extend(names.into_iter().take(7));
+                            if !more {
+                                break;
+                            }
+                            let (_, at, name, namehash) = &expected[selected.len() - 1];
+                            cursor = Some(NameCurrentListCursor {
+                                sort_value: NameCurrentListCursorValue::Timestamp(Some(
+                                    at.parse()?,
+                                )),
+                                namespace: "ens".to_owned(),
+                                normalized_name: name.clone(),
+                                namehash: namehash.clone(),
+                            });
+                        }
+                        let expected_ids: Vec<&str> =
+                            expected.iter().map(|(id, ..)| id.as_str()).collect();
+                        ensure!(
+                            selected
+                                .iter()
+                                .map(String::as_str)
+                                .eq(expected_ids.iter().copied()),
+                            "{label} {order:?} under {mode} selected {} names, expected {}",
+                            selected.len(),
+                            expected_ids.len()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
 }

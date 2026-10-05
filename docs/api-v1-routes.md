@@ -728,19 +728,20 @@ collection route carry neither header.
   registrar leases, ENSv2 registrations, and wrapped subnames; `parent=eth`
   narrows it to the `.eth` second-level names. The public
   `expires_at` is a decimal string; the index and comparisons use exact numeric
-  seconds, never floating point or lexicographic string order. It finds them by
-  walking the retained lifecycle events
-  and NameWrapper states by expiry through `project_lifecycle_event_expiry_idx`,
-  `project_lifecycle_event_inexact_expiry_idx` and
-  `project_wrapper_state_expiry_idx`. These indexes were introduced by
-  `20260928140000_project_families_expiry_indexes.sql`; their current expiry
-  keys use exact numeric storage. With `authority` set the indexed walk
-  composes only names whose stored [name summary](glossary.md#name-summary)
-  selects an arm that can serve a listed value (`ens_v1` for `ens_v0` and
-  `ens_v1`, `ens_v2` for `ens_v2`), and with `parent` set only names one label
-  below it. Names whose retained expiry is a JSON number that is not an
-  integral second, which the walk cannot place, are composed without that
-  pruning. Either way the composed row decides each row. A row with no finite registration expiry is outside this
+  seconds, never floating point or lexicographic string order. It selects a
+  page's names from the stored [name summary](glossary.md#name-summary), which
+  holds each name's exact listing selector: whether the name is listed, its
+  expiry and the public `authority` its row serves. One statement applies the
+  window, `authority`, `parent` and the cursor and takes the first
+  `page_size + 1` names in the listing's order, through
+  `project_name_summary_expiry_idx` or
+  `project_name_summary_authority_expiry_idx`; only those names are composed.
+  A page therefore composes at most `page_size + 1` names however many names
+  the namespace holds or the filters leave out, though a sparse `parent` or a
+  second that many names share still reads many index entries. The selector
+  is written with each publication from the same composition the page runs;
+  a selected name whose composed row does not match is a failure
+  (`500 internal_error`), not a shorter page. A row with no finite registration expiry is outside this
   listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
   remain eligible and keep every digit through filtering, sorting and paging.
   A negative or malformed stored expiry is not a no-expiry sentinel.
