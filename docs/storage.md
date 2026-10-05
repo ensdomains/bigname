@@ -526,7 +526,8 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
 
-The Project address-history catalogue adds no event payload copies. Its chain-owned
+The Project [address-history catalogue](glossary.md#address-history-catalogue) adds no event
+payload copies. Its chain-owned
 `project_address_history_anchor` rows pack independent current and historical address/name
 or address/resource relations; current name rows retain their selected resource after
 Project validates the cited relation position. `project_history_source` holds shared source bounds and conservative
@@ -683,9 +684,12 @@ the resource's complete attributed-event set for this route. An event reached th
 names, resources, or attribution paths counts once. Fallback handoff copies choose the least
 eligible event identity across the complete peer group, independently of the public cursor or
 batch boundary. The API retains at most `page_size + 1` accepted IDs, one scalar count, and the
-final page's payloads. Default counting stops after 10,001 eligible events and returns a null
-total above 10,000; `include=total_count` walks the complete collection. Page and count walks
-share the transaction and compact caches. Name display enrichment loads base names only.
+final page's payloads. The public address-history route skips counting by default and returns
+`total_count: null`; `include=total_count` walks the complete collection for an exact total.
+The storage reader also supports capped counting: for a cap of 10,000, it stops after 10,001
+eligible events and returns a null total above the cap. This storage mode is not the public
+address-history default. Page and requested count walks share the transaction and compact
+caches. Name display enrichment loads base names and verified label preimages on that same snapshot.
 The cursor closes on success and the transaction releases it on error or cancellation. There
 is no full-address application-side anchor, payload, or attribution collection. A single name
 can still require many retained facts during composition; the fixed name batch does not impose

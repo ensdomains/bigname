@@ -1501,6 +1501,18 @@ not materialize a resource, token lineage, authority transition, or surface
 binding. This preserves a post-ENSv1→ENSv2 migration ENSv1 arm without treating it as
 current authority.
 
+<a id="address-history-catalogue"></a>
+## Address-history catalogue
+
+Project-owned facts that let address-history requests find relevant event sources without
+loading an address's complete history. The catalogue records address/name and address/resource
+relations, shared source bounds, and resource-to-resolver reachability; it stores no event
+payload copies. Its event-kind summaries, record-key summaries and block ranges reject only
+impossible candidates. Exact relation, attribution and duplicate checks still determine the
+returned events and any requested count. Project publishes the catalogue in the same transaction
+and generation as its other families, and the reader checks that publication before using it.
+See [storage](storage.md#table-ownership) for the tables and their ownership.
+
 <a id="history-walk"></a>
 ## History walk
 
