@@ -200,6 +200,38 @@ applying as soon as the current binding names another registry contract.
 Revoked (`approved=false`) rows remain replayable projection state but are
 served as absence.
 
+An approved ENSv2 registry `ApprovalForAll` row is effective for every token
+its approver currently owns in the approving registry. The registry adds the
+roles the current token owner holds on the token's own resource to each
+operator that owner approved, so the row is returned with
+`grant_relation=operator`,
+`grant_scope={"kind":"account","detail":{"chain_id":...,"authority_kind":"ens_v2_registry","authority_contract":...,"owner":...}}`
+and `powers` equal to the owner's own served `registry` row on that
+registration, admin roles included. It carries none of the owner's root roles
+and nothing the owner holds only as someone else's operator. An account that
+also holds a role of its own keeps that direct row beside the operator row.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+The owner is the entry's current token owner, read from the
+[registry entry rows](projections.md#ensv2-registry-entries) and not from the
+name: the row follows the token when it is transferred, so the previous
+owner's operators lose it and the new owner's gain it. The registry reports no
+owner for an entry whose own expiry has passed, so the row is absent from the
+first publication whose block time reaches the entry's expiry and returns when
+a renewal moves the expiry past it. An entry whose expiry no retained registry
+log states has no operator rows.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+
+A read bound to one ENSv2 registration by `name` or `registration_id` also
+lists the holders of the registry's
+[root resource](glossary.md#registry-root-resource), because a role held there
+passes the same role check on every token of the registry. Each is a row of
+that registration with `grant_scope.kind` `root` and the holder's root powers
+without `can_transfer_admin`: a transfer checks that role only among the token
+owner's roles on the token, so holding it on the root authorizes nothing on a
+name. A holder with no other root power has no row there.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary, and report the permission
 surfaces whose holders the rows do not list. When any surface is unlisted the
@@ -210,7 +242,7 @@ response carries `meta.completeness=partial`,
 <!-- openapi:enum UnlistedPermissionSurface -->
 | Code | Surface not listed |
 | --- | --- |
-| `ens_v2_registry_operators` | operators that the name's owner approved on the ENSv2 registry with `setApprovalForAll` |
+| `ens_v2_registry_operators` | accounts that a discovered ENSv2 registry's code may let act through another account's roles: for a `WrapperRegistry`, the parent name's owner and that owner's operators on the parent registry |
 | `registrar_approvals` | BaseRegistrar ERC-721 per-token and operator approvals |
 | `resolver_approvals` | resolver operator approvals and per-name delegates |
 | `wrapper_parent_control` | the parent name's control over a wrapped subname that is not emancipated |
@@ -232,15 +264,24 @@ service), not a per-registration permission, and is never a row.
 (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L78-L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L162 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L186 @ ens_v1@91c966f)
-An ENSv2 registry registration reports
-`["ens_v2_registry_operators","resolver_approvals"]`. Its direct role holders
-are rows. The ENSv2 registry also gives the owner's roles to every operator the
-owner approved with `setApprovalForAll`, and those operators are not rows.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+A registration of an ENSv2 registry whose current address an active manifest
+declares (the root and ETH registries, whose code is pinned) reports
+`["resolver_approvals"]`. Its direct role holders, the operators its owner
+approved on the registry with `setApprovalForAll` and the registry's root
+holders are rows.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+A registration of a registry that discovery admitted, or one only an inactive
+or retired declaration covers, serves the same rows and reports
+`["ens_v2_registry_operators","resolver_approvals"]`: bigname does not read a
+discovered contract's code, and a `WrapperRegistry` gives the roles its parent
+registry holds on its root to the parent name's owner and to that owner's
+operators on the parent registry, who act on every token of the registry and
+are not rows.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
 An ENSv2 registration has no BaseRegistrar token, so it never reports
 `registrar_approvals`. It reports `resolver_approvals` because the ENSv2
 `PublicResolverV2` authorizes the owner's operators and per-name delegates, and
-those are not rows either.
+those are not rows.
 (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
 A set of registrations reports the sorted union of its members' lists. A
@@ -3110,7 +3151,7 @@ Closed union of scope detail fields. Each scope uses exactly the shape listed in
 | `registry` | object ContractRef | optional | ENSv2 registry whose root resource the grant is on, only for root scope. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
 | `manager` | string | optional | Record-manager address, only for record_manager scope. |
-| `authority_kind` | enum `registry`, `registrar`, `wrapper` | optional | Account approval authority kind. |
+| `authority_kind` | enum `registry`, `registrar`, `wrapper`, `ens_v2_registry` | optional | Account approval authority kind. |
 | `authority_contract` | string | optional | Account approval contract address. |
 | `owner` | string | optional | Account whose approval grants the powers. |
 | `registrar` | object ContractRef | optional | Registrar contract, only for the history registrar_controller scope. |

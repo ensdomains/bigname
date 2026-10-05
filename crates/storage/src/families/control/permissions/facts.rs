@@ -65,6 +65,8 @@ pub(super) async fn readable_resources(
 pub(super) struct AuthorityFacts {
     pub authority_kind: Option<String>,
     pub root_resource_id: Option<Uuid>,
+    /// The registry contract instance an `ens_v2_registry` resource's latest event names.
+    pub registry_instance: Option<Uuid>,
 }
 
 /// The authority kind and registry root of each of `ids` on `chain_id` at `block_number`. The
@@ -143,7 +145,8 @@ pub(super) async fn authority_facts(
         let resource: Uuid = row.try_get("resource_id")?;
         let instance: Option<String> = row.try_get("registry_instance")?;
         // A malformed instance only drops the root's admins; it must not fail the serving read.
-        if let Some(instance) = instance.and_then(|instance| instance.parse::<Uuid>().ok()) {
+        let instance = instance.and_then(|instance| instance.parse::<Uuid>().ok());
+        if let Some(instance) = instance {
             roots.insert(
                 resource,
                 ens_v2_registry_root_resource_id(chain_id, instance),
@@ -154,6 +157,7 @@ pub(super) async fn authority_facts(
             AuthorityFacts {
                 authority_kind: row.try_get("authority_kind")?,
                 root_resource_id: None,
+                registry_instance: instance,
             },
         );
     }

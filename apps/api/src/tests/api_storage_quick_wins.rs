@@ -189,6 +189,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.project_child_edge_candidate",
         "relation: bigname_phase.project_child_registration_state",
         "relation: bigname_phase.project_claim_normalization",
+        "relation: bigname_phase.project_ens_v2_entry_owner",
         "relation: bigname_phase.project_family_marker",
         "relation: bigname_phase.project_family_undo",
         "relation: bigname_phase.project_grant",

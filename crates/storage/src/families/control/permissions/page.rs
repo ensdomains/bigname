@@ -7,6 +7,8 @@
 //!   time, the ENSv2 path-expiry drop, the empty-row drop and the NameWrapper operator fan-out).
 //! - Registry-operator rows are the F9 approvals of the resource's F2c registry binding
 //!   (`operators.rs`).
+//! - ENSv2 registry operator rows and the root-holder rows of a token resource are derived from
+//!   the F16 entry rows and the root grants (`ens_v2.rs`).
 //! - The summary's authority kind, registry root and readability come from the identity and
 //!   event inputs by key (`facts.rs`); the restriction block is the family one.
 //!
@@ -71,6 +73,7 @@ pub async fn load_family_effective_permissions_page(
         namespace,
         cursor,
         size + 1,
+        true,
     )
     .await?;
     snapshot.close().await?;
@@ -85,6 +88,9 @@ pub async fn load_family_effective_permissions_page(
 }
 
 /// A sentinel-bounded inline expansion for address `include=role_summary`, in one read snapshot.
+/// It leaves out the registry root holders a permissions read of one ENSv2 registration lists:
+/// they are the same for every name of a registry, and repeating them per name would spend the
+/// grant budget on rows that say nothing about the name.
 pub async fn load_family_bounded_permissions(
     db: impl Into<crate::ReadDb<'_>>,
     resource_ids: &[Uuid],
@@ -110,6 +116,7 @@ pub async fn load_family_bounded_permissions(
                 namespace,
                 None,
                 limit - rows.len(),
+                false,
             )
             .await?,
         );
@@ -128,6 +135,7 @@ async fn page_rows(
     namespace: Option<&str>,
     cursor: Option<&PermissionsCurrentAccountResourceCursor>,
     limit: usize,
+    root_holders: bool,
 ) -> Result<Vec<EffectivePermissionRow>> {
     if let Some(resource) = resource {
         if let Some(namespace) = namespace
@@ -137,7 +145,14 @@ async fn page_rows(
         {
             return Ok(Vec::new());
         }
-        published(conn, &[resource]).await?;
+    }
+    // A read bound to an ENSv2 registry token resource also lists the registry's root holders.
+    let mut token_root = None;
+    if let Some(resource) = resource
+        && let Some((publication, _)) = published(conn, &[resource]).await?.first()
+        && root_holders
+    {
+        token_root = super::ens_v2::token_registry_root(conn, publication, resource).await?;
     }
     let mut after = cursor.cloned();
     let mut rows = Vec::new();
@@ -150,6 +165,7 @@ async fn page_rows(
             namespace,
             after.as_ref(),
             batch_size as i64,
+            token_root,
         )
         .await?;
         let exhausted = keys.len() < batch_size;
@@ -184,6 +200,19 @@ pub async fn load_family_permission_summaries(
             &resources,
         )
         .await?;
+        let instances: Vec<Uuid> = facts
+            .values()
+            .filter_map(|facts| facts.registry_instance)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let declared = crate::registries::load_manifest_declared_registry_instances(
+            &mut snapshot,
+            chain_id,
+            &instances,
+            publication.block_number,
+        )
+        .await?;
         let inputs: Vec<ResourceInput> = resources
             .iter()
             .map(|resource| {
@@ -212,6 +241,10 @@ pub async fn load_family_permission_summaries(
                         .as_deref()
                         .map(str::parse)
                         .transpose()?,
+                    registry_manifest_declared: facts
+                        .get(&resource)
+                        .and_then(|facts| facts.registry_instance)
+                        .map(|instance| declared.contains(&instance)),
                     resource_restrictions: restrictions,
                     provenance: json!({"chain_id": chain_id}),
                     chain_positions: publication_positions(&publication),
@@ -316,18 +349,19 @@ async fn effective_rows(
                 ..ResourceInput::default()
             })
             .collect();
-        let shadows = load_permissions_on(
-            conn,
-            &publication.chain_id,
-            &clock(&publication),
-            &inputs,
-            Some(keys),
-        )
-        .await?;
+        let clock = clock(&publication);
+        let shadows =
+            load_permissions_on(conn, &publication.chain_id, &clock, &inputs, Some(keys)).await?;
         for shadow in shadows.values() {
             for grant in &shadow.grants {
                 rows.push(direct_row(grant, &publication)?);
             }
+        }
+        for grant in super::ens_v2::root_holder_rows(conn, &publication, &clock, keys).await? {
+            rows.push(direct_row(&grant, &publication)?);
+        }
+        for row in super::ens_v2::operator_rows(conn, &publication, &clock, keys).await? {
+            rows.push(operator_row(&row, &publication)?);
         }
         let bindings = bindings_for(conn, &publication.chain_id, &resources).await?;
         for (resource, binding) in bindings {

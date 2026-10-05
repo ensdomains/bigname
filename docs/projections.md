@@ -585,9 +585,10 @@ on the same registration. A request whose explicit relation set excludes
 unfiltered reads and sets including `role_holder` retain them. This does not
 bound the request's ordinary ownership enumeration or other work. A role held on the registry root
 reaches every name in the registry, and an ENSv2 registry operator approved
-with `setApprovalForAll` is not a permission row, so neither adds names to an
-address's collection. Reverse lookup does not serve this relation.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+with `setApprovalForAll` holds the token owner's roles rather than a grant of
+its own, so neither adds names to an address's collection. Reverse lookup does
+not serve this relation.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 
 Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
@@ -774,8 +775,24 @@ effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
 registrar token and account approvals and resolver operators and delegates are
-not indexed, and ENSv2 registry operators are folded
-([ENSv2 registry entries](#ensv2-registry-entries)) but not yet served. NameWrapper summaries are partial for
+not indexed. ENSv2 registry operators are not stored per token. The reader
+joins each approved `ens_v2_registry` approval to the
+[registry entries](#ensv2-registry-entries) its owner currently holds in that
+registry and serves the operator with the powers of the owner's own served
+grant on the entry's current resource: no root grant, no grant the owner has
+only as another owner's operator, and nothing once the publication's block
+time reaches the entry's own expiry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+A read bound to one ENSv2 registry token resource also serves the registry's
+root grants as rows of that resource without `can_transfer_admin`, which
+counts only among the token owner's roles on the token.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+The summary of an ENSv2 registry resource records whether an active manifest
+declares its registry, by the rule a registry root read uses; a discovered
+registry keeps the ENSv2 operator surface unlisted because its code may add
+holders these joins do not see. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
 operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
@@ -1792,7 +1809,9 @@ covers. An approved operator gets the roles the current token owner holds on a
 token's own resource, and the registry keeps the owner per entry, not per name.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L638-L640 @ ens_v2_sepolia_20261001@07e55a05)
-No reader uses these tables yet, and the permission summaries stay partial.
+The permission reader joins approvals to `project_ens_v2_entry_owner`
+([Permissions](#permissions)); no reader uses
+`project_ens_v2_registry_parent` yet.
 
 `project_ens_v2_entry_owner` has one row per `(chain_id, registry,
 entry_key)`. The entry key is the registry's storage slot for a label: the
