@@ -2941,7 +2941,11 @@ introduces it rebuilds Project from full history before serving the option; see
   an owner who did not approve the account, once the approval is revoked, and
   from the first publication whose block time reaches the entry's own expiry;
   a renewal brings it back. An account that also holds a role of its own has
-  both rows.
+  both rows. Like the direct rows, operator rows follow the name's
+  registration: once the name's path is released, because the entry or an
+  ancestor of the name expired, the registration serves no rows, although the
+  registry contract still honours roles on an entry whose own expiry has not
+  passed.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 

@@ -218,7 +218,12 @@ owner's operators lose it and the new owner's gain it. The registry reports no
 owner for an entry whose own expiry has passed, so the row is absent from the
 first publication whose block time reaches the entry's expiry and returns when
 a renewal moves the expiry past it. An entry whose expiry no retained registry
-log states has no operator rows.
+log states has no operator rows. Operator rows also follow the registration's
+direct rows: permission rows describe the name's registration, and once the
+name's path is released, because the entry or an ancestor of the name expired,
+the registration serves no rows at all. The registry contract checks only the
+entry's own expiry, so for a child whose ancestor expired first it still
+honours the owner's and the operators' roles; those are not listed.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 
 A read bound to one ENSv2 registration by `name` or `registration_id` also

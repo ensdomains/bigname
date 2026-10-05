@@ -781,7 +781,10 @@ joins each approved `ens_v2_registry` approval to the
 registry and serves the operator with the powers of the owner's own served
 grant on the entry's current resource: no root grant, no grant the owner has
 only as another owner's operator, and nothing once the publication's block
-time reaches the entry's own expiry.
+time reaches the entry's own expiry. The owner's grant is taken as served, so
+the path-expiry drop of the direct rows applies to operators too: a child
+whose ancestor's path expired serves no rows while its own entry is still
+live in the registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 A read bound to one ENSv2 registry token resource also serves the registry's
