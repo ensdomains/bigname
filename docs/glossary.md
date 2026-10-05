@@ -688,15 +688,35 @@ the [expiry-effective fuse word](#expiry-effective-namewrapper-fuse-word), and
 the entry expiry; for an ENSv2 registration it is `locked_roles`, the
 token-scoped registry roles whose assignment can no longer change because no
 current row on the registration or its registry root holds the matching admin
-role. It is absent for registrations without a resource-level constraint model
+role (for `transfer`, no current row on the registration itself holds
+`can_transfer_admin`; the root does not count). It is absent for registrations without a resource-level constraint model
 (ENSv1 registrar- and registry-held names, Basenames), for an expired
 emancipated or locked NameWrapper position, and once the wrapped token is burnt
 or unwrapped. Field
 shapes are in [api-v1.md](api-v1.md#resource-restrictions); the derivation is in
 [projections.md](projections.md#permissions).
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
-(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L428-L435 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
+
+## Registry root resource
+
+The ENSv2 Enhanced Access Control resource `0` of a registry contract
+(`ROOT_RESOURCE`), whose role grants apply to the registry as a whole rather
+than to one name's token. Registry-wide roles such as `registrar` and
+`set_parent` are granted there, and a role held there also satisfies the same
+role check on every name in that registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L177 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2_sepolia_20261001@07e55a05)
+bigname stores its role changes as `RootPermissionChanged` events and serves
+its current holders as permission rows with `grant_scope.kind` `root`, through
+`GET /v1/permissions?registry=<chain_id>:<address>`. Its `resource_id` is
+derived from the registry's contract instance, so it changes when the address
+moves to a new contract instance.
 
 ## ENSv1→ENSv2 migration
 
@@ -2680,8 +2700,13 @@ child counts and the registry labels filter, sort and count by inside one
 statement, which a list cannot compose at read for every child: the selected
 authority arm, whether the name has a serving resource, its registration
 status, expiry and registration times, the owner it serves, and whether the
-latest registry Transfer attributed to it names the zero owner. Each but the
-last is the value
+latest registry Transfer attributed to it names the zero owner. It also stores
+the expiry selector of [`GET /v1/names`](api-v1-routes.md#get-v1names): whether
+the name's row is listed by expiry (`expiry_listable`: the name composes a row,
+its coverage is not unsupported and its registration carries a finite expiry)
+and the public `authority` the row serves (`public_authority`: `ens_v0`,
+`ens_v1`, `ens_v2`, or none). Each but the zero-owner flag
+is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
 latest named registry event of any kind of its resource, else an active surface

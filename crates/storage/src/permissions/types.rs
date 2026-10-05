@@ -439,7 +439,12 @@ mod coverage_tests {
 /// Stable storage representation for permission scope keys.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PermissionScope {
-    Root,
+    /// A grant on an ENSv2 registry's root resource (EAC resource 0), which applies to the whole
+    /// registry. The key stays `root`: the resource id already names the registry.
+    Root {
+        chain_id: String,
+        registry_address: String,
+    },
     Registry,
     Resource,
     Resolver {
@@ -455,7 +460,7 @@ pub enum PermissionScope {
 impl PermissionScope {
     pub const fn kind(&self) -> &'static str {
         match self {
-            Self::Root => "root",
+            Self::Root { .. } => "root",
             Self::Registry => "registry",
             Self::Resource => "resource",
             Self::Resolver { .. } => "resolver",
@@ -465,7 +470,7 @@ impl PermissionScope {
 
     pub fn storage_key(&self) -> String {
         match self {
-            Self::Root => "root".to_owned(),
+            Self::Root { .. } => "root".to_owned(),
             Self::Registry => "registry".to_owned(),
             Self::Resource => "resource".to_owned(),
             Self::Resolver {
@@ -487,7 +492,14 @@ impl PermissionScope {
 
     pub fn detail(&self) -> Value {
         match self {
-            Self::Root | Self::Registry | Self::Resource => json!({}),
+            Self::Registry | Self::Resource => json!({}),
+            Self::Root {
+                chain_id,
+                registry_address,
+            } => json!({
+                "chain_id": chain_id,
+                "registry_address": registry_address.to_ascii_lowercase(),
+            }),
             Self::Resolver {
                 chain_id,
                 resolver_address,
@@ -507,7 +519,11 @@ impl PermissionScope {
 
     pub(crate) fn parse(scope_kind: &str, scope_detail: &Value) -> Result<Self> {
         match scope_kind {
-            "root" => Ok(Self::Root),
+            "root" => Ok(Self::Root {
+                chain_id: json_text_field(scope_detail, "chain_id")?,
+                registry_address: json_text_field(scope_detail, "registry_address")?
+                    .to_ascii_lowercase(),
+            }),
             "registry" => Ok(Self::Registry),
             "resource" => Ok(Self::Resource),
             "resolver" => {
@@ -558,3 +574,7 @@ fn json_text_field(value: &Value, field: &str) -> Result<String> {
         .filter(|value| !value.trim().is_empty())
         .with_context(|| format!("permissions_current scope_detail must include {field}"))
 }
+
+#[cfg(test)]
+#[path = "types_scope_tests.rs"]
+mod scope_tests;

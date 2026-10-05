@@ -202,6 +202,17 @@ change has no continuation guarantee and may be rejected. Consumers must
 discard pre-#613 cursors and restart from the first page; fresh post-publication
 cursors continue normally.
 
+Registry root role changes (`RootPermissionChanged`) became product history
+in a reader-only change: no stored row, identity or cursor format changed.
+They are [`permission` rows](#permission-change-values) on `GET /v1/events`
+(the default feed, `type=permission`, `kind=RootPermissionChanged` and a
+registry's `contract_address` history), in a registry overview's
+`counts.events`, and in an account's address history with `scope=both` or
+`scope=registration` and the `role_holder` relation. `GET /v1/diagnostics/events`
+always listed them, and its `type=permission` filter now selects them too
+(it has no `kind` filter). Name history does not change. Outstanding position cursors continue; the newly visible rows appear
+wherever they fall after the cursor's position.
+
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
 does not restore the name's serving `resource_id`, so the released or expired name's
@@ -358,7 +369,9 @@ collection route carry neither header.
   `GET /v1/names`. Every other registration field (`owner`, `manager`,
   `registration_status`, `registration_id`, `token_id`, `registered_at`,
   `created_at`, `lapsed_registration`, `authority`, `migrated_at`), the
-  resolver fields and `records` are detail-only.
+  resolver fields and `records` are detail-only. ENSv2 token values follow
+  [ENSv2 token identity](api-v1.md#ensv2-token-identity): the recorded version
+  at the selected publication, with a stable `registration_id` across regeneration.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
   as defined in the [naming dictionary](api-v1.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
@@ -2161,8 +2174,8 @@ every id, so it is a merge key, not a durable reference to store.
   underlying log. It is `null` for rows derived from interpreter state rather
   than from one on-chain log.
 - `data`: an object derived from the stored normalized event's before/after
-  state, translated into dictionary vocabulary. Only fields the row actually
-  carries are present; absent or null source values are omitted rather than
+  state and the bounded corresponding token/payment evidence described below,
+  translated into dictionary vocabulary. Absent or null source values are omitted rather than
   serialized as `null`, so `data` may be `{}`. The exception is an expiry
   classified from the event’s contract and registration context: it carries
   `expires_at: null` plus `expires_at_reason`. Addresses are lower-cased.
@@ -2190,16 +2203,17 @@ Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
 | --- | --- |
-| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
-| `renewal`, `release` | `expires_at`, `expires_at_reason` when null |
-| `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper) |
-| `transfer` | `from`, `to`, `fuses` |
+| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `token_id`, `canonical_id`, retained `cost` or `base_cost`/`premium`, `payment_token`, `referrer`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
+| `renewal` | `expires_at`, `expires_at_reason` when null, retained `cost`, `payment_token`, `referrer`, `canonical_id` |
+| `release` | `expires_at`, `expires_at_reason` when null, `canonical_id` |
+| `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper), event-local ENSv2 `canonical_id` |
+| `transfer` | `from`, `to`, `fuses`, recorded ERC-1155 `operator`, ENSv2 `token_id`, `canonical_id` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
-| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
+| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared), event-local ENSv2 `canonical_id` |
 | `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a `NameForAddrChanged` (Basenames, or the ENS `default.reverse` registrar) stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
-| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes); see [permission change values](#permission-change-values) |
-| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
+| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes), proven non-root ENSv2 `token_id` and event-local `canonical_id`; see [permission change values](#permission-change-values) |
+| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared), event-local ENSv2 `canonical_id` |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
 Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
@@ -2285,6 +2299,46 @@ carry neither field. To show one entry per registration, group rows by
 `action_id`. The rows of one action can fall on different pages; a client
 merges them across pages. `page.total_count` counts rows, not actions, and
 there is no action count.
+
+The `registered` and `linked` rows can carry copies of the same registrar payment. These are
+one charge, grouped by the existing `action_id`, even across page boundaries. Payment is supplied
+only by a unique later admitted registrar observation in the same transaction and fork, with
+matching name, token, registry resource and registrar sender. Ambiguous or contradictory evidence
+omits it. Reachability grants, migration boundaries and grants reconstructed from renewal do not
+inherit registration payment. The registrar observation remains supporting evidence, not another
+visible registration row; `contract_address` remains the original row's emitter.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L150-L159 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L501-L506 @ ens_v2_sepolia_20261001@07e55a05)
+
+Payment amounts are unsigned decimal strings with full uint256 precision. ENSv1 amounts are
+native wei; ENSv2 amounts are raw units of the explicitly named `payment_token`. A registration's
+unsplit `cost` does not imply a `base_cost`/`premium` split. Renewal uses its emitted total as
+`cost`, including the historical ENSv2 `base` field. No currency conversion or synthetic zero is
+provided. Explicit zero amounts, bytes32 referrers and payment-token addresses are preserved.
+Sepolia ENSv1 numeric renewals can obtain cost from one corresponding later admitted controller
+observation with the same name, expiry and transaction; intervening renewals prevent an older
+row taking a later renewal's payment. Registry expiry companions do not copy registrar charges.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L364-L368 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/interfaces/IETHRenewer.sol:L27 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L28 @ ens_v2_sepolia_dev@554c309b)
+
+Coverage follows retained admitted events: Sepolia ENSv1 controller registrations and
+non-normalizable renewal labels can lack payment evidence; Basenames registration/renewal
+events lack payment/referrer fields. These values remain absent. ERC-721 transfers lack an
+event operator, so they never substitute the transaction sender or approval state. An ERC-1155
+transfer exposes only its actual retained operator.
+(upstream: .refs/basenames/src/L2/RegistrarController.sol:L497-L548 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L577-L633 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L67 @ basenames@1809bbc)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L212 @ ens_v2_sepolia_20261001@07e55a05)
+
+ENSv2 history `token_id` uses each row's physical event position, not the operation's final token
+or the name's current token. The initiating permission event therefore precedes its own token
+bump. `canonical_id` clears the low 32 bits of valid event-local evidence and remains scoped by
+registry and chain. Missing evidence and the deprecated pre-audit permission inference limit are
+defined under [ENSv2 token identity](api-v1.md#ensv2-token-identity). Enrichment never changes row
+membership, ordering, counts, cursors or registration/action IDs, and runs only with `include=data`.
 
 #### Record event names
 
@@ -2378,10 +2432,27 @@ ENSv1, Basenames and NameWrapper permission rows are derived from ownership,
 registration and wrapper events that state no previous permission set, so
 they omit both lists rather than report an unobserved previous set; their
 `powers` is still the resulting set, and an empty `powers` marks a
-revocation. A NameWrapper fuse change carries `fuses` only. A role change on
-an ENSv2 registry's root resource is stored as `RootPermissionChanged`, which
-is not a `permission` row and carries none of these fields, even though its
-log states the previous roles too.
+revocation. A NameWrapper fuse change carries `fuses` only.
+
+A role change on an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource
+`0`, whose roles apply to every resource of the registry) is a `permission` row with
+raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`, whose
+`detail.registry` is the registry, as on a
+[root resource](glossary.md#registry-root-resource) permission row. Its subject
+`address` is the account whose root roles changed, `powers` is that account's
+named root roles right after the change in the permission powers vocabulary
+(`[]` when none remain; role bits with no name are omitted, as on every
+permission row), and, because the log states the old bitmap, `added_powers`
+and `removed_powers` are always present; either may be `[]`. It has no `name`
+and no `registration_id`, and its `contract_address` (with `include=data`) is
+the registry. `GET /v1/events?contract_address=<registry>` lists a registry's
+root role changes, and an account's own root role changes on every registry are
+in its [address history](#get-v1addressesaddresshistory). A root role change
+is never part of a name's or registration's history, nor of an address's
+history through a name or registration it relates to, even when a registry
+ties a name to its root resource.
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L19-L21 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2@a971bd64)
 
 Admitted BaseRegistrar `ControllerAdded` and `ControllerRemoved` events are
 also `permission` rows. They record registrar-wide controller authorization,
@@ -2694,9 +2765,10 @@ introduces it rebuilds Project from full history before serving the option; see
 <!-- openapi:parameters GET /v1/permissions -->
 | Parameter | In | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- | --- |
-| `name` | query | string | no | none | Name anchor. At least one of name, registration_id or address is required. |
+| `name` | query | string | no | none | Name anchor. At least one of name, registration_id, address or registry is required. |
 | `registration_id` | query | string | no | none | Opaque public registration handle. |
 | `address` | query | string | no | none | EVM address in hexadecimal form. |
+| `registry` | query | string | no | none | ENSv2 registry as `<chain_id>:<address>` with a supported numeric chain ID; selects the grants on its root resource. Cannot be combined with name or registration_id. |
 | `namespace` | query | string | no | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `include` | query | array of enum `lineage` | no | none | Comma-separated expansion names; unlisted values are invalid. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
@@ -2717,12 +2789,15 @@ introduces it rebuilds Project from full history before serving the option; see
 
 - Method/path: `GET /v1/permissions`
 - Tier: product read.
-- Purpose: flat permission rows by name, registration, or address, including
-  registrations that are no longer a name's current one. An `address` anchor
-  answers “what resources does account X operate?” for both direct and
-  effective account-wide grants.
-- Request parameters: at least one of `name`, `registration_id`, or `address`;
-  filters are combinable intersections. A `name` resolves its current
+- Purpose: flat permission rows by name, registration, address, or ENSv2
+  registry, including registrations that are no longer a name's current one. An
+  `address` anchor answers “what resources does account X operate?” for both
+  direct and effective account-wide grants. A `registry` anchor answers “who
+  holds roles on registry R itself?”: the current holders of the registry's
+  [root resource](glossary.md#registry-root-resource).
+- Request parameters: at least one of `name`, `registration_id`, `address`, or
+  `registry`; filters are combinable intersections, except that `registry`
+  cannot be combined with `name` or `registration_id` (`400 invalid_input`). A `name` resolves its current
   `registration_id`; an explicit `registration_id` must match it when both are
   supplied, and `address` then restricts the permission subject. An explicit or
   name-implied `namespace` filters registrations before pagination; an
@@ -2748,6 +2823,24 @@ introduces it rebuilds Project from full history before serving the option; see
   unnamed or superseded registration does not need a current name binding. A
   registration outside the namespace returns an empty page without its resource
   restrictions or permission support metadata.
+  `registry=<chain_id>:<address>` takes a supported numeric chain ID and a
+  case-insensitive address; an empty value is treated as omitted, and any other
+  shape returns `400 invalid_input`. It
+  selects the root resource of the registry contract instance that holds the
+  address at the served publication's block (`meta.as_of`), derived the same way
+  the interpreter derives it, and returns
+  that resource's current holders, so a revoked holder is absent. With `address`
+  it returns that account's root row or an empty page. The row answers whether
+  the account holds a listed root grant; an empty page under the partial marker
+  below does not prove the account has no root authority. An address no active contract
+  instance holds at that block (including one admitted after it), a registry
+  instance retired by then, or a registry with no current root holders returns
+  `200` with empty `data`; the empty page does not prove the
+  registry exists, which the [registry overview](#get-v1registrieschain_idaddress)
+  answers. `namespace` filters the root's rows by the same membership rule as a
+  `registration_id` read (ENSv2 root grants are in the `ens` namespace), but an
+  empty page keeps the registry's completeness classification below. Root rows are also returned by `address` reads and
+  by `registration_id=<root resource>`, the `registration_id` the rows carry.
 - Response shape: `data` is an array of permission rows
   `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,
   authority_context, wrapper_state?, wrapper_fuses?}`.
@@ -2814,8 +2907,9 @@ introduces it rebuilds Project from full history before serving the option; see
   `resolver_root_fallback`, and `registry_root_fallback`. Diagnostics-only
   storage keys such as event provenance, upstream/root resources,
   contract-instance ids, changed powers, and manifest versions are omitted.
-  `grant_scope` is `{kind, detail}`. Detail is `{}` for `root`, `registry`,
-  and `registration`;
+  `grant_scope` is `{kind, detail}`. Detail is `{}` for `registry` and
+  `registration`; `{registry: {chain_id, address}}` for `root`, naming the ENSv2
+  registry whose root resource the grant is on;
   `{resolver: {chain_id, address}}` for `resolver` with numeric `chain_id`;
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
@@ -2857,6 +2951,28 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
+  A registry root holder is:
+
+  ```json
+  {
+    "address": "0xholder",
+    "grant_scope": {
+      "kind": "root",
+      "detail": {"registry": {"chain_id": 11155111, "address": "0xregistry"}}
+    },
+    "powers": ["registrar", "admin_registrar"],
+    "registration_id": "<root resource id>",
+    "authority_context": "resource_audit"
+  }
+  ```
+
+  A root row's `powers` are the holder's declared root role bits, never empty;
+  `name`, `grant_relation`, `record_resource` and the wrapper fields are absent,
+  `authority_context` is always `resource_audit`, and `registration_id` is the
+  root resource's id rather than a name registration. The root `detail` is an
+  additive change: root rows served on `address` and `registration_id` reads
+  before it carried `detail: {}` and now carry the same `registry` object.
+
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
   `(subject, resource_id, scope)`. Direct and account
@@ -2865,7 +2981,9 @@ introduces it rebuilds Project from full history before serving the option; see
   opaque cursor binds the exact normalized collection anchor: normalized
   `address`, the node a `name` names when supplied (so equivalent
   [name inputs](api-v1.md#name-inputs) share a cursor), and an explicitly requested public
-  `registration_id`. It also binds the namespace when explicit or implied by a
+  `registration_id` or normalized `registry` (`<chain_id>:<lowercase address>`,
+  so spellings that differ only in address case share a cursor). It also binds
+  the namespace when explicit or implied by a
   name (and namespace absence for an address-only request, matching its
   all-namespace result set), `include=lineage`, the fixed sort and the last
   keyset tuple. A name-only request follows its current registration; a replacement
@@ -2879,7 +2997,9 @@ introduces it rebuilds Project from full history before serving the option; see
   cryptographically signed. A name-anchored cursor is rejected for a different
   name or a registration-only request, even when both names resolve to the same
   registration. Crossing from direct to operator rows neither duplicates nor
-  omits a row.
+  omits a row. A `registry` read has one resource, so its rows are in holder
+  address order, bytewise on the lowercase hex; a `registry` cursor is rejected
+  for a different registry or for a request without that `registry`.
 - Snapshot behavior: a `name` filter's current registration anchor is resolved
   first; the permission rows and the permission summaries are then read on one
   database snapshot of the captured publication, disclosed in `meta.as_of`,
@@ -2890,7 +3010,7 @@ introduces it rebuilds Project from full history before serving the option; see
   does not affect the page. Historical permission enumeration is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
-  current state. Unsupported filter combinations return `422 unsupported`;
+  current state. Unsupported filter combinations return `400 invalid_input`;
   pairing `name` with a `registration_id` that is not that name's selected
   current registration is not one of them. It is a supported query that selects
   nothing, so it returns `200` with empty `data`; its reason is the explicitly
@@ -2956,6 +3076,28 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
+  A `registry` read is classified by the registry, not by a registration
+  summary. For a registry whose current address an active manifest declares
+  (the root and ETH registries, whose code is pinned) the root holders are
+  listed in full, so the three
+  fields are omitted: every write to an ENSv2 role bitmap emits
+  `EACRolesChanged`, and the registry adds a name owner's roles to that owner's
+  approved operators only for a name's token resource, never for the root
+  resource.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  A registry that discovery admitted, or one only an inactive or retired
+  declaration covers, reports `["ens_v2_registry_operators"]`.
+  bigname does not read a discovered contract's code, and anyone can initialize
+  a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
+  is one): it grants its root roles to a parent registry, and gives exactly
+  those roles to the parent name's current owner and to that owner's operators
+  on the parent registry, who are not rows. A `UserRegistry` is upgradeable, so
+  its code can change too.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L28 @ ens_v2_sepolia_20261001@07e55a05)
   Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`, no list, and takes
@@ -3056,7 +3198,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `sort` | query | enum AddressNamesSort | no | none | Defaults to name for authority and resolves_to listings, and expires_at for relation=former_owner. Former owners accept only explicit sort=expires_at; other explicit sort values return 400 invalid_input. Ties use the route's stable identity order. |
 | `order` | query | enum SortOrder | no | `asc` | Ascending or descending result order. |
 | `dedupe` | query | enum AddressNamesDedupe | no | `name` | Group by normalized name or registration handle. relation=former_owner accepts only omitted dedupe or dedupe=name; dedupe=registration returns 400 invalid_input. |
-| `include` | query | array of enum `counts`, `role_summary` | no | none | Comma-separated expansion names; unlisted values are invalid. Nonempty include is not accepted with relation=former_owner. |
+| `include` | query | array of enum `counts`, `role_summary`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count asks the ownership relations for an exact page.total_count above the candidate cap and is not accepted with relation=resolves_to. Nonempty include is not accepted with relation=former_owner. |
 | `at` | query | string | no | none | Recognized only to reject it with 400 invalid_input: this collection reads current state. |
 | `finality` | query | enum `latest` | no | `latest` | Only omitted or explicit latest is accepted; safe and finalized return 400 invalid_input. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
@@ -3081,7 +3223,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `authority` (a comma-separated set of `ens_v0`, `ens_v1`, `ens_v2`),
   `parent`, `coin_type`, `q`, `match=prefix|contains`,
   `sort=name|expires_at|registered_at|created_at`, `order=asc|desc`,
-  `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
+  `dedupe=name|registration`, `include=role_summary|counts|total_count`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
   `authority` keeps only rows that serve one of the listed `authority` values,
@@ -3119,13 +3261,33 @@ introduces it rebuilds Project from full history before serving the option; see
   arm and a retained activated `MigrationApplied` with its block timestamp.
   Native ENSv2 registrations do not satisfy `is_migrated=true`. It combines
   with the other filters and is rejected with `relation=resolves_to`.
-  The ownership collection always returns an exact `page.total_count` before
-  applying its cursor, with the same relations, `q` and `match` predicate,
-  `authority` set, `parent`, migration predicate and deduplication as the rows.
+  On the ownership relations `page.total_count` counts the collection before
+  its cursor, with the same relations, `q` and `match` predicate, `authority`
+  set, `parent`, migration predicate and deduplication as the rows. It is exact
+  when the address has at most 1,000 candidate names, and `null` above that
+  unless `include=total_count` asks for the exact total. The candidate names are
+  counted before the `q`, `match`, `authority`, `parent` and migration filters:
+  the names on which some admission could make the address the `owner` or
+  `manager` (the address index of
+  [address collections](projections.md#address-and-child-collections)), its ENSv1
+  registry children with no name row, and, when the relation set includes
+  `role_holder` (as it does by default), the names of registrations on which it
+  holds an ENSv2 registry role, all in the requested namespace. An address with
+  more than 1,000 candidates therefore reports `null` even when its filtered
+  collection is small. Above the cap a page composes candidates in sort order,
+  in growing batches, and stops once later candidates can no longer change it,
+  so an ordinary page composes about as many names as it returns. A filter that
+  matches few names can still compose every candidate, and `sort=created_at`
+  always reads every candidate, because a name's first observation can be
+  dated by a registrar event bound to it only later. `include=total_count`
+  also reads every candidate; on an address with tens of thousands of names
+  these reads can reach the request deadline (`408 request_timeout`).
+  The flag changes no row, order or cursor and does not bind cursors, so a
+  client can request it on the first page only.
   `owner` also lists names with no token for their registry owner, such as
   unwrapped subnames and registry children with no lease, so `relation=owner&dedupe=registration`
   counts those as well. For the registrations an address holds, add
-  `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1`
+  `parent=eth`: `GET /v1/addresses/{address}/names?relation=owner&parent=eth&dedupe=registration&page_size=1&include=total_count`
   returns a `page.total_count` with one entry per `.eth` registration the
   address holds, a wrapped `.eth` name once, and no subname;
   `parent=base.eth&namespace=basenames` counts Basenames registrations. The count
@@ -3134,8 +3296,8 @@ introduces it rebuilds Project from full history before serving the option; see
   (a known residual below), and it lists no Basenames registry child without a name
   row. A name
   count uses `dedupe=name`.
-  This GET route supplies exact totals even for single relations whose
-  `POST /v1/lookup` result count remains unknown.
+  With `include=total_count` this GET route supplies exact totals even for
+  single relations whose `POST /v1/lookup` result count remains unknown.
   `q` applies prefix matching to the dictionary `name` field. The API treats
   the complete `q` value as an ENSIP-15 name prefix and normalizes it with the
   same normalizer used for indexed names before comparing it directly with the
@@ -3304,7 +3466,8 @@ introduces it rebuilds Project from full history before serving the option; see
   cursor identity use the serving resource as the grouping key while
   registration fields remain absent. `namespace`, `authority`, `parent`, `q`,
   `match`, `sort`, `order`, `dedupe`,
-  and `include=role_summary` apply as for the authority relations.
+  and `include=role_summary` apply as for the authority relations;
+  `include=total_count` returns `400 invalid_input`.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `manager`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
@@ -3932,6 +4095,15 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L304 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+  A registry root role change (a `RootPermissionChanged` [`permission`
+  row](#permission-change-values)) belongs to no name, and its resource is the
+  registry's root resource, which every holder of that registry shares, so no
+  name or registration anchor reaches it without reaching every other holder's
+  changes. The read matches those rows one by one instead: with `scope=both`
+  or `scope=registration` and a relation set that includes `role_holder` (the
+  default does), the history also lists every root role change whose subject
+  `address` is this address, on every registry, and never another holder's.
+  `scope=name`, and a relation set without `role_holder`, list none.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary and the event-identity contract documented under
   [`GET /v1/events`](#get-v2events). The correlation-scoped candidate
@@ -4168,6 +4340,11 @@ For a registrar lease first identified by a later readable observation, registra
   that contract (a registry, registrar, or resolver address, compared
   case-insensitively); it combines with every other filter (including
   `resolver`, applied as AND), and the cursor binds it like the others.
+  `address` keeps the events [address
+  history](#get-v1addressesaddresshistory) lists for that address with
+  `scope=both` and every relation, including its registry root role changes,
+  so `contract_address=<registry>&address=<account>&kind=RootPermissionChanged`
+  is one account's root role history on one registry.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds appear only as `kind` behind the
   explicit `include=raw` opt-in. Event-row
@@ -4606,7 +4783,9 @@ For a registrar lease first identified by a later readable observation, registra
   defaults to the `ens` namespace, which is served on one chain. For an address
   an operator also admits into another namespace on this chain, the overview
   counts those events too and the default feed does not. The count reads every
-  event of the contract rather than a projected total.
+  event of the contract rather than a projected total. It includes the
+  registry's root role changes (`RootPermissionChanged` `permission` rows),
+  which the feed has listed since they became product history.
   `counts.roles`, also present with `include=counts`, is the exact number of
   observed nonzero declared role assignments across the registry's root and
   label resources. One account on two resources counts twice; several role bits
@@ -4618,6 +4797,9 @@ For a registrar lease first identified by a later readable observation, registra
   (upstream: .refs/zigens/src/api/resolvers/admin.zig:L1150 @ zigens@77d106e9)
   (upstream: .refs/zigens/src/storage/roles.zig:L171 @ zigens@77d106e9)
   (upstream: .refs/zigens/src/storage/roles.zig:L505 @ zigens@77d106e9)
+  The current holders of the registry's own roles, those on its
+  [root resource](glossary.md#registry-root-resource), are listed by
+  [`GET /v1/permissions?registry=<chain_id>:<address>`](#get-v1permissions).
   `referenced_by` is a nested `{data, page}` collection of every name whose
   current subregistry pointer targets this contract, each `{name,
   display_name, namespace, namehash}`, sorted by display name. It usually

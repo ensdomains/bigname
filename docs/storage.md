@@ -314,6 +314,60 @@ latency still require production-scale qualification before activation.
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `resolution_divergences` | guarded non-API lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
+The API owns `normalized_events_registry_token_idx`, a read-only partial index on
+Interpret's `normalized_events`. It serves `storage:normalized_events.registry_tokens`
+(`crates/storage/src/registry_token_ids.rs`): at most 200 deduplicated resources per query,
+with one latest-event index probe for each chain/resource bounded by the selected publication.
+Only activated, readable `TokenResourceLinked` and `TokenRegenerated` events from the ENSv2
+root/registry source families can supply a token. The query also checks matching readable
+chain/hash/number lineage. It selects the latest event by physical block/transaction/log position
+before parsing its token word as U256; invalid latest evidence fails instead of selecting an
+older value. Resource UUIDs remain stable permission handles, independent of token versions.
+
+Name detail loads its selected composed row and token evidence in one short read-only
+REPEATABLE READ snapshot, then closes it before verified RPC work. Resolver bound-name pages
+reuse their collection snapshot; detail lookup enriches all forward and reverse records once
+before its existing served-head generation revalidation. Feed and DTOs without `token_id` make
+no token read. There is no historical token endpoint: exact name/resolver selectors below the
+current publication still return `stale`. The reader changes no normalized or projected rows.
+The [concurrent prebuild runbook](../ops/registry-token-index/README.md) gives the large-database
+installation, adoption and recovery procedure for schema-migration
+`20261005090000_normalized_events_registry_token_index.sql`. This index is rebuilt with the
+[walk index set](#walk-index-set) before serving resumes.
+
+The same index serves `storage:history.token_ids`
+(`crates/storage/src/history/token_ids.rs`). With history `include=data`, registration and
+transfer rows retain their own recorded ENSv2 token word. A non-root registry permission row
+without a token uses one bounded predecessor probe at its exact block/transaction/log position,
+never the current token of its name or resource. The page supplies captured publication bounds;
+the query checks the selected row, its source manifest, matching readable lineage and the
+same block hash for evidence at the row's height. Only the current deployment and the historical
+June post-audit model support this inference. The initiating role event precedes its regeneration
+marker, so its token is the old token.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L529-L538 @ ens_v2_sepolia_20260629@ccaeb58b)
+Deprecated pre-audit permission rows without direct token evidence omit the token: that model
+calls the mint receiver before emitting its regeneration marker, so a predecessor alone cannot
+prove a callback's token. Direct recorded registration/transfer tokens remain supported.
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/PermissionedRegistry.sol:L451-L462 @ ens_v2_sepolia_dev@554c309b)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/erc1155/ERC1155Singleton.sol:L245-L261 @ ens_v2_sepolia_dev@554c309b)
+The caller uses a short read-only repeatable-read context snapshot and revalidates the page's
+Interpret redo fence after enrichment. This changes no row selection, counts, cursors or stored
+data. Missing evidence omits the field; a malformed selected token fails closed. Pages without
+`include=data`, and pages with only direct token evidence, need no predecessor query.
+
+`storage:history.payment_values` (`crates/storage/src/history/payment_values.rs`) supplements
+only the selected page's existing ENSv2 registration grants and Sepolia ENSv1 numeric renewals.
+It probes normalized observations by exact chain/block-hash/transaction position using the
+existing block index. At most two matching candidates are retained to prove uniqueness; a
+contradiction or ambiguity yields no supplement. ENSv2 registration additionally proves the
+same name/token, registrar sender and resource linkage within that transaction. Sepolia renewal
+requires the producing manifest's declared controller, matching name/expiry and no intervening
+numeric renewal. Only small payment objects return to the API. Token and payment reads share
+the page context's read-only snapshot and the surrounding redo fence. No normalized event is
+updated, inserted or newly exposed as a history row.
+
 `project:families.hydrate.text.select` reads changed selector keys and the ordered share from
 `project_text_hydration_work_order_idx`. The reverse selector uses
 `project_reverse_hydration_work_active_idx` and `_stale_idx` before joining tuple state.
@@ -345,6 +399,10 @@ Family indexes serve these concrete readers:
   `project_lifecycle_event_inexact_expiry_idx` and `project_wrapper_state_expiry_idx`;
   resolver-bound names use `project_named_resource_pointer_resolver_idx` and
   `project_registry_pointer_resolver_idx`.
+- The name summary's expiry selector is indexed by `project_name_summary_expiry_idx`
+  (a namespace's listable names by expiry) and `project_name_summary_authority_expiry_idx`
+  (the same within one public authority). The family step maintains both; the expiring-names
+  listing does not read them yet.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;
@@ -393,6 +451,12 @@ Family indexes serve these concrete readers:
   can reach its rows through the same index when the statement names the namespace. With no
   such surface the cost is those probes. The cost of rendering before `LIMIT` with a large
   population of such surfaces has not been measured.
+- The address-names walk (`storage:families.records.address_name_walk`) orders one address's
+  candidate names, read from `project_address_name_index` by its primary key, by their sort
+  key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
+  then a sort of that address's candidates only. Its closure read
+  (`storage:families.records.address_name_walk_closure`) finds the names bound to the walked
+  resources through `project_binding_candidate_resource_idx`.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
@@ -447,6 +511,15 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | --- | --- |
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
+
+Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
+`normalized_events` for its registry root role branch, installed by the normalized-events
+baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
+row:
+
+| Index | Serves |
+| --- | --- |
+| `normalized_events_address_root_permission_idx` | the `OrRootPermissionSubject` branch of `push_selector_filter` in `history/filters.rs`: activated, readable `RootPermissionChanged` rows by lowercased subject |
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -570,6 +643,22 @@ hash](glossary.md#interpreter-content-hash) input changes. Existing installation
 three indexes through `20260923120000_normalized_events_address_match_indexes.sql`; prebuild
 them concurrently on a large database with
 [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md) first.
+
+A registry root role change (`RootPermissionChanged`) belongs to no name, and its resource is
+the registry's root resource, which every holder of that registry shares, so neither anchor
+reaches it without also reaching every other holder's changes. The page and count of a product
+address read in `both` or `registration` scope whose relations admit `role_holder` therefore
+add one more branch to the same OR: `RootPermissionChanged` rows whose lowercased
+`after_state ->> 'subject'` is the address. `normalized_events_address_root_permission_idx`
+keys that branch by the lowercased subject, then the block and log position, over activated
+rows in readable canonicality states, so a page whose address has no other anchor reads it in
+history order. That branch also carries the read's namespace. Every name, resource and
+registration branch of a product read excludes `RootPermissionChanged` rows, so a root role change reaches an
+anchored read only through its subject, even when a nonconforming registry tied a name or
+registration to its root resource. Diagnostics reads neither add the branch nor exclude those
+rows. Existing installations receive the
+index through `20261005120000_normalized_events_address_root_permission_idx.sql`; the same
+`ops/address-history-indexes/install.sql` prebuilds it concurrently.
 
 Node-keyed resolver record writes carry neither a name nor a resource, so history reaches them
 through the registration's resolver pointers (`attribution.rs`). The reader evaluates the
@@ -2231,8 +2320,9 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 33 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
-these: `normalized_events_v1_subregistry_after_node_scope_idx`,
+The other 35 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+these: `normalized_events_registry_token_idx`,
+`normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
 `normalized_events_v2_subregistry_pointer_scope_idx`,
@@ -2257,6 +2347,7 @@ these: `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`,
 `normalized_events_address_registry_owner_match_idx`,
+`normalized_events_address_root_permission_idx`,
 `normalized_events_project_node_history_idx`, `normalized_events_project_v1_pointer_node_idx`
 and `normalized_events_project_v1_pointer_addressed_node_idx`.
 

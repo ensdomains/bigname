@@ -57,7 +57,7 @@ fn batch_size(page_size: u64) -> usize {
 
 /// One composed row as the list CTE binds it (name_current/list.rs, `COMPOSED_NC_COLUMNS`).
 pub(super) fn source_row(row: &NameCurrentRow) -> Value {
-    let unsupported = row.coverage.get("status").and_then(Value::as_str) == Some("unsupported");
+    let unsupported = super::list_keys::unsupported(&row.coverage);
     json!({
         "logical_name_id": row.logical_name_id,
         "namespace": row.namespace,
@@ -93,6 +93,7 @@ impl Gathered {
             .into_iter()
             .filter(|name| self.names.insert(name.clone()))
             .collect();
+        super::seams::note_composed_names(fresh.len());
         let composed = batch::load(conn, &fresh, CoverageShape::Plain).await?;
         self.rows.extend(composed.values().map(source_row));
         Ok(())
@@ -349,6 +350,41 @@ pub async fn load_family_expiring_page(
             return Ok(truncate(page, page_size));
         }
     }
+}
+
+/// The expiring page over every name of the `ens` namespace composed at once: what the walk
+/// must return, whatever it costs. A test oracle only. It composes without the declared
+/// topology, which changes fields the listing does not serve; for `ens` that is one
+/// `declared_summary` key, for Basenames it also rewrites row metadata, so other namespaces are
+/// refused rather than compared.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn load_family_expiring_page_unbounded(
+    db: impl Into<crate::ReadDb<'_>>,
+    filter: &NameCurrentExpiringFilter,
+    order: NameCurrentListOrder,
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+    chains: &[String],
+) -> Result<NameCurrentListPage> {
+    anyhow::ensure!(
+        filter.namespace == "ens",
+        "the unbounded expiring oracle covers only the ens namespace"
+    );
+    let mut snapshot = db.into().snapshot().await?;
+    batch::ensure_published(&mut snapshot, chains).await?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT logical_name_id FROM bigname_phase.name_surfaces WHERE namespace = $1",
+    )
+    .bind(filter.namespace.as_str())
+    .fetch_all(&mut *snapshot)
+    .await
+    .context("failed to load the namespace's names")?;
+    let composed = batch::load_base(&mut snapshot, &names, CoverageShape::Plain).await?;
+    let source = Value::Array(composed.values().map(source_row).collect());
+    let page =
+        expiring_page_from(&mut *snapshot, filter, order, cursor, page_size, &source).await?;
+    snapshot.close().await?;
+    Ok(page)
 }
 
 /// A page read with one extra row, cut to `page_size` with its continuation.

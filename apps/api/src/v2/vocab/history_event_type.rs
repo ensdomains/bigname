@@ -74,6 +74,7 @@ impl HistoryEventType {
             Self::PrimaryName => &["ReverseChanged"],
             Self::Permission => &[
                 "PermissionChanged",
+                "RootPermissionChanged",
                 "PermissionScopeChanged",
                 "RolesChanged",
                 "EACRolesChanged",

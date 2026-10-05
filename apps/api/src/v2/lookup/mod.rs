@@ -26,6 +26,7 @@ mod parse;
 mod relation_filter;
 mod resolves_to;
 mod scope;
+mod tokens;
 
 use admission::require_reverse_records_at_served_head;
 use build::{build_reverse_detail_record, build_reverse_feed_record, lookup_address_status};
@@ -134,6 +135,11 @@ pub(crate) async fn get_lookup(
     )
     .await?;
     apply_migrated_at(&state, &mut results).await?;
+    if profile == LookupProfile::Detail
+        && let Some(snapshot) = selected_snapshot
+    {
+        tokens::apply(&state.pool, &mut results, snapshot).await?;
+    }
     apply_record_abis(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;

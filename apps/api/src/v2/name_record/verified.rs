@@ -40,7 +40,7 @@ pub(super) async fn build_name_record_for_source(
     }
 }
 
-fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>> {
+pub(super) fn unsupported_name_record(row: &NameCurrentRow) -> V2Result<Option<NameRecord>> {
     if string_field(row.coverage.get("status")).as_deref() != Some("unsupported") {
         return Ok(None);
     }

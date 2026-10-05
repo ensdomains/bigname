@@ -19,8 +19,6 @@ use super::list::{
 use super::{escape_like_pattern, push_public_authority_predicate};
 use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
 
-const REGISTRATION_EXPIRY_JSON_PATH: &str = "'{registration,expiry}'";
-
 /// Window over current names of one namespace by registration expiry. `expires_after` is
 /// inclusive and `expires_before` exclusive, so consecutive windows tile without overlap. At least
 /// one bound is required: the reader refuses an unbounded namespace scan.
@@ -100,9 +98,8 @@ pub(crate) async fn expiring_page_from(
     push_filtered_name_list_cte(&mut builder, &list_filter, composed, |builder| {
         // Only a finite registration expiry participates in /names. The exact derived-column
         // predicates below retain the shared alias priority and classified-null behavior.
-        builder.push(" AND (nc.declared_summary #>> ");
-        builder.push(REGISTRATION_EXPIRY_JSON_PATH);
-        builder.push(") ~ '^-?[0-9]+(\\.[0-9]+)?$'");
+        builder.push(" AND ");
+        builder.push(crate::families::name::FINITE_REGISTRATION_EXPIRY_SQL);
         if let Some(authorities) = &filter.authorities {
             push_public_authority_predicate(builder, "nc", authorities);
         }

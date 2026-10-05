@@ -1124,17 +1124,22 @@ epoch row lands on the reactivated registrar resource and the un-admitted
 `upgrade()` burn that emits no `NameUnwrapped`; for an ENSv2 registry resource it is
 `{kind: ens_v2_registry, locked_roles}`, where `locked_roles` lists
 `unregister`, `renew`, `set_subregistry`, `set_resolver`, and `transfer` whose
-admin role (`can_transfer_admin` for `transfer`) no current row on the resource
-or its registry root carries, because only a held admin role can grant or
-revoke that role and the registration cannot re-grant an admin role; it is
-`NULL` for every other resource. The registry root is read from the resource
-identity table, and current resource and registry-root admin aggregates are
-read in the same family snapshot. A root permission change therefore affects
+admin role no current row on the resource or its registry root carries, because
+only a held admin role can grant or revoke that role and the registration
+cannot re-grant an admin role; `transfer` is listed when no current row on the
+resource itself carries `can_transfer_admin`, because a transfer checks that
+role on the token alone and ignores the root; it is `NULL` for every other
+resource. The registry root is resource 0 of the
+registry contract instance that the resource's own events name, counted only
+when its identity row is readable. Current resource and registry-root admin
+aggregates are read in the same family snapshot. A root permission change therefore affects
 `locked_roles` without rewriting every registration.
-(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L428-L435 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2_sepolia_20261001@07e55a05)
 For ENSv2, permissions remain keyed by the
 upstream resource linked to bigname `resource_id`, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351]
 
@@ -1740,7 +1745,11 @@ any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node), and the owner the name row serves
 (`control.owner`, the token holder, else the registry owner, and none on a
 released name; lower-cased), which the
-registry labels' `owner` and `exclude_owner` filters read. Every name with a
+registry labels' `owner` and `exclude_owner` filters read. It also holds the
+expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
+name composes a supported row whose registration carries a finite expiry, and
+`public_authority`, the public `authority` that row serves; for a listable name
+the stored expiry is the expiry the listing serves. Every name with a
 surface has a row, including one whose surface stores no raw label bytes. The
 summary holds no name text and its composition reads no label preimage, so an
 imported preimage never changes a stored summary. The selected arm remains available when an unreadable token

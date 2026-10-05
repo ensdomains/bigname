@@ -322,6 +322,9 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
         summary_expiry(&fixture, &alice).await? == Some(RESERVED_EXPIRY as i64),
         "the cutover block did not recompose the reserved name's summary"
     );
+    // No event names alice.eth at the cutover block, yet its expiry selector moves with it.
+    let selected = |expiry: u64| [(alice.clone(), expiry.to_string(), Some("ens_v1".to_owned()))];
+    ensure!(fixture.assert_expiry_selector().await? == selected(RESERVED_EXPIRY));
 
     // A rollback to an unadmitted implementation ends the cutover.
     upgraded(
@@ -336,9 +339,11 @@ async fn a_reserved_eth_name_serves_the_reservation_expiry_only_while_cut_over()
     fixture.apply(8, FamilyMode::Normal).await?;
     ensure!(served(&fixture, &alice).await? == before);
     ensure!(summary_expiry(&fixture, &alice).await? == Some(LEASE_EXPIRY as i64));
+    ensure!(fixture.assert_expiry_selector().await? == selected(LEASE_EXPIRY));
 
     fixture.assert_undo_restores(8).await?;
     fixture.assert_rebuild_equal(8).await?;
+    ensure!(fixture.assert_expiry_selector().await? == selected(LEASE_EXPIRY));
     fixture.cleanup().await
 }
 

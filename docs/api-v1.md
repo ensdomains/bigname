@@ -45,7 +45,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `display_name` | display form of the name; equal to `name` for a [rendered name](glossary.md#rendered-name) | `canonical_display_name` |
 | `namespace` | public namespace slug used to resolve a name or filter a route, such as `ens` or `basenames` | `namespace` path segment/query usage (unchanged; now echoed consistently) |
 | `namehash` | ENS namehash hex string | `namehash` (unchanged) |
-| `token_id` | decimal-string token id for tokenized registrations/names. Where a `.eth` second-level name serves a `token_id` and its registration states none, the value is the name's labelhash as a decimal string, whether its label is served as text or as a bracketed labelhash | `token_id` (unchanged; now defined consistently) |
+| `token_id` | decimal-string token id for tokenized registrations/names; ENSv2 uses the recorded versioned ERC-1155 token at the selected publication, never its labelhash or permission resource (see [ENSv2 token identity](#ensv2-token-identity)). Where an ENSv1 `.eth` second-level name serves a `token_id` and its registration states none, the value is the name's labelhash as a decimal string, whether its label is served as text or as a bracketed labelhash | `token_id` (unchanged; now defined consistently) |
 | `owner` | who holds the name: the token holder of a name that has a token (an ENSv1 BaseRegistrar lease, a NameWrapper token, including a wrapped subname's, or an ENSv2 registry token), otherwise the registry owner of its node (an unwrapped subname with only a registry record, a registry child with no name row and no known lease holder); a `.eth` or Basenames registry child with no name row whose lease the registrar retains has a token, and serves its holder when bigname knows a nonzero one. On a wrapped name it is the NameWrapper token holder, not the NameWrapper contract, and on an unwrapped `.eth` second-level name the BaseRegistrar token holder, not the registry controller. After an ENSv1 `.eth` token transfer without `reclaim`, `owner` is the new holder while `manager` stays the previous registry owner until the holder calls `reclaim` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f); being or becoming that registry owner adds no history under `relation=owner`, while history an address gained by holding the token or by owning a name with no token stays there; omitted on a released name, including a `.eth` or Basenames registry child with no name row whose registrar lease bigname has released (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294-L297 @ basenames@1809bbc) although its registry record survives: expiry never writes the registry, and the registrar writes it only on a registration other than `registerOnly` (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L147-L149 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L414-L425 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L265-L276 @ basenames@1809bbc) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L122-L128 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248-L250 @ basenames@1809bbc) or a `reclaim` by a live token's holder or an address it approved (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L327-L330 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L458-L466 @ basenames@1809bbc) (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L173-L176 @ basenames@1809bbc), on an expired emancipated or locked wrapped name, whose owner NameWrapper clears (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L851 @ ens_v1@91c966f), on a record the admitted Graveyard holds, even while a NameWrapper token of that cleared subname survives (see [upstream divergences](upstream.md)), and on a registry child with no name row whose registry owner is the NameWrapper contract that named it under a label failing ENSIP-15 normalization: the NameWrapper holds that node for a token holder bigname cannot name (see [Manager](#manager)) | `token_holder`, `owner`, `owner_address`, `registry_owner`, `registrant` (removed in v0.3.0; its value is now `owner`) |
 | `manager` | the account that can change the name's registry record (see [Manager](#manager)) | `effective_controller`, `manager_address` |
 | `relation` | address-to-name relation filter: one or more of the authority relations `owner` (the address is the name's `owner`), `manager` (the address is the name's `manager`), and, on address names and address history, `role_holder` (the address holds an ENSv2 registry role on the name's current registration; not the manager) (comma-separated set); `any` = all authority relations supported on that route; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`), or, on its own and on `GET /v1/addresses/{address}/names` only, `former_owner` (released names whose ended registration the address last held; see [lapsed registration](#lapsed-registration)). `resolves_to` and `former_owner` are not part of `any` and cannot be combined with another relation. `registrant` and `former_registrant` were removed in v0.3.0 and are rejected like any unknown value | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress`; `registrant`; `former_registrant` |
@@ -86,7 +86,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `chain_id` | numeric EVM chain id (`1`, `8453`); string-keyed in maps | string chain ids (`"ethereum-mainnet"`), position slot keys |
 | `network` | display slug (`ethereum`, `base`) | `network` (unchanged, display-only) |
 | `id` (event row) | opaque 64-character identity of one event row, identical for the same event on `/v1/events`, name history, and address history and across pages; a merge key for consumers combining feeds, not a durable reference (it may change at a re-derivation boundary) | `event_identity`, `normalized_event_id` |
-| `registration_id` | the one opaque stable handle for a registration lifecycle; for a `.eth` second-level name it is always the BaseRegistrar lease, wrapped or not (see [registration identity of wrapped names](#registration-identity-of-wrapped-names)) | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
+| `registration_id` | the one opaque stable handle for a registration lifecycle; for an ENSv1 `.eth` second-level name it is always the BaseRegistrar lease, wrapped or not (see [registration identity of wrapped names](#registration-identity-of-wrapped-names)) | `resource_id`, `resource_hex`, `resource`, `token_lineage_id`, `surface_binding_id` |
 | `input` | caller-supplied lookup input echoed in a result | `input` (unchanged; now specified as result echo, not a parallel DTO family) |
 | `normalization` | name-normalization result for an input | `corrected_input_normalization`, `unnormalizable_input` status detail |
 | `finality` | `latest`, `safe`, `finalized` (JSON-RPC block-tag vocabulary) | `consistency` = `head`/`safe`/`finalized` |
@@ -339,6 +339,62 @@ well, because `canExtendSubnames` applies the same grace check.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L127 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L135 @ ens_v1@91c966f)
 
+### ENSv2 token identity
+
+`token_id` on name detail and forward/reverse lookup records is the decimal form
+of the latest token recorded for the selected registration at the response's
+publication block. The reader uses activated, canonical registration,
+`TokenResourceLinked`, and `TokenRegenerated` events, bounded by both the selected
+chain position and Project's published block. It reads the token fields actually
+recorded by the admitted adapter, including older event payloads that only carry
+`token_id`; it does not reconstruct a version from a labelhash or permission
+resource. A current registration without a recorded token omits `token_id`.
+Released registrations also omit it. The routes' existing snapshot rules still
+apply: name detail rejects an older projection it cannot serve, and lookup serves
+the captured current publication.
+
+The current ENSv2 registry constructs the ERC-1155 token by replacing the
+labelhash's low 32 bits with `tokenVersionId`; `getTokenId` uses that construction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L15-L16 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L345-L346 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L691-L693 @ ens_v2_sepolia_20261001@07e55a05)
+Role regeneration burns the old token, increments its version, emits
+`TokenRegenerated(oldTokenId, newTokenId)` and mints to the same owner while its
+permission resource stays unchanged.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
+Accordingly `registration_id` remains the stable opaque registration lifecycle
+handle across token regeneration. Unregistering or a later registration is a
+lifecycle change: the current contract increments both versions when it burns an
+owned token on unregister or replaces a prior owner's token on registration, and
+registration emits its token and permission resource separately.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L237 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L489-L506 @ ens_v2_sepolia_20261001@07e55a05)
+
+Name-list and current permission rows retain their existing registration handles and omit
+`token_id`. History `include=data` exposes `data.token_id` on ENSv2 registration, transfer and
+non-root registry permission rows when evidence proves the token at that row's physical
+block/transaction/log position. Direct registration and transfer words do not require a current
+registration. Permission rows use the last eligible token marker at or before their position,
+bounded by the page's publication. The role event initiating regeneration therefore shows the
+old token, while a subsequent event after the marker shows the new one.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
+This predecessor inference supports the current and historical June post-audit models. Deprecated
+pre-audit permission rows without direct evidence omit the token because their mint callback
+can run before the regeneration marker. Direct historical registration/transfer words remain
+supported. Missing evidence omits the field; malformed selected token evidence is an internal
+data error. Historical registration IDs and token words are never rewritten to a later version.
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L529-L538 @ ens_v2_sepolia_20260629@ccaeb58b)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/PermissionedRegistry.sol:L451-L462 @ ens_v2_sepolia_dev@554c309b)
+
+History `data.canonical_id` is the decimal ENSv2 storage key obtained by clearing an event-local
+identifier's low 32 bits. It is scoped by registry and chain, and differs from the full labelhash,
+versioned token, permission resource and opaque `registration_id`. It uses the row's retained
+token, or the documented permission-resource/registration-label evidence, with consistent masked
+values when several are present. It never uses current name state. Root permissions, resolver
+resources and other protocol families omit it.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L11-L16 @ ens_v2_sepolia_20261001@07e55a05)
+
 ### Resource restrictions
 
 `restrictions` describes the [resource restrictions](glossary.md#resource-restrictions)
@@ -390,17 +446,21 @@ Name-shaped rows keep `ens_v1.wrapper_state` and `ens_v1.wrapper_fuses`;
   registration only by an account whose admin roles, held on that registration
   or on the registry root, cover it; on a registration the settable roles are
   the held admin roles shifted down to their regular counterparts, so an admin
-  role cannot be re-granted once every holder has revoked it, and
-  `ROLE_CAN_TRANSFER_ADMIN`, checked only on the token owner, has no lower
-  role at all. `locked_roles` is therefore the set of those roles whose admin
-  counterpart (`can_transfer_admin` for `transfer`) no current permission row on
-  the registration or its root carries; whether the role itself is still held
-  is read from the rows. An empty list means every one of them can still change.
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L453-L455 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L560-L572 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2@a971bd64)
+  role cannot be re-granted once every holder has revoked it. `transfer` has no
+  lower role: a transfer needs `ROLE_CAN_TRANSFER_ADMIN` held by the token owner
+  on the registration itself, and the same role held on the registry root does
+  not count. `locked_roles` is therefore the set of those roles whose admin
+  counterpart no current permission row on the registration or its root
+  carries, except that `transfer` is listed whenever no current row on the
+  registration itself carries `can_transfer_admin`; whether the role itself is
+  still held is read from the rows. An empty list means every one of them can
+  still change.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L428-L435 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L31-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L24-L45 @ ens_v2_sepolia_20261001@07e55a05)
 
 ### Permission powers vocabulary
 
@@ -1618,6 +1678,17 @@ permission rows do not change. Only `/v1/diagnostics/events` serves
 `raw_fact_ref`, so no product row changes, and diagnostic cursors continue
 under the re-walk rule above.
 
+Registry root role changes (`RootPermissionChanged`) became product history in
+a reader-only change: no stored row, identity or cursor format changed. They
+are `permission` rows with `grant_scope.kind` `root`, `powers`, `added_powers`
+and `removed_powers` (see
+[permission change values](api-v1-routes.md#permission-change-values)). The
+default event feed, `type=permission`, `kind=RootPermissionChanged`, a
+registry's `contract_address` history and its `counts.events`, and address
+history in `both` or `registration` scope with the `role_holder` relation gain
+them, and so does the diagnostics `type=permission` filter; name
+history does not change. Outstanding position cursors continue.
+
 A `record` row may also come from a node-keyed resolver observation that carries
 no logical name or resource of its own, such as an exact direct
 `public_resolver_v2` write. Project attributes that observation to a registration
@@ -2474,7 +2545,7 @@ Flat name-detail object, also used by resolver bound names. An identity-only uns
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `registration_id` | string | only when registration_held | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
-| `token_id` | string | optional | Decimal-string token identifier. |
+| `token_id` | string | optional | Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](#ensv2-token-identity). |
 | `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. |
 | `manager` | string | optional | Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown. |
 | `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
@@ -2594,7 +2665,7 @@ Shared lookup feed/detail record. Feed records carry identity, `chain_id`, `netw
 | `namespace` | string | always | Resolved public namespace slug. |
 | `namehash` | string | always | Hexadecimal ENS namehash. |
 | `registration_id` | string | optional | Opaque registration lifecycle handle; permission rows use the published permission-handle mapping. |
-| `token_id` | string | optional | Decimal-string token identifier. |
+| `token_id` | string | optional | Decimal-string token identifier. For ENSv2, the recorded versioned ERC-1155 token at the selected publication; omitted without a current registration or recorded token. See [ENSv2 token identity](#ensv2-token-identity). |
 | `owner` | string | optional | Who holds the name (see Naming Dictionary): the token holder of a name with a token (a BaseRegistrar lease, a NameWrapper token or an ENSv2 registry token), otherwise the registry owner of its node; omitted on released names and on expired emancipated or locked wrapped names. |
 | `manager` | string | optional | Account that can change the name's registry record (see Manager): the registry owner of a name with no NameWrapper state and the token holder, the owner, of a wrapped name in any wrapper state; omitted while a wrapped `.eth` second-level name is in its registrar grace period, wherever the address it copies is omitted, and on a registry child whose NameWrapper state is unknown. |
 | `registered_at` | string | optional | Start of the current registration, which renewals keep, and the ENSv1→ENSv2 migration of a name with an ENSv1 registrar lease (a `.eth` second-level name); a migrated name without one, such as a subname, starts its registration at its ENSv2 grant; decimal string of Unix seconds; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
@@ -3037,7 +3108,7 @@ Grouped resolver keys and values shared by name detail and lookup detail; see [g
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `kind` | enum `root`, `registry`, `registration`, `resolver`, `record_manager`, `account`, `registrar_controller` | always | Discriminator for this object. |
-| `detail` | object GrantScopeDetail | always | Scope-specific fields; empty for root, registry and registration. Registrar-controller is history-only. |
+| `detail` | object GrantScopeDetail | always | Scope-specific fields; empty for registry and registration. Root names its registry. Registrar-controller is history-only. |
 
 ### GrantScopeDetail
 
@@ -3047,6 +3118,7 @@ Closed union of scope detail fields. Each scope uses exactly the shape listed in
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `registry` | object ContractRef | optional | ENSv2 registry whose root resource the grant is on, only for root scope. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
 | `manager` | string | optional | Record-manager address, only for record_manager scope. |
 | `authority_kind` | enum `registry`, `registrar`, `wrapper` | optional | Account approval authority kind. |
@@ -3139,6 +3211,14 @@ Closed history payload fields. The event type and retained evidence determine wh
 <!-- openapi:object HistoryEventData -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
+| `token_id` | string | optional | Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](#ensv2-token-identity). |
+| `canonical_id` | string | optional | Decimal ENSv2 event-local identifier with its low 32 bits cleared; scoped by registry and chain, not a registration UUID. |
+| `cost` | string | optional | Unsigned decimal unsplit registration amount or renewal amount; native wei for ENSv1, raw payment-token units for ENSv2. |
+| `base_cost` | string | optional | Unsigned decimal explicitly emitted registration base amount. |
+| `premium` | string | optional | Unsigned decimal explicitly emitted registration premium. |
+| `payment_token` | object ContractRef | optional | ERC-20 contract named by an ENSv2 payment observation; explicit zero address is preserved, without inferring a currency. |
+| `referrer` | string | optional | Emitted bytes32 referrer as lowercase 0x-prefixed hex, including explicit zero. |
+| `operator` | string | optional | Lowercase operator explicitly retained on an ERC-1155 transfer. |
 | `registrant` | string | optional | Registrant the registration event named, as the on-chain event carries it. |
 | `owner` | string | optional | Owner address the event named. |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |
@@ -3700,6 +3780,7 @@ vocabularies are marked at their existing canonical tables above.
 | `RecordVersionChanged` |
 | `ReverseChanged` |
 | `PermissionChanged` |
+| `RootPermissionChanged` |
 | `PermissionScopeChanged` |
 | `RolesChanged` |
 | `EACRolesChanged` |

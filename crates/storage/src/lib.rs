@@ -30,6 +30,7 @@ mod projection_helpers;
 mod read_db;
 mod record_inventory;
 mod registries;
+mod registry_token_ids;
 mod resolution_state;
 mod resolution_support;
 mod resolver;
@@ -43,12 +44,13 @@ pub use families::name::rendered as rendered_name;
 pub use unix_seconds::UnixSeconds;
 
 pub use address_names::{
-    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,
-    AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentPage,
-    AddressNamesCurrentProvenanceSummary, AddressNamesCurrentSort, AddressNamesCurrentSortedCursor,
-    AddressNamesCurrentSortedCursorValue, AddressNamesCurrentSortedPage,
-    AddressNamesCurrentSummary, AddressRecordCoinMatch, AddressRecordCurrentEntry,
-    AddressRecordEvmEntry, AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
+    AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
+    AddressNamesCurrentCappedPage, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
+    AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressNamesPageRequest,
+    AddressRecordCoinMatch, AddressRecordCurrentEntry, AddressRecordEvmEntry,
+    AddressRecordsCurrentEvmPage, AddressRecordsCurrentPage,
     DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     ENSIP19_DEFAULT_ADDRESS_RECORD_KEY, EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, NameQuery,
     NameQueryMatch, load_address_names_current, load_address_names_current_for_relations,
@@ -56,7 +58,7 @@ pub use address_names::{
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
-    load_address_records_current_page,
+    load_address_records_current_page, load_family_address_names_capped_page,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
@@ -83,7 +85,8 @@ pub use history::{
     load_address_history_page_for_relations, load_bounded_record_attribution,
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
-    load_history_events_by_ids, load_name_history, load_name_history_head, load_name_history_page,
+    load_history_events_by_ids, load_history_payment_values, load_history_token_ids,
+    load_name_history, load_name_history_head, load_name_history_page,
     load_name_history_page_with_child_registrations, load_recorded_primary_names,
     load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
@@ -97,11 +100,11 @@ pub use history::{
     explain_registration_history_filter_for_test,
 };
 pub use identity::{
-    NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,
-    load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
-    load_surface_binding, load_surface_binding_including_noncanonical,
-    load_surface_bindings_by_logical_name_id,
+    ENS_V2_ROOT_UPSTREAM_RESOURCE, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind,
+    TokenLineage, ens_v2_registry_resource_id, ens_v2_registry_root_resource_id, load_name_surface,
+    load_name_surface_including_noncanonical, load_name_surfaces_by_logical_name_ids,
+    load_resource, load_resource_including_noncanonical, load_surface_binding,
+    load_surface_binding_including_noncanonical, load_surface_bindings_by_logical_name_id,
     load_surface_bindings_by_logical_name_id_including_noncanonical,
     load_surface_bindings_by_resource_id,
     load_surface_bindings_by_resource_id_including_noncanonical, load_token_lineage,
@@ -162,10 +165,11 @@ pub use record_inventory::{
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,
-    RegistryReferencePage, SubregistryPointer, load_registry_contract,
-    load_registry_references_page, load_registry_serving_pointer,
+    RegistryReferencePage, RegistryRootResource, SubregistryPointer, load_registry_contract,
+    load_registry_references_page, load_registry_root_resource, load_registry_serving_pointer,
     load_subregistry_pointers_for_names,
 };
+pub use registry_token_ids::load_ens_v2_token_ids;
 pub use resolution_state::{Protocol, ResolutionState, load_resolution_state_on};
 pub use resolution_support::{
     BASE_MAINNET_CHAIN_ID, BASENAMES_L1_RESOLVER_ADDRESS, BASENAMES_NAMESPACE, ENS_NAMESPACE,

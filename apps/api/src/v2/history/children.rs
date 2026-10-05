@@ -109,6 +109,11 @@ pub(super) async fn load_page(
     request: PageRequest<'_>,
     child_registrations: bool,
 ) -> V2Result<NameHistoryPageData> {
+    let bounds = request
+        .options
+        .publication_block_bounds
+        .as_ref()
+        .ok_or_else(|| V2Error::internal_error("history publication bounds are missing"))?;
     if !child_registrations {
         let page = bigname_storage::load_name_history_page(
             &state.pool,
@@ -124,11 +129,23 @@ pub(super) async fn load_page(
         )
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
+        #[cfg(test)]
+        after_page_test_hook(&state.pool).await?;
+        let context = crate::v2::history_context::load_history_row_context(
+            &state.pool,
+            &page.rows,
+            request.include,
+            bounds,
+            Some(request.interpret_redo_fence),
+        )
+        .await?;
         return Ok(NameHistoryPageData {
             rows: page
                 .rows
                 .iter()
-                .filter_map(|row| build_history_event(row, request.anchor_name, request.include))
+                .filter_map(|row| {
+                    build_history_event(row, request.anchor_name, request.include, &context)
+                })
                 .collect(),
             next_cursor: page.next_cursor,
             summary: page.summary,
@@ -147,9 +164,25 @@ pub(super) async fn load_page(
     )
     .await
     .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
+    #[cfg(test)]
+    after_page_test_hook(&state.pool).await?;
+    let events = page
+        .rows
+        .iter()
+        .map(|row| row.event.clone())
+        .collect::<Vec<_>>();
+    let context = crate::v2::history_context::load_history_row_context(
+        &state.pool,
+        &events,
+        request.include,
+        bounds,
+        Some(request.interpret_redo_fence),
+    )
+    .await?;
     let mut rows = Vec::with_capacity(page.rows.len());
     for row in &page.rows {
-        let Some(mut event) = build_history_event(&row.event, request.anchor_name, request.include)
+        let Some(mut event) =
+            build_history_event(&row.event, request.anchor_name, request.include, &context)
         else {
             continue;
         };
@@ -171,6 +204,16 @@ pub(super) async fn load_page(
         next_cursor: page.next_cursor,
         summary: page.summary,
     })
+}
+
+#[cfg(test)]
+async fn after_page_test_hook(pool: &sqlx::PgPool) -> V2Result<()> {
+    bigname_storage::history_anchor_read_test_hooks::run(
+        pool,
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to run history read test hook"))
 }
 
 #[cfg(test)]

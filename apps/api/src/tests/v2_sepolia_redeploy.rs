@@ -15,14 +15,14 @@ sol! {
     event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
 }
 
-const CHAIN: &str = "ethereum-sepolia";
-const FIRST: i64 = 11_709_000;
-const HEAD: i64 = 11_821_700;
-const SENDER: &str = "0x0000000000000000000000000000000000000043";
+pub(super) const CHAIN: &str = "ethereum-sepolia";
+pub(super) const FIRST: i64 = 11_709_000;
+pub(super) const HEAD: i64 = 11_821_700;
+pub(super) const SENDER: &str = "0x0000000000000000000000000000000000000043";
 const CLIENT_PROXY: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
 const MANAGED_PROXY: &str = "0x6d80F2172CFdEc5730fE683860C33d26fC42e6F1";
 const OLD_REGISTRY: &str = "0x657ea849311d3d5823348dded7c2aaafb3ede09e";
-const NEW_REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
+pub(super) const NEW_REGISTRY: &str = "0xd4ebcbbdf463c9c45784603db0ddd499bc44a8b4";
 const OLD_UNIVERSAL_RESOLVER: &str = "0x5d25c1d6acbb71b7a28aa7899618a3412a8303e3";
 const NEW_UNIVERSAL_RESOLVER: &str = "0x24e1d8e068620b647ca097f961a61055f4f42d72";
 
@@ -124,7 +124,7 @@ const REDEPLOYED_FAMILIES: [&str; 6] = [
     "ens_execution",
 ];
 
-fn checked_in_profile() -> std::path::PathBuf {
+pub(super) fn checked_in_profile() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/sepolia")
 }
 
@@ -183,7 +183,7 @@ fn raw_namehash(labels: &[&str]) -> B256 {
     })
 }
 
-fn token(label: &str) -> U256 {
+pub(super) fn token(label: &str) -> U256 {
     let mut token = *keccak256(label.as_bytes());
     token[28..].copy_from_slice(&0_u32.to_be_bytes());
     U256::from_be_bytes(token)
@@ -253,6 +253,15 @@ async fn seed_both_generations(pool: &PgPool) -> Result<()> {
         (11_821_695, OLD_REGISTRY, registration),
         (11_821_696, OLD_REGISTRY, resource),
     ];
+    seed_raw_facts(pool, facts).await
+}
+
+/// The canonical chain from `FIRST` to `HEAD`, one transaction and log per fact at its block,
+/// and an intake cursor at `HEAD`.
+pub(super) async fn seed_raw_facts(
+    pool: &PgPool,
+    facts: impl IntoIterator<Item = (i64, &'static str, alloy_primitives::LogData)>,
+) -> Result<()> {
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
@@ -328,7 +337,28 @@ async fn seed_both_generations(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Result<()> {
+/// Every phase completed at `HEAD` under the current content hash, as a running deployment.
+pub(super) async fn complete_phases(pool: &PgPool) -> Result<()> {
+    phase_runner::state::PhaseStore::new(pool.clone())
+        .initialize_chain(CHAIN)
+        .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed', started_at = now(), finished_at = now(),
+             current_block_number = $2, current_block_hash = $3,
+             input_content_hash = CASE WHEN phase_name IN ('interpret', 'project') THEN $4 END
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(HEAD)
+    .bind(block_hash(HEAD))
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn interpret_and_project(pool: &PgPool, mode: RunMode) -> Result<()> {
     let engine = Engine::new(pool.clone())
         .with_blocks_per_batch(std::num::NonZeroU32::new(200_000).expect("non-zero"));
     let mut resume_current = None;
@@ -383,7 +413,7 @@ async fn send(database: &TestDatabase, request: Request<Body>) -> Result<(Status
     Ok((status, read_json(response).await?))
 }
 
-async fn get(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
+pub(super) async fn get(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
     send(database, Request::builder().uri(uri).body(Body::empty())?).await
 }
 
@@ -463,22 +493,7 @@ async fn sepolia_redeploy_serves_names_only_the_dropped_registry_named_as_never_
     .await?;
     std::fs::remove_dir_all(&previous)?;
     seed_both_generations(pool).await?;
-    phase_runner::state::PhaseStore::new(pool.clone())
-        .initialize_chain(CHAIN)
-        .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET phase_status = 'completed', started_at = now(), finished_at = now(),
-             current_block_number = $2, current_block_hash = $3,
-             input_content_hash = CASE WHEN phase_name IN ('interpret', 'project') THEN $4 END
-         WHERE chain_id = $1",
-    )
-    .bind(CHAIN)
-    .bind(HEAD)
-    .bind(block_hash(HEAD))
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .execute(pool)
-    .await?;
+    complete_phases(pool).await?;
     interpret_and_project(pool, RunMode::Normal).await?;
 
     for label in DROPPED {
