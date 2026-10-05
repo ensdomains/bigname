@@ -46,7 +46,8 @@ const ROOT_ONLY_POWER: &str = "can_transfer_admin";
 
 /// The candidate keys of ENSv2 registry operators: each approved operator with every entry its
 /// approver currently owns in the approving registry, where the owner has a grant on the entry's
-/// resource. Composition applies the entry's expiry and the path-expiry drop.
+/// resource. Composition applies the entry's expiry and the path-expiry drop. `$9` is the chain
+/// of the resource a read is bound to, null on an address read.
 pub(super) const OPERATOR_CANDIDATES: &str = "SELECT approval.subject, entry.resource_id,
         concat('account:', approval.chain_id, ':ens_v2_registry:',
             approval.authority_contract, ':', approval.owner) AS scope
@@ -58,6 +59,7 @@ pub(super) const OPERATOR_CANDIDATES: &str = "SELECT approval.subject, entry.res
       AND approval.relation_kind = 'operator' AND approval.approved
       AND approval.subject <> approval.owner
       AND entry.status = 'registered' AND entry.resource_id IS NOT NULL
+      AND ($9::text IS NULL OR entry.chain_id = $9)
       AND EXISTS (SELECT 1 FROM bigname_phase.project_grant owner_grant
           WHERE owner_grant.chain_id = entry.chain_id
             AND owner_grant.resource_id = entry.resource_id

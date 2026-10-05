@@ -227,7 +227,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 58);
+    assert_eq!(actual.len(), 59);
     database.cleanup().await
 }
 

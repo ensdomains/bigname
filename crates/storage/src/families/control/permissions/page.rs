@@ -147,12 +147,19 @@ async fn page_rows(
         }
     }
     // A read bound to an ENSv2 registry token resource also lists the registry's root holders.
-    let mut token_root = None;
+    let mut token = None;
     if let Some(resource) = resource
         && let Some((publication, _)) = published(conn, &[resource]).await?.first()
-        && root_holders
     {
-        token_root = super::ens_v2::token_registry_root(conn, publication, resource).await?;
+        let root = if root_holders {
+            super::ens_v2::token_registry_root(conn, publication, resource).await?
+        } else {
+            None
+        };
+        token = Some(super::candidates::TokenRead {
+            chain_id: publication.chain_id.clone(),
+            root,
+        });
     }
     let mut after = cursor.cloned();
     let mut rows = Vec::new();
@@ -165,7 +172,7 @@ async fn page_rows(
             namespace,
             after.as_ref(),
             batch_size as i64,
-            token_root,
+            token.as_ref(),
         )
         .await?;
         let exhausted = keys.len() < batch_size;
