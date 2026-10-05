@@ -836,6 +836,22 @@ CREATE INDEX IF NOT EXISTS normalized_events_address_registry_owner_match_idx
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+-- Address history also lists the registry root role changes made to the address: the
+-- RootPermissionChanged rows whose subject is the address, which name no name or per-address
+-- resource. The expression and predicate must stay identical to the arm in
+-- crates/storage/src/history/filters.rs and to
+-- migrations/20261005120000_normalized_events_address_root_permission_idx.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_address_root_permission_idx
+    ON normalized_events (
+        lower(after_state ->> 'subject'),
+        block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE event_kind = 'RootPermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,
@@ -1008,3 +1024,13 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_addressed_node_i
       AND COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node') IS NOT NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+-- API serving: latest published ENSv2 token per registration resource.
+CREATE INDEX IF NOT EXISTS normalized_events_registry_token_idx
+ON normalized_events
+    (chain_id, resource_id, block_number DESC, transaction_index DESC, log_index DESC)
+WHERE source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+  AND event_kind IN ('TokenResourceLinked', 'TokenRegenerated')
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized')
+  AND resource_id IS NOT NULL AND block_number IS NOT NULL
+  AND transaction_index IS NOT NULL AND log_index IS NOT NULL;

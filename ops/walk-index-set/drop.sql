@@ -14,7 +14,7 @@ SET statement_timeout = '1h';
 -- progress or holds a live publication, which it commits before it records progress, and
 -- its Interpret is not redoing. The check runs before and after the drops and takes no phase
 -- lock, so run the script as the walk or redo starts. The one-hour timeout bounds each drop,
--- not the script, so allow for all 33 before Interpret can complete.
+-- not the script, so allow for all 35 before Interpret can complete.
 CREATE OR REPLACE FUNCTION pg_temp.walk_index_served_chains() RETURNS text
 LANGUAGE sql STABLE AS $$
     SELECT string_agg(projected.chain_id, ', ' ORDER BY projected.chain_id)
@@ -41,6 +41,7 @@ $$;
 CREATE OR REPLACE FUNCTION pg_temp.walk_index_dropped() RETURNS text[]
 LANGUAGE sql IMMUTABLE AS $$
     SELECT ARRAY[
+        'normalized_events_registry_token_idx',
         'normalized_events_v1_subregistry_after_node_scope_idx',
         'normalized_events_v1_subregistry_after_child_scope_idx',
         'normalized_events_v1_subregistry_before_node_scope_idx',
@@ -71,6 +72,7 @@ LANGUAGE sql IMMUTABLE AS $$
         'normalized_events_address_registrant_match_idx',
         'normalized_events_address_token_holder_match_idx',
         'normalized_events_address_registry_owner_match_idx',
+        'normalized_events_address_root_permission_idx',
         'normalized_events_project_node_history_idx',
         'normalized_events_project_v1_pointer_node_idx',
         'normalized_events_project_v1_pointer_addressed_node_idx'
@@ -113,6 +115,7 @@ END
 $$;
 
 \set ON_ERROR_STOP off
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_registry_token_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_after_node_scope_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_after_child_scope_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_v1_subregistry_before_node_scope_idx;
@@ -143,6 +146,7 @@ DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_primar
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_registrant_match_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_token_holder_match_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_registry_owner_match_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_address_root_permission_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_node_history_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_v1_pointer_node_idx;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_project_v1_pointer_addressed_node_idx;

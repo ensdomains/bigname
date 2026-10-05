@@ -43,6 +43,115 @@ fn row(event_kind: &str, before: Value, after: Value) -> StorageHistoryEvent {
 }
 
 #[test]
+fn history_payment_values_preserve_precision_zero_and_source_meaning() {
+    let maximum = alloy_primitives::U256::MAX.to_string();
+    let mut event = row(
+        "RegistrationGranted",
+        json!({}),
+        json!({
+            "source_event":"NameRegistered","cost":maximum,"referrer":format!("0x{}","0".repeat(64)),
+        }),
+    );
+    event.source_family = "ens_v1_registrar_l1".into();
+    let data = row_detail(&event, HistoryEventType::Registration).data;
+    assert_eq!(data["cost"], maximum);
+    assert_eq!(data["referrer"], format!("0x{}", "0".repeat(64)));
+    assert!(!data.contains_key("base_cost"));
+    event.after_state = json!({"source_event":"NameRegistered","base_cost":"000123","premium":"0"});
+    let data = row_detail(&event, HistoryEventType::Registration).data;
+    assert_eq!(data["base_cost"], "123");
+    assert_eq!(data["premium"], "0");
+    assert!(!data.contains_key("cost"));
+    event.after_state["source_event"] = json!("NameRenewed");
+    assert!(
+        !row_detail(&event, HistoryEventType::Registration)
+            .data
+            .contains_key("base_cost")
+    );
+    event.source_family = "ens_v2_registrar_l1".into();
+    event.event_kind = "RegistrationRenewed".into();
+    event.after_state = json!({"source_event":"NameRenewed","amount":"0","base":"55",
+        "payment_token":"0x0000000000000000000000000000000000000000"});
+    let data = row_detail(&event, HistoryEventType::Renewal).data;
+    assert_eq!(data["cost"], "0");
+    assert_eq!(
+        data["payment_token"]["address"],
+        "0x0000000000000000000000000000000000000000"
+    );
+    event.after_state["amount"] = json!("invalid");
+    assert!(
+        !row_detail(&event, HistoryEventType::Renewal)
+            .data
+            .contains_key("cost")
+    );
+    event.after_state.as_object_mut().unwrap().remove("amount");
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Renewal).data["cost"],
+        "55"
+    );
+    event.source_family = "basenames_base_registrar".into();
+    assert!(
+        !row_detail(&event, HistoryEventType::Renewal)
+            .data
+            .contains_key("cost")
+    );
+}
+
+#[test]
+fn history_canonical_id_and_operator_use_only_valid_event_evidence() {
+    let mut event = row(
+        "PermissionChanged",
+        json!({}),
+        json!({"upstream_resource":"0x100000002"}),
+    );
+    event.source_family = "ens_v2_registry_l1".into();
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Permission).data["canonical_id"],
+        "4294967296"
+    );
+    event.after_state["token_id"] = json!("0x100000009");
+    event.after_state["labelhash"] = json!("0x1ffffffff");
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Permission).data["canonical_id"],
+        "4294967296"
+    );
+    event.after_state["token_id"] = json!("0x200000009");
+    assert!(
+        !row_detail(&event, HistoryEventType::Permission)
+            .data
+            .contains_key("canonical_id")
+    );
+    event.after_state["token_id"] = json!("invalid");
+    assert!(
+        !row_detail(&event, HistoryEventType::Permission)
+            .data
+            .contains_key("canonical_id")
+    );
+    event.after_state = json!({"upstream_resource":"0x1","root_resource":false});
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Permission).data["canonical_id"],
+        "0"
+    );
+    event.after_state["root_resource"] = json!(true);
+    assert!(
+        !row_detail(&event, HistoryEventType::Permission)
+            .data
+            .contains_key("canonical_id")
+    );
+    event.after_state = json!({"operator":"0x00000000000000000000000000000000000000AA"});
+    assert_eq!(
+        row_detail(&event, HistoryEventType::Transfer).data["operator"],
+        "0x00000000000000000000000000000000000000aa"
+    );
+    event.source_family = "ens_v1_registrar_l1".into();
+    assert!(
+        !row_detail(&event, HistoryEventType::Transfer)
+            .data
+            .contains_key("operator")
+    );
+}
+
+#[test]
 fn expiry_timestamps_preserve_finite_words_and_contextual_nulls() {
     for expiry in [0_u64, 253_402_300_800, 9_007_199_254_740_993, u64::MAX] {
         let event = row("RegistrationRenewed", json!({}), json!({"expiry": expiry}));
@@ -481,6 +590,41 @@ fn permission_rows_derive_changes_only_from_a_logged_previous_set() {
             "address": "0x00000000000000000000000000000000000000dd",
             "grant_scope": {"kind": "registration", "detail": {}},
             "powers": ["registration_control"],
+        })
+    );
+}
+
+/// A registry root role change is a `permission` row in the root scope. Its log states the
+/// account's old roles, so the row lists what the change granted and revoked.
+#[test]
+fn root_role_changes_render_as_permission_rows_with_logged_changes() {
+    assert_eq!(
+        super::super::history_event_type("RootPermissionChanged"),
+        Some(HistoryEventType::Permission)
+    );
+    let subject = "0x00000000000000000000000000000000000000DD";
+    let detail = row_detail(
+        &row(
+            "RootPermissionChanged",
+            json!({"subject": subject, "role_bitmap": "0x10001",
+                "effective_powers": ["registrar", "renew"]}),
+            json!({"subject": subject, "role_bitmap": "0x10010", "old_role_bitmap": "0x10001",
+                "effective_powers": ["register_reserved", "renew"], "root_resource": true,
+                "scope": {"kind": "registry_root", "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x00000000000000000000000000000000000000aa"}}),
+        ),
+        HistoryEventType::Permission,
+    );
+    let mut data = Value::Object(detail.data);
+    assert_eq!(data["grant_scope"]["kind"], "root", "{data}");
+    data.as_object_mut().map(|data| data.remove("grant_scope"));
+    assert_eq!(
+        data,
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "powers": ["register_reserved", "renew"],
+            "added_powers": ["register_reserved"],
+            "removed_powers": ["registrar"],
         })
     );
 }

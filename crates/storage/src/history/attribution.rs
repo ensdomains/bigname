@@ -105,12 +105,7 @@ impl AttributedRecords {
 pub(in crate::history) fn selector_resource_ids(selectors: &[HistorySelector]) -> Vec<Uuid> {
     selectors
         .iter()
-        .flat_map(|selector| match selector {
-            HistorySelector::Resources(resource_ids)
-            | HistorySelector::LogicalNamesOrResources { resource_ids, .. }
-            | HistorySelector::ProductRegistration { resource_ids, .. } => resource_ids.as_slice(),
-            HistorySelector::LogicalNames(_) | HistorySelector::None => &[],
-        })
+        .flat_map(HistorySelector::resource_ids)
         .copied()
         .collect::<BTreeSet<_>>()
         .into_iter()

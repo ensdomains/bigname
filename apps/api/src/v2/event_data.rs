@@ -1,8 +1,8 @@
 //! Row expansions for the history collections: `include=data` payloads and the
 //! `include=raw` storage kind.
 //!
-//! With `include=data`, each friendly `type` exposes only the fields its stored
-//! normalized event actually carries, translated into dictionary vocabulary
+//! With `include=data`, each friendly `type` exposes retained fields and bounded corresponding
+//! token/payment observations, translated into dictionary vocabulary
 //! (`expires_at`, `resolver: {chain_id, address}`, `powers`, ...). Absent or
 //! null source fields are omitted. Classified no-expiry values instead carry `null` plus
 //! `expires_at_reason`. The raw
@@ -93,6 +93,10 @@ fn build_event_data(
     let after = &row.after_state;
     let before = &row.before_state;
     let mut data = Map::new();
+    if let Some(token_id) = context.token_id(row) {
+        data.insert("token_id".to_owned(), Value::String(token_id.to_owned()));
+    }
+    super::history_values::append(&mut data, row, event_type, context);
     match event_type {
         HistoryEventType::Registration => {
             insert(&mut data, "registrant", address_field(after, "registrant"));
@@ -315,7 +319,11 @@ fn difference(left: &Value, right: &Value) -> Value {
 fn grant_scope(row: &StorageHistoryEvent) -> Option<Value> {
     let scope = row.after_state.get("scope")?;
     let scope = match string_field(scope, "kind")?.as_str() {
-        "root" | "registry_root" => PermissionScope::Root,
+        "root" | "registry_root" => PermissionScope::Root {
+            chain_id: string_field(scope, "chain_id").or_else(|| row.chain_id.clone())?,
+            registry_address: string_field(scope, "registry_address")
+                .or_else(|| string_field(&row.raw_fact_ref, "emitting_address"))?,
+        },
         "registry" => PermissionScope::Registry,
         "resource" => PermissionScope::Resource,
         "registrar_controller" => {

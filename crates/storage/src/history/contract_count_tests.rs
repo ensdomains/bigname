@@ -43,6 +43,7 @@ const PRODUCT_KINDS: &[&str] = &[
     "ResolverChanged",
     "ReverseChanged",
     "RolesChanged",
+    "RootPermissionChanged",
     "SubregistryChanged",
     "TokenControlTransferred",
 ];
