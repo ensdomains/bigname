@@ -1340,7 +1340,7 @@ COMMENT ON TABLE project_node_record_value IS
 COMMENT ON COLUMN project_node_record_value.hydration_limit IS
     'This value is the largest Multicall3 aggregate hydration may next send the text selector in, left by a read whose aggregate failed as a whole; null when the last read answered the selector or none failed. Scheduling state only.';
 COMMENT ON COLUMN project_node_record_value.hydration_failures IS
-    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
+    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN project_node_record_value.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_node_record_value.resolver_address IS
@@ -1906,7 +1906,7 @@ COMMENT ON TABLE project_reverse_tuple IS
 COMMENT ON COLUMN project_reverse_tuple.attempt_limit IS
     'This value is the largest Multicall3 aggregate hydration may next send the tuple in, left by a read whose aggregate failed as a whole; null when the last read answered the tuple or none failed. Scheduling state only.';
 COMMENT ON COLUMN project_reverse_tuple.attempt_failures IS
-    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
+    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN project_reverse_tuple.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_reverse_tuple.coin_type IS
@@ -2327,7 +2327,7 @@ CREATE TABLE IF NOT EXISTS project_text_hydration_work (
 COMMENT ON TABLE project_text_hydration_work IS
     'Project-owned derived index of text selectors needing hydration or overlay clearing. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
 COMMENT ON COLUMN project_text_hydration_work.hydration_failures IS
-    'This value copies project_node_record_value.hydration_failures. Nothing orders or filters by it yet.';
+    'This value copies project_node_record_value.hydration_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 CREATE INDEX IF NOT EXISTS project_text_hydration_work_order_idx
     ON project_text_hydration_work (chain_id, hydrated_at_block NULLS FIRST,
         resolver_address, arm, arm_identity, record_key);
@@ -2347,7 +2347,7 @@ CREATE TABLE IF NOT EXISTS project_reverse_hydration_work (
 COMMENT ON TABLE project_reverse_hydration_work IS
     'Project-owned derived index of continuously refreshed reverse tuples and obsolete overlays to clear. Rebuilt from affected source keys after publication and undo; contains no provider responses.';
 COMMENT ON COLUMN project_reverse_hydration_work.attempt_failures IS
-    'This value copies project_reverse_tuple.attempt_failures. Nothing orders or filters by it yet.';
+    'This value copies project_reverse_tuple.attempt_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 CREATE INDEX IF NOT EXISTS project_reverse_hydration_work_active_idx
     ON project_reverse_hydration_work (chain_id, attempt_ordinal NULLS FIRST,
         successful_at_block NULLS FIRST, address) WHERE eligible;

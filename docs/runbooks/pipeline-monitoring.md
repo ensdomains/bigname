@@ -393,6 +393,13 @@ every time and is tried again, alone, whenever its turn comes. Do not
 judge progress by pending text work alone: reverse tuples stay in rotation
 after a successful read.
 
+A failed child response waits 7,200 blocks before another hydration read unless
+fresh selector evidence resets its delay. A stable pending count during that
+wait is expected; the row's original attempt stamp must not advance on every
+head. Old eligible work has 63 reserved text slots and a rounded-up quarter of
+each kind's call budget. Outer failures remain distinct and follow the split
+or unobserved policy above.
+
 The run gauges retain the newest outcome until the next; anomaly and hydration
 counters add all reported outcomes. Pending single-block observations are bounded to 65,536
 per chain until the metrics task drains them. Cancellation can leave an

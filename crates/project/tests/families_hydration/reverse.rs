@@ -191,3 +191,34 @@ pub async fn work_index(fixture: &Fixture) -> Result<(Vec<Value>, Vec<Value>)> {
     .await?;
     Ok((index, derived))
 }
+
+/// Exercise the production queue selection at a candidate retry height without publishing
+/// thousands of empty fixture blocks. Head eligibility remains covered by the Follow tests.
+pub async fn selected_addresses(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
+    let sql = include_str!("../../src/families/hydrate/reverse.sql").replace(
+        "{pointer_emission_ordinal}",
+        &bigname_storage::families::position::emission_ordinal_sql(
+            "p.event_identity",
+            "p.transaction_index",
+            "p.log_index",
+        ),
+    );
+    let rows: Vec<Value> = sqlx::query_scalar(&sql)
+        .bind(CHAIN)
+        .bind(block)
+        .bind(super::support::hash(block))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(json!([]))
+        .bind(vec![SILENT])
+        .bind(json!([]))
+        .bind(false)
+        .fetch_all(&fixture.pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row["address"].as_str().unwrap().to_owned())
+        .collect())
+}

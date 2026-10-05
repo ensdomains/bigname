@@ -4,17 +4,38 @@
 -- Keyed lateral dependency probes keep custom and generic plans bounded by those candidates.
 WITH changed_keys AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $8)
+), waiting_keys AS MATERIALIZED (
+    SELECT q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key
+    FROM project_text_hydration_work q WHERE q.chain_id = $1 AND NOT $9
+      AND NOT EXISTS (SELECT 1 FROM changed_keys c
+          WHERE (c.chain_id, c.resolver_address, c.arm, c.arm_identity, c.record_key) =
+              (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key))
+      AND (COALESCE(q.hydration_failures, 0) = 0 OR q.hydrated_at_block IS NULL
+        OR q.hydrated_at_block <= $2 - 7200 OR EXISTS (
+            SELECT 1 FROM project_node_record_value v
+            WHERE (v.chain_id, v.resolver_address, v.arm, v.arm_identity, v.record_key) =
+                (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key)
+              AND v.hydration_limit IS NOT NULL))
+      AND q.hydrated_at_block IS NOT NULL
+    ORDER BY q.hydrated_at_block NULLS FIRST, q.resolver_address, q.arm, q.arm_identity, q.record_key
+    LIMIT ($7::bigint + 3) / 4
 ), rolling_keys AS MATERIALIZED (
     SELECT q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key
     FROM project_text_hydration_work q WHERE q.chain_id = $1 AND NOT $9
       AND NOT EXISTS (SELECT 1 FROM changed_keys c
           WHERE (c.chain_id, c.resolver_address, c.arm, c.arm_identity, c.record_key) =
               (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key))
+      AND (COALESCE(q.hydration_failures, 0) = 0 OR q.hydrated_at_block IS NULL
+        OR q.hydrated_at_block <= $2 - 7200 OR EXISTS (
+            SELECT 1 FROM project_node_record_value v
+            WHERE (v.chain_id, v.resolver_address, v.arm, v.arm_identity, v.record_key) =
+                (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key)
+              AND v.hydration_limit IS NOT NULL))
     ORDER BY q.hydrated_at_block NULLS FIRST, q.resolver_address, q.arm, q.arm_identity, q.record_key
     LIMIT $7
 ), candidate_keys AS (
     SELECT chain_id, resolver_address, arm, arm_identity, record_key FROM changed_keys
-    UNION SELECT * FROM rolling_keys
+    UNION SELECT * FROM rolling_keys UNION SELECT * FROM waiting_keys
 ), value_changes AS (
     SELECT * FROM jsonb_populate_recordset(NULL::project_node_record_value, $3)
 ), record_values AS (
@@ -161,13 +182,23 @@ WITH changed_keys AS (
             AND COALESCE(hydrated_value -> 'source_position', 'null') = _source_position
             AND COALESCE(hydrated_value -> 'admission', 'null') = _admission)
         ELSE COALESCE(hydrated_value <> 'null', false) END
+), ready AS (
+    SELECT work.*, (NOT _delta AND hydrated_at_block IS NOT NULL) AS _waiting,
+        EXISTS (SELECT 1 FROM waiting_keys q
+            WHERE (q.chain_id, q.resolver_address, q.arm, q.arm_identity, q.record_key) =
+                (work.chain_id, work.resolver_address, work.arm, work.arm_identity, work.record_key))
+            AS _reserved
+    FROM work
+    WHERE $9 OR NOT _active OR _delta OR hydration_limit IS NOT NULL
+        OR COALESCE(hydration_failures, 0) = 0 OR hydrated_at_block IS NULL
+        OR hydrated_at_block <= $2 - 7200
 )
--- The block's share: its own changes first, then never-read selectors, then the oldest attempts,
--- each in key order.
-SELECT to_jsonb(work.*) || jsonb_build_object('_selector', jsonb_build_object(
+-- Reserve ceil(250 / 4) slots for the oldest stamped eligible work, then fill by the usual
+-- changed/never-read/oldest order. A missing old share is available to other work.
+SELECT to_jsonb(ready.*) || jsonb_build_object('_selector', jsonb_build_object(
     'source_position', _source_position, 'version_position', _version_position,
     'admission', _admission, 'namehash', _namehash))
-FROM work
-ORDER BY NOT _delta, hydrated_at_block NULLS FIRST,
+FROM ready
+ORDER BY NOT _reserved, NOT _delta, hydrated_at_block NULLS FIRST,
     resolver_address, arm, arm_identity, record_key
 LIMIT CASE WHEN $9 THEN NULL ELSE $7 END

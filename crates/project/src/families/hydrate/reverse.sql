@@ -9,6 +9,11 @@ WITH changed_keys AS (
     WHERE q.chain_id = $1 AND q.eligible AND NOT $11
       AND NOT EXISTS (SELECT 1 FROM changed_keys c
           WHERE (c.address, c.coin_type, c.namespace) = (q.address, q.coin_type, q.namespace))
+      AND (COALESCE(q.attempt_failures, 0) = 0 OR q.attempt_block IS NULL
+        OR q.attempt_block <= $2 - 7200 OR EXISTS (
+            SELECT 1 FROM project_reverse_tuple t
+            WHERE (t.address, t.coin_type, t.namespace) = (q.address, q.coin_type, q.namespace)
+              AND t.attempt_limit IS NOT NULL))
     ORDER BY q.attempt_ordinal NULLS FIRST, q.successful_at_block NULLS FIRST, q.address LIMIT 250
 ), stale_keys AS MATERIALIZED (
     SELECT q.address, q.coin_type, q.namespace
@@ -69,6 +74,10 @@ WITH changed_keys AS (
            COALESCE((t.reverse_position->>'block_number')::bigint = $2
                OR (t.claim_position->>'block_number')::bigint = $2
                OR pointer.block_number = $2 OR node.block_number = $2, false) AS delta,
+           t.attempt_block IS NOT NULL AND (COALESCE(t.block_number > t.attempt_block
+               OR node.block_number > t.attempt_block, false)
+               OR t.reverse_node IS DISTINCT FROM t.baseline ->> 'reverse_node'
+               OR pointer.resolver_address IS DISTINCT FROM t.baseline ->> 'resolver_address') AS _reset,
            jsonb_build_object(
                'reverse_node', t.reverse_node,
                'resolver_address', pointer.resolver_address,
@@ -112,6 +121,9 @@ WITH changed_keys AS (
 ), active AS (
     SELECT * FROM selected WHERE eligible
         AND NOT COALESCE(attempt_block = $2 AND attempt_hash = $3, false)
+        AND (attempt_limit IS NOT NULL
+            OR COALESCE(attempt_failures, 0) = 0 OR attempt_block IS NULL
+            OR attempt_block <= $2 - 7200)
 ), selected_priority AS (
     SELECT attempt_ordinal FROM active WHERE NOT delta
     ORDER BY attempt_ordinal NULLS FIRST,
@@ -134,4 +146,5 @@ WITH changed_keys AS (
 SELECT payload FROM (
     SELECT address, coin_type, namespace, to_jsonb(work) AS payload FROM work WHERE NOT $11
     UNION ALL SELECT address, coin_type, namespace, to_jsonb(selected) FROM selected WHERE $11
-) result ORDER BY address, coin_type, namespace
+) result ORDER BY (payload ->> 'delta')::boolean,
+    (payload ->> 'attempt_ordinal')::bigint NULLS FIRST, address, coin_type, namespace

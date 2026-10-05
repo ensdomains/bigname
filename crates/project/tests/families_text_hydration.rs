@@ -226,6 +226,8 @@ async fn text_follow_hydrates_new_writes_retries_failures_and_preserves_empty_re
         ),
         (0, 1, 1)
     );
+    // Fresh on-chain evidence clears the failed-child delay before a successful empty read.
+    text(&fixture, 5, None).await?;
     rpc.answer(5, Some(""));
     run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
     assert_eq!(entry(&fixture).await?["status"], "not_found");
@@ -238,7 +240,7 @@ async fn text_follow_hydrates_new_writes_retries_failures_and_preserves_empty_re
     .await?;
     assert!(
         journal["hydrated_value"].is_null(),
-        "empty-block retry is journalled"
+        "retry after new evidence is journalled"
     );
     let calls = rpc.calls().len();
     run(&fixture, 5, FamilyMode::Redo { from: 5, to: 5 }, &rpc).await?;
@@ -395,27 +397,26 @@ async fn text_rebuild_backlog_rolls_over_blocks_under_the_limit_with_changes_fir
     let mut expected = range(250, 499);
     expected.push("zz".to_owned());
     assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
-    // Then the rest of the never-read keys, then the oldest failed attempts.
+    // The remaining never-read keys drain; the 250 failed children keep their original stamp.
     run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
-    let mut expected = range(0, 149);
-    expected.extend(range(499, BACKLOG));
-    assert_eq!(keys_at(&attempts(&fixture).await?, 4), expected);
-    run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
-    assert_eq!(keys_at(&attempts(&fixture).await?, 5), range(149, 250));
-    run(&fixture, 6, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(keys_at(&attempts(&fixture).await?, 4), range(499, BACKLOG));
+    for block in [5, 6] {
+        let outcome = run(&fixture, block, FamilyMode::Normal, &rpc).await?;
+        assert_eq!(outcome.hydration.text.rpc_calls, 0);
+    }
     let rows = attempts(&fixture).await?;
     assert_eq!(rows.len(), BACKLOG + 1);
-    assert!(
-        rows.iter()
-            .all(|(_, _, status)| status.as_deref() == Some("success")),
-        "the whole backlog is hydrated"
-    );
-    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(keys_at(&rows, 2), range(0, 250));
     assert_eq!(
-        per_call,
-        vec![250, 250, 250, 101],
-        "one bounded batch per block, none once the backlog is drained"
+        rows.iter()
+            .filter(|(_, _, status)| status.is_some())
+            .count(),
+        351
     );
+    assert!(selected(&fixture, 7201).await?.is_empty());
+    assert_eq!(selected(&fixture, 7202).await?, range(0, 250));
+    let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
+    assert_eq!(per_call, vec![250, 250, 101]);
     fixture.cleanup().await
 }
 
@@ -534,7 +535,7 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
         json!({"hydrated_value": null, "hydrated_at_block": null}),
     )
     .await?;
-    // Failed reads at block 1. They sort first by key, yet wait behind every never-read selector.
+    // Old stamped work, including legacy rows without failure metadata, gets reserved slots.
     copies(
         &fixture,
         "a",
@@ -560,18 +561,17 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
 
     sync_text_work(&fixture, 2).await?;
 
-    // The query itself returns only the block's share: never-read selectors, in key order.
-    assert_eq!(selected(&fixture, 2).await?, keys("n", 1, 250));
+    // Both the old stamped rows and the orphaned overlays get the reserved slots first.
+    let mut first = keys("a", 1, 5);
+    first.extend(keys("r", 1, 5));
+    first.extend(keys("n", 1, 240));
+    assert_eq!(selected(&fixture, 2).await?, first);
     rpc.answer(2, Some("fresh"));
     run(&fixture, 2, FamilyMode::Normal, &rpc).await?;
-    assert_eq!(keys_at(&attempts(&fixture).await?, 2), keys("n", 1, 250));
-    // Then the rest of the never-read selectors, then the older attempts, failed or orphaned.
-    let mut expected = keys("a", 1, 5);
-    expected.extend(keys("n", 251, 300));
-    expected.extend(keys("r", 1, 5));
-    let mut share = selected(&fixture, 3).await?;
-    share.sort();
-    assert_eq!(share, expected);
+    first.sort();
+    assert_eq!(keys_at(&attempts(&fixture).await?, 2), first);
+    let expected = keys("n", 241, 300);
+    assert_eq!(selected(&fixture, 3).await?, expected);
     rpc.answer(3, Some("fresh"));
     run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
     assert_eq!(keys_at(&attempts(&fixture).await?, 3), expected);
@@ -579,7 +579,7 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
     assert!(selected(&fixture, 4).await?.is_empty());
     run(&fixture, 4, FamilyMode::Normal, &rpc).await?;
     let per_call: Vec<usize> = rpc.calls().into_iter().map(|(_, count)| count).collect();
-    assert_eq!(per_call, vec![1, 250, 60]);
+    assert_eq!(per_call, vec![1, 10, 240, 60]);
     let rows = attempts(&fixture).await?;
     assert_eq!(rows.len(), 1 + 3000 + 300 + 5 + 5);
     assert!(
@@ -922,6 +922,12 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .fetch_one(&fixture.pool)
         .await?;
     assert_eq!(markers, 0);
+    // The new binary requires the scheduling migration after the historical work-table install.
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20261005180000_project_hydration_schedule.sql"
+    ))
+    .execute(&fixture.pool)
+    .await?;
     run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
     assert_eq!(
         pending_text(&fixture).await?,
@@ -1368,3 +1374,6 @@ async fn undo_restores_a_deferred_text_selector_and_its_work_entry() -> Result<(
     assert_eq!(fixture.rows("project_text_hydration_work").await?, work);
     fixture.cleanup().await
 }
+
+#[path = "families_hydration/text_schedule.rs"]
+mod schedule;

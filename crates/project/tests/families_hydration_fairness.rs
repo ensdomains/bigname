@@ -214,3 +214,92 @@ async fn a_deferred_tuple_is_restored_by_undo_and_replayed_without_the_endpoint(
     assert_eq!((index, &derived), (index_before, &derived));
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn continuing_nineteen_changed_singletons_cannot_starve_the_rolling_reverse_page()
+-> Result<()> {
+    let (fixture, rpc) = fixture("family_hydration_arrivals", 4).await?;
+    for index in 1..=269 {
+        seed(&fixture, 1, index).await?;
+    }
+    run(&fixture, 1, FamilyMode::Rebuild, &rpc).await?;
+    // The first nineteen are the source state of already-isolated outer failures. They have
+    // never observed a name, so no observation height is fabricated for this scheduling state.
+    sqlx::query(
+        "UPDATE project_reverse_tuple SET attempt_limit=1, attempt_failures=1 WHERE address <= $1",
+    )
+    .bind(reverse::address(19))
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query("UPDATE project_reverse_hydration_work SET attempt_failures=1 WHERE address <= $1")
+        .bind(reverse::address(19))
+        .execute(&fixture.pool)
+        .await?;
+    for index in 1..=19 {
+        rpc.poison(&node(index));
+    }
+    for block in 2..=4 {
+        for index in 1..=19 {
+            seed(&fixture, block, index).await?;
+        }
+        let outcome = run(&fixture, block, FamilyMode::Normal, &rpc).await?;
+        assert!(outcome.hydration.reverse.rpc_calls <= 18);
+        let read: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_reverse_tuple WHERE address > $1 AND attempt_block=$2 AND hydrated_name IS NOT NULL"
+        ).bind(reverse::address(19)).bind(block).fetch_one(&fixture.pool).await?;
+        assert_eq!(
+            read, 250,
+            "continuing changed work cannot take the rolling page's service"
+        );
+        assert_eq!(sizes(&rpc, block).first(), Some(&250));
+    }
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn failed_reverse_children_cool_until_expiry_or_fresh_selector_evidence() -> Result<()> {
+    let (fixture, rpc) = fixture("family_hydration_retry_delay", 6).await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    for index in [1, 2] {
+        seed(&fixture, 1, index).await?;
+    }
+    rpc.fail_call(&node(2));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    let failed = tuple(&fixture, 2).await?;
+    assert!(failed["hydrated_name"].is_null());
+    assert_eq!(failed["attempt_failures"], 1);
+    rpc.clear_faults();
+    for block in [2, 3] {
+        let outcome = run(&fixture, block, FamilyMode::Normal, &rpc).await?;
+        assert_eq!(outcome.hydration.reverse.answered, 1);
+        assert_eq!(tuple(&fixture, 2).await?, failed);
+    }
+    assert!(
+        !reverse::selected_addresses(&fixture, 7200)
+            .await?
+            .contains(&reverse::address(2))
+    );
+    assert!(
+        reverse::selected_addresses(&fixture, 7201)
+            .await?
+            .contains(&reverse::address(2))
+    );
+    let before = fixture.rows("project_reverse_tuple").await?;
+    let (work, derived) = work_index(&fixture).await?;
+    assert_eq!(work, derived);
+    // A fresh claim is published while catching up; only the later head performs the reads.
+    seed(&fixture, 4, 2).await?;
+    let outcome = run(&fixture, 5, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(outcome.hydration.passes, 1);
+    let changed = tuple(&fixture, 2).await?;
+    assert_eq!(changed["hydrated_name"], "block5.eth");
+    assert!(changed["attempt_failures"].is_null());
+    bigname_project::families::undo_to(&fixture.pool, CHAIN, 3).await?;
+    assert_eq!(fixture.rows("project_reverse_tuple").await?, before);
+    assert_eq!(work_index(&fixture).await?, (work.clone(), work));
+    let calls = rpc.calls();
+    run(&fixture, 5, FamilyMode::Redo { from: 4, to: 5 }, &rpc).await?;
+    assert_eq!(rpc.calls(), calls);
+    assert!(tuple(&fixture, 2).await?["attempt_failures"].is_null());
+    fixture.cleanup().await
+}

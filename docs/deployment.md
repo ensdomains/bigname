@@ -2983,10 +2983,10 @@ without a default, so no row is rewritten and no family is reset; on an empty
 schema-migration database it is a no-op and `phase-runner init-schema`
 installs the same columns. It takes the family marker table in `EXCLUSIVE`
 mode until it commits. Apply it with the runner stopped and before the new
-binary starts: the family writer stores rows by column name, so the new binary
-on a database without the columns silently drops the values, and every head
-then starts splitting a failed aggregate from its full size again. A previous
-binary on the new schema leaves the columns null, which reads as no limit.
+binary starts: hydration selection now reads these columns directly and fails
+if they are absent. The generic family writer also cannot persist scheduling
+fields missing from the schema. A previous binary on the new schema leaves
+the columns null, which reads as no limit.
 
 Behavior changes on `ethereum-mainnet`, the only hydrated chain
 ([follow-only hydration](projections.md#follow-only-hydration)):
@@ -3004,6 +3004,11 @@ Behavior changes on `ethereum-mainnet`, the only hydrated chain
   other calls at the block, the failed batch is split, within a call and time
   limit per block, and what is still unread records only where to resume. A
   call that fails inside an answered aggregate still clears its value.
+- Old waiting work receives 63 of the 250 text selection slots and a rounded-up
+  quarter of each kind's call budget, before new arrivals can use that time.
+  Unused shares stay available. A failed child response waits 7,200 blocks
+  before retry; fresh selector evidence clears obsolete scheduling state.
+  Outer failures keep the separate non-observation and split policy above.
 - Seven hydration metrics and two `warn` log lines are new
   ([Project family work](runbooks/pipeline-monitoring.md#project-family-work)).
   The hydration HTTP client now has a 5-second connect and 10-second total

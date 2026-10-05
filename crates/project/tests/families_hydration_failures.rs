@@ -107,7 +107,8 @@ async fn an_endpoint_that_does_not_serve_the_head_writes_no_hydration_and_logs_t
     let logs = String::from_utf8(logs.0.lock().unwrap().clone())?;
     assert!(logs.contains("a hydration RPC batch failed"), "{logs}");
     assert!(logs.contains("kind=\"reverse\""), "{logs}");
-    assert!(logs.contains("selectors=2"), "{logs}");
+    // The reserved rolling tuple is attempted before the new tuple; unavailability stops both.
+    assert!(logs.contains("selectors=1"), "{logs}");
     assert!(logs.contains("does not serve this block"), "{logs}");
 
     // A second failing head costs one aggregate and one probe again, with no retry fan-out. It
@@ -163,7 +164,9 @@ async fn a_failed_call_inside_an_answered_aggregate_clears_only_its_own_tuple() 
     );
     assert_eq!(outcome.hydration.probes, 0);
 
-    // A successful empty answer is an answer: it replaces the name it finds.
+    // Fresh reverse evidence clears the failed child's delay. A successful empty answer then
+    // replaces both names, preserving the distinction from failure.
+    seed(&fixture, 3, 2).await?;
     rpc.answer(3, Some(""));
     run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
     for index in [1, 2] {

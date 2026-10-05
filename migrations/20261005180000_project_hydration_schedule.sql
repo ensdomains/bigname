@@ -6,10 +6,10 @@
 -- columns.
 --
 -- Stop the family writer and apply this before starting the release that writes the columns.
--- The writer stores rows by column name, so the new writer run against a schema without the
--- columns silently drops the values it has no column for: every head would start splitting a
--- failed aggregate from its full size again. An older writer run against the new schema leaves
--- the columns null, which reads as no limit and no failure.
+-- Hydration selection reads the columns directly and fails if they are absent. The generic
+-- column-name writer also cannot persist fields missing from the table's composite type.
+-- An older writer run against the new schema leaves the columns null, which reads as no limit
+-- and no failure.
 --
 -- The columns are nullable and added without a default, so no row is rewritten and no family
 -- is reset: a null limit is the full aggregate size. The family marker table is taken in
@@ -36,14 +36,14 @@ ALTER TABLE bigname_phase.project_text_hydration_work
 COMMENT ON COLUMN bigname_phase.project_reverse_tuple.attempt_limit IS
     'This value is the largest Multicall3 aggregate hydration may next send the tuple in, left by a read whose aggregate failed as a whole; null when the last read answered the tuple or none failed. Scheduling state only.';
 COMMENT ON COLUMN bigname_phase.project_reverse_tuple.attempt_failures IS
-    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
+    'This value counts the hydration reads in a row that observed no name for the tuple, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN bigname_phase.project_node_record_value.hydration_limit IS
     'This value is the largest Multicall3 aggregate hydration may next send the text selector in, left by a read whose aggregate failed as a whole; null when the last read answered the selector or none failed. Scheduling state only.';
 COMMENT ON COLUMN bigname_phase.project_node_record_value.hydration_failures IS
-    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; nothing reads it yet.';
+    'This value counts the hydration reads in a row that observed no value for the text selector, a failed aggregate or a failed call; null after a read that observed one. Scheduling state only; a positive count with a null aggregate limit delays a failed child retry by 7,200 blocks.';
 COMMENT ON COLUMN bigname_phase.project_reverse_hydration_work.attempt_failures IS
-    'This value copies project_reverse_tuple.attempt_failures. Nothing orders or filters by it yet.';
+    'This value copies project_reverse_tuple.attempt_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 COMMENT ON COLUMN bigname_phase.project_text_hydration_work.hydration_failures IS
-    'This value copies project_node_record_value.hydration_failures. Nothing orders or filters by it yet.';
+    'This value copies project_node_record_value.hydration_failures. The selector uses it with the source aggregate limit and attempt height to defer failed child retries.';
 END
 $migration$;

@@ -69,9 +69,10 @@ marker's child by number and parent hash. Consequently:
 
 - Blocks applied while Project catches up publish without any hydration RPC.
   Their changed selectors wait in the work indexes and join the rolling
-  selection at the head, with no priority over older work: only what the head
-  block itself changed is selected ahead of it. With marker 100 and head 110,
-  blocks 101 to 109 make no call and block 110 hydrates.
+  selection at the head. After the reserved share for older waiting work,
+  selectors changed by the head block take priority over that rolling work.
+  With marker 100 and head 110, blocks 101 to 109 make no call and block 110
+  hydrates.
 - A block a run stops on because its block budget is spent is not the head.
   The continuation that reaches the head hydrates there. Budgets, repair,
   replay and rebuild scheduling are unchanged; no run is cut short to make a
@@ -158,7 +159,30 @@ head that selects them sends them in aggregates no larger than that limit, so
 the splitting continues where it stopped instead of starting from 250 again.
 A selector that fails every time ends up alone and costs one call whenever
 its turn comes; the readable selectors that shared its aggregate are read.
-Nothing limits how often such a selector is tried again.
+An outer singleton failure still follows this rule: it is not a failed child
+response and does not start the individual-record retry delay.
+
+For each kind, a rounded-up quarter of its call budget is reserved for old
+waiting work and sent first, before new arrivals can use its time. The budget
+is `ceil(selected requests / 250) + 16`: 250 requests allow 17 calls, of which
+5 are reserved; 269 allow 18 calls, of which 5 are reserved. Remaining calls
+prefer fresh work, then unfinished old work. If one class has no work, the
+other can use all unused calls. When old work yields after its reserved
+calls, completed failed parents are recorded as deferred before fresh work
+can exhaust the remaining time. The existing time limits still apply; this
+is a service opportunity, not a promise of an answer from an unavailable or
+slow endpoint.
+
+A selector whose own call failed inside a successfully answered aggregate
+waits 7,200 blocks from that attempt before becoming eligible again. At
+`attempt height + 7,200` it may be selected; no empty-head tick is added. A
+positive failure count with a null size limit distinguishes this outcome
+from a deferred outer failure. Successful answers, including empty answers,
+clear the failure count. Fresh text event/version/admission changes and fresh
+reverse selector evidence clear obsolete scheduling state in the ordinary
+Project reducer, even during catch-up or replay. Those resets are journalled
+and undone with the event change; they never change observation provenance.
+An unrelated text key on the same resolver does not reset another key's delay.
 
 Reverse names are read before text values. While text selectors are waiting,
 the reverse reads may use at most half of the block's 30 seconds, so slow
@@ -186,8 +210,12 @@ height; `hydration_limit` and `hydration_failures` only schedule the selector
 (the largest aggregate it may next be sent in, and the reads in a row that
 observed no value). The event columns remain unchanged. Successful empty reads
 are `not_found`; a failed call or lost admission exposes the baseline. Each
-hydrating block selects at most 250 text selectors: those the block changed
-first, then never-read selectors, then the oldest attempts. Selection is not a
+hydrating block selects at most 250 text selectors. It reserves 63 slots
+(`ceil(250 / 4)`) for the oldest stamped, eligible, unchanged work, using the
+existing work index. The remaining slots prefer changed selectors, then
+never-read selectors, then the oldest attempts. Unused reserved slots are
+available to those other selectors. Cooling failed children remain in the
+work index but are skipped before either bounded selection. Selection is not a
 promise that all of them are read in that block: the call and time limits
 above apply. Every selected
 text selector is one whose overlay is missing or no longer matches it, so
@@ -1704,7 +1732,8 @@ family marker, including refresh work on empty blocks. Only the head block
 hydrates, and a read ends in one of the four outcomes of
 [follow-only hydration](#follow-only-hydration). A call that fails inside an
 answered aggregate retracts the overlay (fail closed) and the block publishes;
-a later head block retries through the bounded rolling selection. A batch that
+a head block at least 7,200 blocks later may retry through the bounded rolling
+selection, unless fresh selector evidence first clears the delay. A batch that
 fails as a whole retracts nothing. Successful not-found is distinct from both.
 Attempt cohorts use the monotonically increasing publication generation. The reader also binds
 the overlay to its selected node/resolver and readable block hash.
@@ -1714,14 +1743,15 @@ with its row, and new or changed selectors use event-derived claims until a late
 head block refreshes them. Rebuild ranges retain their existing behavior.
 
 Each hydrating block selects every eligible tuple the block changed and at
-most 250 additional eligible tuples. Both are grouped into aggregates
-together: tuples without a size limit fill aggregates in address order, the
-limited ones are packed by limit, and the aggregates go out in the order of
-their earliest tuple by address. A changed tuple is therefore not necessarily
-read before the rolling ones, a later tuple can be sent before an earlier
-limited one, and the
-call and time limits of [follow-only hydration](#follow-only-hydration) decide
-how many of them the block reads.
+most 250 additional eligible tuples. The rolling tuples receive the reserved
+quarter of calls before changed work, ordered by their attempt cohort and
+address. Each class is grouped separately: tuples without a size limit fill
+aggregates in request order, limited ones are packed by limit, and aggregates
+are ordered by their earliest member. After the reservation, changed work
+gets the remaining calls before unfinished rolling work. The call and time
+limits of [follow-only hydration](#follow-only-hydration) decide how many of
+them the block reads. Failed children still cooling are skipped before the
+rolling selection, so they cannot hold the oldest cohort in place.
 Rolling selection orders never-attempted tuples
 first, then the least recently attempted group; within a group it uses the
 oldest successful hydration height and stable tuple identity. Attempts use the
@@ -1734,7 +1764,8 @@ and undone with the row. `hydrated_name`, `attempt_block`, `attempt_hash` and
 selector it was observed for, always written together.
 
 A tuple whose own call failed inside an answered aggregate advances in the
-rotation with a cleared name, so the reader serves the event-derived baseline.
+rotation with a cleared name and a 7,200-block retry delay, so the reader
+serves the event-derived baseline.
 A deferred tuple advances in the rotation too, but keeps its observation: only
 the scheduling columns change, so a tuple that cannot be read does not hold the
 oldest group's place and block the groups behind it, and its name is never

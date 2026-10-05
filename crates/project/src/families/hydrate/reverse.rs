@@ -20,8 +20,9 @@
 //! - an unobserved tuple (the endpoint did not serve the block, or the pass had no time or call
 //!   left for it) is not written at all.
 //!
-//! Nothing reads `attempt_failures` yet: a tuple that fails every time is still read each time
-//! its turn comes, alone once its limit is one.
+//! A failed child waits 7,200 blocks before another read: a positive failure count with no
+//! size limit identifies it. Deferred outer failures retain a limit and keep their existing
+//! scheduling. Fresh selector evidence clears obsolete retry state through the event reducer.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
@@ -55,6 +56,7 @@ pub(super) struct Candidate {
     resolver: Option<String>,
     active: bool,
     limit: Option<usize>,
+    waiting: bool,
 }
 
 pub(super) struct Prepared {
@@ -121,6 +123,7 @@ pub(super) async fn select(
             let limit = schedule::limit(&row, "attempt_limit");
             Some(Candidate {
                 limit,
+                waiting: row.get("delta") != Some(&Value::Bool(true)),
                 row,
                 key,
                 node,
@@ -156,6 +159,59 @@ async fn selected_values(
         .fetch_all(&mut **transaction)
         .await
         .map_err(|e| ProjectError::database("failed to select family reverse hydration", e))
+}
+
+/// Clear obsolete scheduling state in the reducer transaction, including catch-up/replay.
+pub(super) async fn reset_schedule(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    rows: &mut RowSet,
+) -> Result<()> {
+    let targets = super::work::reverse_keys(
+        transaction,
+        context.chain_id,
+        &super::work::changed_images(rows),
+    )
+    .await?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let changed = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        &context.block.hash,
+        rows,
+        targets,
+        true,
+    )
+    .await?;
+    let keys: Vec<_> = changed
+        .into_iter()
+        .filter(|value| {
+            value["_reset"] == true
+                && (!value["attempt_failures"].is_null() || !value["attempt_limit"].is_null())
+        })
+        .map(|value| {
+            key_of(
+                &tables::REVERSE_TUPLE,
+                tables::REVERSE_TUPLE
+                    .key
+                    .iter()
+                    .map(|column| value[*column].clone()),
+            )
+        })
+        .collect();
+    rows.load(transaction, &tables::REVERSE_TUPLE, keys.clone())
+        .await?;
+    for key in keys {
+        if let Some(mut row) = rows.get(&tables::REVERSE_TUPLE, &key).cloned() {
+            set(&mut row, "attempt_limit", Value::Null);
+            set(&mut row, "attempt_failures", Value::Null);
+            rows.put(&tables::REVERSE_TUPLE, row)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn refresh(
@@ -255,7 +311,14 @@ pub(super) async fn execute(
             block_hash: session.head.hash.clone(),
         },
     };
-    let reads = session.read(Kind::Reverse, &requests, &limits, &call).await;
+    let waiting: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.active)
+        .map(|candidate| candidate.waiting)
+        .collect();
+    let reads = session
+        .read(Kind::Reverse, &requests, &limits, &waiting, &call)
+        .await;
     session.stats.reverse.failed_calls += reads
         .iter()
         .filter(|read| {
@@ -322,8 +385,11 @@ impl Prepared {
                 continue;
             };
             let before = row.clone();
+            if matches!(read, Some(Read::Unobserved)) {
+                continue;
+            }
             let name = match read {
-                Some(Read::Unobserved) => continue,
+                Some(Read::Unobserved) => unreachable!(),
                 Some(Read::Deferred { limit }) => {
                     set(&mut row, "attempt_ordinal", json!(ordinal));
                     set(&mut row, "attempt_limit", json!(limit));

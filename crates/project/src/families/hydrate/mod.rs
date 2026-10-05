@@ -47,6 +47,20 @@ pub(crate) async fn head(
     input::readable_head(pool, chain_id).await
 }
 
+/// Selector changes invalidate retry scheduling independently of whether this block hydrates.
+/// The owned rows journal these resets with the event changes, preserving undo and replay.
+pub(crate) async fn reset_schedule(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &reduce::Context<'_>,
+    rows: &mut RowSet,
+) -> Result<()> {
+    if context.chain_id == ETHEREUM {
+        reverse::reset_schedule(transaction, context, rows).await?;
+        text::reset_schedule(transaction, context, rows).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn prepare(
     pool: &PgPool,
     chain_id: &str,
@@ -90,6 +104,7 @@ pub(crate) async fn prepare(
     super::classification::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     super::records::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     super::reverse::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
+    reset_schedule(&mut opened.transaction, &context, &mut rows).await?;
     let reverse = reverse::select(&mut opened.transaction, &context, &rows).await?;
     let text = text::select(&mut opened.transaction, &context, &rows).await?;
     close(opened.transaction).await?;

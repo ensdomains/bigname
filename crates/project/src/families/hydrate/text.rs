@@ -1,9 +1,8 @@
 //! F6 text enrichment keeps the event-derived columns intact. The existing JSON overlay records
 //! the outcome and the selectors it was read for; null restores the missing-value baseline.
 //!
-//! A hydrating block reads at most [`ROLLING_LIMIT`] selectors: those the block changed first,
-//! then the backlog a rebuild leaves (every overlay null) in a stable rolling order, never-read
-//! selectors before the oldest attempts.
+//! A hydrating block selects at most [`ROLLING_LIMIT`] selectors. A rounded-up quarter of the
+//! slots goes to the oldest stamped work; remaining slots prefer changes, then never-read work.
 //!
 //! `hydrated_value` is the observation. `hydrated_at_block` is its block and the selector's
 //! place in the backlog; `hydration_limit` and `hydration_failures` only schedule it: the size
@@ -23,16 +22,11 @@
 //! - an unobserved selector (the endpoint did not serve the block, or the pass had no time or
 //!   call left for it) is not written at all.
 //!
-//! Nothing reads `hydration_failures` yet: a selector that fails every time is still read and
-//! stamped each time its turn comes, alone once its limit is one.
-//!
-//! `text.sql` decides which selectors need work and cuts the block's share, so a block never
-//! transfers the selectors that are already current. Every row it returns is work: a read stamps
-//! it current or with a newer attempt, and a cleared overlay leaves the work set, so the backlog
-//! behind the cut moves forward whenever the block's share has room for it. Changed selectors
-//! still rank first: while 250 or more change every block, the unchanged backlog waits, as it
-//! did before the cut moved into the query, and a steady stream of never-read selectors likewise
-//! delays failed retries.
+//! A failed child waits 7,200 blocks before another read. A positive failure count with no
+//! aggregate-size limit identifies it; deferred outer failures keep their limit and can resume
+//! at the next head. Actual selector changes clear scheduling state in the event reducer,
+//! including on catch-up blocks. `text.sql` applies the delay before cutting either queue share,
+//! so cooling selectors cannot occupy eligible waiting work's slots.
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use bigname_lookup::{
@@ -64,6 +58,7 @@ pub(super) struct Candidate {
     selector: Value,
     request: Option<EnsTextRecordMulticallRequest>,
     limit: Option<usize>,
+    waiting: bool,
 }
 
 pub(super) struct Prepared {
@@ -156,6 +151,58 @@ async fn selected_values(
         .map_err(|e| ProjectError::database("failed to select family text hydration", e))
 }
 
+/// Clear obsolete scheduling state in the reducer transaction, including catch-up/replay.
+pub(super) async fn reset_schedule(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    rows: &mut RowSet,
+) -> Result<()> {
+    let targets = super::work::text_keys(
+        transaction,
+        context.chain_id,
+        &super::work::changed_images(rows),
+    )
+    .await?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let changed = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        rows,
+        targets,
+        true,
+    )
+    .await?;
+    let keys: Vec<_> = changed
+        .into_iter()
+        .filter(|value| {
+            value["_delta"] == true
+                && (!value["hydration_failures"].is_null() || !value["hydration_limit"].is_null())
+        })
+        .map(|value| {
+            key_of(
+                &tables::NODE_RECORD_VALUE,
+                tables::NODE_RECORD_VALUE
+                    .key
+                    .iter()
+                    .map(|column| value[*column].clone()),
+            )
+        })
+        .collect();
+    rows.load(transaction, &tables::NODE_RECORD_VALUE, keys.clone())
+        .await?;
+    for key in keys {
+        if let Some(mut row) = rows.get(&tables::NODE_RECORD_VALUE, &key).cloned() {
+            set(&mut row, "hydration_limit", Value::Null);
+            set(&mut row, "hydration_failures", Value::Null);
+            rows.put(&tables::NODE_RECORD_VALUE, row)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn refresh(
     transaction: &mut Transaction<'_, Postgres>,
     chain: &str,
@@ -185,8 +232,7 @@ pub(super) async fn refresh(
 }
 
 /// One selected row. The query already dropped current and cleared selectors and cut the block's
-/// share: the block's own changes first, then never-read selectors, then the oldest attempts, each
-/// in key order. Preparation and publication run the same query on the same rows, so both cut the
+/// share: reserved oldest stamped work, then changes, never-read selectors and older attempts. Preparation and publication run the same query on the same rows, so both cut the
 /// same list.
 fn candidate(value: Value) -> Result<Candidate> {
     let selector = value["_selector"].clone();
@@ -218,6 +264,7 @@ fn candidate(value: Value) -> Result<Candidate> {
         ),
         selector,
         request,
+        waiting: value["_waiting"] == true,
         limit: value
             .as_object()
             .and_then(|row| schedule::limit(row, "hydration_limit")),
@@ -280,7 +327,14 @@ pub(super) async fn execute(
             block_hash: session.head.hash.clone(),
         },
     };
-    let reads = session.read(Kind::Text, &requests, &limits, &call).await;
+    let waiting: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.request.is_some())
+        .map(|candidate| candidate.waiting)
+        .collect();
+    let reads = session
+        .read(Kind::Text, &requests, &limits, &waiting, &call)
+        .await;
     session.stats.text.failed_calls += reads
         .iter()
         .filter(|read| {

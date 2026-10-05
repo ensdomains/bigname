@@ -20,7 +20,10 @@
 //!   this block left it instead of starting again from the whole aggregate.
 //!
 //! One kind sends at most one aggregate per [`BATCH_LIMIT`] selectors plus [`ISOLATION_CALLS`]
-//! per block. A selector whose first aggregate the block has no call left for is
+//! per block. A rounded-up quarter of that call budget serves old waiting work first; unused
+//! calls remain available to either class. Completed splits are deferred before yielding to
+//! fresh work, so the priority switch cannot discard failure progress. A selector whose first
+//! aggregate the block has no call left for is
 //! [`Read::Unobserved`] and keeps its place for the next head.
 //!
 //! Every call and the whole pass are bounded by [`HydrationTimeLimits`]; the kind read first has
@@ -167,6 +170,30 @@ fn groups(limits: &[Option<usize>]) -> Vec<Group> {
         .collect()
 }
 
+/// Keep old work separate so fresh arrivals cannot spend its reserved calls or initial time.
+/// Once the quarter is used, fresh groups go first; unused calls remain available to either.
+fn waiting_groups(limits: &[Option<usize>], waiting: &[bool]) -> (Vec<Group>, Vec<Group>) {
+    let mut old = Vec::new();
+    let mut fresh = Vec::new();
+    for group in groups(limits) {
+        let (older, newer): (Vec<_>, Vec<_>) = group
+            .members
+            .into_iter()
+            .partition(|member| waiting[*member]);
+        for (members, queue) in [(older, &mut old), (newer, &mut fresh)] {
+            if !members.is_empty() {
+                queue.push(Group {
+                    members,
+                    half: false,
+                });
+            }
+        }
+    }
+    old.reverse();
+    fresh.reverse();
+    (old, fresh)
+}
+
 fn settle<T>(reads: &mut [Option<Read<T>>], members: &[usize], read: impl Fn() -> Read<T>) {
     for member in members {
         reads[*member] = Some(read());
@@ -251,13 +278,35 @@ impl<'a> Session<'a> {
         kind: Kind,
         requests: &[A::Request],
         limits: &[Option<usize>],
+        waiting: &[bool],
         call: &A,
     ) -> Vec<Read<A::Answer>> {
         let mut reads: Vec<Option<Read<A::Answer>>> = requests.iter().map(|_| None).collect();
         let mut calls = requests.len().div_ceil(BATCH_LIMIT) + ISOLATION_CALLS;
-        let mut pending = groups(limits);
-        pending.reverse();
-        while let Some(Group { members, half }) = pending.pop() {
+        let (mut old, mut fresh) = waiting_groups(limits, waiting);
+        let mut priority = calls.div_ceil(4);
+        while !old.is_empty() || !fresh.is_empty() {
+            if priority == 0
+                && !fresh.is_empty()
+                && self.serves != Some(false)
+                && self.time_left().is_some()
+            {
+                // Commit completed old failures before fresh work can spend the remaining time.
+                old.retain(|group| {
+                    if group.half {
+                        settle(&mut reads, &group.members, || Read::Deferred {
+                            limit: group.members.len(),
+                        });
+                    }
+                    !group.half
+                });
+            }
+            let pending = if !old.is_empty() && (priority > 0 || fresh.is_empty()) {
+                &mut old
+            } else {
+                &mut fresh
+            };
+            let Group { members, half } = pending.pop().expect("pending group");
             let size = members.len();
             if self.serves == Some(false) || self.time_left().is_none() {
                 settle(&mut reads, &members, || Read::Unobserved);
@@ -278,6 +327,7 @@ impl<'a> Session<'a> {
             match self.aggregate(kind, &chunk, call).await {
                 Sent::Answered(found) => {
                     calls -= 1;
+                    priority = priority.saturating_sub(1);
                     for (member, value) in members.iter().zip(found) {
                         reads[*member] = Some(Read::Answered(value));
                     }
@@ -285,6 +335,7 @@ impl<'a> Session<'a> {
                 Sent::Stopped => settle(&mut reads, &members, || Read::Unobserved),
                 Sent::Failed => {
                     calls -= 1;
+                    priority = priority.saturating_sub(1);
                     if self.serves.is_none() {
                         self.probe().await;
                     }
