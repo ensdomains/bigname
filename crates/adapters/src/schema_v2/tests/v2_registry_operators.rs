@@ -450,3 +450,82 @@ fn a_renewal_of_an_unregistered_entry_is_kept_as_an_expiry_fact() -> anyhow::Res
     assert_eq!(again.after_state["expiry"], 300);
     Ok(())
 }
+
+/// A reservation has no token to burn, so unregistering it keeps its version: the revived
+/// entry is later registered under the token id the tokenless renewal named. A restore must
+/// not let that retained renewal touch the token the registration creates.
+#[test]
+fn a_revived_reservation_registers_under_the_same_token_after_a_restore() -> anyhow::Result<()> {
+    let owner: Address = OWNER.parse()?;
+    let token = versioned_token("held", 0);
+    let renewed = |block, log, expiry| {
+        raw_at(
+            v2_registry::ExpiryUpdated {
+                tokenId: token,
+                newExpiry: expiry,
+                sender: owner,
+            }
+            .encode_log_data(),
+            block,
+            log,
+            ETH_REGISTRY,
+        )
+    };
+    let first_input = input(
+        vec![
+            raw_at(
+                v2_registry::LabelReserved {
+                    tokenId: token,
+                    labelHash: keccak256(b"held"),
+                    label: "held".to_owned(),
+                    expiry: 100,
+                    sender: owner,
+                }
+                .encode_log_data(),
+                1,
+                0,
+                ETH_REGISTRY,
+            ),
+            raw_at(
+                v2_registry::LabelUnregistered {
+                    tokenId: token,
+                    sender: owner,
+                }
+                .encode_log_data(),
+                2,
+                0,
+                ETH_REGISTRY,
+            ),
+            renewed(3, 0, 500),
+        ],
+        3,
+    );
+    let first_blocks = first_input.blocks.clone();
+    let (first, session) = interpret_test_batch_incremental(first_input, None)?;
+    assert!(first.normalized_events.iter().any(|event| {
+        event.block_number == Some(3) && event.after_state["token_state_absent"] == true
+    }));
+    let prior = seam::fold_prior_events(Vec::new(), &first.normalized_events, &first_blocks)?;
+
+    let mut second_logs = registration(4, 0, "held", 200);
+    second_logs.push(renewed(5, 0, 300));
+    let mut second_input = input(second_logs, 6);
+    second_input.blocks.retain(|block| block.block_number > 3);
+    let mut fresh_input = second_input.clone();
+    fresh_input.prior_events = prior;
+    let fresh = interpret_test_batch(fresh_input)?;
+    let (second, _) = interpret_test_batch_incremental(second_input, Some(session))?;
+    assert_eq!(second, fresh);
+    let renewal = second
+        .normalized_events
+        .iter()
+        .find(|event| event.block_number == Some(5) && event.event_kind == "ExpiryChanged")
+        .expect("the renewal of the registered token");
+    assert!(renewal.after_state.get("token_state_absent").is_none());
+    assert_eq!(
+        renewal.before_state["expiry"], 200,
+        "the registration's expiry, not the tokenless renewal's"
+    );
+    assert_eq!(renewal.after_state["expiry"], 300);
+    Ok(())
+}

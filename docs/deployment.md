@@ -2585,8 +2585,14 @@ Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests, so it rotates the
 chain. It changes no reader: `GET /v1/permissions` still names
 `ens_v2_registry_operators` as an unlisted surface. Besides the approval rows,
 stored events gain one kind of row: an `ExpiryChanged` with no name, no resource
-and `token_state_absent = true` for a renewal of an entry that has no token,
-which `/v1/diagnostics/events` shows and no product row uses. The Mainnet and Base
+and `token_state_absent = true` for an `ExpiryUpdated` whose token the adapter
+holds no state for, such as a renewal that revives an unregistered entry or a
+renewal of an entry registered before the registry's retained history. It
+updates the registry entry row and creates no named lifecycle or ownership
+state. `/v1/diagnostics/events` shows it, and so does `GET /v1/events` when the
+request is unanchored or filtered by the registry's `contract_address`, as an
+`expiry` event with no name, counted in `total_count`; name, registration and
+address history do not list it. The Mainnet and Base
 manifests are unchanged, so those chains get the hash rotation and its
 Interpret and Project redo pair and no Ingest redo.
 

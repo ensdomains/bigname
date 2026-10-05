@@ -492,7 +492,10 @@ fn v2_replacement_null_roles_do_not_restore_displaced_token() -> Result<()> {
     assert!(
         restored_expiry.normalized_events.iter().all(|event| {
             event.after_state["token_id"] != displaced_token
-                || event.after_state["token_state_absent"] == true
+                || (event.event_kind == "ExpiryChanged"
+                    && event.after_state["token_state_absent"] == true
+                    && event.logical_name_id.is_none()
+                    && event.resource_id.is_none())
         }),
         "replacement null roles recreated the displaced token: {:#?}",
         restored_expiry.normalized_events
