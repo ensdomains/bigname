@@ -3037,7 +3037,7 @@ Grouped resolver keys and values shared by name detail and lookup detail; see [g
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `kind` | enum `root`, `registry`, `registration`, `resolver`, `record_manager`, `account`, `registrar_controller` | always | Discriminator for this object. |
-| `detail` | object GrantScopeDetail | always | Scope-specific fields; empty for root, registry and registration. Registrar-controller is history-only. |
+| `detail` | object GrantScopeDetail | always | Scope-specific fields; empty for registry and registration. Root names its registry. Registrar-controller is history-only. |
 
 ### GrantScopeDetail
 
@@ -3047,6 +3047,7 @@ Closed union of scope detail fields. Each scope uses exactly the shape listed in
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
 | `resolver` | object ContractRef | optional | Resolver contract for this answer. |
+| `registry` | object ContractRef | optional | ENSv2 registry whose root resource the grant is on, only for root scope. |
 | `chain_id` | integer | optional | Numeric EVM chain ID. |
 | `manager` | string | optional | Record-manager address, only for record_manager scope. |
 | `authority_kind` | enum `registry`, `registrar`, `wrapper` | optional | Account approval authority kind. |

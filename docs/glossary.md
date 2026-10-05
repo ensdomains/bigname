@@ -701,6 +701,23 @@ shapes are in [api-v1.md](api-v1.md#resource-restrictions); the derivation is in
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L606-L618 @ ens_v2_sepolia_20261001@07e55a05)
 
+## Registry root resource
+
+The ENSv2 Enhanced Access Control resource `0` of a registry contract
+(`ROOT_RESOURCE`), whose role grants apply to the registry as a whole rather
+than to one name's token. Registry-wide roles such as `registrar` and
+`set_parent` are granted there, and a role held there also satisfies the same
+role check on every name in that registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L53-L54 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L177 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2_sepolia_20261001@07e55a05)
+bigname stores its role changes as `RootPermissionChanged` events and serves
+its current holders as permission rows with `grant_scope.kind` `root`, through
+`GET /v1/permissions?registry=<chain_id>:<address>`. Its `resource_id` is
+derived from the registry's contract instance, so it changes when the address
+moves to a new contract instance.
+
 ## ENSv1→ENSv2 migration
 
 the on-chain move of an existing ENS name from the

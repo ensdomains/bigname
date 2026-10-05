@@ -315,7 +315,11 @@ fn difference(left: &Value, right: &Value) -> Value {
 fn grant_scope(row: &StorageHistoryEvent) -> Option<Value> {
     let scope = row.after_state.get("scope")?;
     let scope = match string_field(scope, "kind")?.as_str() {
-        "root" | "registry_root" => PermissionScope::Root,
+        "root" | "registry_root" => PermissionScope::Root {
+            chain_id: string_field(scope, "chain_id").or_else(|| row.chain_id.clone())?,
+            registry_address: string_field(scope, "registry_address")
+                .or_else(|| string_field(&row.raw_fact_ref, "emitting_address"))?,
+        },
         "registry" => PermissionScope::Registry,
         "resource" => PermissionScope::Resource,
         "registrar_controller" => {
