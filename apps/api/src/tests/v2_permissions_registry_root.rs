@@ -220,6 +220,19 @@ async fn v2_get_permissions_marks_discovered_registry_roots_partial() -> Result<
     sqlx::query("DELETE FROM manifest_contract_instances WHERE contract_instance_id = $1")
         .bind(Uuid::from_u128(0xA190)).execute(&database.pool).await?;
     assert_partial(&v2_permissions_payload_for_database(&database, &uri).await?);
+    // A discovered registry with no root grant ingested keeps the marker on its empty page,
+    // with or without a namespace.
+    let eventless = "0x00000000000000000000000000000000000000d7";
+    sqlx::query("INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, 'ethereum-mainnet', 'contract')").bind(Uuid::from_u128(0xD700)).execute(&database.pool).await?;
+    sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number)
+        VALUES ($1, 'ethereum-mainnet', $2, 61)").bind(Uuid::from_u128(0xD700)).bind(eventless).execute(&database.pool).await?;
+    for suffix in ["", "&namespace=ens"] {
+        let empty = v2_permissions_payload_for_database(&database,
+            &format!("/v1/permissions?registry=1:{eventless}{suffix}")).await?;
+        assert_eq!(empty["data"], json!([]), "{empty}");
+        assert_eq!(empty["meta"]["unlisted_permission_surfaces"], json!(["ens_v2_registry_operators"]), "{empty}");
+    }
     database.cleanup().await
 }
 

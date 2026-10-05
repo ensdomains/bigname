@@ -2744,8 +2744,9 @@ introduces it rebuilds Project from full history before serving the option; see
   instance retired by then, or a registry with no current root holders returns
   `200` with empty `data`; the empty page does not prove the
   registry exists, which the [registry overview](#get-v1registrieschain_idaddress)
-  answers. `namespace` applies as for a `registration_id` read: ENSv2 root grants
-  are in the `ens` namespace. Root rows are also returned by `address` reads and
+  answers. `namespace` filters the root's rows by the same membership rule as a
+  `registration_id` read (ENSv2 root grants are in the `ens` namespace), but an
+  empty page keeps the registry's completeness classification below. Root rows are also returned by `address` reads and
   by `registration_id=<root resource>`, the `registration_id` the rows carry.
 - Response shape: `data` is an array of permission rows
   `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,

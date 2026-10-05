@@ -178,8 +178,11 @@ pub(super) async fn resolve_permissions_filter(
     } else {
         None
     };
+    // A registry read leaves the namespace to the page read, so its empty page keeps the
+    // registry's support classification.
     let empty_selection = if empty_selection.is_none()
         && inputs.name_filter.is_none()
+        && registry_root.is_none()
         && let (Some(resource_id), Some(namespace)) = (resource_id, params.namespace.as_deref())
         && !bigname_storage::permission_resource_matches_namespace(
             snapshot.conn().await?,
