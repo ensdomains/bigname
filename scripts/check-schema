@@ -6024,6 +6024,10 @@ BEGIN
                   AND index_state.indnatts = index_state.indnkeyatts
                   AND index_state.indnkeyatts =
                       cardinality(required.key_patterns)
+                  -- Per-column pg_get_indexdef omits COLLATE; inspect the key's
+                  -- stored collation separately from its expression below.
+                  AND (required.index_name <> 'normalized_events_registry_origin_idx'
+                       OR index_state.indcollation[5] = '"C"'::regcollation)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM generate_subscripts(required.key_patterns, 1)
@@ -6082,7 +6086,7 @@ BEGIN
                     ARRAY['chain_id', 'subject', '%scope_detail%registry_address%'],
                     ARRAY['%scope%root%']),
                 ('normalized_events_registry_origin_idx', 'normalized_events',
-                    ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number', 'transaction_index', 'log_index', '%event_identity%COLLATE%"C"%'],
+                    ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number', 'transaction_index', 'log_index', 'event_identity'],
                     ARRAY['%source_family%ens_v2_migration_l1%', '%event_kind%ContractDiscovered%', '%canonicality_state%canonical%safe%finalized%']),
                 ('normalized_events_wrapper_departure_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
