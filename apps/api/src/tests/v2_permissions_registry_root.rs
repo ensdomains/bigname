@@ -248,5 +248,37 @@ async fn v2_get_permissions_resolves_the_registry_at_the_publication() -> Result
     database.cleanup().await
 }
 
+// The namespace check runs on the request's snapshot: a reorg of the registry's root grants
+// after the snapshot passed its publication check does not empty the captured page.
+#[tokio::test]
+async fn v2_get_permissions_registry_namespace_reads_the_pinned_snapshot() -> Result<()> {
+    use crate::v2::collection_snapshot::finish_test_hooks::{Stage, install_at};
+    let database = TestDatabase::new_migrated().await?;
+    seed_registry_root_holders(&database).await?;
+    let uri = format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}&namespace=ens");
+    let selected = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(selected["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{selected}");
+
+    let (_guard, read) = install_at(&database.pool, Stage::Pinned).await?;
+    let state = database.app_state_with_public_namespaces(&["ens"]);
+    let request = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("request must build"))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), read.wait_until_reached())
+        .await
+        .context("permissions request never reached the hook")?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned'
+        WHERE chain_id = 'ethereum-mainnet' AND block_number BETWEEN 70 AND 77")
+        .execute(&database.pool).await?;
+    read.resume().await;
+    let response = request.await.context("permissions request task panicked")??;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"], selected["data"], "{payload}");
+    database.cleanup().await
+}
+
 #[path = "v2_permissions_registry_root_real.rs"]
 mod real_logs;
