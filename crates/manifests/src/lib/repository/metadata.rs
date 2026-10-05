@@ -6,8 +6,8 @@ use bigname_domain::vocabulary::parse_alloy_evm_address;
 
 use super::normalize_address;
 use crate::{
-    DEFAULT_VERIFIED_AUTHORITY_ARMS, MANAGED_UNIVERSAL_RESOLVER_ROLE, SourceManifest,
-    UNIVERSAL_RESOLVER_ROLE, VERIFIED_AUTHORITY_ARMS,
+    DEFAULT_VERIFIED_AUTHORITY_ARMS, MANAGED_UNIVERSAL_RESOLVER_ROLE, ManifestAbiEvent,
+    SourceManifest, UNIVERSAL_RESOLVER_ROLE, VERIFIED_AUTHORITY_ARMS,
 };
 
 /// `universal_resolver_implementations` is an `ens_execution` declaration of valid, distinct
@@ -135,5 +135,39 @@ pub(super) fn validate_start_block_fits_i64(
         );
     }
 
+    Ok(())
+}
+
+/// An event `start_block` bounds only the family-wide watch entry, so it is refused where the
+/// compiled watch plan has no such entry for the event.
+pub(super) fn validate_event_start_block(
+    manifest: &SourceManifest,
+    event: &ManifestAbiEvent,
+    path: &Path,
+) -> Result<()> {
+    if event.start_block.is_none() {
+        return Ok(());
+    }
+    validate_start_block_fits_i64(event.start_block, "ABI event", &event.name, path)?;
+    let parsed = event.parsed_event_view()?;
+    let topic0 = parsed.topic0().map(|topic| topic.to_ascii_lowercase());
+    let family_wide = crate::uses_discovered_emitters(&manifest.source_family)
+        && !crate::is_role_scoped_event(
+            &manifest.source_family,
+            &parsed.canonical_signature(),
+            &event.emitter_roles,
+        )
+        && topic0.is_some_and(|topic0| {
+            crate::all_emitter_topic0s(&manifest.source_family, std::slice::from_ref(&topic0))
+                .is_empty()
+        });
+    if !family_wide {
+        bail!(
+            "manifest ABI event {} in {} sets start_block, but source family {} compiles no family-wide watch entry for it",
+            event.name,
+            path.display(),
+            manifest.source_family
+        );
+    }
     Ok(())
 }

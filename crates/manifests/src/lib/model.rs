@@ -257,6 +257,14 @@ pub struct ManifestAbiEvent {
     pub emitter_roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_events: Vec<String>,
+    /// The inclusive start of this event's family-wide watch entry in the compiled watch plan;
+    /// block zero when omitted. Declared-address entries keep their declaration's start.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_start_block",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub start_block: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<AbiEntryStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

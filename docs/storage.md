@@ -460,6 +460,15 @@ Family indexes serve these concrete readers:
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
+- The [ENSv2 registry entry](projections.md#ensv2-registry-entries) tables carry the indexes
+  the registry operator read will use and no reader uses yet:
+  `project_ens_v2_entry_owner_owner_idx` `(chain_id, owner, registry, entry_key)` over rows
+  with an owner, from an approval's owner to the entries it owns in the approving registry;
+  `project_ens_v2_entry_owner_resource_idx` `(chain_id, resource_id)` over rows with a
+  resource, from a served resource to its entry; and
+  `project_ens_v2_registry_parent_entry_idx` `(chain_id, parent, parent_entry_key)` over rows
+  with a parent, from a parent entry to the registries that name it. Schema-migration
+  `20261005140000_project_ens_v2_registry_entries.sql` adds the two tables and these indexes.
 - The composed name reader's resource pointer lookup
   (`storage:families.name.resource_pointers`) can probe `project_resource_pointer_pkey` by
   resource and the partial `project_resource_pointer_root_node_idx` (ENSv2 root registry

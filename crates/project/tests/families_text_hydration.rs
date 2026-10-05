@@ -785,7 +785,15 @@ async fn hydration_work_upgrade_reset_is_atomic_idempotent_and_rebuilds_pending_
         .skip(1)
         .step_by(2)
         .collect();
+    // The ENSv2 registry entry tables came later, with
+    // 20261005140000_project_ens_v2_registry_entries.sql.
     let expected: std::collections::BTreeSet<_> = families::family_tables()
+        .filter(|table| {
+            !matches!(
+                *table,
+                "project_ens_v2_entry_owner" | "project_ens_v2_registry_parent"
+            )
+        })
         .chain([
             "project_family_marker",
             "project_family_undo",

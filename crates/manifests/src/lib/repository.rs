@@ -25,7 +25,9 @@ mod mirror;
 #[path = "repository/read_features.rs"]
 mod read_features;
 
-use metadata::{validate_start_block_fits_i64, validate_verified_authority_arms};
+use metadata::{
+    validate_event_start_block, validate_start_block_fits_i64, validate_verified_authority_arms,
+};
 use mirror::validate_mirror_declarations;
 use read_features::validate_read_features;
 
@@ -476,6 +478,7 @@ fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
                 );
             }
         }
+        validate_event_start_block(manifest, event, path)?;
     }
 
     for call in &manifest.abi.calls {

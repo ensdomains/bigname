@@ -90,6 +90,7 @@ pub(crate) fn preload(
     super::records::preload(&chain, events, into);
     super::wrapper::preload(&chain, events, into);
     super::permissions::preload(&chain, events, into);
+    super::ens_v2_registry::preload(&chain, events, into);
     super::topology::preload(&chain, events, into);
     super::reverse::preload(&chain, events, keys, into);
     super::addresses::preload(&chain, events, into);
@@ -126,6 +127,7 @@ pub(crate) async fn apply(
     super::records::apply(transaction, context, events, rows).await?;
     super::wrapper::apply(transaction, context, events, rows).await?;
     super::permissions::apply(transaction, context, events, rows).await?;
+    super::ens_v2_registry::apply(transaction, context, events, rows).await?;
     super::topology::apply(transaction, context, events, rows).await?;
     super::reverse::apply(transaction, context, events, rows).await?;
     super::addresses::apply(transaction, context, events, rows).await?;
