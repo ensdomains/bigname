@@ -910,6 +910,12 @@ collection route carry neither header.
   it is no longer the name's current one.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
+  Known gap: a receiver contract that unwraps inside the mint callback of the
+  wrap produces mint, burn, `NameUnwrapped`, `NameWrapped`; bigname records
+  that as wrapped, so the wrapper fields, this expiry and the `restrictions`
+  expiry included, are served although the token is burnt.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
   Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
   `MAX_EXPIRY` therefore keeps the lifecycle value active at representable
   served block timestamps. Its wrapper expiry is publicly `null` with
