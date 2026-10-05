@@ -1,6 +1,7 @@
 //! A registration's `restrictions.locked_roles` counts the admin roles held on its registry's
 //! root resource, with every row produced from real raw logs by Interpret and Project on the
 //! checked-in Sepolia profile.
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
 use super::v2_sepolia_redeploy::{
     CHAIN, NEW_REGISTRY, SENDER, checked_in_profile, complete_phases, get, interpret_and_project,
     seed_raw_facts, token,
@@ -130,6 +131,7 @@ async fn registration_locked_roles_count_the_real_registry_root_admins() -> Resu
 
     // The root's admin_unregister and admin_set_resolver unlock their roles; its
     // can_transfer_admin does not, because a transfer checks only the token's own roles.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L463-L465 @ ens_v2_sepolia_20261001@07e55a05)
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
     let (status, permissions) = get(
         &database,
