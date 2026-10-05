@@ -347,7 +347,7 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
     for event in &mut hashed_output.normalized_events {
         event.before_state_explicit = false;
     }
-    let snapshot = format!("{hashed_output:#?}");
+    let snapshot = flat_raw_evidence_snapshot(&format!("{hashed_output:#?}"));
     let output_keccak = format!("{:#x}", keccak256(snapshot.as_bytes()));
     eprintln!(
         "dense_corpus raw_logs={} normalized_events={} registrations={} output_keccak={} elapsed_ms={:.3}",
@@ -364,6 +364,36 @@ fn dense_same_transaction_output_matches_the_slow_path_snapshot() -> Result<()> 
     );
     assert_eq!(output_keccak, case.expected_output_keccak);
     Ok(())
+}
+
+/// Renders each name surface's raw evidence as the flat `raw_name`, `raw_labels` and
+/// `dns_encoded_name` fields the pinned snapshots were taken with, leaving out the preimage
+/// witness. The pins therefore still prove that every surface keeps the same raw bundle.
+fn flat_raw_evidence_snapshot(snapshot: &str) -> String {
+    let mut flat = Vec::new();
+    let mut lines = snapshot.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "raw: Some(" {
+            flat.push(line.to_owned());
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let evidence_end = format!("{}}},", " ".repeat(indent + 4));
+        assert_eq!(lines.next().map(str::trim), Some("RawNameEvidence {"));
+        for evidence in lines.by_ref() {
+            if evidence == evidence_end {
+                break;
+            }
+            if !evidence
+                .trim_start()
+                .starts_with("preimage_event_identity:")
+            {
+                flat.push(evidence[8..].to_owned());
+            }
+        }
+        assert_eq!(lines.next().map(str::trim), Some("),"));
+    }
+    flat.join("\n")
 }
 
 #[test]
@@ -1603,7 +1633,7 @@ fn assert_name_surfaces(
         let expected_logical =
             canonical_logical_id(text_field(row, "logical_name_id")?, logical_ids);
         if surface.logical_name_id != expected_logical
-            || surface.raw_name != text_field(row, "input_name")?
+            || surface.raw_name() != Some(text_field(row, "input_name")?)
             || surface.chain_id != text_field(row, "chain_id")?
             || surface.block_hash != text_field(row, "block_hash")?
             || surface.normalizer_version != text_field(row, "normalizer_version")?
@@ -1615,7 +1645,7 @@ fn assert_name_surfaces(
         }
         let actual_dns = format!(
             "\\x{}",
-            alloy_primitives::hex::encode(&surface.dns_encoded_name)
+            alloy_primitives::hex::encode(surface.dns_encoded_name().unwrap_or_default())
         );
         let actual_labelhashes = Value::Array(
             surface
@@ -2552,7 +2582,7 @@ fn dense_output_is_purely_additive_over_the_pre_retention_snapshot() -> Result<(
     reduced
         .resources
         .retain(|resource| referenced.contains(&resource.resource_id));
-    let snapshot = format!("{reduced:#?}")
+    let snapshot = flat_raw_evidence_snapshot(&format!("{reduced:#?}"))
         .lines()
         .filter(|line| !line.trim().starts_with("before_state_explicit:"))
         .collect::<Vec<_>>()

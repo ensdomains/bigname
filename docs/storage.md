@@ -130,6 +130,64 @@ surface-to-resource changes remain reconstructible through `surface_bindings`.
 Canonical display text is derived from verified preimages and normalization
 state; it is never identity.
 
+### Name identity and raw evidence
+
+A `name_surfaces` row is a node's [name surface](glossary.md#surface-name-surface).
+Its identity columns are always present: `logical_name_id`, `namehash`, and
+`labelhashes`, the complete label-hash path, leaf first, with the one legacy
+exception described below. `block_hash`,
+`block_number` and `provenance` anchor the first canonical observation that
+established the node.
+
+The raw bytes of its labels are optional evidence, stored as one bundle:
+`raw_name`, `raw_labels` and `dns_encoded_name` are all present or all NULL.
+A row whose bytes are not all known stores NULL in all three, never an empty
+string, an empty array or the DNS encoding of the root; it is always `active`
+with no normalization errors, because unknown bytes have no normalization
+verdict. `preimage_event_identity` names the row's
+[preimage witness](glossary.md#preimage-witness), the `event_identity` of the
+earliest canonical `PreimageObserved` event of that name, and is NULL whenever
+the bundle is. It is the deterministic event identity, not the sequence-assigned
+`normalized_event_id`, and is not a foreign key, because a redo deletes and
+rewrites its range's events. The `name_surfaces_raw_evidence_check` constraint
+holds these rules.
+
+The exception is a shadow surface whose observed bytes have no PostgreSQL-safe
+text decoding. It keeps the row it has always stored: an empty-string
+`raw_name`, an empty `raw_labels` array and an empty `labelhashes` array, with
+the bytes in its `PreimageObserved` event. Its stored path is therefore not
+the node's label-hash path. The writer rejects a later observation of the same
+node that carries the complete path, as a conflicting path, and the row cannot
+become one without raw bytes, because that shape requires a non-empty path.
+No adapter emits such a complete-path observation of an existing surface yet;
+these rows need a repair before one does.
+
+Interpret's surface writer accepts a second observation of a stored surface
+when the namespace, namehash, label-hash path and chain match and, where both
+sides carry raw bytes, the bytes match too. An observation with raw bytes
+enriches a row that has none and takes the incoming normalization verdict; an
+observation without them leaves stored bytes, witness and verdict alone. When
+one batch observes a name's bytes more than once in a block, the writer stores
+the earliest of those events by transaction and log position as the witness,
+whichever observation it writes first. The
+identity anchor moves on its own rule, to a strictly earlier observation or
+onto an orphaned row, whichever kind of observation arrives. Anything else is
+a data-integrity error.
+
+An event establishes a surface without raw bytes by carrying
+`name_identity_observed: true` in its `after_state` and naming the surface.
+State restore and redo re-anchoring accept that event as an observation of the
+identity, as they accept `PreimageObserved`. No adapter emits it yet, so every
+surface written today carries its raw bundle and a witness.
+
+The normalization-flag recompute (`phase-runner redo --phase recompute-flags`)
+gives a row without raw bytes no verdict: it stays `active` with no errors and
+only takes the current normalizer version. When it newly rejects a row's
+bytes, `deactivated_at` comes from the row's anchor, or from its preimage
+witness when that event lies after the anchor: in a later block, or at a later
+log index in the anchor's block. A rainbow-table import never fills
+the raw bundle; it writes `label_preimages` only.
+
 ### Binding intervals and authority arms
 
 Every `surface_bindings` row stores a non-null `authority_arm` with one of the
@@ -1963,10 +2021,30 @@ identity derived before it keeps its anchor even when an in-range event
 references it. An identity the replay re-observes is restored by the ordinary
 upsert at its first derivation block; only one still orphaned afterwards is
 re-anchored, and a name surface re-anchors from the earliest surviving
-observation that carries the name itself, staying orphaned when none survives.
-Outside that orphan replacement, a name surface's `deactivated_at` moves only
-for a strictly lower incoming block, so the stored value does not depend on the
-order emissions arrive in.
+observation that establishes it, a `PreimageObserved` row or a
+[label-hash-path observation](#name-identity-and-raw-evidence), staying
+orphaned when none survives. A shadow surface's `deactivated_at` follows its
+earliest surviving `PreimageObserved` row.
+Outside that orphan replacement, the ordinary surface upsert moves a name
+surface's `deactivated_at` only for a strictly lower incoming block, so the
+stored value does not depend on the order emissions arrive in. Its one other
+case is enrichment: a row without raw bytes that first receives bytes failing
+the normalization gate takes the incoming `deactivated_at`, at whatever block
+those bytes arrive. Witness repair, below, is a separate operation that can
+also move it.
+
+A surface's [preimage witness](glossary.md#preimage-witness) is repaired
+separately from its anchor, so raw bytes learned after the node was established
+are handled even when the node's first observation lies before the redo range.
+Redo preparation releases every witness whose event is in the range. At
+completion each surface with a released witness, or with a preimage observation
+in the range, takes its earliest surviving canonical `PreimageObserved` event as
+witness. A canonical surface left with none loses its raw bundle and its
+normalization verdict, and stays as the identity alone, when a surviving
+label-hash-path observation still establishes it; without such an observation
+the row is left as it was. When the repair moves a shadow surface's witness
+and the replacement witness's block timestamp is later than the stored
+`deactivated_at`, `deactivated_at` moves to that block timestamp.
 
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
@@ -2106,7 +2184,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_event_identity_key` | the writer's `ON CONFLICT (event_identity)` and identity transitions |
 | `normalized_events_interpreter_state_history_idx` | prior-state value reads and the full-state restore (`load/prior.rs`) |
 | `normalized_events_resource_history_idx` | the lookahead loader's resource arm, registrar transition evidence |
-| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) and the flag recompute's raw-label fallback (`recompute.rs`), which look a name's events up by name alone |
+| `normalized_events_name_history_idx` | migration transition evidence by name (`write/identity/transition/registrar.rs`) the flag recompute's raw-label fallback (`recompute.rs`) and the redo's preimage-witness repair (`write/reanchor.rs`), which look a name's events up by name alone |
 | `normalized_events_chain_block_number_idx`, `normalized_events_chain_block_number_desc_idx` | the redo-range clear and preparation, the full-state restore, the loader-choice family probe and the due-names block-before-batch read; either twin serves each |
 | `normalized_events_projection_idx` | the manifest sync's retained admission history (`retained_admission_manifests` in `crates/manifests/src/schema_v2_persistence.rs`), which reads every `SourceManifestUpdated` row by kind |
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |

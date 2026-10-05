@@ -286,10 +286,11 @@ async fn released_materialized_registry_audits_keep_followable_resource_handles(
             .name_surfaces
             .iter()
             .map(|n| {
-                let mut row = name_surface(&format!("ens:{}", n.raw_name));
-                row.input_name = n.raw_name.clone();
-                row.canonical_display_name = n.raw_name.clone();
-                row.normalized_name = n.raw_name.clone();
+                let raw_name = n.raw_name().expect("test surfaces carry raw names");
+                let mut row = name_surface(&format!("ens:{raw_name}"));
+                row.input_name = raw_name.to_owned();
+                row.canonical_display_name = raw_name.to_owned();
+                row.normalized_name = raw_name.to_owned();
                 row.namehash = n.namehash.clone();
                 row.block_hash = n.block_hash.clone();
                 row.block_number = n.block_number;

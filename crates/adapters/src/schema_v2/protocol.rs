@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use super::{
     catalog::Selected,
+    identity::NodeIdentityDraft,
     manifest::{ManifestEvent, ManifestSource},
     model::{DiscoveryRuleInput, RawLogInput},
     state::State,
@@ -28,7 +29,7 @@ pub(super) use bigname_manifests::{
     event_allows_empty_emitter_roles, role_insensitivity_justification,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Interpreted {
     pub events: Vec<EventDraft>,
     pub sourced_events: Vec<SourcedEventBatch>,
@@ -44,24 +45,12 @@ pub(super) struct Interpreted {
     /// persisted normalized provenance remains `ens_v2_migration_l1`.
     pub migration_events: Vec<EventDraft>,
     pub migration_observations: Vec<MigrationObservation>,
+    pub node_identities: Vec<NodeIdentityDraft>,
 }
 
 impl Interpreted {
     pub(super) fn new() -> Self {
-        Self {
-            events: Vec::new(),
-            sourced_events: Vec::new(),
-            boundary_events: Vec::new(),
-            labels: Vec::new(),
-            names: Vec::new(),
-            shadow_names: Vec::new(),
-            resources: Vec::new(),
-            binding_closures: Vec::new(),
-            bindings: Vec::new(),
-            discovery: Vec::new(),
-            migration_events: Vec::new(),
-            migration_observations: Vec::new(),
-        }
+        Self::default()
     }
 
     pub(super) fn append(&mut self, other: &mut Self) {
@@ -78,6 +67,7 @@ impl Interpreted {
         self.migration_events.append(&mut other.migration_events);
         self.migration_observations
             .append(&mut other.migration_observations);
+        self.node_identities.append(&mut other.node_identities);
     }
 }
 #[derive(Clone, Debug)]
