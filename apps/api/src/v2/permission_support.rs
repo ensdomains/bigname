@@ -17,15 +17,15 @@ const PERMISSIONS_PARTIALLY_LISTED_REASON: &str = "permissions_partially_listed"
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UnlistedPermissionSurface {
-    /// Operators that a name's owner approved on the ENSv2 registry itself. The registry adds
-    /// the owner's roles to the roles of every operator the owner approved with
-    /// `setApprovalForAll`.
-    /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
-    /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2@a971bd64)
-    /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L165-L167 @ ens_v2@a971bd64)
-    /// For a discovered registry's root resource, the accounts a `WrapperRegistry` lets act with the
-    /// roles its parent registry holds: the parent name's owner and that owner's operators on the
-    /// parent registry.
+    /// Accounts that act on an ENSv2 registry through someone else's roles and are not rows. The
+    /// operators a token owner approved on the registry with `setApprovalForAll` are rows, and so
+    /// are the registry's root holders. What stays unlisted is what a discovered registry's code
+    /// may add: a `WrapperRegistry` lets the parent name's owner, and that owner's operators on
+    /// the parent registry, act with the roles its parent registry holds on its root, which
+    /// count on every token of the registry.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
     EnsV2RegistryOperators,
     /// BaseRegistrar ERC-721 per-token and operator approvals. An approved spender passes the
     /// same check as the token owner, which also gates `reclaim`.
@@ -110,9 +110,15 @@ impl PermissionSupport {
     /// An ENSv1 NameWrapper registration. Holders, operators, and per-token delegates are rows.
     pub(crate) const WRAPPER_PARTIAL: Self =
         Self::partial(&[ResolverApprovals, WrapperParentControl]);
-    /// An ENSv2 registry resource. It has no BaseRegistrar token, so `registrar_approvals` does
-    /// not apply. Its direct role holders are rows, while operators approved on the registry
-    /// and resolver operators and delegates are not.
+    /// A token resource of a manifest-declared ENSv2 registry (the root and ETH registries, whose
+    /// code is pinned). It has no BaseRegistrar token, so `registrar_approvals` does not apply.
+    /// Its direct role holders, the operators its owner approved on the registry and the
+    /// registry's root holders are rows, while resolver operators and delegates are not.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+    pub(crate) const DECLARED_ENS_V2_REGISTRY_PARTIAL: Self = Self::partial(&[ResolverApprovals]);
+    /// A token resource of a registry that discovery admitted. The same rows are served, but
+    /// bigname does not read a discovered contract's code, so the root-derived holders of
+    /// [`Self::DISCOVERED_REGISTRY_ROOT_PARTIAL`], who act on every token, may be missing.
     pub(crate) const ENS_V2_REGISTRY_PARTIAL: Self =
         Self::partial(&[EnsV2RegistryOperators, ResolverApprovals]);
     /// A manifest-declared ENSv2 registry's root resource (the root and ETH registries, whose code
@@ -195,10 +201,12 @@ fn permission_support_for_summary(
         ) => {
             // The projection records one reason for every registration whose approvals are not
             // ingested. The authority kind says which approvals those are.
-            if summary.authority_kind.as_deref() == Some(ENS_V2_REGISTRY_AUTHORITY_KIND) {
-                PermissionSupport::ENS_V2_REGISTRY_PARTIAL
-            } else {
+            if summary.authority_kind.as_deref() != Some(ENS_V2_REGISTRY_AUTHORITY_KIND) {
                 PermissionSupport::REGISTRAR_RESOLVER_PARTIAL
+            } else if summary.registry_manifest_declared == Some(true) {
+                PermissionSupport::DECLARED_ENS_V2_REGISTRY_PARTIAL
+            } else {
+                PermissionSupport::ENS_V2_REGISTRY_PARTIAL
             }
         }
         (
@@ -270,6 +278,7 @@ mod tests {
             resource_id,
             authority_kind: None,
             root_resource_id: None,
+            registry_manifest_declared: None,
             coverage,
             resource_restrictions: None,
             provenance: json!({}),

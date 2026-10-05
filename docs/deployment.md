@@ -1166,6 +1166,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_grant,
     bigname_phase.project_resource_admin_aggregate,
     bigname_phase.project_account_approval,
+    bigname_phase.project_ens_v2_entry_owner,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
     bigname_phase.project_reverse_tuple,
@@ -2677,6 +2678,45 @@ first retained log is at its admission start. After the redo, check that
 an empty `effective_powers`, that `project_ens_v2_entry_owner` has a row for a
 known ETHRegistry name with its current owner, and that no
 `AccountPermissionChanged` row names a resolver as its authority contract.
+
+### ENSv2 registry operators and root holders on permission reads
+
+The build that serves ENSv2 registry operators and lists registry root holders
+on a registration's permission read changes readers and the API only. It adds
+no schema-migration and does not rotate the
+[interpreter content hash](glossary.md#interpreter-content-hash), so it needs
+no redo of its own. It reads the approval rows and the registry entry rows of
+[the build above](#ensv2-registry-operator-approvals-and-registry-entries), so
+it must not serve before that build's schema-migration and redo sequence has
+completed on the database: until the families are rebuilt, the entry table is
+empty and no ENSv2 operator is listed.
+
+The API startup check now requires `bigname_phase.project_ens_v2_entry_owner`.
+Grant the API role `SELECT` on it, as in the
+[API role grant list](#surviving-services), before starting this API build; a role without
+it fails startup.
+
+What changes on `GET /v1/permissions` and `include=role_summary`
+([route contract](api-v1-routes.md#get-v1permissions)):
+
+- An ENSv2 registration gains one `grant_relation=operator` row per account,
+  other than the owner itself, that its current token owner approved on the
+  registry, while the owner has a served grant on the token and the entry has
+  not expired: the registry adds the current owner's token roles to each
+  operator that owner approved, and reports no owner once the entry's expiry
+  has passed. The row has `authority_kind` `ens_v2_registry`, a value the
+  account scope did not use before.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+- A `name` or `registration_id` read of an ENSv2 registration gains the
+  registry's root holders as `root` rows of that registration, because a
+  role check on a token reads the caller's root roles together with its token
+  roles. Its row count and pages change. `role_summary` does not repeat them.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+- A registration of a manifest-declared ENSv2 registry stops reporting
+  `ens_v2_registry_operators` and reports `["resolver_approvals"]`. A
+  registration of a discovered registry, a discovered registry's root and an
+  address-only read keep the code.
 
 ### v0.4.0 rollout
 

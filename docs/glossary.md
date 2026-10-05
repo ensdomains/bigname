@@ -718,7 +718,8 @@ role check on every name in that registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L467 @ ens_v2_sepolia_20261001@07e55a05)
 bigname stores its role changes as `RootPermissionChanged` events and serves
 its current holders as permission rows with `grant_scope.kind` `root`, through
-`GET /v1/permissions?registry=<chain_id>:<address>`. Its `resource_id` is
+`GET /v1/permissions?registry=<chain_id>:<address>`, and lists them on a
+permissions read of one registration of that registry. Its `resource_id` is
 derived from the registry's contract instance, so it changes when the address
 moves to a new contract instance.
 
@@ -1661,8 +1662,13 @@ a permission scope whose authority starts from an account-wide approval rather
 than a grant persisted for one resource. The public `grant_scope.kind` is
 `account`; its detail contains `chain_id`, `authority_kind`,
 `authority_contract`, and `owner`. Applicability to a resource is evaluated at
-read time through that resource's current
-[registry-owner binding](#registry-owner-binding).
+read time: for an ENSv1 or Basenames registry approval (`authority_kind`
+`registry`) through that resource's current
+[registry-owner binding](#registry-owner-binding), and for an ENSv2 registry
+approval (`authority_kind` `ens_v2_registry`) through the registry entry whose
+current token owner is `owner`, while that entry has not expired. An ENSv2
+row's powers are that owner's roles on the token's own resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 
 <a id="grant-relation"></a>
 ## Grant relation

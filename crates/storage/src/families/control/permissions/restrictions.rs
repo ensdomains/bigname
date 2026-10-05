@@ -67,25 +67,33 @@ pub(super) async fn load(
         .into_iter()
         .map(|row| (row.resource_id.clone(), row))
         .collect();
-    let registry_ids: Vec<String> = resources
+    let (registry_ids, root_ids): (Vec<String>, Vec<Option<String>>) = resources
         .iter()
         .filter(|input| {
             input.authority_kind.as_deref() == Some("ens_v2_registry") && active(&input.resource_id)
         })
-        .map(|input| input.resource_id.clone())
-        .collect();
+        .map(|input| (input.resource_id.clone(), input.root_resource_id.clone()))
+        .unzip();
     // ENSv2 registry grants have no wrapper mask. Account approval expansion cannot create a
     // row unless a holder grant already survives, so its fan-out never affects this existence.
+    // A read bound to the resource also serves its registry's root grants (`ens_v2.rs`), so a
+    // root grant is a served row.
     let has_grants: BTreeSet<String> = sqlx::query_scalar(
         "/* storage:families.control.permissions.summary_has_grants */
-         SELECT resource FROM unnest($2::text[]) resource
+         SELECT pair.resource FROM unnest($2::text[], $3::text[]) pair(resource, root)
          WHERE EXISTS (SELECT 1 FROM bigname_phase.project_grant grant_row
-             WHERE grant_row.chain_id = $1 AND grant_row.resource_id = resource::uuid
+             WHERE grant_row.chain_id = $1 AND grant_row.resource_id = pair.resource::uuid
                AND jsonb_typeof(grant_row.effective_powers) = 'array'
-               AND grant_row.effective_powers <> '[]'::jsonb)",
+               AND grant_row.effective_powers <> '[]'::jsonb)
+            OR EXISTS (SELECT 1 FROM bigname_phase.project_grant root_grant
+             WHERE root_grant.chain_id = $1 AND root_grant.resource_id = pair.root::uuid
+               AND root_grant.scope = 'root'
+               AND jsonb_typeof(root_grant.effective_powers) = 'array'
+               AND root_grant.effective_powers <> '[]'::jsonb)",
     )
     .bind(chain_id)
     .bind(&registry_ids)
+    .bind(&root_ids)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
