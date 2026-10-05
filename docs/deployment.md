@@ -2661,11 +2661,17 @@ What changes on `GET /v1/permissions` and `include=role_summary`
 - An ENSv2 registration gains one `grant_relation=operator` row per account,
   other than the owner itself, that its current token owner approved on the
   registry, while the owner has a served grant on the token and the entry has
-  not expired. The row has `authority_kind` `ens_v2_registry`, a value the
+  not expired: the registry adds the current owner's token roles to each
+  operator that owner approved, and reports no owner once the entry's expiry
+  has passed. The row has `authority_kind` `ens_v2_registry`, a value the
   account scope did not use before.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 - A `name` or `registration_id` read of an ENSv2 registration gains the
-  registry's root holders as `root` rows of that registration, so its row
-  count and pages change. `role_summary` does not repeat them.
+  registry's root holders as `root` rows of that registration, because a
+  role check on a token reads the caller's root roles together with its token
+  roles. Its row count and pages change. `role_summary` does not repeat them.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 - A registration of a manifest-declared ENSv2 registry stops reporting
   `ens_v2_registry_operators` and reports `["resolver_approvals"]`. A
   registration of a discovered registry, a discovered registry's root and an
