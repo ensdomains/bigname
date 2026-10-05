@@ -451,3 +451,55 @@ async fn v2_reverse_lookup_pages_every_name_on_a_database_with_an_icu_collation(
 
     database.cleanup().await
 }
+
+/// The same reverse read over more names than one candidate batch, so the statement continues
+/// from the last candidate of a batch, by the counted read and by the page-only read a
+/// `relation` filter takes. The fixture mixes emoji and ASCII labels.
+#[tokio::test]
+async fn v2_reverse_lookup_continues_its_candidate_batches_on_an_icu_collation() -> Result<()> {
+    let database = TestDatabase::new_migrated_icu().await?;
+    seed_bulk_address_names(&database, 100).await?;
+
+    for relation in [None, Some("owner")] {
+        let mut walks = Vec::new();
+        for page_size in [7, 50] {
+            let (mut walked, mut cursor) = (Vec::new(), None::<Value>);
+            for _ in 0..=100 {
+                let mut input = json!({"address": BULK_ADDRESS, "page_size": page_size});
+                if let Some(relation) = relation {
+                    input["relation"] = json!(relation);
+                }
+                if let Some(cursor) = cursor.take() {
+                    input["cursor"] = cursor;
+                }
+                let response = v2_lookup_response_for_database_with_public_namespaces(
+                    &database,
+                    "/v1/lookup",
+                    json!({"inputs": [input]}),
+                    &["ens"],
+                )
+                .await?;
+                assert_eq!(response.status(), StatusCode::OK, "{relation:?}");
+                let body: Value = read_json(response).await?;
+                let result = &body["data"][0];
+                let records = result["records"].as_array().expect("records");
+                walked.extend(
+                    records.iter().map(|record| record["name"].as_str().expect("name").to_owned()),
+                );
+                cursor = result["page"]["next_cursor"].as_str().map(|cursor| json!(cursor));
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            let mut bytewise = walked.clone();
+            bytewise.sort();
+            bytewise.dedup();
+            assert_eq!(bytewise.len(), 100, "{relation:?} page_size={page_size}: {walked:?}");
+            assert_eq!(walked, bytewise, "{relation:?} page_size={page_size}");
+            walks.push(walked);
+        }
+        assert_eq!(walks[0], walks[1], "{relation:?}");
+    }
+
+    database.cleanup().await
+}
