@@ -213,6 +213,7 @@ mod tests {
             resource_id: Uuid::from_u128(0x77),
             authority_kind: Some("wrapper".to_owned()),
             root_resource_id: None,
+            registry_manifest_declared: None,
             coverage:
                 ResourcePermissionCoverage::wrapper_parent_and_resolver_delegation_not_projected(),
             resource_restrictions: restrictions,

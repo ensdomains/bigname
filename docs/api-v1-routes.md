@@ -2867,6 +2867,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `registration_id` read (ENSv2 root grants are in the `ens` namespace), but an
   empty page keeps the registry's completeness classification below. Root rows are also returned by `address` reads and
   by `registration_id=<root resource>`, the `registration_id` the rows carry.
+  A `name` or `registration_id` read of an ENSv2 registration lists the same
+  holders as rows of that registration, as described below.
 - Response shape: `data` is an array of permission rows
   `{address, grant_relation?, grant_scope, powers, registration_id, record_resource?, name?,
   authority_context, wrapper_state?, wrapper_fuses?}`.
@@ -2940,9 +2942,11 @@ introduces it rebuilds Project from full history before serving the option; see
   `{chain_id, manager}` for `record_manager`; and
   `{chain_id, authority_kind, authority_contract, owner}` for the
   [`account` permission scope](glossary.md#account-permission-scope). Effective
-  account rows carry `grant_relation=operator` and
-  `powers=["registry_control"]`; direct rows omit `grant_relation` and are
-  otherwise byte-for-byte compatible. For example, a direct row remains:
+  account rows carry `grant_relation=operator`. An ENSv1 or Basenames registry
+  operator has `powers=["registry_control"]`; an ENSv2 registry operator has
+  the powers of the token owner's own row on that registration. Direct rows
+  omit `grant_relation` and are otherwise byte-for-byte compatible. For
+  example, a direct row remains:
 
   ```json
   {
@@ -2977,6 +2981,41 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
+  An ENSv2 registry operator is an account the registration's current token
+  owner approved on the registry with `setApprovalForAll`. Its `powers` are
+  the owner's `registry` row on the same registration, admin roles included,
+  and none of the owner's root roles. The row is absent once the token moves to
+  an owner who did not approve the account, once the approval is revoked, and
+  from the first publication whose block time reaches the entry's own expiry;
+  a renewal brings it back. An account that also holds a role of its own has
+  both rows. Like the direct rows, operator rows follow the name's
+  registration: once the name's path is released, because the entry or an
+  ancestor of the name expired, the registration serves no rows, although the
+  registry contract still honours roles on an entry whose own expiry has not
+  passed.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+
+  ```json
+  {
+    "address": "0xoperator",
+    "grant_relation": "operator",
+    "grant_scope": {
+      "kind": "account",
+      "detail": {
+        "chain_id": 11155111,
+        "authority_kind": "ens_v2_registry",
+        "authority_contract": "0xregistry",
+        "owner": "0xtoken-owner"
+      }
+    },
+    "powers": ["set_resolver", "admin_set_resolver", "can_transfer_admin"],
+    "registration_id": "018f...",
+    "name": "example.eth",
+    "authority_context": "current_for_name"
+  }
+  ```
+
   A registry root holder is:
 
   ```json
@@ -2992,12 +3031,51 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
-  A root row's `powers` are the holder's declared root role bits, never empty;
-  `name`, `grant_relation`, `record_resource` and the wrapper fields are absent,
-  `authority_context` is always `resource_audit`, and `registration_id` is the
-  root resource's id rather than a name registration. The root `detail` is an
-  additive change: root rows served on `address` and `registration_id` reads
-  before it carried `detail: {}` and now carry the same `registry` object.
+  On a `registry` read, an `address` read and a read of the root resource by
+  `registration_id`, a root row's `powers` are the holder's declared root role
+  bits, never empty; `name`, `grant_relation`, `record_resource` and the
+  wrapper fields are absent, `authority_context` is always `resource_audit`,
+  and `registration_id` is the root resource's id rather than a name
+  registration. The root `detail` is an additive change: root rows served on
+  `address` and `registration_id` reads before it carried `detail: {}` and now
+  carry the same `registry` object.
+
+  A read bound to one ENSv2 registration by `name` or `registration_id` lists
+  the registry's root holders too, because a role held on the root passes the
+  same check on every token of the registry. There a root row belongs to the
+  registration: `registration_id`, `name` and `authority_context` are the
+  values the registration's other rows carry, `grant_scope` is the same `root`
+  object, and `powers` are the holder's root powers. `can_transfer_admin`
+  held on the root has three effects. It does not pass the transfer gate,
+  which checks that role only among the token owner's own roles on the token,
+  and it gives no ERC-1155 approval to move a token. It lets the holder revoke
+  that role from an account on a live name. And in a `PermissionedRegistry`, or a
+  `UserRegistry`, which inherits the check, while any account holds it on
+  the root the registry is not emancipated, so `safeTransferFrom` of every
+  name of the registry reverts; `unsafeTransfer` skips that check. A
+  `WrapperRegistry` overrides the check to always pass, so this third effect
+  does not apply there.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
+  With `address` the read returns that account's
+  rows on the registration, its root row included. An `address` read without
+  `name` or `registration_id` lists a root holder once, on the root resource,
+  and does not repeat it for each name of the registry. A registration whose
+  rows are dropped because its name's path was released, by its own expiry or
+  an ancestor's, lists no root holders. A holder of root `renew` can still
+  revive an expired entry; such holders are rows of the `registry` read.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
@@ -3023,7 +3101,8 @@ introduces it rebuilds Project from full history before serving the option; see
   cryptographically signed. A name-anchored cursor is rejected for a different
   name or a registration-only request, even when both names resolve to the same
   registration. Crossing from direct to operator rows neither duplicates nor
-  omits a row. A `registry` read has one resource, so its rows are in holder
+  omits a row. A root holder listed on an ENSv2 registration has the scope key
+  `root` under that registration's id. A `registry` read has one resource, so its rows are in holder
   address order, bytewise on the lowercase hex; a `registry` cursor is rejected
   for a different registry or for a request without that `registry`.
 - Snapshot behavior: a `name` filter's current registration anchor is resolved
@@ -3094,12 +3173,18 @@ introduces it rebuilds Project from full history before serving the option; see
   approvals are not enumerated; the NameWrapper `Ownable` owner is a
   deployment-wide administrator, not a per-registration permission.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565-L589 @ ens_v1@91c966f)
-  An ENSv2 registry registration reports
-  `["ens_v2_registry_operators","resolver_approvals"]`: its direct role holders
-  are rows, while operators the owner approved on the ENSv2 registry and
-  `PublicResolverV2` operators and delegates are not. It has no BaseRegistrar
-  token, so it never reports `registrar_approvals`.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+  A registration of an ENSv2 registry whose current address an active
+  manifest declares reports `["resolver_approvals"]`: its direct role holders,
+  the operators its owner approved on the registry and the registry's root
+  holders are rows, while `PublicResolverV2` operators and delegates are not.
+  A registration of a registry that discovery admitted, or one only an
+  inactive or retired declaration covers, serves the same rows and reports
+  `["ens_v2_registry_operators","resolver_approvals"]`, for the reason given
+  for a discovered registry's root below: the accounts a `WrapperRegistry`
+  lets act with its parent's roles act on every token of the registry and are
+  not rows. An ENSv2 registration has no BaseRegistrar token, so it never
+  reports `registrar_approvals`.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
   A `registry` read is classified by the registry, not by a registration
@@ -3136,9 +3221,13 @@ introduces it rebuilds Project from full history before serving the option; see
   but neither the page nor a role summary is an authoritative permission
   enumeration while the partial marker is present. Registrar ERC-721 approvals,
   resolver approvals/delegates, and parent control of non-emancipated wrapped
-  subnames remain absent. ENSv2 registry operators also remain absent, and an
-  ENSv2 registration names that gap as `ens_v2_registry_operators`.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64) A `name` filter
+  subnames remain absent. ENSv2 registry operators are served as rows. A
+  registration of a manifest-declared ENSv2 registry reports only
+  `resolver_approvals`; a registration of a discovered registry serves the
+  same operator rows and also reports `ens_v2_registry_operators`, because its
+  code may let further accounts act that the rows do not list.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05) A `name` filter
   resolves only the selected current registration: a migrated name returns its
   ENSv2 permission rows, while an explicit `registration_id` can still select a
   retained historical ENSv1 registration for audit. An ENSv2 reservation does
@@ -3400,7 +3489,8 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
   Holding a role does not make the address the `manager`, and it combines with the other
   relations: an owner that also holds a role matches both. Roles held on the
-  registry root and ENSv2 registry operators add no `role_holder` rows (see
+  registry root and roles an ENSv2 registry operator has through a token owner
+  add no `role_holder` rows (see
   [address collections](projections.md#address-and-child-collections)), so a
   page that omits a name does not prove the address holds no permission on
   it. `dedupe=name` groups by name surface and is the
@@ -3579,8 +3669,12 @@ introduces it rebuilds Project from full history before serving the option; see
   explicit gaps. `grant_scope` uses the same shape documented for
   `GET /v1/permissions`. Direct grants omit `grant_relation`; effective
   registry-operator grants carry `grant_relation=operator`, the account scope,
-  and `powers=["registry_control"]`. Operator grants expand roles for resources
+  and `powers=["registry_control"]` for an ENSv1 or Basenames registry or the
+  token owner's powers for an ENSv2 registry. Operator grants expand roles for resources
   already on the page but never add or remove address-name membership rows.
+  The registry root holders a permissions read of one ENSv2 registration lists
+  are not repeated in `role_summary`: they are the same for every name of a
+  registry. Read them once with `GET /v1/permissions?registry=`.
   The include supports at most 1,000 grant rows across all returned summaries,
   counting each grant again when multiple names share a resource. This is a
   total nested expansion budget, not a per-name or per-subject limit. Overflows
@@ -3588,8 +3682,10 @@ introduces it rebuilds Project from full history before serving the option; see
   Omit the include, then paginate
   `GET /v1/permissions?registration_id=<permission_resource_id>` for each selected
   resource. Preserve `namespace` only if it was explicitly present on the names
-  request; do not add `name` or `address` filters. This reads the same supported
-  permission relation, including supported rows on an unsupported name anchor.
+  request; do not add `name` or `address` filters. This is the full permissions
+  read of the registration: the grants `role_summary` would have carried,
+  including supported rows on an unsupported name anchor, plus the registry
+  root holders `role_summary` leaves out.
   Existing unsupported permission families remain unsupported. Reducing the name
   page can help, but one resource can exceed the limit by itself. Each request
   binds its own publication: a publication change between the names request and

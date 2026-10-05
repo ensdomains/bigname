@@ -2492,3 +2492,6 @@ mod registry_released_audit;
 
 #[path = "v2_permissions_registry_root.rs"]
 mod registry_root;
+
+#[path = "v2_permissions_ens_v2_operators_real.rs"]
+mod ens_v2_operators_real;

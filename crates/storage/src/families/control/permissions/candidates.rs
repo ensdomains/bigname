@@ -25,6 +25,16 @@ impl From<&Key> for PermissionsCurrentAccountResourceCursor {
     }
 }
 
+/// What a read bound to one resource resolved before seeking keys.
+#[derive(Clone, Debug)]
+pub(super) struct TokenRead {
+    /// The resource's chain, which lets the ENSv2 entry lookup use its `(chain_id,
+    /// resource_id)` index.
+    pub chain_id: String,
+    /// The registry root whose holders the read lists with an ENSv2 registry token resource.
+    pub root: Option<Uuid>,
+}
+
 const DIRECT: &str = "SELECT grant_row.subject, grant_row.resource_id, grant_row.scope
     FROM bigname_phase.project_grant grant_row";
 const WRAPPER: &str = "SELECT approval.subject, grant_row.resource_id, grant_row.scope
@@ -48,6 +58,7 @@ const ACCOUNT_SCOPE: &str = "concat('account:', approval.chain_id, ':registry:',
 /// The next candidate keys in the public bytewise tuple order. A cursor can continue within
 /// one resource or one subject without loading the keys that precede it. Namespace membership
 /// precedes publication checks, so an unrelated namespace's rebuilding chain is not read.
+/// `token` is what a read bound to one resource knows about it.
 pub(super) async fn page(
     conn: &mut PgConnection,
     subject: Option<&str>,
@@ -55,6 +66,7 @@ pub(super) async fn page(
     namespace: Option<&str>,
     after: Option<&PermissionsCurrentAccountResourceCursor>,
     limit: i64,
+    token: Option<&TokenRead>,
 ) -> Result<Vec<Key>> {
     let registry_target = format!(
         "SELECT approval.subject, observation.target_resource_id AS resource_id,
@@ -82,7 +94,10 @@ pub(super) async fn page(
     } else {
         ""
     };
-    let arms = [DIRECT, WRAPPER, &registry_target, &registry_resource, &registry_name]
+    let arms = [
+        DIRECT, WRAPPER, &registry_target, &registry_resource, &registry_name,
+        super::ens_v2::OPERATOR_CANDIDATES, super::ens_v2::ROOT_HOLDER_CANDIDATES,
+    ]
         .into_iter().map(|source| format!(
             "(SELECT DISTINCT candidate.subject COLLATE \"C\" AS subject,
                     candidate.resource_id, candidate.scope COLLATE \"C\" AS scope
@@ -115,6 +130,8 @@ pub(super) async fn page(
     .bind(after.map(|key| key.resource_id))
     .bind(after.map(|key| key.scope.as_str()))
     .bind(limit)
+    .bind(token.and_then(|token| token.root))
+    .bind(token.map(|token| token.chain_id.as_str()))
     .fetch_all(conn)
     .await
     .map_err(Into::into)

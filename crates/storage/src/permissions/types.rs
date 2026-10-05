@@ -265,6 +265,11 @@ pub struct PermissionsCurrentResourceSummary {
     pub resource_id: Uuid,
     pub authority_kind: Option<String>,
     pub root_resource_id: Option<Uuid>,
+    /// For an ENSv2 registry resource, whether an active manifest declares the registry that
+    /// holds it, as [`crate::RegistryRootResource::manifest_declared`] says of its root. `None`
+    /// for every other resource and when the resource's events name no registry instance.
+    #[sqlx(default)]
+    pub registry_manifest_declared: Option<bool>,
     #[sqlx(json)]
     pub coverage: ResourcePermissionCoverage,
     /// Registration-level restriction block served as `restrictions`; `None` when the resource

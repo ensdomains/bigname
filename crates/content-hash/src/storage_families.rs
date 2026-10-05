@@ -58,6 +58,7 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/mod.rs",
     "crates/storage/src/families/control/mod.rs",
     "crates/storage/src/families/control/permissions/candidates.rs",
+    "crates/storage/src/families/control/permissions/ens_v2.rs",
     "crates/storage/src/families/control/permissions/facts.rs",
     "crates/storage/src/families/control/permissions/grants.rs",
     "crates/storage/src/families/control/permissions/mod.rs",

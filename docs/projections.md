@@ -727,9 +727,10 @@ on the same registration. A request whose explicit relation set excludes
 unfiltered reads and sets including `role_holder` retain them. This does not
 bound the request's ordinary ownership enumeration or other work. A role held on the registry root
 reaches every name in the registry, and an ENSv2 registry operator approved
-with `setApprovalForAll` is not a permission row, so neither adds names to an
-address's collection. Reverse lookup does not serve this relation.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
+with `setApprovalForAll` holds the token owner's roles rather than a grant of
+its own, so neither adds names to an address's collection. Reverse lookup does
+not serve this relation.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 
 Raw unbounded diagnostic address history separately includes retained
 controller and permission evidence, including former controllers, as documented
@@ -922,8 +923,45 @@ effective powers, provenance, and chain positions. The companion resource
 summary distinguishes authoritative empty enumeration from unsupported or
 partial permission support. Current non-wrapper summaries are partial because
 registrar token and account approvals and resolver operators and delegates are
-not indexed, and ENSv2 registry operators are folded
-([ENSv2 registry entries](#ensv2-registry-entries)) but not yet served. NameWrapper summaries are partial for
+not indexed. ENSv2 registry operators are not stored per token. The reader
+joins each approved `ens_v2_registry` approval to the
+[registry entries](#ensv2-registry-entries) its owner currently holds in that
+registry and serves the operator with the powers of the owner's own served
+grant on the entry's current resource: no root grant, no grant the owner has
+only as another owner's operator, and nothing once the publication's block
+time reaches the entry's own expiry. The owner's grant is taken as served, so
+the path-expiry drop of the direct rows applies to operators too: a child
+whose ancestor's path expired serves no rows while its own entry is still
+live in the registry.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
+A read bound to one ENSv2 registry token resource also serves the registry's
+root grants as rows of that resource, under the same path-expiry drop. A
+root holder of `can_transfer_admin` does not pass the transfer gate, which
+checks that role only among the token owner's own roles on the token, and has
+no ERC-1155 approval from it. The holder can revoke the role from an account
+on a live token. In a `PermissionedRegistry`, or a `UserRegistry`, which
+inherits the check, while any account holds it on the root the registry is not
+emancipated, so `safeTransferFrom` of every token reverts; `unsafeTransfer`
+skips that check. A `WrapperRegistry` overrides the check to always pass.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/libraries/RegistryRolesLib.sol:L65-L76 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L433-L438 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L359-L364 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L185-L190 @ ens_v2_sepolia_20261001@07e55a05)
+An expired registration lists no root holder, although a root `renew` holder
+can still revive the entry; that holder is a row of the root resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
+The summary of an ENSv2 registry resource records whether an active manifest
+declares its registry, by the rule a registry root read uses; a discovered
+registry keeps the ENSv2 operator surface unlisted because its code may add
+holders these joins do not see. NameWrapper summaries are partial for
 a narrower reason described below: holders, operators, and per-token delegates
 are rows, while parent control of a non-emancipated wrapped subname and resolver
 operators/delegates are not. For a grant on an ENSv2 record-ID resolver, whose
@@ -948,7 +986,8 @@ owner, subject, and relation. It retains both active and revoked latest states;
 for a NameWrapper, while `approved=false` carries no effective powers. An ENSv2
 registry approval (`authority_kind=ens_v2_registry`) carries no effective power
 in either state, because the operator's powers are the token owner's on each
-token; `approved` alone carries the fact, and no reader joins these rows yet. Project
+token; `approved` alone carries the fact, and the permission reader joins these rows
+to the registry's entry owners as described above. Project
 retains account approvals once per account key; readers join registry and
 NameWrapper operators as described below. Name composition carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
@@ -1978,7 +2017,9 @@ covers. An approved operator gets the roles the current token owner holds on a
 token's own resource, and the registry keeps the owner per entry, not per name.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L638-L640 @ ens_v2_sepolia_20261001@07e55a05)
-No reader uses these tables yet, and the permission summaries stay partial.
+The permission reader joins approvals to `project_ens_v2_entry_owner`
+([Permissions](#permissions)); no reader uses
+`project_ens_v2_registry_parent` yet.
 
 `project_ens_v2_entry_owner` has one row per `(chain_id, registry,
 entry_key)`. The entry key is the registry's storage slot for a label: the
