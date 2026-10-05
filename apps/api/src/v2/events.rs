@@ -181,9 +181,14 @@ pub(crate) async fn get_events(
     } else {
         history_total_count(storage_page.summary.as_ref())
     };
-    let context =
-        super::history_context::load_history_row_context(&state.pool, &storage_page.rows, include)
-            .await?;
+    let context = super::history_context::load_history_row_context(
+        &state.pool,
+        &storage_page.rows,
+        include,
+        &snapshot.block_bounds(),
+        storage_page.interpret_redo_fence.as_ref(),
+    )
+    .await?;
     let logical_name_ids = storage_page
         .rows
         .iter()

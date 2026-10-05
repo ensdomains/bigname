@@ -540,7 +540,13 @@ ENSv2 registration at its publication, including role-triggered token regenerati
 released/unregistered or identity-only unsupported name, or a name lacking eligible token evidence,
 omits the field. No bare labelhash or permission-resource word is substituted. `registration_id`
 remains the existing resource UUID through regeneration; a new registration lifecycle may select
-a new resource. Feed and list/history/permission DTOs retain their existing omission.
+a new resource. Feed, name lists and current permission DTOs retain their existing omission.
+History `include=data` exposes proven event-position token IDs on ENSv2 registration, transfer
+and non-root registry permission rows. It also exposes event-local canonical keys, retained
+payment/referrer details and explicit ERC-1155 operators, including uniquely corresponding
+registrar payments on existing registration rows. See [history payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)
+for exact evidence rules, registered/linked copies of one charge, and historical/source coverage
+limits. Current name state never rewrites these history values.
 The construction and separate token/EAC versions are defined by the pinned registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L7 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L578 @ ens_v2_sepolia_20261001@07e55a05)

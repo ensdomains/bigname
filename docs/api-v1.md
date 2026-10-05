@@ -370,10 +370,30 @@ registration emits its token and permission resource separately.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L237 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L489-L506 @ ens_v2_sepolia_20261001@07e55a05)
 
-Collection and permission rows retain their existing registration handles; these
-shapes do not expose `token_id`. Historical events keep their original
-registration identity and stored token words. They are never rewritten to a
-later token version.
+Name-list and current permission rows retain their existing registration handles and omit
+`token_id`. History `include=data` exposes `data.token_id` on ENSv2 registration, transfer and
+non-root registry permission rows when evidence proves the token at that row's physical
+block/transaction/log position. Direct registration and transfer words do not require a current
+registration. Permission rows use the last eligible token marker at or before their position,
+bounded by the page's publication. The role event initiating regeneration therefore shows the
+old token, while a subsequent event after the marker shows the new one.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
+This predecessor inference supports the current and historical June post-audit models. Deprecated
+pre-audit permission rows without direct evidence omit the token because their mint callback
+can run before the regeneration marker. Direct historical registration/transfer words remain
+supported. Missing evidence omits the field; malformed selected token evidence is an internal
+data error. Historical registration IDs and token words are never rewritten to a later version.
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L529-L538 @ ens_v2_sepolia_20260629@ccaeb58b)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/PermissionedRegistry.sol:L451-L462 @ ens_v2_sepolia_dev@554c309b)
+
+History `data.canonical_id` is the decimal ENSv2 storage key obtained by clearing an event-local
+identifier's low 32 bits. It is scoped by registry and chain, and differs from the full labelhash,
+versioned token, permission resource and opaque `registration_id`. It uses the row's retained
+token, or the documented permission-resource/registration-label evidence, with consistent masked
+values when several are present. It never uses current name state. Root permissions, resolver
+resources and other protocol families omit it.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/LibLabel.sol:L11-L16 @ ens_v2_sepolia_20261001@07e55a05)
 
 ### Resource restrictions
 
@@ -3187,6 +3207,14 @@ Closed history payload fields. The event type and retained evidence determine wh
 <!-- openapi:object HistoryEventData -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
+| `token_id` | string | optional | Decimal ENSv2 token at this registration, transfer or non-root registry permission row's physical event position; see [ENSv2 token identity](#ensv2-token-identity). |
+| `canonical_id` | string | optional | Decimal ENSv2 event-local identifier with its low 32 bits cleared; scoped by registry and chain, not a registration UUID. |
+| `cost` | string | optional | Unsigned decimal unsplit registration amount or renewal amount; native wei for ENSv1, raw payment-token units for ENSv2. |
+| `base_cost` | string | optional | Unsigned decimal explicitly emitted registration base amount. |
+| `premium` | string | optional | Unsigned decimal explicitly emitted registration premium. |
+| `payment_token` | object ContractRef | optional | ERC-20 contract named by an ENSv2 payment observation; explicit zero address is preserved, without inferring a currency. |
+| `referrer` | string | optional | Emitted bytes32 referrer as lowercase 0x-prefixed hex, including explicit zero. |
+| `operator` | string | optional | Lowercase operator explicitly retained on an ERC-1155 transfer. |
 | `registrant` | string | optional | Registrant the registration event named, as the on-chain event carries it. |
 | `owner` | string | optional | Owner address the event named. |
 | `expires_at` | nullable string | optional | Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](#timestamp-format-and-absent-expiry). |

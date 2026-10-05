@@ -15,6 +15,7 @@ mod history;
 mod history_context;
 mod history_filters;
 pub(crate) mod history_keyset;
+mod history_values;
 mod list_cursor;
 pub(crate) mod lookup;
 mod name_filter;
