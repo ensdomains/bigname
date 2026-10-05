@@ -3193,9 +3193,11 @@ covers this start. See the [measured watch-plan change](manifests.md).
 Metadata and retained origins do not replace ordinary registry
 announcement admission or introduce pre-initialization approval capture.
 
-### Renewal of a retired ENSv1 registrar lease
+### ENSv1 intermediary migration and retired registrar renewal
 
-The renewal adapter now applies the existing same-lease retirement rule before
+The migration adapter now selects the exact terminal controller-entry and
+cleanup transfers while preserving earlier ordinary transfers in the same
+transaction. The renewal adapter applies the existing same-lease retirement rule before
 creating a new ENSv1 binding from later name readability. Actual renewal and
 expiry observations remain available. This changes `crates/adapters/src` and
 rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for
@@ -3206,5 +3208,6 @@ the [planned migration and fingerprint
 boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
 One redo pair under the final combined release covers this correction and
 other changes in that release; an earlier hash does not. Preserve raw facts
-and verify that a migrated name continues to serve its current ENSv2
-registration after a later ENSv1 renewal, with no reopened ENSv1 predecessor.
+and verify that intermediary migrations publish their current ENSv2
+registration with no active ENSv1 predecessor, including after a later ENSv1
+renewal of that retired lease.

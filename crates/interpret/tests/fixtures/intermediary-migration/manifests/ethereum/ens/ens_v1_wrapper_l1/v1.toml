@@ -1,0 +1,65 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+discovery_rules = []
+manifest_version = 1
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+roots = []
+source_family = "ens_v1_wrapper_l1"
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)"
+name = "NameWrapped"
+normalized_events = ["TokenControlTransferred", "ExpiryChanged", "PermissionScopeChanged", "PermissionChanged", "SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PreimageObserved"]
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event NameUnwrapped(bytes32 indexed node, address owner)"
+name = "NameUnwrapped"
+normalized_events = ["SurfaceUnbound", "SurfaceBound", "AuthorityEpochChanged", "ResolverChanged", "PermissionChanged"]
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event FusesSet(bytes32 indexed node, uint32 fuses)"
+name = "FusesSet"
+normalized_events = ["PermissionScopeChanged"]
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event ExpiryExtended(bytes32 indexed node, uint64 expiry)"
+name = "ExpiryExtended"
+normalized_events = ["ExpiryChanged"]
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+name = "TransferSingle"
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+name = "ApprovalForAll"
+normalized_events = []
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+name = "Approval"
+normalized_events = []
+
+[[abi.events]]
+emitter_roles = ["name_wrapper"]
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+name = "TransferBatch"
+normalized_events = ["TokenControlTransferred", "PermissionChanged"]
+
+[capability_flags]
+
+[[contracts]]
+address = "0xa51c1fc2f0d1a1b8494ed1fe312d7c3a78ed91c0"
+proxy_kind = "none"
+role = "name_wrapper"
+start_block = 13

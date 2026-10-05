@@ -1355,6 +1355,13 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The controller entry and selected cleanup must be the unique terminal pair
+of same-label registrar transfers, in strict log order. Earlier ordinary
+transfers remain outside the reconciliation window: their token control,
+permissions, binding changes and authority history are preserved and folded
+into the predecessor state. An approved intermediary can therefore receive
+the token before transferring it into the controller in the same transaction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L92-L120 @ ens_v2_sepolia_20261001@07e55a05)
 The name may enter the transaction bound to its lease or, after a registrar
 transfer without `reclaim`, to the registry-only resource the lease goes on
 under; the registrar state is the lease either way.

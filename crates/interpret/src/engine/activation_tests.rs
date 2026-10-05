@@ -86,6 +86,9 @@ mod graveyard_burned;
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
 
+#[path = "tests/intermediary_migration.rs"]
+mod intermediary_migration;
+
 #[path = "tests/sunny_seal.rs"]
 mod sunny_seal;
 

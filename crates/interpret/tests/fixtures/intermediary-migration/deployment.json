@@ -1,0 +1,14 @@
+{
+  "a": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+  "b": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+  "batcher": "0x9d4454b023096f34b160d6b654540c56a1f81688",
+  "c": "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+  "controller": "0x998abeb3e57409262ae5b751f60747921b33613e",
+  "graveyard": "0xf5059a5d33d5853360d16c683c16e67980206f36",
+  "registrar_v1": "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0",
+  "registry_v1": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+  "registry_v2": "0x4ed7c70f96b99c776995fb64377f0d4ab3b0e1c1",
+  "v2_artifacts": "contracts/deployments/sepolia",
+  "v2_pin": "07e55a056f5b6a9c90119f501bdd05714e67dddd",
+  "wrapper_v1": "0xa51c1fc2f0d1a1b8494ed1fe312d7c3a78ed91c0"
+}

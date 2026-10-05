@@ -1,0 +1,38 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_20261001"
+discovery_rules = []
+manifest_version = 2
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+source_family = "ens_v2_registrar_l1"
+
+[[abi.events]]
+emitter_roles = ["registrar"]
+fragment = "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)"
+name = "NameRegistered"
+normalized_events = ["RegistrarNameRegistered", "PreimageObserved"]
+
+[[abi.events]]
+emitter_roles = ["registrar"]
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+name = "NameRenewed"
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]
+
+[capability_flags]
+name_history = "supported"
+
+[capability_flags.exact_name_profile]
+notes = "namespace capability declaration for /v1/namespaces; whether a name is served follows its authority decision, not this flag"
+status = "supported"
+
+[[contracts]]
+address = "0x7a2088a1bfc9d81c55368ae168c2c02570cb814f"
+proxy_kind = "none"
+role = "registrar"
+start_block = 27
+
+[[roots]]
+address = "0x7a2088a1bfc9d81c55368ae168c2c02570cb814f"
+name = "ETHRegistrar"
+start_block = 27
