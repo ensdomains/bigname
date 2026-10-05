@@ -277,6 +277,35 @@ fn openapi_record_keys_enforce_the_fixed_array_limit() {
 }
 
 #[test]
+fn openapi_expiry_windows_repeat_with_bounded_membership() {
+    let parameters = document()["paths"]["/v1/names"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    let windows = parameters
+        .iter()
+        .find(|p| p["name"] == "expires_window")
+        .unwrap();
+    assert_eq!(windows["style"], "form");
+    assert_eq!(windows["explode"], true);
+    assert_eq!(windows["required"], false);
+    let bounds = validator(&windows["schema"]).unwrap();
+    for (count, valid) in [(0, false), (1, true), (32, true), (33, false)] {
+        assert_eq!(bounds.is_valid(&json!(vec!["1..2"; count])), valid);
+    }
+    let schema = &document()["components"]["schemas"]["SearchName"];
+    assert!(
+        !schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("expires_window_index"))
+    );
+    let index = validator(&schema["properties"]["expires_window_index"]).unwrap();
+    for (value, valid) in [(-1, false), (0, true), (31, true), (32, false)] {
+        assert_eq!(index.is_valid(&json!(value)), valid);
+    }
+}
+
+#[test]
 fn openapi_error_responses_constrain_codes_for_the_operation_and_status() {
     for (method, path, status, allowed) in [
         ("post", "/v1/lookup", "400", &["invalid_input"][..]),

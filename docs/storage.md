@@ -369,14 +369,12 @@ that also has an ENSv2 candidate.
 
 Family indexes serve these concrete readers:
 
-- Expiring names use `project_lifecycle_event_expiry_idx`,
-  `project_lifecycle_event_inexact_expiry_idx` and `project_wrapper_state_expiry_idx`;
-  resolver-bound names use `project_named_resource_pointer_resolver_idx` and
-  `project_registry_pointer_resolver_idx`.
-- The name summary's expiry selector is indexed by `project_name_summary_expiry_idx`
-  (a namespace's listable names by expiry) and `project_name_summary_authority_expiry_idx`
-  (the same within one public authority). The family step maintains both; the expiring-names
-  listing does not read them yet.
+- Expiring names select from the name summary's expiry selector through
+  `project_name_summary_expiry_idx` (a namespace's listable names by expiry) and
+  `project_name_summary_authority_expiry_idx` (the same within one public authority), joined
+  to `name_surfaces` by its primary key for the name order within one expiry. The family step
+  maintains both indexes. Resolver-bound names use `project_named_resource_pointer_resolver_idx`
+  and `project_registry_pointer_resolver_idx`.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;

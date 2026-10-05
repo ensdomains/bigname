@@ -634,6 +634,7 @@ collection route carry neither header.
 | `namespace` | query | string | yes | none | Public namespace filter. Name-shaped routes infer it from the name when omitted; other omission rules are specified below. |
 | `expires_after` | query | string | no | none | Inclusive finite-expiry lower bound, as decimal Unix seconds or RFC 3339. Classified null expiry never matches. |
 | `expires_before` | query | string | no | none | Exclusive finite-expiry upper bound, as decimal Unix seconds or RFC 3339; must be later than expires_after when both are supplied. |
+| `expires_window` | query | repeated array [1, 32] of string | no | none | Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index. |
 | `authority` | query | array of enum Authority | no | none | Comma-separated served `authority` values; a row matches when the `authority` it serves is any listed value. Rows that serve no `authority` match no set. |
 | `parent` | query | string | no | none | A name; only names exactly one label below it, by normalized name spelling, are listed. parent=eth lists every `<label>.eth` name and no deeper subname. |
 | `sort` | query | enum `expires_at` | no | `expires_at` | Row sort key; ties use the route's stable identity order. |
@@ -668,13 +669,14 @@ collection route carry neither header.
   [Running an expiry sweep](guides/expiry-sweep.md) shows how a notification
   service applies the rules below.
 - Request parameters: query `namespace` (required), `expires_after`,
-  `expires_before`, `authority`, `parent`, `sort=expires_at`,
+  `expires_before`, repeated `expires_window`, `authority`, `parent`, `sort=expires_at`,
   `order=asc|desc`, `cursor`, `page_size`, and optional `finality=latest`. `at` and historical `finality`
   values are rejected by the shared latest-state collection rule.
   `namespace` is required: the listing is one namespace's index scan, and a
   missing namespace returns `400 invalid_input`; an unsupported one returns
-  `404 not_found`. At least one of `expires_after` and `expires_before` is
-  required so the request can never be an unbounded scan; both accept decimal
+  `404 not_found`. Supply at least one of `expires_after` and `expires_before`,
+  or use repeated `expires_window`, so the request can never be an unbounded
+  scan. Scalar bounds accept decimal
   Unix seconds or RFC 3339 timestamps, including offsets and fractional
   seconds. `expires_after` is inclusive and `expires_before` exclusive, so
   consecutive windows tile without overlap or gap; `expires_after` must be
@@ -683,6 +685,18 @@ collection route carry neither header.
   bound, or an equal or inverted pair returns `400 invalid_input`. Finite
   expiry bounds are exact numeric seconds, including beyond year 9999; public
   whole-second formatting does not round an RFC 3339 filter boundary.
+  Alternatively, repeat `expires_window=after..before` for 1–32 finite,
+  disjoint windows. Each bound uses the same exact timestamp parser as the
+  scalar bounds, with at most nanosecond precision. Both bounds are required
+  and `after < before`; the lower bound is inclusive and the upper exclusive.
+  Whitespace around bounds is ignored. Encode a literal `+` in an RFC 3339
+  offset as `%2B`. Adjacent windows are allowed; overlap, duplicates after
+  normalization, more than 32 windows, blank or malformed windows, and a
+  mixture with either scalar expiry parameter (even a blank one) return
+  `400 invalid_input`. Each row belongs to exactly one input window and
+  carries its zero-based `expires_window_index` in the original request order.
+  Input order does not affect result ordering. This parameter is supported
+  only on `GET /v1/names`; every other parameter remains single-valued.
   `authority` keeps only rows whose served `authority` is a listed value, with
   the grammar of
   [`GET /v1/addresses/{address}/names`](#get-v1addressesaddressnames): an
@@ -708,7 +722,8 @@ collection route carry neither header.
   `parent=base.eth` with `namespace=basenames` selects the Basenames
   second-level names. Both filters apply before paging. A value that names no
   authority (`authority=,`), an unknown authority, an empty `parent`, a
-  `parent` that is not a valid name, or a repeated parameter returns
+  `parent` that is not a valid name, or a repeated parameter other than
+  `expires_window` returns
   `400 invalid_input`.
 - Response shape: `data` is an array of the same record-shaped rows
   `GET /v1/search` serves: `name`, `display_name`, `namespace`, `namehash`,
@@ -716,8 +731,11 @@ collection route carry neither header.
   `created_at`,
   `expires_at`, `grace_ends_at`, `authority` as `GET /v1/names/{name}` serves
   it, and the `ens_v1` object while that `authority` is `ens_v1` or `ens_v0` (see
-  [the naming dictionary](api-v1.md#naming-dictionary)). Every row has an
-  `expires_at` inside the window. `expires_at` is the served expiry of
+  [the naming dictionary](api-v1.md#naming-dictionary)). Every row's exact
+  stored expiry falls in a requested window. With repeated windows, every row
+  also carries `expires_window_index` (0–31); scalar requests and search omit
+  that field. Membership uses the exact stored expiry, before public
+  whole-second formatting. `expires_at` is the served expiry of
   [Expiry and grace](api-v1.md#expiry-and-grace): from the Universal Resolver
   cutover a `.eth` name with a live ENSv2 entry is listed by that entry's
   expiry, before it by its ENSv1 lease's. A name
@@ -728,19 +746,23 @@ collection route carry neither header.
   registrar leases, ENSv2 registrations, and wrapped subnames; `parent=eth`
   narrows it to the `.eth` second-level names. The public
   `expires_at` is a decimal string; the index and comparisons use exact numeric
-  seconds, never floating point or lexicographic string order. It finds them by
-  walking the retained lifecycle events
-  and NameWrapper states by expiry through `project_lifecycle_event_expiry_idx`,
-  `project_lifecycle_event_inexact_expiry_idx` and
-  `project_wrapper_state_expiry_idx`. These indexes were introduced by
-  `20260928140000_project_families_expiry_indexes.sql`; their current expiry
-  keys use exact numeric storage. With `authority` set the indexed walk
-  composes only names whose stored [name summary](glossary.md#name-summary)
-  selects an arm that can serve a listed value (`ens_v1` for `ens_v0` and
-  `ens_v1`, `ens_v2` for `ens_v2`), and with `parent` set only names one label
-  below it. Names whose retained expiry is a JSON number that is not an
-  integral second, which the walk cannot place, are composed without that
-  pruning. Either way the composed row decides each row. A row with no finite registration expiry is outside this
+  seconds, never floating point or lexicographic string order. It selects a
+  page's names from the stored [name summary](glossary.md#name-summary), which
+  holds each name's exact listing selector: whether the name is listed, its
+  expiry and the public `authority` its row serves. One statement applies the
+  expiry bounds, `authority`, `parent` and the cursor and takes the first
+  `page_size + 1` names in the listing's order, through
+  `project_name_summary_expiry_idx` or
+  `project_name_summary_authority_expiry_idx`; only those names are composed.
+  For repeated windows, that statement selects at most `page_size + 1` keys
+  per window and takes the first `page_size + 1` across their ordered union,
+  then composes those names once under the page's shared snapshot.
+  A page therefore composes at most `page_size + 1` names however many names
+  the namespace holds or the filters leave out, though a sparse `parent` or a
+  second that many names share still reads many index entries. The selector
+  is written with each publication from the same composition the page runs;
+  a selected name whose composed row does not match is a failure
+  (`500 internal_error`), not a shorter page. A row with no finite registration expiry is outside this
   listing. Finite values after year 9999, above `2^53 - 1` or above `i64::MAX`
   remain eligible and keep every digit through filtering, sorting and paging.
   A negative or malformed stored expiry is not a no-expiry sentinel.
@@ -774,9 +796,13 @@ collection route carry neither header.
   that wants the names a given address last held asks
   `GET /v1/addresses/{address}/names?relation=former_owner`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
-  requested order, ties broken by namespace, name, and namehash. Cursors are
-  bound to namespace, both bounds, `authority`, `parent`, and order, and hold
-  the last row's position;
+  requested expiry order; namespace, name and namehash tie breakers remain
+  ascending in either direction. Cursors bind namespace, scalar bounds or the
+  complete ordered normalized window list, `authority`, `parent`, and order,
+  and hold the last row's position. Reordering, adding, removing or changing a
+  window invalidates the cursor; equivalent timestamp spellings are accepted.
+  Scalar and repeated-window cursors are not interchangeable, even for one
+  equivalent window. `page_size` may change within its 1–200 limit;
   see [current-state list cursors](api-v1.md#current-state-list-cursors).
   `page.total_count` is `null`.
 - Snapshot behavior: each page is read on one database snapshot of the

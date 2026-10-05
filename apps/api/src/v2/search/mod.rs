@@ -69,6 +69,9 @@ pub(crate) struct SearchName {
     pub(crate) expires_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at_reason: Option<String>,
+    /// Zero-based request-window membership, omitted on scalar expiry requests and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expires_window_index: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) grace_ends_at: Option<crate::v2::timestamps::ExpiryTimestamp>,
     /// The `authority` the name's detail serves.
@@ -295,6 +298,7 @@ pub(crate) fn build_search_name(row: &NameCurrentListRow) -> V2Result<SearchName
         authority: crate::v2::vocab::Authority::from_provenance(&row.row.provenance),
         ens_v1,
         lapsed_registration: None,
+        expires_window_index: None,
     })
 }
 

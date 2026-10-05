@@ -131,3 +131,6 @@ pub(super) fn note_submitted_rows(_rows: usize) {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_composed_names(_names: usize) {}
+
+#[cfg(any(test, feature = "test-support"))]
+pub use super::list::explain_expiring_selection;

@@ -243,12 +243,13 @@ async fn v2_get_names_rejects_invalid_authority_and_parent() -> Result<()> {
     database.cleanup().await
 }
 
-// The `authority` walk prune reads the stored name summary's arm, not the composed row: a name
-// whose summary arm cannot serve the requested authority is never composed, so it is not listed
-// even though its composed row would match. The family step keeps the two equal at every
-// publication; this pins that the listing relies on it.
+// The `authority` filter selects by the stored name summary's public authority, before anything
+// is composed: a name whose stored value is not a requested one is never composed, so it is not
+// listed. The family step keeps the stored value equal to the composed row's at every
+// publication. Were they to differ, a listing that selects the name by the stored value fails
+// rather than serve a page the composed rows cannot fill.
 #[tokio::test]
-async fn v2_get_names_authority_walk_skips_a_name_by_its_summary_arm() -> Result<()> {
+async fn v2_get_names_authority_selects_by_the_stored_public_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_filter_fixture(&database).await?;
     let ens_v2 = v2_names_filter_uri("&authority=ens_v2");
@@ -258,7 +259,7 @@ async fn v2_get_names_authority_walk_skips_a_name_by_its_summary_arm() -> Result
     );
 
     let updated = sqlx::query(
-        "UPDATE bigname_phase.project_name_summary SET authority_arm = 'ens_v1'
+        "UPDATE bigname_phase.project_name_summary SET public_authority = 'ens_v1'
          WHERE logical_name_id = $1",
     )
     .bind(bigname_storage::logical_name_id_for_name("ens", "fresh.eth"))
@@ -271,8 +272,22 @@ async fn v2_get_names_authority_walk_skips_a_name_by_its_summary_arm() -> Result
         v2_names_listed(&v2_names_payload(&database, &ens_v2).await?),
         ["kid.fresh.eth"]
     );
+    let ens_v1 = v2_names_filter_uri("&authority=ens_v1");
+    let refused = v2_names_response(&database, &ens_v1).await?;
+    assert_eq!(refused.status(), StatusCode::INTERNAL_SERVER_ERROR, "{ens_v1}");
     let all = v2_names_payload(&database, &v2_names_filter_uri("")).await?;
     assert!(v2_names_listed(&all).contains(&"fresh.eth".to_owned()), "{all:#}");
+
+    // A name the stored selector does not mark listable is not listed at all.
+    sqlx::query(
+        "UPDATE bigname_phase.project_name_summary SET expiry_listable = FALSE
+         WHERE logical_name_id = $1",
+    )
+    .bind(bigname_storage::logical_name_id_for_name("ens", "fresh.eth"))
+    .execute(&database.pool)
+    .await?;
+    let all = v2_names_payload(&database, &v2_names_filter_uri("")).await?;
+    assert!(!v2_names_listed(&all).contains(&"fresh.eth".to_owned()), "{all:#}");
     database.cleanup().await
 }
 
@@ -290,10 +305,10 @@ async fn v2_names_filter_pages(database: &TestDatabase, uri: &str) -> Result<Vec
     }
 }
 
-// With the walk's internal batch cut to one or two candidates, every filtered listing still
-// settles on exactly the rows the unfiltered listing holds for that filter, in both orders.
+// Paged one row at a time, every filtered listing returns exactly the rows the unfiltered
+// listing holds for that filter, in both orders.
 #[tokio::test]
-async fn v2_get_names_filters_settle_across_walk_batches() -> Result<()> {
+async fn v2_get_names_filters_page_to_the_unfiltered_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_filter_fixture(&database).await?;
     let all = v2_names_payload(&database, &v2_names_filter_uri("")).await?;
@@ -317,14 +332,8 @@ async fn v2_get_names_filters_settle_across_walk_batches() -> Result<()> {
                 expected.reverse();
             }
             let uri = v2_names_filter_uri(&format!("{filters}&order={order}"));
-            for batch in [1, 2] {
-                let listed = bigname_storage::families::name::seams::with_batch_size(
-                    batch,
-                    v2_names_filter_pages(&database, &uri),
-                )
-                .await?;
-                assert_eq!(listed, expected, "{uri} at batch {batch}");
-            }
+            let listed = v2_names_filter_pages(&database, &uri).await?;
+            assert_eq!(listed, expected, "{uri}");
         }
     }
     database.cleanup().await

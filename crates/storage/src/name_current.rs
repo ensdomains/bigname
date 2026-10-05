@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use sqlx::types::Uuid;
 
-pub use expiring::NameCurrentExpiringFilter;
+pub use expiring::{NameCurrentExpiringFilter, NameCurrentExpiryWindow};
 pub(crate) use expiring::{expiring_page_from, parent_like_patterns, push_parent_predicate};
 pub(crate) use list::{COMPOSED_NC_COLUMNS, escape_like_pattern, list_page_from};
 pub use list::{
@@ -27,7 +27,7 @@ pub use public_authority::{
     name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub(crate) use public_authority::{
-    public_authority_arms, push_public_authority_filter_in, push_public_authority_predicate,
+    push_public_authority_filter_in, push_public_authority_predicate,
 };
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;

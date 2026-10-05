@@ -1742,7 +1742,8 @@ registry labels' `owner` and `exclude_owner` filters read. It also holds the
 expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
 name composes a supported row whose registration carries a finite expiry, and
 `public_authority`, the public `authority` that row serves; for a listable name
-the stored expiry is the expiry the listing serves. Every name with a
+the stored expiry is the expiry the listing serves, and the listing selects its
+page's names by these fields before it composes any. Every name with a
 surface has a row. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so

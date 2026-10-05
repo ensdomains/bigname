@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=399
+expected_refusal_assertions=400
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=69
+expected_predecessor_shape_proof_count=70
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -707,6 +707,11 @@ check_served_projection_removal() {
                 emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
             fi
             emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" baseline-first
+            # The event walk's expiry indexes: present in the pre-7c shape, absent from the baseline.
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" baseline-first
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql" preceding-shape
             else
@@ -848,6 +853,7 @@ for migration_file in \
     "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
     "$ROOT/migrations/20261005140000_project_ens_v2_registry_entries.sql" \
     "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" \
+    "$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql" \
     "$ROOT/migrations/20261005170000_project_address_history_catalogue.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1270,6 +1276,68 @@ END $$;
 SQL
     emit_phase_migration "$summary_selector_migration" baseline-first
 } | run_psql
+# The event walk's expiry indexes. From a schema that still has the three indexes with the
+# definitions 20260928140000 gave them, and the selector column's earlier comment, the
+# schema-migration must drop exactly those three, keep expiry_seconds on both tables and
+# every other index, set the baseline's comment (the selector schema-migration, applied
+# just above, leaves its earlier wording), and accept that shape on a rerun. A
+# relation of one of the names that is not such an index must stop it.
+expiry_walk_index_migration="$ROOT/migrations/20261005160000_project_families_drop_expiry_walk_indexes.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+-- 20260928140000, applied above after the baseline, has already put the three back.
+DROP INDEX IF EXISTS project_lifecycle_event_expiry_idx,
+    project_lifecycle_event_inexact_expiry_idx, project_wrapper_state_expiry_idx;
+CREATE TEMP TABLE expected_family_indexes AS
+SELECT indexrelid::regclass::text AS index_name, pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass);
+CREATE INDEX project_lifecycle_event_expiry_idx
+    ON project_lifecycle_event (expiry_seconds) WHERE expiry_seconds IS NOT NULL;
+CREATE INDEX project_lifecycle_event_inexact_expiry_idx
+    ON project_lifecycle_event (chain_id)
+    WHERE expiry_seconds IS NULL AND jsonb_typeof(expiry) = 'number';
+CREATE INDEX project_wrapper_state_expiry_idx
+    ON project_wrapper_state (expiry_seconds) WHERE expiry_seconds IS NOT NULL;
+COMMENT ON COLUMN project_name_summary.public_authority IS
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
+SQL
+    emit_phase_migration "$expiry_walk_index_migration" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+        WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+        EXCEPT SELECT index_name, definition FROM expected_family_indexes
+    ) OR EXISTS (
+        SELECT index_name, definition FROM expected_family_indexes
+        EXCEPT SELECT indexrelid::regclass::text, pg_get_indexdef(indexrelid) FROM pg_index
+        WHERE indrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+    ) THEN
+        RAISE EXCEPTION 'dropping the expiry walk indexes left a different index set than the baseline';
+    END IF;
+    IF (SELECT count(*) FROM pg_attribute
+        WHERE attrelid IN ('project_lifecycle_event'::regclass, 'project_wrapper_state'::regclass)
+          AND attname = 'expiry_seconds' AND NOT attisdropped) <> 2 THEN
+        RAISE EXCEPTION 'dropping the expiry walk indexes removed an expiry_seconds column';
+    END IF;
+    IF (SELECT col_description('project_name_summary'::regclass, attnum) FROM pg_attribute
+        WHERE attrelid = 'project_name_summary'::regclass AND attname = 'public_authority')
+       IS DISTINCT FROM 'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The authority filter of the expiry listing of GET /v1/names selects by it.' THEN
+        RAISE EXCEPTION 'the public_authority comment differs from the baseline';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$expiry_walk_index_migration" baseline-first
+    emit_phase_migration "$expiry_walk_index_migration" baseline-first
+} | run_psql
+assert_migration_refusal "table-named-project_wrapper_state_expiry_idx" \
+    "$expiry_walk_index_migration" \
+    "$scratch_schema.project_wrapper_state_expiry_idx is not an index on $scratch_schema.project_wrapper_state; it is not dropped" <<'SQL'
+CREATE TABLE project_wrapper_state_expiry_idx (placeholder integer);
+SQL
 report_timing baseline-first
 # Recreate the additive historical binding index from its preceding schema shape.
 # Compare the resulting catalog definition to the fresh baseline, then prove reruns.

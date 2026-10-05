@@ -755,10 +755,13 @@ async fn v2_get_names_rejects_unbounded_or_malformed_requests() -> Result<()> {
             "/v1/names?expires_after=2025-01-01T00:00:00Z",
             "namespace is required",
         ),
-        ("/v1/names?namespace=ens", "expires_after or expires_before"),
+        (
+            "/v1/names?namespace=ens",
+            "expires_after, expires_before or expires_window is required so the listing is bounded",
+        ),
         (
             "/v1/names?namespace=ens&sort=expires_at",
-            "expires_after or expires_before",
+            "expires_after, expires_before or expires_window is required so the listing is bounded",
         ),
         (
             "/v1/names?namespace=ens&expires_after=2027-01-01T00:00:00Z&expires_before=2026-01-01T00:00:00Z",

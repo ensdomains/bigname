@@ -2688,7 +2688,8 @@ the expiry selector of [`GET /v1/names`](api-v1-routes.md#get-v1names): whether
 the name's row is listed by expiry (`expiry_listable`: the name composes a row,
 its coverage is not unsupported and its registration carries a finite expiry)
 and the public `authority` the row serves (`public_authority`: `ens_v0`,
-`ens_v1`, `ens_v2`, or none). Each but the zero-owner flag
+`ens_v1`, `ens_v2`, or none). That listing selects each page's names by
+these two fields and the stored expiry, then composes only the selected names. Each but the zero-owner flag
 is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
