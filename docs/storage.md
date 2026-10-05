@@ -299,8 +299,8 @@ Family indexes serve these concrete readers:
   start from `project_address_name_index`.
 - The address-names walk (`storage:families.records.address_name_walk`) orders one address's
   candidate names, read from `project_address_name_index` by its primary key, by their sort
-  key: the `name_surfaces`, `project_name_summary` and `project_name_history` primary keys, one
-  probe per candidate, then a sort of that address's candidates only. Its closure read
+  key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
+  then a sort of that address's candidates only. Its closure read
   (`storage:families.records.address_name_walk_closure`) finds the names bound to the walked
   resources through `project_binding_candidate_resource_idx`.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
