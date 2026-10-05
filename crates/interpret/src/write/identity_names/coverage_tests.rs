@@ -4,9 +4,9 @@ use serde_json::json;
 
 use super::*;
 
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub(super) type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-async fn database(name: &str) -> TestResult<TestDatabase> {
+pub(super) async fn database(name: &str) -> TestResult<TestDatabase> {
     let database = TestDatabase::create(TestDatabaseConfig::new(name)).await?;
     for sql in [
         include_str!("../../../../storage/schema/baseline/01_chain.sql"),
@@ -25,7 +25,7 @@ async fn database(name: &str) -> TestResult<TestDatabase> {
     Ok(database)
 }
 
-async fn write_output(database: &TestDatabase, output: &BatchOutput) -> TestResult {
+pub(super) async fn write_output(database: &TestDatabase, output: &BatchOutput) -> TestResult {
     let mut transaction = database.pool().begin().await?;
     write(&mut transaction, output).await?;
     transaction.commit().await?;
@@ -51,7 +51,7 @@ fn observed_preimage(
     }
 }
 
-fn surface(logical_name_id: &str, raw_name: &str) -> NameSurface {
+pub(super) fn surface(logical_name_id: &str, raw_name: &str) -> NameSurface {
     let namehash = logical_name_id
         .strip_prefix("ens:")
         .expect("test logical IDs use the ENS namespace");

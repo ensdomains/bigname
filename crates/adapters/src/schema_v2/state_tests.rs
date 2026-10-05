@@ -83,6 +83,38 @@ fn restore_keys_authority_derived_resolver_links_by_child() {
 }
 
 #[test]
+fn restore_knows_a_name_identity_observed_from_its_hash_path() {
+    let event = |after_state| PriorEventInput {
+        retained_state_key: "registry-child".to_owned(),
+        chain_id: "test-chain".to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        logical_name_id: Some("test:child".to_owned()),
+        resource_id: Some(Uuid::from_u128(1)),
+        event_kind: "SubregistryChanged".to_owned(),
+        source_family: "ens_v1_registry_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: Some(1),
+        emitting_address: None,
+        state_scope: None,
+        block_timestamp: None,
+        write_position: None,
+        after_state,
+    };
+    let body = json!({"source_event": "NewOwner", "node": "parent", "child_node": "child"});
+
+    let mut unmarked = State::new(Vec::new(), Vec::new());
+    crate::schema_v2::state_restore::v1(&mut unmarked, &event(body.clone()));
+    assert!(!unmarked.v1_active_surface_materialized(NAMESPACE, "child"));
+
+    let mut marked_body = body;
+    marked_body[crate::schema_v2::seam::NAME_IDENTITY_OBSERVED_KEY] = json!(true);
+    let mut restored = State::new(Vec::new(), Vec::new());
+    crate::schema_v2::state_restore::v1(&mut restored, &event(marked_body));
+    assert!(restored.v1_active_surface_materialized(NAMESPACE, "child"));
+    assert!(restored.v1_surface_materialized(NAMESPACE, "child"));
+}
+
+#[test]
 fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
     const NODE: &str = "node";
     const OWNER: &str = "0x0000000000000000000000000000000000000001";

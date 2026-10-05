@@ -419,3 +419,7 @@ mod tests {
 #[cfg(test)]
 #[path = "identity_names/coverage_tests.rs"]
 mod coverage_tests;
+
+#[cfg(test)]
+#[path = "identity_names/raw_evidence_tests.rs"]
+mod raw_evidence_tests;

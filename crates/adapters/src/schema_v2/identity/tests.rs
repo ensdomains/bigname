@@ -120,3 +120,135 @@ fn interleaved_compaction_matches_writer() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+mod node_identity {
+    use std::collections::BTreeMap;
+
+    use alloy_primitives::keccak256;
+
+    use super::super::node::{self, NodeIdentityDraft};
+    use crate::schema_v2::{
+        catalog::Selected,
+        common::{hash_hex, namehash},
+        manifest::{ManifestEvent, ManifestSource},
+        model::{BatchOutput, RawLogInput},
+        state::State,
+    };
+
+    fn selected() -> Selected {
+        let event = ManifestEvent {
+            name: "NewOwner".to_owned(),
+            signature: "NewOwner(bytes32,bytes32,address)".to_owned(),
+            topic0: format!("{:#x}", keccak256(b"NewOwner(bytes32,bytes32,address)")),
+            emitter_roles: vec!["registry".to_owned()],
+            normalized_events: vec!["SubregistryChanged".to_owned()],
+        };
+        Selected {
+            source: ManifestSource {
+                manifest_id: 1,
+                manifest_version: 1,
+                namespace: "ens".to_owned(),
+                source_family: "ens_v1_registry_l1".to_owned(),
+                chain_id: "ethereum-sepolia".to_owned(),
+                deployment_label: "unit-test".to_owned(),
+                correlation_addresses: BTreeMap::new(),
+                resolver_implementations: BTreeMap::new(),
+                universal_resolver_implementations: Vec::new(),
+                universal_resolver_proxies: Vec::new(),
+                events: vec![event.clone()],
+            },
+            event,
+            contract_instance_id: uuid::Uuid::from_u128(1),
+            emitter_role: Some("registry".to_owned()),
+            match_all: false,
+            manifest_declared_emitter: true,
+        }
+    }
+
+    fn raw() -> RawLogInput {
+        RawLogInput {
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: format!("0x{:064x}", 7_u64),
+            block_number: 7,
+            block_timestamp: time::OffsetDateTime::from_unix_timestamp(1_700_000_000)
+                .expect("timestamp"),
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: format!("0x{:064x}", 70_u64),
+            transaction_index: 0,
+            log_index: 3,
+            emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            topics: Vec::new(),
+            data: Vec::new(),
+        }
+    }
+
+    fn draft() -> NodeIdentityDraft {
+        let labels = ["sub".to_owned(), "leon".to_owned(), "eth".to_owned()];
+        NodeIdentityDraft {
+            labelhashes: labels
+                .iter()
+                .map(|label| hash_hex(label.as_bytes()))
+                .collect(),
+            namehash: namehash(&labels),
+        }
+    }
+
+    #[test]
+    fn hash_path_draft_becomes_a_surface_without_raw_bytes_or_preimage() -> anyhow::Result<()> {
+        let draft = draft();
+        let mut state = State::new(Vec::new(), Vec::new());
+        let mut output = BatchOutput::default();
+        node::materialize(
+            &selected(),
+            &raw(),
+            std::slice::from_ref(&draft),
+            &serde_json::json!({"log_index": 3}),
+            &mut state,
+            &mut output,
+        )?;
+
+        let [surface] = output.name_surfaces.as_slice() else {
+            panic!("one surface expected");
+        };
+        assert_eq!(surface.logical_name_id, format!("ens:{}", draft.namehash));
+        assert_eq!(surface.raw, None);
+        assert_eq!(surface.labelhashes, draft.labelhashes);
+        assert_eq!(surface.visibility_state, "active");
+        assert_eq!(surface.normalization_errors, serde_json::json!([]));
+        assert_eq!(surface.block_number, 7);
+        assert!(output.normalized_events.is_empty());
+        assert!(output.label_preimages.is_empty());
+        assert!(state.v1_active_surface_materialized("ens", &draft.namehash));
+        Ok(())
+    }
+
+    #[test]
+    fn draft_whose_path_does_not_hash_to_its_node_is_rejected() {
+        for broken in [
+            NodeIdentityDraft {
+                labelhashes: draft().labelhashes[1..].to_vec(),
+                ..draft()
+            },
+            NodeIdentityDraft {
+                labelhashes: Vec::new(),
+                ..draft()
+            },
+            NodeIdentityDraft {
+                labelhashes: vec!["[sub]".to_owned(), "eth".to_owned()],
+                ..draft()
+            },
+        ] {
+            let mut output = BatchOutput::default();
+            let result = node::materialize(
+                &selected(),
+                &raw(),
+                &[broken],
+                &serde_json::json!({}),
+                &mut State::new(Vec::new(), Vec::new()),
+                &mut output,
+            );
+            assert!(result.is_err());
+            assert!(output.name_surfaces.is_empty());
+        }
+    }
+}
