@@ -2582,8 +2582,11 @@ and [ENSv2 registry entries](projections.md#ensv2-registry-entries)) changes
 `crates/manifests/src`, `crates/adapters/src`, `crates/project/src` and the
 Sepolia `ens_v2_registry_l1` and `ens_v2_root_l1` manifests, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
-chain. It changes no reader: `GET /v1/permissions` still names
-`ens_v2_registry_operators` as an unlisted surface. Besides the approval rows,
+chain. Permissions exposure is unchanged: `GET /v1/permissions` still names
+`ens_v2_registry_operators` as an unlisted surface. The shared product-history
+reader excludes the marked tokenless expiry described below from listing and
+counting before pagination; that reader change does not by itself rotate the
+interpreter content hash. Besides the approval rows,
 stored events gain one kind of row: an `ExpiryChanged` with no name, no resource
 and `token_state_absent = true` for an `ExpiryUpdated` whose token the adapter
 holds no state for, such as a renewal that revives an unregistered entry or a

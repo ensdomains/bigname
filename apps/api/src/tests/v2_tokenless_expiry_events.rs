@@ -45,12 +45,10 @@ async fn tokenless_registry_expiry_feeds_the_entry_row_and_no_event_read() -> Re
                "expiry": 1_900_000_001_u64, "sender": G_ADDRESS,
                "registry_contract_instance_id": instance}),
     );
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[unregistered, tokenless, ordinary],
-    )
-    .await?;
-    rebuild_fixture_families(&database.pool, EVENT_DATA_CHAIN, 145, "0xhistory145").await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[unregistered, tokenless])
+        .await?;
+    // Through block 144 only the marked renewal has touched the unregistered entry.
+    rebuild_fixture_families(&database.pool, EVENT_DATA_CHAIN, 144, "0xhistory144").await?;
 
     let stored: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bigname_phase.normalized_events
@@ -59,16 +57,25 @@ async fn tokenless_registry_expiry_feeds_the_entry_row_and_no_event_read() -> Re
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(stored, 1, "the renewal is a stored, activated event");
-    let (status, token_id, expiry): (String, String, sqlx::types::BigDecimal) = sqlx::query_as(
-        "SELECT status, token_id, expiry FROM bigname_phase.project_ens_v2_entry_owner
-         WHERE chain_id = $1 AND registry = $2",
-    )
-    .bind(EVENT_DATA_CHAIN)
-    .bind(REGISTRY)
-    .fetch_one(&database.pool)
-    .await?;
-    assert_eq!(status, "reserved", "the renewal revived the unregistered entry");
+    let entry = || async {
+        sqlx::query_as::<_, (String, String, sqlx::types::BigDecimal)>(
+            "SELECT status, token_id, expiry FROM bigname_phase.project_ens_v2_entry_owner
+             WHERE chain_id = $1 AND registry = $2",
+        )
+        .bind(EVENT_DATA_CHAIN)
+        .bind(REGISTRY)
+        .fetch_one(&database.pool)
+        .await
+    };
+    let (status, token_id, expiry) = entry().await?;
+    assert_eq!(status, "reserved", "the marked renewal revived the unregistered entry");
     assert_eq!(token_id, token("00000001"));
+    assert_eq!(expiry.to_string(), "1900000000");
+
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[ordinary]).await?;
+    rebuild_fixture_families(&database.pool, EVENT_DATA_CHAIN, 145, "0xhistory145").await?;
+    let (status, _, expiry) = entry().await?;
+    assert_eq!(status, "reserved");
     assert_eq!(expiry.to_string(), "1900000001");
 
     let by_contract = hk_ok(
