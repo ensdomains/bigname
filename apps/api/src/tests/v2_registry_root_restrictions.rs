@@ -130,6 +130,7 @@ async fn registration_locked_roles_count_the_real_registry_root_admins() -> Resu
 
     // The root's admin_unregister and admin_set_resolver unlock their roles; its
     // can_transfer_admin does not, because a transfer checks only the token's own roles.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L536-L539 @ ens_v2_sepolia_20261001@07e55a05)
     let (status, permissions) = get(
         &database,
         &format!("/v1/permissions?registration_id={registration}"),
