@@ -1,0 +1,81 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_20261001"
+discovery_rules = []
+manifest_version = 2
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+roots = []
+source_family = "ens_v2_migration_l1"
+
+[[abi.events]]
+emitter_roles = ["verifiable_factory"]
+fragment = "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)"
+name = "ProxyDeployed"
+normalized_events = ["ContractDiscovered"]
+
+[[abi.events]]
+emitter_roles = ["ens_v1_renewal_bridge"]
+fragment = "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)"
+name = "NameRenewed"
+normalized_events = ["RegistrationRenewed", "PreimageObserved"]
+
+[capability_flags]
+
+[[contracts]]
+address = "0x998abeb3e57409262ae5b751f60747921b33613e"
+proxy_kind = "none"
+role = "unlocked_migration_controller"
+start_block = 40
+
+[[contracts]]
+address = "0x70e0ba845a1a0f2da3359c97e0285013525ffc49"
+proxy_kind = "none"
+role = "locked_migration_controller"
+start_block = 41
+
+[[contracts]]
+address = "0xf5059a5d33d5853360d16c683c16e67980206f36"
+proxy_kind = "none"
+role = "graveyard"
+start_block = 38
+
+[[contracts]]
+address = "0xbae9ea56f13b8dae0f1df605b3db5a62c9e68f63"
+proxy_kind = "none"
+role = "ens_v1_renewal_bridge"
+start_block = 0
+
+[[contracts]]
+address = "0x1613beb3b2c4f22ee086b2b38c1476a3ce7f78e8"
+proxy_kind = "none"
+role = "verifiable_factory"
+start_block = 36
+
+[[contracts]]
+address = "0x689ee6baf510c471f4078cbdf4c0345aa9672347"
+proxy_kind = "none"
+role = "migration_helper"
+start_block = 0
+
+[[contracts]]
+address = "0x95401dc811bb5740090279ba06cfa8fcf6113778"
+proxy_kind = "none"
+role = "wrapper_registry_implementation"
+start_block = 39
+
+[[contracts]]
+address = "0x5712dc67179b01f4f6a8d4632e1e4fbf3871da95"
+proxy_kind = "none"
+role = "user_registry_implementation"
+start_block = 0
+
+[[contracts]]
+address = "0xea27a5754a727f959fe4959339ece4e2dc2172b7"
+proxy_kind = "none"
+role = "batch_registrar"
+start_block = 0
+
+[correlation_addresses]
+ens_v1_base_registrar = "0x9fe46736679d2d9a65f0992f2272de9f3c7fa6e0"
+ens_v1_name_wrapper = "0xa51c1fc2f0d1a1b8494ed1fe312d7c3a78ed91c0"

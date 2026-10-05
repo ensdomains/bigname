@@ -1355,6 +1355,13 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The controller entry and selected cleanup must be the unique terminal pair
+of same-label registrar transfers, in strict log order. Earlier ordinary
+transfers remain outside the reconciliation window: their token control,
+permissions, binding changes and authority history are preserved and folded
+into the predecessor state. An approved intermediary can therefore receive
+the token before transferring it into the controller in the same transaction.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/migration/UnlockedMigrationController.sol:L92-L120 @ ens_v2_sepolia_20261001@07e55a05)
 The name may enter the transaction bound to its lease or, after a registrar
 transfer without `reclaim`, to the registry-only resource the lease goes on
 under; the registrar state is the lease either way.
@@ -1863,6 +1870,12 @@ they describe one registration: the original grant and the snapshot share a `res
 `registered_at` is the original grant's block time either way.
 
 For this disclosure rule, launch-bounded transfers to the manifest-declared Graveyard and admitted cleanup observations carry `registrar_surface_retired` in their existing event payload. The bounded retained evidence records that retirement separately from the ENSv1 current-registry fallback marker. It prevents a later preimage from reopening that lease and does not replace migration correlation or relax exact cleanup evidence. A subsequent independently proven new numeric grant has a new lease identity.
+Numeric registrar renewal and controller name enrichment use the same retirement
+veto before creating a new ENSv1 binding. They retain the actual renewal, expiry,
+name, resource, lineage, holder and bounded retirement evidence. Retirement does
+not close an existing ordinary binding, delete the retained lease, or prove
+that an ENSv1→ENSv2 migration completed; incomplete migration evidence remains
+subject to the same exact correlation requirements.
 
 Only active manifests participate in raw-log selection and watch authority.
 Interpret separately retains metadata for stored deprecated manifest versions

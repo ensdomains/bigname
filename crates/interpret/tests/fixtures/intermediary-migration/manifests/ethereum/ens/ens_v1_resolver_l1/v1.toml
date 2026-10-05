@@ -1,0 +1,118 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v1"
+discovery_rules = []
+manifest_version = 1
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+roots = []
+source_family = "ens_v1_resolver_l1"
+
+[[abi.events]]
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+name = "ABIChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event AddrChanged(bytes32 indexed node, address a)"
+name = "AddrChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event AddressChanged(bytes32 indexed node, uint256 coinType, bytes newAddress)"
+name = "AddressChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event ContentChanged(bytes32 indexed node, bytes32 hash)"
+name = "ContentChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event ContenthashChanged(bytes32 indexed node, bytes hash)"
+name = "ContenthashChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event DNSRecordChanged(bytes32 indexed node, bytes name, uint16 resource, bytes record)"
+name = "DNSRecordChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event DNSRecordDeleted(bytes32 indexed node, bytes name, uint16 resource)"
+name = "DNSRecordDeleted"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event DNSZonehashChanged(bytes32 indexed node, bytes lastzonehash, bytes zonehash)"
+name = "DNSZonehashChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event DataChanged(bytes32 indexed node, string indexed indexedKey, string key, bytes indexed indexedData)"
+name = "DataChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event InterfaceChanged(bytes32 indexed node, bytes4 indexed interfaceID, address implementer)"
+name = "InterfaceChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event NameChanged(bytes32 indexed node, string name)"
+name = "NameChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key)"
+name = "TextChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)"
+name = "TextChanged"
+normalized_events = ["RecordChanged"]
+
+[[abi.events]]
+fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
+name = "VersionChanged"
+normalized_events = ["RecordVersionChanged"]
+
+[[abi.events]]
+emitter_roles = ["public_resolver", "public_resolver_8948458", "public_resolver_8fade66"]
+fragment = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+name = "ApprovalForAll"
+normalized_events = []
+
+[[abi.events]]
+emitter_roles = ["public_resolver", "public_resolver_8948458", "public_resolver_8fade66"]
+fragment = "event Approved(address owner, bytes32 indexed node, address indexed delegate, bool indexed approved)"
+name = "Approved"
+normalized_events = []
+
+[capability_flags]
+
+[[contracts]]
+address = "0x9a676e781a523b5d0c0e43731313a708cb607508"
+proxy_kind = "none"
+read_features = ["ensip19_default_address"]
+role = "public_resolver"
+start_block = 15
+
+[[contracts]]
+address = "0x8314579ccc51fb48eaa7bca09141c635b07ec692"
+proxy_kind = "none"
+role = "public_resolver_8948458"
+start_block = 0
+
+[[contracts]]
+address = "0x30b44a1182abb227d19197f0db55573e8232a92c"
+proxy_kind = "none"
+role = "public_resolver_8fade66"
+start_block = 0
+
+[[contracts]]
+address = "0x148043470d25784e96d9e3b52ab080f23f5be593"
+proxy_kind = "none"
+role = "public_resolver_0ceec52"
+start_block = 0

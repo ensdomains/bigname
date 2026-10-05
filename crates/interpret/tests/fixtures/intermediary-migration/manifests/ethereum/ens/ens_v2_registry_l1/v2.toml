@@ -1,0 +1,127 @@
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_20261001"
+manifest_version = 2
+namespace = "ens"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+rollout_status = "active"
+source_family = "ens_v2_registry_l1"
+
+[[abi.events]]
+fragment = "event RegistryCreated()"
+name = "RegistryCreated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistryCreated"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)"
+name = "LabelRegistered"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationGranted", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)"
+name = "LabelReserved"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)"
+name = "LabelUnregistered"
+normalized_events = ["RegistrationReleased", "SurfaceUnbound", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)"
+name = "ExpiryUpdated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+name = "SubregistryUpdated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "SubregistryChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)"
+name = "ResolverUpdated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ResolverChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)"
+name = "TokenResource"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenResourceLinked", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+name = "TransferSingle"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+name = "TransferBatch"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenControlTransferred"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"
+name = "EACRolesChanged"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "PermissionChanged", "RootPermissionChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId)"
+name = "TokenRegenerated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "TokenRegenerated", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
+name = "ParentUpdated"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event Upgraded(address indexed implementation)"
+name = "Upgraded"
+normalized_events = ["SurfaceUnbound", "RegistrationReleased", "Upgraded"]
+
+[[abi.events]]
+emitter_roles = ["registry"]
+fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
+name = "ApprovalForAll"
+normalized_events = []
+start_block = 10893181
+
+[capability_flags.declared_children]
+notes = "selected official Sepolia ETHRegistry and discovered user registries are authoritative declared child inputs"
+status = "supported"
+
+[[contracts]]
+address = "0x4ed7c70f96b99c776995fb64377f0d4ab3b0e1c1"
+proxy_kind = "none"
+role = "registry"
+start_block = 23
+
+[[discovery_rules]]
+admission = "reachable_from_root"
+edge_kind = "subregistry"
+from_role = "registry"
+
+[[discovery_rules]]
+admission = "reachable_from_root"
+edge_kind = "resolver"
+from_role = "registry"
+
+[[discovery_rules]]
+admission = "reachable_from_root"
+edge_kind = "registry_announcement"
+from_role = "registry"
+
+[[roots]]
+address = "0x4ed7c70f96b99c776995fb64377f0d4ab3b0e1c1"
+name = "ETHRegistry"
+start_block = 23

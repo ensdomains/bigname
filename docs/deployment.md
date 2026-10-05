@@ -3203,3 +3203,22 @@ contract for backed, lapsed and unwrapped entries. The correction changes reader
 sources only and does not rotate the interpreter content hash itself, add a
 schema-migration or require an additional redo. It ships within the release's
 existing hash rotation and schema-migration sequence described above.
+
+### ENSv1 intermediary migration and retired registrar renewal
+
+The migration adapter now selects the exact terminal controller-entry and
+cleanup transfers while preserving earlier ordinary transfers in the same
+transaction. The renewal adapter applies the existing same-lease retirement rule before
+creating a new ENSv1 binding from later name readability. Actual renewal and
+expiry observations remain available. This changes `crates/adapters/src` and
+rotates the [interpreter content hash](glossary.md#interpreter-content-hash) for
+every chain, without changing the schema, manifests or watch coverage. Deploy
+matching runner and API binaries and finish the full-history Interpret redo
+and the Project redo it installs before serving the new generation, following
+the [planned migration and fingerprint
+boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary).
+One redo pair under the final combined release covers this correction and
+other changes in that release; an earlier hash does not. Preserve raw facts
+and verify that intermediary migrations publish their current ENSv2
+registration with no active ENSv1 predecessor, including after a later ENSv1
+renewal of that retired lease.

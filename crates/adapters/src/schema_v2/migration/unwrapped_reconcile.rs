@@ -150,14 +150,26 @@ pub(in crate::schema_v2) fn unwrapped_reconciliations(
         let label = transition.predecessor_selector["resource"]["labelhash"]
             .as_str()
             .unwrap_or_default();
-        let transfers = transaction
+        let mut transfers = transaction
             .iter()
             .copied()
             .filter(|observation| observation.decoded["labelhash"].as_str() == Some(label))
             .collect::<Vec<_>>();
-        let [incoming, cleanup] = transfers.as_slice() else {
+        transfers.sort_by_key(|observation| observation.raw.log_index);
+        let [.., incoming, cleanup] = transfers.as_slice() else {
             continue;
         };
+        // Earlier ordinary transfers remain in the prefix. Only the unique terminal pair
+        // ending at the selected cleanup can delimit the controller's temporary authority.
+        // `prove` still requires its exact instance, owners and complete migration receipt.
+        if transition.predecessor_selector["predecessor_cleanup"]["log_index"].as_i64()
+            != Some(cleanup.raw.log_index)
+            || transfers
+                .windows(2)
+                .any(|pair| pair[0].raw.log_index >= pair[1].raw.log_index)
+        {
+            continue;
+        }
         let prefix = output
             .normalized_events
             .iter()
