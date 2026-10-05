@@ -118,6 +118,7 @@ async fn window_curl(base: &str, uri: &str) -> Result<(Value, f64)> {
 async fn v2_names_windows_measure_20k() -> Result<()> {
     use std::sync::{Arc, atomic::{AtomicBool,AtomicU64,Ordering}};
     use bigname_storage::families::name::seams;
+    use sqlx::Connection;
     let output = std::env::var("BIGNAME_WINDOWS_MEASURE_OUTPUT").context("measurement output directory required")?;
     std::fs::create_dir_all(&output)?;
     // A published disposable fixture can be retained while the timing harness is rebuilt.
@@ -259,13 +260,15 @@ async fn v2_names_windows_measure_20k() -> Result<()> {
             sort_value:bigname_storage::NameCurrentListCursorValue::Timestamp(WindowSeconds::from_seconds(name.expiry as i128)),
             namespace:"ens".to_owned(),normalized_name:name.name.clone(),namehash:name.namehash.clone() }});
         let sort=if order=="desc"{bigname_storage::NameCurrentListOrder::Desc}else{bigname_storage::NameCurrentListOrder::Asc};
-        let mut conn=pool.acquire().await?;
+        // Keep forced plan-cache modes off the HTTP serving pool.
+        let mut conn=sqlx::PgConnection::connect_with(&pool.connect_options()).await?;
         for mode in ["auto","force_custom_plan","force_generic_plan"] {
             let plan=seams::explain_expiring_selection(&mut conn,&filter,sort,cursor.as_ref(),200,mode).await?;
             assert_eq!(plan["plan"][0]["Plan"]["Actual Rows"],json!((expected.len()-offset).min(201)));
             if mode=="force_generic_plan" {assert_eq!(plan["generic_plans"],json!(1));}
             std::fs::write(format!("{output}/{label}-{mode}.json"),serde_json::to_vec_pretty(&plan)?)?;
         }
+        conn.close().await?;
     }
     std::fs::write(format!("{output}/http.json"),serde_json::to_vec_pretty(&records)?)?;
     server.abort();
