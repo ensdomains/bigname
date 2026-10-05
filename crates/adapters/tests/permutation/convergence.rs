@@ -823,12 +823,12 @@ fn name_surfaces(output: &BatchOutput) -> Vec<Row> {
         .map(|row| Row {
             key: format!("{}:{}", row.chain_id, row.logical_name_id),
             body: format!(
-                "{}:{}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{:?}:{}",
+                "{}:{:?}:{:?}:{:?}:{:?}:{}:{}:{}:{}:{:?}:{:?}:{}",
                 row.namespace,
-                row.raw_name,
-                row.raw_labels,
+                row.raw_name(),
+                row.raw_labels(),
                 row.labelhashes,
-                row.dns_encoded_name,
+                row.dns_encoded_name(),
                 row.namehash,
                 row.normalizer_version,
                 row.visibility_state,

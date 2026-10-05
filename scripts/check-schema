@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=373
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=64
+expected_predecessor_shape_proof_count=65
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -675,6 +675,17 @@ check_served_projection_removal() {
             else
                 emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" baseline-first
             fi
+            if [ "$suffix" = removal ]; then
+                # Restore name_surfaces' exact predecessor shape before testing the upgrade.
+                printf 'ALTER TABLE name_surfaces DROP CONSTRAINT name_surfaces_raw_evidence_check, DROP COLUMN preimage_event_identity, ALTER COLUMN raw_name SET NOT NULL, ALTER COLUMN raw_labels SET NOT NULL, ALTER COLUMN dns_encoded_name SET NOT NULL, ADD CHECK (cardinality(raw_labels) = cardinality(labelhashes));\n'
+                printf "COMMENT ON TABLE name_surfaces IS 'This table stores raw names and their visibility state.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_name IS 'This value is the verbatim name.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.raw_labels IS 'This array stores the verbatim labels.';\n"
+                printf "COMMENT ON COLUMN name_surfaces.dns_encoded_name IS 'This value is the DNS wire name.';\n"
+                emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
             # The expiry selector columns and indexes: added to the pre-7c shape, already in the baseline.
             if [ "$suffix" = removal ]; then
                 emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
@@ -811,6 +822,7 @@ for migration_file in \
     "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
     "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -1155,7 +1167,9 @@ for migration_file in \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql"
+    "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

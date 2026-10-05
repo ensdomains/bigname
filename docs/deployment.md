@@ -2746,6 +2746,42 @@ it), rebuild it with the statement above and apply the schema-migrations again. 
 before the index exists behaves the same, only slower at start. API standbys receive the index
 through replication.
 
+### Name surfaces without raw label bytes
+
+The build that lets a [name surface](glossary.md#surface-name-surface) exist before the raw
+bytes of its labels are known changes the identity baseline, one schema-migration, the adapter
+surface model and Interpret's surface writer, redo re-anchoring and flag recompute
+([storage](storage.md#name-identity-and-raw-evidence)). Those sources are inside the
+[interpreter content hash](glossary.md#interpreter-content-hash), so the hash rotates for
+every chain. No adapter produces a surface without raw bytes yet: a re-derivation under this
+build writes the same surfaces, bindings and normalized events as before, and each surface
+additionally names its [preimage witness](glossary.md#preimage-witness).
+
+`20261005130000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
+`name_surfaces.raw_name`, `raw_labels` and `dns_encoded_name`, adds the nullable
+`preimage_event_identity` column, replaces the label-count check with
+`name_surfaces_raw_evidence_check`, and fills the new column for each existing row that has
+a canonical `PreimageObserved` event on a canonical block, from the earliest one. A row with
+no such event keeps a NULL witness; the full-range Interpret redo below fills it if the
+replay observes the name's bytes. No existing row loses a value. The
+schema-migration takes an ACCESS EXCLUSIVE lock on `name_surfaces` and holds it while the
+backfill and the new check's validation of every row run. The backfill is one statement: it
+reads every canonical `PreimageObserved` event with a name, joins each to its
+`chain_lineage` row, keeps the earliest per chain and name, and joins that result to
+`name_surfaces`. Its cost follows the amount of preimage history as well as the number of
+surfaces, and the plan PostgreSQL chooses has not been measured at production size; time it
+on a copy of the database first. Apply it with
+the phase runner, redo processes and API stopped, with the same `lock_timeout`,
+`statement_timeout` and retry procedure as the other schema-migrations and `--target-version
+20261005130000`; it is not a concurrent step.
+A binary from before this build can still read and write the migrated table, because it
+writes all three raw columns on every row.
+
+After the schema-migration, an existing deployment finishes the full-range Interpret redo and
+the stamped Project redo the rotation installs before the matching API serves, as the
+[handoff](#phase-runner-configuration) describes. This build targets the next hash-rotating
+release; when it ships with other rotating changes, one redo pair discharges them all.
+
 ### Expiry selector on the name summary
 
 `20261005150000_project_name_summary_expiry_selector.sql` adds two columns to the
