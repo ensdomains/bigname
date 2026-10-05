@@ -135,10 +135,36 @@ pub async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
 
 /// Full family content.
 pub async fn family_state(pool: &PgPool, chain: &str) -> Result<Value> {
+    // Rebuild and restore may reach the same publication through different generations.
+    // Verify each complete catalogue stamp before comparing content without that sequence.
+    let invalid_catalogue: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_history_catalogue_marker catalogue
+             FULL JOIN project_family_marker family USING (chain_id)
+             WHERE COALESCE(catalogue.chain_id, family.chain_id) = $1
+               AND (catalogue.chain_id IS NOT NULL OR family.current_block_number IS NOT NULL)
+               AND ((catalogue.block_number, catalogue.block_hash,
+                     catalogue.publication_sequence, catalogue.input_content_hash)
+                    IS DISTINCT FROM (family.current_block_number, family.current_block_hash,
+                                      family.sequence, family.input_content_hash)
+                    OR catalogue.catalogue_version IS DISTINCT FROM 1))",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    anyhow::ensure!(
+        !invalid_catalogue,
+        "catalogue stamp does not match family publication"
+    );
     let mut state = serde_json::Map::new();
     for table in families::family_tables() {
+        let row = if table == "project_history_catalogue_marker" {
+            "to_jsonb(row) - 'publication_sequence'"
+        } else {
+            "to_jsonb(row)"
+        };
         let rows: Vec<Value> = sqlx::query_scalar(&format!(
-            "SELECT to_jsonb(row) AS value FROM {table} row WHERE chain_id = $1 ORDER BY 1"
+            "SELECT {row} AS value FROM {table} row WHERE chain_id = $1 ORDER BY 1"
         ))
         .bind(chain)
         .fetch_all(pool)

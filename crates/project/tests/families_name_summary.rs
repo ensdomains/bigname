@@ -471,6 +471,12 @@ async fn composing_one_summary_reads_only_that_names_zero_owner_candidates() -> 
             .await?;
     }
     publish(&fixture, 5).await?;
+    // The wider history index needs fixture statistics for the planner to choose the
+    // selective name lookup; otherwise this tiny new table can favour the chain index.
+    // Keep ANALYZE outside the measured transaction, which still enforces the same bound.
+    sqlx::query("ANALYZE normalized_events")
+        .execute(&fixture.pool)
+        .await?;
     let publication =
         bigname_storage::families::name::load_family_publication(&fixture.pool, CHAIN)
             .await?
