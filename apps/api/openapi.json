@@ -6415,7 +6415,7 @@
           },
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -6728,7 +6728,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -7033,7 +7033,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "ENSIP-15 normalized name."
+            "description": "ENSIP-15 normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash."
           },
           "display_name": {
             "type": "string",
@@ -7115,7 +7115,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7204,7 +7204,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7574,7 +7574,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "raw_claim_name": {
             "type": "string",
@@ -7606,7 +7606,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "unsupported_reason": {
             "type": "string",
@@ -7629,7 +7629,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -7996,7 +7996,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "authority_context": {
             "$ref": "#/components/schemas/AuthorityContext",
@@ -8072,7 +8072,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "namespace": {
             "type": "string",
@@ -8157,7 +8157,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "subject": {
             "$ref": "#/components/schemas/HistoryRowSubject",
@@ -8240,7 +8240,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -8990,7 +8990,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "display_name": {
             "type": "string",
@@ -9022,7 +9022,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Normalized name; the subnames and registry-label routes also permit the documented non-name forms."
+            "description": "Normalized name, or the rendered name of a name whose surface stores no raw label bytes, which spells a label without verified text as a bracketed labelhash; the subnames and registry-label routes also permit the documented non-name forms."
           },
           "powers": {
             "type": "array",
