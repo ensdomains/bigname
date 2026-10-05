@@ -194,7 +194,7 @@ async fn address_history_walk_bounds_live_rows_and_preserves_complete_order() ->
             let uri = format!("/v1/addresses/{ADDRESS}/history?page_size=7{suffix}");
             let (body, _) = measured(&database, &uri, 7).await?;
             assert_eq!(body["data"], json!([]), "{uri}: {body}");
-            assert_eq!(body["page"]["total_count"], json!(0));
+            assert_eq!(body["page"]["total_count"], Value::Null);
         }
         database.cleanup().await?;
     }
@@ -411,7 +411,7 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
     let (first, stats) = measured(&database, &base, 200).await?;
     assert_eq!(
         first["page"]["total_count"],
-        json!(1_201),
+        Value::Null,
         "{first}; {stats:?}"
     );
     assert_eq!(
@@ -428,7 +428,7 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
             .get("attribution_batches")
             .copied()
             .unwrap_or_default()
-            > 100,
+            > 1,
         "{stats:?}"
     );
     let expected: Vec<_> = (1_001..=1_200)
@@ -475,7 +475,7 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
 }
 
 #[tokio::test]
-async fn address_history_walk_keeps_the_real_ten_thousand_count_threshold() -> Result<()> {
+async fn address_history_walk_defaults_to_no_count_across_the_former_threshold() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     const HOLDER: &str = "0x00000000000000000000000000000000000000cc";
@@ -505,14 +505,7 @@ async fn address_history_walk_keeps_the_real_ten_thousand_count_threshold() -> R
         }
         rebuild_address_fixture(&database).await?;
         let (body, stats) = measured(&database, &base, 1).await?;
-        assert_eq!(
-            body["page"]["total_count"],
-            if expected > 10_000 {
-                Value::Null
-            } else {
-                json!(expected)
-            }
-        );
+        assert_eq!(body["page"]["total_count"], Value::Null);
         assert!(
             stats
                 .peak
@@ -594,15 +587,27 @@ async fn address_history_walk_handoff_winner_precedes_batches_and_public_cursors
                 uri.push_str(&format!("&cursor={cursor}&include=total_count"));
             }
             let (body, stats) = measured(&database, &uri, 1).await?;
-            assert_eq!(body["page"]["total_count"], json!(21), "{body}");
-            assert!(
-                stats
-                    .counters
-                    .get("handoff_batches")
-                    .copied()
-                    .unwrap_or_default()
-                    > 1
+            assert_eq!(
+                body["page"]["total_count"],
+                if cursor.is_some() {
+                    json!(21)
+                } else {
+                    Value::Null
+                },
+                "{body}"
             );
+            if cursor.is_some() {
+                // The explicit count enumerates the later duplicate groups; the default
+                // first page can stop before reaching those groups.
+                assert!(
+                    stats
+                        .counters
+                        .get("handoff_batches")
+                        .copied()
+                        .unwrap_or_default()
+                        > 1
+                );
+            }
             actual.extend(hk_ids(&body));
             cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
             if cursor.is_none() {

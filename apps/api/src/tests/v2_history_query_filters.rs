@@ -4,6 +4,11 @@ async fn history_query_filters_apply_before_pages_counts_and_child_union() -> Re
     let database = TestDatabase::new_migrated().await?;
     hkw_seed(&database).await?;
     for route in hk_routes() {
+        let route = if route.starts_with("/v1/addresses/") {
+            format!("{route}&include=total_count")
+        } else {
+            route
+        };
         for order in ["asc", "desc"] {
             let query = format!("{route}&exclude_type=record,permission&order={order}");
             let (expected, total) = hkw_baseline(&database, &query).await?;
@@ -154,7 +159,7 @@ async fn history_query_record_key_keeps_writes_clears_and_only_scoped_resets() -
         format!("/v1/names/{G_NAME}/history?scope=both&include=child_registrations,data,raw"),
         format!("/v1/events?name={G_NAME}"),
         format!("/v1/events?registration_id={}", Uuid::from_u128(0x7172)),
-        format!("/v1/addresses/{G_ADDRESS}/history?scope=both"),
+        format!("/v1/addresses/{G_ADDRESS}/history?scope=both&include=total_count"),
     ];
     for route in routes {
         for order in ["asc", "desc"] {

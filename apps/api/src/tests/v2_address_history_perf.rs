@@ -137,14 +137,7 @@ async fn address_history_create_performance_fixture() -> Result<()> {
         (body, snapshot)
     };
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        body["page"]["total_count"],
-        if count * 4 > 10_000 {
-            Value::Null
-        } else {
-            json!(count * 4)
-        }
-    );
+    assert_eq!(body["page"]["total_count"], Value::Null);
     std::fs::write(
         directory.join(format!("fixture-{count}.json")),
         serde_json::to_vec_pretty(

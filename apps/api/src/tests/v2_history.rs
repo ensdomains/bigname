@@ -2203,7 +2203,7 @@ async fn v2_history_timestamp_window_resolves_blocks_through_lineage() -> Result
     )
     .await?;
     assert_eq!(payload["data"], json!([]));
-    assert_eq!(payload["page"]["total_count"], json!(0));
+    assert_eq!(payload["page"]["total_count"], Value::Null);
 
     // Cursors bind the timestamp window.
     let first = v2_history_payload_for_database(
@@ -2263,10 +2263,15 @@ async fn v2_history_total_count_is_populated_only_for_anchored_requests() -> Res
         "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=3",
     )
     .await?;
-    let total = payload["page"]["total_count"]
-        .as_u64()
-        .expect("address history must count anchored rows");
-    assert!(total >= 1);
+    assert_eq!(payload["page"]["total_count"], Value::Null);
+    let counted = v2_history_payload_for_database(
+        &database,
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?page_size=3&include=total_count",
+    ).await?;
+    assert!(counted["page"]["total_count"].as_u64().unwrap() >= 1);
+    assert_eq!(counted["data"], payload["data"]);
+    assert_eq!(counted["page"]["next_cursor"], payload["page"]["next_cursor"]);
+    assert_eq!(counted["page"]["has_more"], payload["page"]["has_more"]);
 
     let payload =
         v2_history_payload_for_database(&database, "/v1/events?namespace=ens&page_size=3").await?;

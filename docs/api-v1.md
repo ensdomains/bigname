@@ -655,7 +655,9 @@ Rules:
   use the address-name GET collection for an exact single-relation count.
   Address-name ownership collections return the exact count of their filtered,
   deduplicated entries before the cursor.
-  Anchored history collections (name history, address history, and
+  Address history returns `total_count=null` by default; `include=total_count`
+  requests an exact total over the same filters and published snapshot as its
+  page. Other anchored history collections (name history and
   `/v1/events` with a `name`, `registration_id`, `address`, or `resolver`
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000

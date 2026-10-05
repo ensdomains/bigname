@@ -12,12 +12,11 @@ use super::address_names::relation_set_to_storage;
 use super::history_keyset::RequestCursor;
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Page,
-    QueryParamAllowlist, QueryParams, RelationSet, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, build_event, decode, encode, history_include, history_page_options,
-    history_sort_token, history_storage_order, history_storage_scope, history_total_count,
-    insert_history_filter_keys, map_history_page_error, resolve_history_block_window,
-    validate_latest_collection_selectors,
+    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, QueryParams,
+    RelationSet, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode,
+    encode, history_include, history_page_options, history_sort_token, history_storage_order,
+    history_storage_scope, insert_history_filter_keys, map_history_page_error,
+    resolve_history_block_window, validate_latest_collection_selectors,
 };
 
 const ADDRESS_FILTER_KEY: &str = "address";
@@ -131,7 +130,7 @@ pub(crate) async fn get_address_history(
         if params.include.iter().any(|v| v == "total_count") {
             HistorySummaryMode::Count
         } else {
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+            HistorySummaryMode::None
         },
         &options,
         true,
@@ -152,11 +151,10 @@ pub(crate) async fn get_address_history(
         .as_ref()
         .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
-    let total_count = if params.include.iter().any(|v| v == "total_count") {
-        storage_page.summary.as_ref().map(|s| s.total_count)
-    } else {
-        history_total_count(storage_page.summary.as_ref())
-    };
+    let total_count = storage_page
+        .summary
+        .as_ref()
+        .map(|summary| summary.total_count);
     let context = super::history_context::load_history_row_context(
         &state.pool,
         &storage_page.rows,

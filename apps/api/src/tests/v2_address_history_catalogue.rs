@@ -2,6 +2,17 @@
 use super::*;
 use bigname_storage::history_anchor_read_test_hooks::{self, HistoryReadHookPoint};
 
+fn assert_no_count(stats: &bigname_storage::AddressHistoryWorkingSet) {
+    for key in [
+        "catalogue_direct_count",
+        "catalogue_proof_batches",
+        "address_history_exact_cursor_micros",
+        "address_history_count_walk_micros",
+    ] {
+        assert!(!stats.counters.contains_key(key), "{key}: {stats:?}");
+    }
+}
+
 #[tokio::test]
 async fn address_history_catalogue_count_paths_keep_exact_results_and_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -11,19 +22,61 @@ async fn address_history_catalogue_count_paths_keep_exact_results_and_cursors() 
         .filter(|(_, id)| id.ends_with("RegistrationGranted"))
         .map(|(_, id)| hkw_id(id))
         .collect();
+    let base = format!(
+        "/v1/addresses/{ADDRESS}/history?relation=owner&kind=RegistrationGranted&order=asc&page_size=1"
+    );
+    let (uncounted, stats) = measured(&database, &base, 1).await?;
+    assert_no_count(&stats);
+    assert_eq!(uncounted["page"]["total_count"], Value::Null);
+    let (counted, stats) = measured(&database, &format!("{base}&include=total_count"), 1).await?;
+    assert_eq!(stats.counters.get("catalogue_direct_count"), Some(&1));
+    assert_eq!(counted["page"]["total_count"], json!(11));
+    assert_eq!(uncounted["data"], counted["data"]);
+    assert_eq!(
+        uncounted["page"]["next_cursor"],
+        counted["page"]["next_cursor"]
+    );
+    assert_eq!(uncounted["page"]["has_more"], counted["page"]["has_more"]);
+    assert_eq!(hk_ids(&uncounted), expected_grants[..1]);
+    // The same public cursor can continue with or without an explicit total.
+    let cursor = uncounted["page"]["next_cursor"].as_str().unwrap();
     for include in ["", "&include=total_count"] {
-        let uri = format!(
-            "/v1/addresses/{ADDRESS}/history?relation=owner&kind=RegistrationGranted&order=asc&page_size=1{include}"
+        let (next, stats) =
+            measured(&database, &format!("{base}&cursor={cursor}{include}"), 1).await?;
+        assert_eq!(
+            next["page"]["total_count"],
+            if include.is_empty() {
+                Value::Null
+            } else {
+                json!(11)
+            }
         );
-        let (first, stats) = measured(&database, &uri, 1).await?;
-        assert_eq!(stats.counters.get("catalogue_direct_count"), Some(&1));
-        assert_eq!(first["page"]["total_count"], json!(11));
-        assert_eq!(hk_ids(&first), expected_grants[..1]);
-        let cursor = first["page"]["next_cursor"].as_str().unwrap();
-        let (next, stats) = measured(&database, &format!("{uri}&cursor={cursor}"), 1).await?;
-        assert_eq!(stats.counters.get("catalogue_direct_count"), Some(&1));
-        assert_eq!(next["page"]["total_count"], json!(11));
         assert_eq!(hk_ids(&next), expected_grants[1..2]);
+        if include.is_empty() {
+            assert_no_count(&stats);
+        }
+    }
+    for include in ["", "&include=total_count"] {
+        let (empty, stats) = measured(
+            &database,
+            &format!("/v1/addresses/{ADDRESS}/history?relation=owner&record_key=missing{include}"),
+            50,
+        )
+        .await?;
+        assert_eq!(empty["data"], json!([]));
+        assert_eq!(empty["page"]["has_more"], json!(false));
+        assert_eq!(empty["page"]["next_cursor"], Value::Null);
+        assert_eq!(
+            empty["page"]["total_count"],
+            if include.is_empty() {
+                Value::Null
+            } else {
+                json!(0)
+            }
+        );
+        if include.is_empty() {
+            assert_no_count(&stats);
+        }
     }
     let uri = format!(
         "/v1/addresses/{ADDRESS}/history?relation=owner&record_key=addr:60&order=desc&page_size=2"
@@ -37,7 +90,8 @@ async fn address_history_catalogue_count_paths_keep_exact_results_and_cursors() 
         .map(|(_, id)| hkw_id(id))
         .collect();
     assert_eq!(hk_ids(&records), expected_records);
-    assert_eq!(records["page"]["total_count"], json!(11));
+    assert_eq!(records["page"]["total_count"], Value::Null);
+    assert_no_count(&stats);
     assert!(!stats.counters.contains_key("catalogue_direct_count"));
     let uri = format!(
         "/v1/addresses/{ADDRESS}/history?relation=owner&order=asc&page_size=200&include=total_count"
@@ -128,6 +182,16 @@ async fn address_history_new_owner_reads_old_shared_history_without_backfill() -
 
 #[tokio::test]
 async fn address_history_catalogue_publication_change_uses_original_bounds() -> Result<()> {
+    check_publication_change("&include=total_count").await
+}
+
+#[tokio::test]
+async fn address_history_catalogue_publication_change_without_count_uses_original_bounds()
+-> Result<()> {
+    check_publication_change("").await
+}
+
+async fn check_publication_change(include: &str) -> Result<()> {
     for (point, change, path) in [
         (
             HistoryReadHookPoint::AfterAnchors,
@@ -157,11 +221,12 @@ async fn address_history_catalogue_publication_change_uses_original_bounds() -> 
     ] {
         let database = TestDatabase::new_migrated().await?;
         seed_names(&database, 2).await?;
-        let uri = format!(
-            "/v1/addresses/{ADDRESS}/history?relation=owner&page_size=200&include=total_count"
-        );
+        let uri = format!("/v1/addresses/{ADDRESS}/history?relation=owner&page_size=200{include}");
         let (before, before_stats) = measured(&database, &uri, 200).await?;
         assert_eq!(before_stats.counters.get("catalogue"), Some(&1));
+        if include.is_empty() {
+            assert_no_count(&before_stats);
+        }
         let (_guard, control) =
             history_anchor_read_test_hooks::install(&database.lookup_pool, point).await?;
         let state = database.app_state_with_public_namespaces(&["ens"]);
@@ -239,6 +304,9 @@ async fn address_history_catalogue_publication_change_uses_original_bounds() -> 
             assert_eq!(body["error"]["code"], "stale");
         } else {
             assert_eq!(status, StatusCode::OK, "{body}");
+            if include.is_empty() {
+                assert_no_count(&stats);
+            }
             assert_eq!(
                 body["data"], before["data"],
                 "the publication gap changed the bounded page"
@@ -253,7 +321,14 @@ async fn address_history_catalogue_publication_change_uses_original_bounds() -> 
             assert_eq!(fresh_stats.counters.get("catalogue"), Some(&1));
             if change == "advance" {
                 assert!(hk_ids(&fresh).contains(&hkw_id("catalogue-next-publication")));
-                assert_eq!(fresh["page"]["total_count"], json!(9));
+                assert_eq!(
+                    fresh["page"]["total_count"],
+                    if include.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(9)
+                    }
+                );
             }
         }
         database.cleanup().await?;

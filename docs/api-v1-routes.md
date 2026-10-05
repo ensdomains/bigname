@@ -2125,8 +2125,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   binds [`include=child_registrations`](#direct-child-registrations-includechild_registrations),
   which changes which rows the collection holds; the payload flags
   `include=data` and `include=raw` are not bound.
-- `page.total_count` is populated for anchored history reads: name history and
-  address history always, and `/v1/events` when `name`, `registration_id`,
+- Address history returns `page.total_count=null` by default, including empty
+  results. `include=total_count` requests an exact, uncapped total over the same
+  filtered collection and published snapshot as the page. The flag does not
+  bind cursors, so clients may request a count on one page and omit it on the
+  next; each opt-in request counts again at its current published position. An
+  exact empty result is zero. Exact counting may scan the entire matching
+  history and cost substantially more than a page.
+- `page.total_count` is populated by default for other anchored history reads:
+  name history, and `/v1/events` when `name`, `registration_id`,
   `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
@@ -4048,7 +4055,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | `order` | query | enum SortOrder | no | `desc` | Ascending or descending result order. |
 | `from_timestamp` | query | string | no | none | Inclusive timestamp lower bound, decimal Unix seconds or RFC 3339; retains input precision. |
 | `to_timestamp` | query | string | no | none | Inclusive timestamp upper bound, decimal Unix seconds or RFC 3339; must not precede from_timestamp. |
-| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. |
+| `include` | query | array of enum `data`, `raw`, `total_count` | no | none | Comma-separated expansion names; unlisted values are invalid. total_count requests an exact total; page.total_count is null when omitted. |
 | `cursor` | query | string | no | none | Opaque continuation token. It binds the route anchor, filters and ordering; current-state and history cursor rules differ as described above. |
 | `page_size` | query | integer [1, 200] | no | `50` | Maximum rows per page: 1 through 200. |
 
@@ -4139,13 +4146,14 @@ introduces it rebuilds Project from full history before serving the option; see
   product-visible events. The cursor is bound to the address, namespace,
   relation set, scope, direction, `type` set, and timestamp window. A
   nonterminal page contains `page_size` rows; only the terminal page may be
-  shorter. `page.total_count` follows the shared anchored-count contract:
-  capped by default, exact and uncapped with `include=total_count`.
+  shorter. `page.total_count` is `null` by default, including empty results.
+  `include=total_count` requests an exact, uncapped total without changing the
+  page rows, cursor or `has_more`.
   Address candidates remain in SQL; the reader validates fixed-size event and
   anchor batches, including resolver-record attribution, and retains only the
-  requested page and one lookahead row. Counting uses the same matching rules
-  without retaining the matched history. The default count stops after 10,001
-  matches; an exact count can scan the entire matching history and cost more.
+  requested page and one lookahead row. Optional counting uses the same matching
+  rules without retaining the matched history; an exact count can scan the
+  entire matching history and cost substantially more than a page.
   Neither mode truncates the collection or changes its cursor order.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
