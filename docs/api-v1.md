@@ -1649,6 +1649,17 @@ permission rows do not change. Only `/v1/diagnostics/events` serves
 `raw_fact_ref`, so no product row changes, and diagnostic cursors continue
 under the re-walk rule above.
 
+Registry root role changes (`RootPermissionChanged`) became product history in
+a reader-only change: no stored row, identity or cursor format changed. They
+are `permission` rows with `grant_scope.kind` `root`, `powers`, `added_powers`
+and `removed_powers` (see
+[permission change values](api-v1-routes.md#permission-change-values)). The
+default event feed, `type=permission`, `kind=RootPermissionChanged`, a
+registry's `contract_address` history and its `counts.events`, and address
+history in `both` or `registration` scope with the `role_holder` relation gain
+them, and so does the diagnostics `type=permission` filter; name
+history does not change. Outstanding position cursors continue.
+
 A `record` row may also come from a node-keyed resolver observation that carries
 no logical name or resource of its own, such as an exact direct
 `public_resolver_v2` write. Project attributes that observation to a registration
@@ -3730,6 +3741,7 @@ vocabularies are marked at their existing canonical tables above.
 | `RecordVersionChanged` |
 | `ReverseChanged` |
 | `PermissionChanged` |
+| `RootPermissionChanged` |
 | `PermissionScopeChanged` |
 | `RolesChanged` |
 | `EACRolesChanged` |

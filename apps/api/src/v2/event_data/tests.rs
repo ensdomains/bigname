@@ -484,3 +484,38 @@ fn permission_rows_derive_changes_only_from_a_logged_previous_set() {
         })
     );
 }
+
+/// A registry root role change is a `permission` row in the root scope. Its log states the
+/// account's old roles, so the row lists what the change granted and revoked.
+#[test]
+fn root_role_changes_render_as_permission_rows_with_logged_changes() {
+    assert_eq!(
+        super::super::history_event_type("RootPermissionChanged"),
+        Some(HistoryEventType::Permission)
+    );
+    let subject = "0x00000000000000000000000000000000000000DD";
+    let detail = row_detail(
+        &row(
+            "RootPermissionChanged",
+            json!({"subject": subject, "role_bitmap": "0x10001",
+                "effective_powers": ["registrar", "renew"]}),
+            json!({"subject": subject, "role_bitmap": "0x10010", "old_role_bitmap": "0x10001",
+                "effective_powers": ["register_reserved", "renew"], "root_resource": true,
+                "scope": {"kind": "registry_root", "chain_id": "ethereum-mainnet",
+                    "registry_address": "0x00000000000000000000000000000000000000aa"}}),
+        ),
+        HistoryEventType::Permission,
+    );
+    let mut data = Value::Object(detail.data);
+    assert_eq!(data["grant_scope"]["kind"], "root", "{data}");
+    data.as_object_mut().map(|data| data.remove("grant_scope"));
+    assert_eq!(
+        data,
+        json!({
+            "address": "0x00000000000000000000000000000000000000dd",
+            "powers": ["register_reserved", "renew"],
+            "added_powers": ["register_reserved"],
+            "removed_powers": ["registrar"],
+        })
+    );
+}

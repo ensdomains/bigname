@@ -12,11 +12,12 @@ SET statement_timeout = '6h';
 -- names. This check runs twice. Before the builds it refuses any name that is
 -- already taken by something other than the reviewed, valid and ready index,
 -- so the operator repairs it before the other builds run; names that resolve
--- to nothing pass. After the builds it also requires all three indexes to
+-- to nothing pass. After the builds it also requires all four indexes to
 -- exist, so the script fails instead of reporting success. README.md describes
 -- the recovery.
 -- The definition check matches the one in the schema-migration
--- 20260923120000_normalized_events_address_match_indexes.sql and reads
+-- 20260923120000_normalized_events_address_match_indexes.sql (and, for the root
+-- permission index, 20261005120000_normalized_events_address_root_permission_idx.sql) and reads
 -- pg_get_indexdef the way ops/v1-lookahead-indexes/install.sql does: the
 -- function's own SET clauses make search_path pg_catalog and turn
 -- quote_all_identifiers off while it runs, so both schema names are always
@@ -43,7 +44,9 @@ BEGIN
             ('normalized_events_address_token_holder_match_idx',
              $def$CREATE INDEX normalized_events_address_token_holder_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE ((event_kind = 'TokenControlTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_address_registry_owner_match_idx',
-             $def$CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
+             $def$CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_address_root_permission_idx',
+             $def$CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -129,6 +132,17 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_registry_owner
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_root_permission_idx
+    ON bigname_phase.normalized_events (
+        lower(after_state ->> 'subject'),
+        block_number DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        normalized_event_id DESC
+    )
+    WHERE event_kind = 'RootPermissionChanged'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
@@ -137,9 +151,10 @@ FROM pg_index
 WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_address_registrant_match_idx'),
     to_regclass('bigname_phase.normalized_events_address_token_holder_match_idx'),
-    to_regclass('bigname_phase.normalized_events_address_registry_owner_match_idx')
+    to_regclass('bigname_phase.normalized_events_address_registry_owner_match_idx'),
+    to_regclass('bigname_phase.normalized_events_address_root_permission_idx')
 ) ORDER BY index_name;
 
--- All three must now exist, belong to bigname_phase.normalized_events, be valid and
+-- All four must now exist, belong to bigname_phase.normalized_events, be valid and
 -- ready, and have the reviewed definition.
 DO $$ BEGIN PERFORM pg_temp.check_address_history_indexes(true); END $$;

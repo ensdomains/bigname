@@ -333,6 +333,7 @@ fn events_filter_builds_storage_filter_and_cursor_filters() {
         parsed.storage_filter.event_kinds,
         vec![
             "PermissionChanged".to_owned(),
+            "RootPermissionChanged".to_owned(),
             "PermissionScopeChanged".to_owned(),
             "RolesChanged".to_owned(),
             "EACRolesChanged".to_owned(),
