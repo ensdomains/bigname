@@ -2719,6 +2719,9 @@ async fn v2_history_ignores_unpublished_binding_and_address_anchor_expansion() -
     let mut prior_owner = v2_history_event("prior-owner-anchor", None, Some(resource), "RegistrationGranted", 101);
     prior_owner.after_state = json!({"registrant":"0x0000000000000000000000000000000000000f98"});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[prior_owner]).await?;
+    // Reinterpreted history reaches address readers through a completed Project rebuild.
+    // Keep the original publication: the future binding and owner remain above its bound.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let narrowed = v2_history_payload_for_database(&database,
         "/v1/addresses/0x0000000000000000000000000000000000000f98/history?type=record&from_timestamp=2023-11-14T22%3A15%3A06Z&include=total_count").await?;
     assert_eq!(narrowed["page"]["total_count"], json!(1), "an ownership anchor before the requested event window still applies");
