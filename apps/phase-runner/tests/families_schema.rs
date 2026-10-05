@@ -243,7 +243,7 @@ async fn load_table_structure(pool: &sqlx::PgPool, table: &str) -> Result<Vec<St
 }
 
 const OPTIONAL_RAW_EVIDENCE: &str =
-    include_str!("../../../migrations/20261005120000_name_surfaces_optional_raw_evidence.sql");
+    include_str!("../../../migrations/20261005130000_name_surfaces_optional_raw_evidence.sql");
 
 /// `name_surfaces` without column positions: the test rebuilds the predecessor shape by
 /// dropping the new column, which a database that never had it does not do.

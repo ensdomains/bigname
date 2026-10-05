@@ -2757,7 +2757,7 @@ every chain. No adapter produces a surface without raw bytes yet: a re-derivatio
 build writes the same surfaces, bindings and normalized events as before, and each surface
 additionally names its [preimage witness](glossary.md#preimage-witness).
 
-`20261005120000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
+`20261005130000_name_surfaces_optional_raw_evidence.sql` drops `NOT NULL` from
 `name_surfaces.raw_name`, `raw_labels` and `dns_encoded_name`, adds the nullable
 `preimage_event_identity` column, replaces the label-count check with
 `name_surfaces_raw_evidence_check`, and fills the new column for every existing row from its
@@ -2767,7 +2767,7 @@ backfill joins `name_surfaces` to `normalized_events` through
 `normalized_events_name_history_idx` and the new check validates every row. Apply it with
 the phase runner, redo processes and API stopped, with the same `lock_timeout`,
 `statement_timeout` and retry procedure as the other schema-migrations and `--target-version
-20261005120000`; it is not a concurrent step, and its duration grows with `name_surfaces`.
+20261005130000`; it is not a concurrent step, and its duration grows with `name_surfaces`.
 A binary from before this build can still read and write the migrated table, because it
 writes all three raw columns on every row.
 

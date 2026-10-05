@@ -682,10 +682,10 @@ check_served_projection_removal() {
                 printf "COMMENT ON COLUMN name_surfaces.raw_name IS 'This value is the verbatim name.';\n"
                 printf "COMMENT ON COLUMN name_surfaces.raw_labels IS 'This array stores the verbatim labels.';\n"
                 printf "COMMENT ON COLUMN name_surfaces.dns_encoded_name IS 'This value is the DNS wire name.';\n"
-                emit_phase_migration "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" preceding-shape
             fi
-            emit_phase_migration "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql" baseline-first
-            emit_phase_migration "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -817,7 +817,7 @@ for migration_file in \
     "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
-    "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql"
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1162,8 +1162,8 @@ for migration_file in \
     "$ROOT/migrations/20261001153000_ingest_cursor_verified_chain.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
-    "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql" \
-    "$ROOT/migrations/20261005120000_name_surfaces_optional_raw_evidence.sql"
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql" \
+    "$ROOT/migrations/20261005130000_name_surfaces_optional_raw_evidence.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
