@@ -16,7 +16,9 @@ use crate::{
     ENSV1_MIRROR_RESOLVER_ROLE, LoadedManifest, ManifestAbi, ManifestLoadStatus,
     ManifestLoadSummary,
 };
-use crate::{ManifestRepository, SourceManifest, event_allows_empty_emitter_roles};
+use crate::{
+    ManifestAbiEvent, ManifestRepository, SourceManifest, event_allows_empty_emitter_roles,
+};
 
 #[path = "repository/metadata.rs"]
 mod metadata;
@@ -476,6 +478,7 @@ fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
                 );
             }
         }
+        validate_event_start_block(manifest, event, path)?;
     }
 
     for call in &manifest.abi.calls {
@@ -491,6 +494,40 @@ fn validate_manifest_abi(manifest: &SourceManifest, path: &Path) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// An event `start_block` bounds only the family-wide watch entry, so it is refused where the
+/// compiled watch plan has no such entry for the event.
+fn validate_event_start_block(
+    manifest: &SourceManifest,
+    event: &ManifestAbiEvent,
+    path: &Path,
+) -> Result<()> {
+    if event.start_block.is_none() {
+        return Ok(());
+    }
+    validate_start_block_fits_i64(event.start_block, "ABI event", &event.name, path)?;
+    let parsed = event.parsed_event_view()?;
+    let topic0 = parsed.topic0().map(|topic| topic.to_ascii_lowercase());
+    let family_wide = crate::uses_discovered_emitters(&manifest.source_family)
+        && !crate::is_role_scoped_event(
+            &manifest.source_family,
+            &parsed.canonical_signature(),
+            &event.emitter_roles,
+        )
+        && topic0.is_some_and(|topic0| {
+            crate::all_emitter_topic0s(&manifest.source_family, std::slice::from_ref(&topic0))
+                .is_empty()
+        });
+    if !family_wide {
+        bail!(
+            "manifest ABI event {} in {} sets start_block, but source family {} compiles no family-wide watch entry for it",
+            event.name,
+            path.display(),
+            manifest.source_family
+        );
+    }
     Ok(())
 }
 

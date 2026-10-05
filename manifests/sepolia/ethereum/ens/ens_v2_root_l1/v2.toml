@@ -117,3 +117,15 @@ name = "ParentUpdated"
 fragment = "event ParentUpdated(address indexed parent, string label, address indexed sender)"
 emitter_roles = ["root_registry"]
 normalized_events = ["SurfaceUnbound", "RegistrationReleased", "ParentChanged", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ExpiryChanged", "ResolverChanged", "SubregistryChanged"]
+
+# The RootRegistry keeps the same ERC-1155 owner-to-operator approvals as every registry. A
+# standard approval declaration: the list stays empty and the adapter maps the event to
+# AccountPermissionChanged. This family has no discovered emitters, so the event is watched at
+# the declared RootRegistry from its start_block.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/RootRegistry.json:L362 @ ens_v2_sepolia_20261001@07e55a05)
+[[abi.events]]
+name = "ApprovalForAll"
+fragment = "event ApprovalForAll(address indexed account, address indexed operator, bool approved)"
+emitter_roles = ["root_registry"]
+normalized_events = []

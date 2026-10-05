@@ -1090,6 +1090,100 @@ async fn a_new_implementation_widens_from_its_declared_start() -> Result<()> {
     Ok(())
 }
 
+/// A copy of the checked-in Sepolia profile whose ENSv2 registry and root manifests are edited.
+fn copy_profile_with_ens_v2_registries(
+    source: &std::path::Path,
+    edit: impl Fn(String) -> String,
+) -> Result<std::path::PathBuf> {
+    let target = std::env::temp_dir().join(format!(
+        "bigname-sepolia-v2-registry-edit-{}",
+        Uuid::new_v4()
+    ));
+    copy_dir(source, &target)?;
+    for family in ["ens_v2_registry_l1", "ens_v2_root_l1"] {
+        let path = target.join(format!("ethereum/ens/{family}/v2.toml"));
+        let original = fs::read_to_string(&path)?;
+        fs::write(path, edit(original))?;
+    }
+    Ok(target)
+}
+
+fn without_approval_for_all(manifest: String) -> String {
+    let declaration = manifest
+        .find("[[abi.events]]\nname = \"ApprovalForAll\"")
+        .expect("the ENSv2 manifest declares ApprovalForAll last");
+    manifest[..declaration].to_owned()
+}
+
+#[tokio::test]
+async fn ens_v2_registry_approval_widening_redoes_ingest_from_the_event_start() -> Result<()> {
+    const EVENT_START: i64 = 11_708_986;
+    let checked_in = checked_in_sepolia_root();
+    let baseline_root = copy_profile_with_ens_v2_registries(&checked_in, without_approval_for_all)?;
+    let unbounded_root = copy_profile_with_ens_v2_registries(&checked_in, |manifest| {
+        manifest.replacen(&format!("start_block = {EVENT_START}\n"), "", 1)
+    })?;
+    for (desired_root, expected_from) in [(&checked_in, EVENT_START), (&unbounded_root, 0)] {
+        let scratch =
+            ScratchDatabase::create("production_manifest_sepolia_v2_registry_approval").await?;
+        sync_schema_v2_repository(scratch.pool(), &load_repository(&baseline_root)?).await?;
+        seed_completed_ingest_range_through(&scratch, "ethereum-sepolia", 12_000_000).await?;
+
+        sync_schema_v2_repository(scratch.pool(), &load_repository(desired_root)?).await?;
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+            Some((expected_from, 12_000_000)),
+            "the family-wide ApprovalForAll entry sets the redo start"
+        );
+        let reason: String = sqlx::query_scalar(
+            "SELECT last_error FROM chain_phase_state
+             WHERE chain_id = 'ethereum-sepolia' AND phase_name = 'ingest'",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(
+            reason,
+            "required downstream redo: manifest watch plan widened over an already-ingested range"
+        );
+        let approval_topic = format!("{:#x}", keccak256(b"ApprovalForAll(address,address,bool)"));
+        let compiled: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT manifest.source_family, entry -> 'emitter' ->> 'kind',
+                    (entry ->> 'start')::bigint
+             FROM manifest_versions manifest
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 manifest.manifest_payload -> '_bigname_compiled_watch'
+             ) AS compiled(entry)
+             WHERE manifest.chain_id = 'ethereum-sepolia'
+               AND manifest.source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
+               AND manifest.rollout_status = 'active'
+               AND lower(entry ->> 'topic0') = $1
+             ORDER BY 1, 2",
+        )
+        .bind(&approval_topic)
+        .fetch_all(scratch.pool())
+        .await?;
+        assert_eq!(
+            compiled,
+            vec![
+                ("ens_v2_registry_l1".into(), "address".into(), 11_820_399),
+                ("ens_v2_registry_l1".into(), "family".into(), expected_from),
+                ("ens_v2_root_l1".into(), "address".into(), 11_820_291),
+            ]
+        );
+        sync_schema_v2_repository(scratch.pool(), &load_repository(desired_root)?).await?;
+        assert_eq!(
+            required_ingest_redo(scratch.pool(), "ethereum-sepolia").await?,
+            Some((expected_from, 12_000_000)),
+            "an unchanged second sync must be idempotent"
+        );
+        scratch.cleanup().await?;
+    }
+
+    fs::remove_dir_all(&baseline_root)?;
+    fs::remove_dir_all(&unbounded_root)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn widening_an_ingested_manifest_event_blocks_initial_derivation_until_reingest() -> Result<()>
 {

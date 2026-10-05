@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 pub const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
 pub const ENS_V2_RESOLVER_SOURCE_FAMILY: &str = "ens_v2_resolver_l1";
 pub const ENS_V2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
+pub const ENS_V2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
 pub const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
 
 const REGISTRY_CREATED_SIGNATURE: &str = "RegistryCreated()";
@@ -96,6 +97,19 @@ pub fn is_address_scoped_approval(source_family: &str, signature: &str) -> bool 
         }
         _ => false,
     }
+}
+
+/// Returns whether the adapter-owned
+/// [standard approval derivation](../../../../docs/glossary.md#standard-approval-derivation)
+/// maps this declaration, which must then declare no normalized events. This is the derivation
+/// predicate only: an ENSv2 registry `ApprovalForAll` is standard-derived but watched like any
+/// other event of its family, so [`is_address_scoped_approval`] stays false for it.
+pub fn is_standard_approval(source_family: &str, signature: &str) -> bool {
+    is_address_scoped_approval(source_family, signature)
+        || (matches!(
+            source_family,
+            ENS_V2_REGISTRY_SOURCE_FAMILY | ENS_V2_ROOT_SOURCE_FAMILY
+        ) && signature == APPROVAL_FOR_ALL_SIGNATURE)
 }
 
 pub fn generic_resolver_topic0s() -> Vec<String> {
