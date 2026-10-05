@@ -15,7 +15,8 @@
 //! which the name history (`project_name_history`) never backdates. Above the cap it reads every
 //! candidate, still with a null total. Registry children sort by the name they serve and have no timestamp.
 //! Postgres orders the keys, so the order is the page statement's under the database
-//! collation. The walk composes the candidates in that order, in batches that double, and runs
+//! collation. The walk composes the candidates in that order, in batches that double up to
+//! `MAX_WALK_BATCH`, and runs
 //! the unchanged page statement over the rows gathered so far. A group whose first member the
 //! walk has not reached sorts at or after the walk position, so the page is final once its
 //! last row is a group the walk passed, with one more row after it, or once every candidate is
@@ -167,6 +168,10 @@ pub async fn load_family_address_names_capped_page(
         total_count: (!capped).then_some(page.summary.grouped_entry_count),
     })
 }
+
+/// The most candidates one walk step composes before it drops the rows the filters reject, so
+/// a filter that matches little holds at most this many names' rows at a time.
+const MAX_WALK_BATCH: usize = 1024;
 
 /// A walk candidate: a name to compose on its index chain, or a registry child's prebuilt rows.
 enum Candidate {
@@ -349,7 +354,7 @@ async fn walk_page(
         gathered.rows.append(&mut step.rows);
         gathered.names.append(&mut step.names);
         position = end;
-        batch = batch.saturating_mul(2);
+        batch = batch.saturating_mul(2).min(MAX_WALK_BATCH);
         let rows = Value::Array(std::mem::take(&mut gathered.rows));
         let names = Value::Array(std::mem::take(&mut gathered.names));
         let page = load_address_names_page_entries_from(
