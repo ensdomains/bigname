@@ -328,6 +328,9 @@ canonical upgrade away from that implementation through the same Project
 publication. Returning to the implementation does not restore support after
 a departure; undoing the departure does. P must be the pinned declared root
 or ETH registry, or an equivalently proven UserRegistry or WrapperRegistry.
+The reader uses retained `SourceManifestUpdated` declarations, normalized factory,
+announcement and upgrade facts, and the current Project entry's admitted instance.
+It does not consult Interpret's mutable identity or discovery tables for this proof.
 Unknown W/P histories produce no derived row or speculative replacement.
 This explicit narrowing, including delayed initialization, is documented in
 [upstream divergences](upstream.md#wrapperregistry-permission-history).

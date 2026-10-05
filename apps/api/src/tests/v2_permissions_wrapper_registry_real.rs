@@ -14,6 +14,8 @@ mod api_role;
 mod history;
 #[path = "v2_permissions_wrapper_registry_lifecycle.rs"]
 mod lifecycle;
+#[path = "v2_permissions_wrapper_registry_proof.rs"]
+mod proof;
 
 const CHAIN: &str = "ethereum-sepolia";
 const BASE: i64 = 11_820_500;
@@ -27,6 +29,7 @@ const WRAPPER_IMPL: &str = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880";
 const UNKNOWN: &str = "0x0000000000000000000000000000000000000bad";
 const PARENT: &str = "0x0000000000000000000000000000000000000d01";
 const WRAPPER: &str = "0x0000000000000000000000000000000000000d02";
+const EMPTY_PARENT: &str = "0x0000000000000000000000000000000000000d04";
 const CHILD: &str = "0x0000000000000000000000000000000000000d03";
 const ALICE: &str = "0x00000000000000000000000000000000000000a1";
 const BOB: &str = "0x00000000000000000000000000000000000000b1";
@@ -181,10 +184,12 @@ impl Logs {
             .encode_log_data(),
         )
     }
-    // User initialization requires at least one root grant. W initializes exactly its virtual
-    // parent bitmap; direct administrator grants follow through the live owner's admin roles.
+    // User initialization seeds the operational root account used by these scenarios. Wrapper
+    // initialization alone seeds root admin bits; subsequent public grants can add only ordinary
+    // root roles while the caller still has their corresponding initialized admin bits.
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L57-L69 @ ens_v2_sepolia_20261001@07e55a05)
     // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L250-L265 @ ens_v2_sepolia_20261001@07e55a05)
     fn user(&mut self, offset: i64, registry: &str) -> &mut Self {
         self.upgrade(offset, registry, USER_IMPL)
             .push(offset, registry, RegistryCreated {}.encode_log_data())
@@ -326,7 +331,16 @@ fn manual_logs(token_roles: U256, expiry: u64) -> Logs {
     logs.user(0, PARENT)
         .register(1, PARENT, LABEL, ALICE, expiry, token_roles)
         .wrapper(2, WRAPPER, PARENT, LABEL, ADMIN, bitmap() | admin_bitmap())
-        .roles(3, WRAPPER, U256::ZERO, ADMIN, U256::ZERO, admin_bitmap())
+        .roles(
+            3,
+            WRAPPER,
+            U256::ZERO,
+            ADMIN,
+            U256::ZERO,
+            bit(0) | bit(8) | bit(124),
+        )
+        .roles(3, WRAPPER, U256::ZERO, ALICE, U256::ZERO, bit(20))
+        .roles(3, WRAPPER, U256::ZERO, OPERATOR, U256::ZERO, bit(24))
         .roles(
             3,
             WRAPPER,
@@ -335,8 +349,6 @@ fn manual_logs(token_roles: U256, expiry: u64) -> Logs {
             bitmap() | admin_bitmap(),
             bitmap(),
         )
-        .roles(3, WRAPPER, U256::ZERO, ALICE, U256::ZERO, bit(20))
-        .roles(3, WRAPPER, U256::ZERO, OPERATOR, U256::ZERO, bit(24))
         .approve(4, PARENT, ALICE, OPERATOR, true)
         .approve(4, PARENT, ALICE, ALICE, true);
     logs
@@ -533,11 +545,21 @@ fn for_subject<'a>(page: &'a Value, subject: &str) -> Vec<&'a Value> {
         .collect()
 }
 fn assert_derived(page: &Value, subject: &str, relation: &str, parent: &str, owner: &str) {
+    assert_derived_powers(page, subject, relation, parent, owner, expected_powers());
+}
+fn assert_derived_powers(
+    page: &Value,
+    subject: &str,
+    relation: &str,
+    parent: &str,
+    owner: &str,
+    powers: Value,
+) {
     let rows = for_subject(page, subject);
     assert_eq!(rows.len(), 1, "{page:#}");
     let row = rows[0];
     assert_eq!(row["grant_relation"], relation, "{row:#}");
-    assert_eq!(row["powers"], expected_powers(), "{row:#}");
+    assert_eq!(row["powers"], powers, "{row:#}");
     if relation == "operator" {
         assert_eq!(
             row["grant_scope"],

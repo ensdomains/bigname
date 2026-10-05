@@ -125,9 +125,10 @@ pub(super) async fn compose(
         .collect();
     // Resolve each root's address from one of its stored, resource-keyed root grants. The
     // recognition check below verifies that this is the admitted instance's actual root id.
-    let parents: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+    let parents: Vec<(Uuid, String, String, String, Option<String>)> = sqlx::query_as(
         "/* storage:families.control.permissions.wrapper_parents */
-         SELECT root.resource_id, parent.registry, parent.parent, parent.parent_entry_key
+         SELECT root.resource_id, parent.registry, parent.parent, parent.parent_entry_key,
+                entry.registry_contract_instance_id
          FROM unnest($2::uuid[]) root(resource_id)
          JOIN LATERAL (
              SELECT grant_row.scope_detail ->> 'registry_address' AS registry
@@ -138,6 +139,9 @@ pub(super) async fn compose(
          ) registry ON true
          JOIN bigname_phase.project_ens_v2_registry_parent parent
            ON parent.chain_id = $1 AND parent.registry = registry.registry
+         JOIN bigname_phase.project_ens_v2_entry_owner entry
+           ON entry.chain_id = parent.chain_id AND entry.registry = parent.parent
+          AND entry.entry_key = parent.parent_entry_key
          WHERE parent.parent IS NOT NULL AND parent.parent_entry_key IS NOT NULL",
     )
     .bind(&publication.chain_id)
@@ -145,11 +149,25 @@ pub(super) async fn compose(
     .fetch_all(&mut *conn)
     .await
     .context("failed to load current WrapperRegistry parents")?;
+    if parents.is_empty() {
+        return Ok(());
+    }
+    let declarations = registry_support::Declarations::load(conn, publication).await?;
     let mut supported = BTreeMap::new();
-    for (_, registry, parent, _) in &parents {
-        for address in [registry, parent] {
+    for (_, registry, parent, _, parent_instance) in &parents {
+        for (address, instance) in [
+            (registry, None),
+            (
+                parent,
+                parent_instance
+                    .as_deref()
+                    .and_then(|value| value.parse::<Uuid>().ok()),
+            ),
+        ] {
             if !supported.contains_key(address) {
-                let support = registry_support::load(conn, publication, address).await?;
+                let support =
+                    registry_support::load(conn, publication, &declarations, address, instance)
+                        .await?;
                 supported.insert(address.clone(), support);
             }
         }
@@ -171,7 +189,7 @@ pub(super) async fn compose(
         ))
     })
     .collect();
-    for (root, registry, parent, entry_key) in parents {
+    for (root, registry, parent, entry_key, parent_instance) in parents {
         let (Some(Some(wrapper)), Some(Some(parent_model))) =
             (supported.get(&registry), supported.get(&parent))
         else {
@@ -180,6 +198,16 @@ pub(super) async fn compose(
         if wrapper.model != Model::Wrapper
             || wrapper.root != root
             || wrapper.namespace != parent_model.namespace
+            || parent_instance
+                .as_deref()
+                .and_then(|value| value.parse::<Uuid>().ok())
+                .is_none_or(|instance| {
+                    parent_model.root
+                        != crate::identity::ens_v2_registry_root_resource_id(
+                            &publication.chain_id,
+                            instance,
+                        )
+                })
         {
             continue;
         }

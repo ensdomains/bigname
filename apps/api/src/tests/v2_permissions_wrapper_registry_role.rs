@@ -51,6 +51,13 @@ async fn documented_non_superuser_api_role_serves_wrapper_roots_and_preflight_re
             .await?;
     assert!(!superuser);
     crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool).await?;
+    // This route's existing identity/namespace selection still needs its documented grants.
+    // The new recognition itself must not read Interpret discovery coordination state.
+    sqlx::query(&format!(
+        "REVOKE SELECT ON bigname_phase.discovery_edges FROM {role}"
+    ))
+    .execute(&database.pool)
+    .await?;
     let response = app_router(state(pool.clone()))
         .oneshot(
             Request::builder()

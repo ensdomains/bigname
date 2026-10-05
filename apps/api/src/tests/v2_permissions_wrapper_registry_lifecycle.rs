@@ -81,9 +81,30 @@ async fn manual_factory_wrapper_derives_owner_without_parent_roles_and_pages_sha
 async fn empty_replacement_dormant_grants_transfer_expiry_renewal_and_approval_revocation()
 -> Result<()> {
     let mut logs = manual_logs(bit(156), (TIME + 11) as u64);
-    logs.roles(5, WRAPPER, U256::ZERO, PARENT, bitmap(), U256::ZERO)
-        .approve(6, PARENT, ALICE, OPERATOR, false)
-        .approve(7, PARENT, ALICE, OPERATOR, true)
+    // Preserve the initialized can_transfer_admin bit. ADMIN's ordinary set-parent role was legally
+    // granted before they were stripped; changing to an empty virtual parent exercises the
+    // same replacement without trying to recreate a forbidden root admin grant.
+    // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L250-L287 @ ens_v2_sepolia_20261001@07e55a05)
+    logs.user(0, EMPTY_PARENT)
+        .register(1, EMPTY_PARENT, LABEL, ALICE, (TIME + 11) as u64, bit(156))
+        .approve(4, EMPTY_PARENT, ALICE, OPERATOR, true)
+        .parent(5, WRAPPER, EMPTY_PARENT, LABEL, ADMIN)
+        .approve(6, EMPTY_PARENT, ALICE, OPERATOR, false)
+        .approve(7, EMPTY_PARENT, ALICE, OPERATOR, true)
+        .push(
+            8,
+            EMPTY_PARENT,
+            TransferSingle {
+                operator: address(ALICE),
+                from: address(ALICE),
+                to: address(BOB),
+                id: id(LABEL),
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+        )
+        .roles(8, EMPTY_PARENT, id(LABEL), ALICE, bit(156), U256::ZERO)
+        .roles(8, EMPTY_PARENT, id(LABEL), BOB, U256::ZERO, bit(156))
         .push(
             8,
             PARENT,
@@ -98,7 +119,7 @@ async fn empty_replacement_dormant_grants_transfer_expiry_renewal_and_approval_r
         )
         .roles(8, PARENT, id(LABEL), ALICE, bit(156), U256::ZERO)
         .roles(8, PARENT, id(LABEL), BOB, U256::ZERO, bit(156))
-        .roles(9, WRAPPER, U256::ZERO, PARENT, U256::ZERO, bitmap())
+        .parent(9, WRAPPER, PARENT, LABEL, ADMIN)
         .approve(10, PARENT, BOB, OPERATOR, true)
         .renew(12, PARENT, LABEL, (TIME + 100) as u64);
     let database = setup(&logs).await?;
@@ -285,7 +306,14 @@ async fn current_parent_and_raw_label_choose_owner_without_recursive_parent_clas
     let mut logs = manual_logs(U256::ZERO, (TIME + 100) as u64);
     logs.roles(0, ETH, U256::ZERO, ADMIN, U256::ZERO, parent_admin())
         .register(0, ETH, "other", BOB, (TIME + 100) as u64, U256::ZERO)
-        .roles(5, WRAPPER, U256::ZERO, ETH, U256::ZERO, bitmap())
+        .roles(
+            2,
+            WRAPPER,
+            U256::ZERO,
+            ETH,
+            U256::ZERO,
+            bit(0) | bit(8) | bit(16),
+        )
         .parent(5, WRAPPER, ETH, "other", ADMIN)
         .parent(6, WRAPPER, ZERO, "other", ADMIN)
         .parent(7, WRAPPER, PARENT, LABEL, ADMIN);
@@ -301,7 +329,14 @@ async fn current_parent_and_raw_label_choose_owner_without_recursive_parent_clas
     );
     publish(&database, 5).await?;
     let changed = registry_page(&database, WRAPPER).await?;
-    assert_derived(&changed, BOB, "holder", ETH, BOB);
+    assert_derived_powers(
+        &changed,
+        BOB,
+        "holder",
+        ETH,
+        BOB,
+        json!(["registrar", "set_parent", "renew"]),
+    );
     assert_eq!(
         for_subject(&changed, ALICE)[0]["powers"],
         json!(["set_subregistry"])
@@ -350,7 +385,14 @@ async fn self_parent_combines_token_and_root_operator_powers_under_one_account_k
             .encode_log_data(),
         )
         .register(4, WRAPPER, "self", ALICE, (TIME + 100) as u64, bit(24))
-        .roles(4, WRAPPER, U256::ZERO, WRAPPER, U256::ZERO, bitmap())
+        .roles(
+            2,
+            WRAPPER,
+            U256::ZERO,
+            WRAPPER,
+            U256::ZERO,
+            bit(0) | bit(8) | bit(16),
+        )
         .parent(5, WRAPPER, WRAPPER, "self", ADMIN)
         .approve(6, WRAPPER, ALICE, OPERATOR, true);
     let database = setup(&logs).await?;
@@ -382,13 +424,7 @@ async fn self_parent_combines_token_and_root_operator_powers_under_one_account_k
         .collect();
     assert_eq!(
         powers,
-        std::collections::BTreeSet::from([
-            "registrar",
-            "set_parent",
-            "renew",
-            "can_transfer_admin",
-            "set_resolver",
-        ])
+        std::collections::BTreeSet::from(["registrar", "set_parent", "renew", "set_resolver",])
     );
     // The bounded expansion used by address-name role_summary keeps only token roles,
     // even when a self-parent approval shares the root operator's account key.
