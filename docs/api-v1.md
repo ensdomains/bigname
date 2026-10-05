@@ -3858,6 +3858,7 @@ vocabularies are marked at their existing canonical tables above.
 | Value |
 | --- |
 | `operator` |
+| `holder` |
 
 ### NetworkHeadStatus
 

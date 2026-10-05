@@ -7398,7 +7398,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval; direct grants omit it."
+            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",
@@ -8003,7 +8003,7 @@
         "properties": {
           "grant_relation": {
             "$ref": "#/components/schemas/GrantRelation",
-            "description": "`operator` for an effective account approval; direct grants omit it."
+            "description": "`operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it."
           },
           "grant_scope": {
             "$ref": "#/components/schemas/GrantScope",

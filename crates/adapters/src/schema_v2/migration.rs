@@ -210,13 +210,7 @@ pub(super) fn correlate(
             log_index,
         ))
     });
-    // Preserve independent known registry origins without changing any correlated visibility.
-    // Their eventual RegistryCreated announcement still owns ordinary registry admission.
-    output.normalized_events.retain(|event| {
-        event.source_family != MIGRATION_FAMILY
-            || event.consumer_visibility == CANDIDATE
-            || registry_origin::supported_origin(catalog, event)
-    });
+    registry_origin::retain(catalog, &mut output.normalized_events);
     insert_boundaries(output, boundaries);
     activate_complete_groups(output);
     sort_and_deduplicate(output);

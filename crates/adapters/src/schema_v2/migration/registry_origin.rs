@@ -2,7 +2,7 @@
 //! A retained origin is not a registry admission or a migration correlation.
 use serde_json::Value;
 
-use super::{Catalog, MIGRATION_FAMILY, NormalizedEvent};
+use super::{CANDIDATE, Catalog, MIGRATION_FAMILY, NormalizedEvent};
 
 // The exact reviewed implementations, never a role-only assertion about arbitrary future code.
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
@@ -18,7 +18,17 @@ const IMPLEMENTATIONS: [(&str, &str); 2] = [
     ),
 ];
 
-pub(super) fn supported_origin(catalog: &Catalog, event: &NormalizedEvent) -> bool {
+pub(super) fn retain(catalog: &Catalog, events: &mut Vec<NormalizedEvent>) {
+    // Preserve independent known registry origins without changing any correlated visibility.
+    // Their eventual RegistryCreated announcement still owns ordinary registry admission.
+    events.retain(|event| {
+        event.source_family != MIGRATION_FAMILY
+            || event.consumer_visibility == CANDIDATE
+            || supported_origin(catalog, event)
+    });
+}
+
+fn supported_origin(catalog: &Catalog, event: &NormalizedEvent) -> bool {
     let Some(source) = catalog.source_for_family(MIGRATION_FAMILY) else {
         return false;
     };
