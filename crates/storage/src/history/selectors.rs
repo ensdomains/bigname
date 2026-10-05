@@ -17,6 +17,14 @@ pub(super) enum HistorySelector {
         logical_name_ids: Vec<String>,
         resource_ids: Vec<Uuid>,
     },
+    /// An address read's anchors, or a registry root role change whose subject is `subject`
+    /// (in `namespace`, when the read has one). The root resource is shared by every holder of
+    /// the registry, so it cannot be an anchor.
+    OrRootPermissionSubject {
+        anchors: Box<HistorySelector>,
+        subject: String,
+        namespace: Option<String>,
+    },
 }
 
 pub(super) fn product_registration_history_selector(
@@ -30,6 +38,17 @@ pub(super) fn product_registration_history_selector(
 }
 
 impl HistorySelector {
+    /// The resources whose rows, and attributed record writes, the selector reads.
+    pub(super) fn resource_ids(&self) -> &[Uuid] {
+        match self {
+            Self::Resources(resource_ids)
+            | Self::LogicalNamesOrResources { resource_ids, .. }
+            | Self::ProductRegistration { resource_ids, .. } => resource_ids,
+            Self::OrRootPermissionSubject { anchors, .. } => anchors.resource_ids(),
+            Self::LogicalNames(_) | Self::None => &[],
+        }
+    }
+
     pub(super) fn logical_names(logical_name_ids: Vec<String>) -> Self {
         if logical_name_ids.is_empty() {
             Self::None

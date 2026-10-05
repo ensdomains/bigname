@@ -255,22 +255,25 @@ pub(crate) async fn get_address_names(
     )
     .await?;
 
-    let storage_page = bigname_storage::load_address_names_current_page_filtered(
+    let storage_page = bigname_storage::load_family_address_names_capped_page(
         snapshot.conn().await?,
-        &normalized_address,
-        namespace_filter.as_deref(),
-        storage_relations,
-        storage_dedupe,
-        normalized_q
-            .as_deref()
-            .map(|q| params.name_match.to_storage(q)),
-        authorities.as_deref(),
-        params.is_migrated,
-        parent.as_deref(),
-        storage_sort,
-        storage_order,
-        storage_cursor.as_ref(),
-        params.page_size,
+        &bigname_storage::AddressNamesPageRequest {
+            address: &normalized_address,
+            namespace: namespace_filter.as_deref(),
+            relations: storage_relations,
+            dedupe_by: storage_dedupe,
+            q: normalized_q
+                .as_deref()
+                .map(|q| params.name_match.to_storage(q)),
+            authority: authorities.as_deref(),
+            is_migrated: params.is_migrated,
+            parent: parent.as_deref(),
+            sort: storage_sort,
+            order: storage_order,
+            cursor: storage_cursor.as_ref(),
+            page_size: params.page_size,
+        },
+        include.total_count,
     )
     .await
     .map_err(|error| {
@@ -476,7 +479,7 @@ pub(crate) async fn get_address_names(
             cursor: params.cursor.clone(),
             next_cursor,
             page_size: params.page_size,
-            total_count: Some(storage_page.summary.grouped_entry_count),
+            total_count: storage_page.total_count,
             has_more,
         }),
         meta,
@@ -553,6 +556,7 @@ pub(crate) fn build_address_name_role_summary(
 pub(super) struct AddressNamesInclude {
     pub(super) role_summary: bool,
     pub(super) counts: bool,
+    pub(super) total_count: bool,
 }
 
 pub(super) fn address_names_include(include: &[String]) -> V2Result<AddressNamesInclude> {
@@ -561,9 +565,10 @@ pub(super) fn address_names_include(include: &[String]) -> V2Result<AddressNames
         match value.as_str() {
             "role_summary" => parsed.role_summary = true,
             "counts" => parsed.counts = true,
+            "total_count" => parsed.total_count = true,
             _ => {
                 return Err(V2Error::invalid_input(
-                    "include must contain only role_summary or counts",
+                    "include must contain only role_summary, counts or total_count",
                 ));
             }
         }

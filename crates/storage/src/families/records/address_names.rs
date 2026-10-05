@@ -38,7 +38,7 @@ use crate::{
             rows::{BindingCandidate, WrapperRow},
             wrapper::load_wrapper_rows,
         },
-        name::{CoverageShape, FamilyPublication, load_composed, servable_publication},
+        name::{CoverageShape, FamilyPublication, load_composed_base, servable_publication},
     },
 };
 
@@ -102,7 +102,33 @@ pub(crate) async fn compose_address_name_rows(
     requested_relations: Option<&[AddressNameRelation]>,
     with_history_evidence: bool,
 ) -> Result<(Value, Value)> {
-    let indexed: Vec<(String, String)> = sqlx::query_as(
+    let include_roles = includes_roles(requested_relations);
+    let by_chain = address_name_candidates(conn, address, namespace, include_roles).await?;
+    let composer = AddressComposer {
+        address,
+        include_roles,
+        with_history_evidence,
+    };
+    compose_candidate_rows(conn, &composer, &by_chain).await
+}
+
+/// Whether a relation set lists `role_holder`, explicitly or by default.
+pub(crate) fn includes_roles(requested_relations: Option<&[AddressNameRelation]>) -> bool {
+    requested_relations
+        .filter(|relations| !relations.is_empty())
+        .is_none_or(|relations| relations.contains(&AddressNameRelation::RoleHolder))
+}
+
+/// The names an address read composes, by chain: the names the address index lists for the
+/// address and, with `include_roles`, the names on which it holds an ENSv2 registry role, which
+/// the index does not list (`address_roles.rs`).
+pub(crate) async fn address_name_candidates(
+    conn: &mut PgConnection,
+    address: &str,
+    namespace: Option<&str>,
+    include_roles: bool,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut indexed: Vec<(String, String)> = sqlx::query_as(
         "/* storage:families.records.address_name_index */
          SELECT DISTINCT indexed.chain_id, indexed.logical_name_id
          FROM bigname_phase.project_address_name_index indexed
@@ -117,73 +143,151 @@ pub(crate) async fn compose_address_name_rows(
     .fetch_all(&mut *conn)
     .await
     .with_context(|| format!("failed to load the address index of {address}"))?;
-    // The names on which the address holds an ENSv2 registry role, which the index does not
-    // list (`address_roles.rs`).
-    let include_roles = requested_relations
-        .filter(|relations| !relations.is_empty())
-        .is_none_or(|relations| relations.contains(&AddressNameRelation::RoleHolder));
-    let mut indexed = indexed;
     if include_roles {
         indexed.extend(
             super::address_roles::role_name_candidates(&mut *conn, address, namespace).await?,
         );
     }
-    if indexed.is_empty() {
-        // The route captures and revalidates its requested namespace publication. No rows
-        // identify another chain to read here; unrelated markers cannot veto that scope.
-        return Ok((json!([]), json!([])));
-    }
     let mut by_chain: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (chain_id, name) in indexed {
         by_chain.entry(chain_id).or_default().insert(name);
     }
-    let wanted = address.to_ascii_lowercase();
+    Ok(by_chain)
+}
+
+/// Every candidate's page rows, composed a chunk at a time.
+pub(crate) async fn compose_candidate_rows(
+    conn: &mut PgConnection,
+    composer: &AddressComposer<'_>,
+    by_chain: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(Value, Value)> {
+    // With no candidates the route's own namespace publication check stands: no rows identify
+    // another chain to read here, and unrelated markers cannot veto that scope.
     let (mut rows, mut names) = (Vec::new(), Vec::new());
     for (chain_id, ids) in by_chain {
-        let publication = servable_publication(conn, &chain_id).await?;
-        let ids: Vec<String> = ids.into_iter().collect();
-        let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
-        let clock_seconds = publication.timestamp_seconds();
-        let roles = if include_roles {
-            RoleHolderLoad::Subject(address)
-        } else {
-            RoleHolderLoad::Skip
-        };
-        let inputs =
-            ChainInputs::load(conn, &chain_id, composed.values(), clock_seconds, roles).await?;
-        for row in composed.values() {
-            let input = inputs.input(row, clock_seconds);
-            let mut listed = false;
-            for (related, relation) in relations(&input) {
-                if related == wanted {
-                    let mut relation_row = address_name_row(&related, relation, row, &publication);
-                    if with_history_evidence
-                        && let Some(position) =
-                            super::address_relations::relation_position(&input, &related, relation)
-                    {
-                        relation_row["provenance"]["event_identity"] =
-                            json!(position.event_identity);
-                        relation_row["chain_positions"]["block_number"] =
-                            json!(position.block_number);
-                    }
-                    rows.push(relation_row);
-                    listed = true;
-                }
-            }
-            if listed {
-                names.push(name_row(row));
+        let publication = servable_publication(conn, chain_id).await?;
+        let ids: Vec<String> = ids.iter().cloned().collect();
+        // Each chunk's composed rows are reduced to the page's JSON rows before the next chunk
+        // composes. A name's relations read only its own rows, so chunking changes no row.
+        for chunk in ids.chunks(super::seams::compose_chunk()) {
+            for name in composer.compose(conn, &publication, chunk).await? {
+                rows.extend(name.rows);
+                names.push(name.name);
             }
         }
     }
     Ok((Value::Array(rows), Value::Array(names)))
 }
 
-/// The name columns the page's authority and migration filters and timestamp sorts read.
+/// One composed name the address relates to: its relation rows for the address and its name row.
+pub(crate) struct ComposedName {
+    pub(crate) logical_name_id: String,
+    pub(crate) canonical_display_name: String,
+    pub(crate) resource_id: Option<String>,
+    pub(crate) rows: Vec<Value>,
+    pub(crate) name: Value,
+}
+
+/// Composes names and keeps the page rows of those `address` relates to.
+pub(crate) struct AddressComposer<'a> {
+    pub(crate) address: &'a str,
+    pub(crate) include_roles: bool,
+    pub(crate) with_history_evidence: bool,
+}
+
+impl AddressComposer<'_> {
+    /// The names among `ids`, of `publication`'s chain, the address relates to, in id order.
+    pub(crate) async fn compose(
+        &self,
+        conn: &mut PgConnection,
+        publication: &FamilyPublication,
+        ids: &[String],
+    ) -> Result<Vec<ComposedName>> {
+        let wanted = self.address.to_ascii_lowercase();
+        let clock_seconds = publication.timestamp_seconds();
+        let composed = compose_base_chunk(conn, ids).await?;
+        let roles = if self.include_roles {
+            RoleHolderLoad::Subject(self.address)
+        } else {
+            RoleHolderLoad::Skip
+        };
+        let inputs = ChainInputs::load(
+            conn,
+            &publication.chain_id,
+            composed.values(),
+            clock_seconds,
+            roles,
+        )
+        .await?;
+        let mut out = Vec::new();
+        for row in composed.values() {
+            let input = inputs.input(row, clock_seconds);
+            let mut rows = Vec::new();
+            for (related, relation) in relations(&input) {
+                if related != wanted {
+                    continue;
+                }
+                let mut relation_row = address_name_row(&related, relation, row, publication);
+                if self.with_history_evidence
+                    && let Some(position) =
+                        super::address_relations::relation_position(&input, &related, relation)
+                {
+                    relation_row["provenance"]["event_identity"] = json!(position.event_identity);
+                    relation_row["chain_positions"]["block_number"] = json!(position.block_number);
+                }
+                rows.push(relation_row);
+            }
+            if !rows.is_empty() {
+                out.push(ComposedName {
+                    logical_name_id: row.logical_name_id.clone(),
+                    canonical_display_name: row.canonical_display_name.clone(),
+                    resource_id: row.resource_id.map(|resource| resource.to_string()),
+                    rows,
+                    name: name_row(row),
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The composed rows of one chunk of an address read's names, without the declared resolution
+/// topology and the record inventories it reads: no address read serves either.
+pub(super) async fn compose_base_chunk(
+    conn: &mut PgConnection,
+    ids: &[String],
+) -> Result<BTreeMap<String, NameCurrentRow>> {
+    super::seams::note_composed_batch(ids.len());
+    load_composed_base(conn, ids, CoverageShape::Plain).await
+}
+
+/// The name columns the page's authority and migration filters and timestamp sorts read:
+/// `declared_summary.registration`, `.control` and `.history.created_at`, and
+/// `provenance.authority_selection`. Nothing else is kept, so a page holds no composed summary
+/// beyond what its statements read.
 pub(super) fn name_row(row: &NameCurrentRow) -> Value {
+    let mut summary = serde_json::Map::new();
+    for key in ["registration", "control"] {
+        if let Some(value) = row.declared_summary.get(key) {
+            summary.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(history) = row.declared_summary.get("history") {
+        let slim = match history.get("created_at") {
+            Some(created_at) => json!({"created_at": created_at}),
+            None if history.is_object() => json!({}),
+            None => history.clone(),
+        };
+        summary.insert("history".to_owned(), slim);
+    }
+    let mut provenance = serde_json::Map::new();
+    if let Some(selection) = row.provenance.get("authority_selection") {
+        provenance.insert("authority_selection".to_owned(), selection.clone());
+    }
     json!({
         "logical_name_id": row.logical_name_id,
-        "declared_summary": row.declared_summary,
-        "provenance": row.provenance,
+        "declared_summary": summary,
+        "provenance": provenance,
     })
 }
 
