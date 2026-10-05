@@ -67,6 +67,7 @@ const READER_FILES: &[&str] = &[
     // The composed-row listings and the API-side topology enrichment (`batch::load`).
     "crates/storage/src/families/name/bound.rs",
     "crates/storage/src/families/name/list.rs",
+    "crates/storage/src/families/name/list/expiring.rs",
     "crates/storage/src/families/name/seams.rs",
     "crates/storage/src/families/name/topology.rs",
     "crates/storage/src/families/records/address_names.rs",
