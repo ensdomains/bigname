@@ -6,10 +6,10 @@ mod facts;
 mod grants;
 mod operators;
 pub mod page;
-mod restrictions;
 mod registry_support;
-mod wrapper_registry;
+mod restrictions;
 mod summary;
+mod wrapper_registry;
 
 use std::collections::{BTreeMap, BTreeSet};
 
