@@ -3,12 +3,14 @@
 
 use std::collections::BTreeMap;
 
-use bigname_storage::NameCurrentRow;
+use bigname_storage::{NameCurrentRow, RegistryRootResource};
 use sqlx::types::Uuid;
 
 use crate::AppState;
 
+use super::super::collection_snapshot::CollectionSnapshot;
 use super::super::name_record::{name_registration_fields, registration_id, string_field};
+use super::super::params::ContractSelector;
 use super::super::support::normalize_inferred_route_name;
 use super::super::{
     QueryParams, V2Result,
@@ -105,8 +107,13 @@ pub(super) async fn resolve_permissions_filter(
     params: &QueryParams,
     include_lineage: bool,
     inputs: &PermissionsFilterInputs,
-    block_bounds: &BTreeMap<String, i64>,
+    snapshot: &mut CollectionSnapshot,
 ) -> V2Result<ResolvedPermissionsFilter> {
+    let block_bounds = &snapshot.block_bounds();
+    let registry_root = match params.registry.as_ref() {
+        Some(registry) => Some(load_registry_root(snapshot, registry).await?),
+        None => None,
+    };
     let resolved_name_row = match inputs.name_filter.as_ref() {
         Some(name_filter) => Some(
             load_current_name_row(
@@ -149,25 +156,6 @@ pub(super) async fn resolve_permissions_filter(
 
     let namespace = inputs.namespace.clone();
     let mut resource_is_not_a_registration = false;
-    // The registry resolves at the captured publication's block, so an instance the interpreter
-    // admitted or retired after it does not select a resource the published rows do not describe.
-    let registry_root = match params.registry.as_ref() {
-        Some(registry) => Some(match block_bounds.get(registry.chain_slug) {
-            Some(&block) => bigname_storage::load_registry_root_resource(
-                &state.pool,
-                registry.chain_slug,
-                &registry.address,
-                block,
-            )
-            .await
-            .map_err(|error| {
-                tracing::error!(?error, "failed to resolve a registry root resource");
-                V2Error::internal_error("failed to resolve registry root resource")
-            })?,
-            None => None,
-        }),
-        None => None,
-    };
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {
         _ if registry_root.is_some() => registry_root.flatten().map(|root| root.resource_id),
         (Some(name_resource_id), _) => Some(name_resource_id),
@@ -212,7 +200,7 @@ pub(super) async fn resolve_permissions_filter(
     };
     let scope = if let Some(root) = registry_root {
         PermissionRequestScope::RegistryRoot {
-            migration_registry: root.is_some_and(|root| root.migration_registry),
+            manifest_declared: root.is_some_and(|root| root.manifest_declared),
         }
     } else if resource_id.is_some() {
         PermissionRequestScope::ResourceBound
@@ -379,6 +367,29 @@ async fn control_resource_for_registration(
         return Ok(None);
     }
     Ok(Some(registration_id))
+}
+
+/// The root resource `registry` selects, read on the request's snapshot at the captured
+/// publication's block, so an instance the interpreter admitted or retired after it does not select
+/// a resource the published rows do not describe. A chain without a captured bound selects nothing.
+async fn load_registry_root(
+    snapshot: &mut CollectionSnapshot,
+    registry: &ContractSelector,
+) -> V2Result<Option<RegistryRootResource>> {
+    let Some(&block) = snapshot.block_bounds().get(registry.chain_slug) else {
+        return Ok(None);
+    };
+    bigname_storage::load_registry_root_resource(
+        snapshot.conn().await?,
+        registry.chain_slug,
+        &registry.address,
+        block,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(?error, "failed to resolve a registry root resource");
+        V2Error::internal_error("failed to resolve registry root resource")
+    })
 }
 
 fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {

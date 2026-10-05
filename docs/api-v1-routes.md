@@ -2731,13 +2731,15 @@ introduces it rebuilds Project from full history before serving the option; see
   registration outside the namespace returns an empty page without its resource
   restrictions or permission support metadata.
   `registry=<chain_id>:<address>` takes a supported numeric chain ID and a
-  case-insensitive address; any other shape returns `400 invalid_input`. It
+  case-insensitive address; an empty value is treated as omitted, and any other
+  shape returns `400 invalid_input`. It
   selects the root resource of the registry contract instance that holds the
   address at the served publication's block (`meta.as_of`), derived the same way
   the interpreter derives it, and returns
   that resource's current holders, so a revoked holder is absent. With `address`
-  it returns that account's root row or an empty page, which answers whether the
-  account holds root roles on the registry. An address no active contract
+  it returns that account's root row or an empty page. The row answers whether
+  the account holds a listed root grant; an empty page under the partial marker
+  below does not prove the account has no root authority. An address no active contract
   instance holds at that block (including one admitted after it), a registry
   instance retired by then, or a registry with no current root holders returns
   `200` with empty `data`; the empty page does not prove the
@@ -2981,22 +2983,25 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
   A `registry` read is classified by the registry, not by a registration
-  summary. Its root holders are listed in full, so the three fields are
-  omitted: every write to an ENSv2 role bitmap emits `EACRolesChanged`, and the
-  registry adds a name owner's roles to that owner's approved operators only for
-  a name's token resource, never for the root resource.
+  summary. For a registry a manifest declares (the root and ETH registries,
+  whose code is pinned) the root holders are listed in full, so the three
+  fields are omitted: every write to an ENSv2 role bitmap emits
+  `EACRolesChanged`, and the registry adds a name owner's roles to that owner's
+  approved operators only for a name's token resource, never for the root
+  resource.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
-  The exception is a [migration registry](glossary.md#migration-registry-wrapperregistry),
-  recognized by its activated migration registry creation record on a readable
-  block, with the matching canonical registry announcement. Its root
-  roles are granted to the parent registry, and the contract gives exactly those
-  roles to the parent name's current owner and to that owner's operators on the
-  parent registry, who are not rows. Such a read reports
-  `["ens_v2_registry_operators"]`.
-  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L140-L142 @ ens_v2_sepolia_20261001@07e55a05)
+  A registry that discovery admitted reports `["ens_v2_registry_operators"]`.
+  bigname does not read a discovered contract's code, and anyone can initialize
+  a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
+  is one): it grants its root roles to a parent registry, and gives exactly
+  those roles to the parent name's current owner and to that owner's operators
+  on the parent registry, who are not rows. A `UserRegistry` is upgradeable, so
+  its code can change too.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L28 @ ens_v2_sepolia_20261001@07e55a05)
   Independently proven full support omits all three fields. Missing or
   unrecognized summary metadata returns `meta.completeness=partial` with
   `unsupported_reason=permission_support_unknown`, no list, and takes

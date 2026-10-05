@@ -129,7 +129,7 @@ pub(crate) async fn get_permissions(
         &params,
         include_lineage,
         &filter_inputs,
-        &snapshot.block_bounds(),
+        &mut snapshot,
     )
     .await?;
     let storage_cursor = params

@@ -138,11 +138,12 @@ async fn registry_selector_reads_the_root_resource_the_adapter_derives() -> Resu
         .bind(Uuid::from_u128(INSTANCE)).bind(CHAIN).execute(&database.pool).await?;
     sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number)
         VALUES ($1, $2, $3, 0)").bind(Uuid::from_u128(INSTANCE)).bind(CHAIN).bind(REGISTRY).execute(&database.pool).await?;
-    let computed = bigname_storage::load_registry_root_resource(&database.pool, CHAIN, REGISTRY, 123)
+    let computed =
+        bigname_storage::load_registry_root_resource(&mut *database.pool.acquire().await?, CHAIN, REGISTRY, 123)
         .await?
         .expect("the active instance has a root resource");
     assert_eq!(computed.resource_id, adapter_root);
-    assert!(!computed.migration_registry);
+    assert!(!computed.manifest_declared);
 
     upsert_test_token_lineages(&database.pool, &output.token_lineages.iter()
         .map(|l| address_name_token_lineage(l.token_lineage_id, &l.block_hash, l.block_number))
@@ -182,6 +183,6 @@ async fn registry_selector_reads_the_root_resource_the_adapter_derives() -> Resu
         "registration_id": adapter_root.to_string(),
         "authority_context": "resource_audit",
     }]), "{page}");
-    assert!(page["meta"].get("completeness").is_none(), "{page}");
+    assert_eq!(page["meta"]["unlisted_permission_surfaces"], json!(["ens_v2_registry_operators"]), "{page}");
     database.cleanup().await
 }

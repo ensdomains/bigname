@@ -1019,14 +1019,17 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
     // deployer's constructor grant remains and the revoked grantee is absent.
     let registry = format!("{:#x}", deployment.eth_registry.address);
     let root = bigname_storage::load_registry_root_resource(
-        &run.db.pool,
+        &mut *run.db.pool.acquire().await?,
         "ethereum-sepolia",
         &registry,
         i64::MAX,
     )
     .await?
     .context("the ETH registry has an active contract instance")?;
-    assert!(!root.migration_registry);
+    assert!(
+        root.manifest_declared,
+        "the ETH registry is manifest-declared"
+    );
     let written: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT resource_id FROM normalized_events \
          WHERE event_kind = 'RootPermissionChanged' AND canonicality_state = 'canonical' \

@@ -23,8 +23,9 @@ pub(crate) enum UnlistedPermissionSurface {
     /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L575-L592 @ ens_v2@a971bd64)
     /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L73-L75 @ ens_v2@a971bd64)
     /// (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L165-L167 @ ens_v2@a971bd64)
-    /// For a migration `WrapperRegistry`'s root resource, the parent name's owner and that owner's
-    /// operators on the parent registry, which act with the roles the parent registry holds.
+    /// For a discovered registry's root resource, the accounts a `WrapperRegistry` lets act with the
+    /// roles its parent registry holds: the parent name's owner and that owner's operators on the
+    /// parent registry.
     EnsV2RegistryOperators,
     /// BaseRegistrar ERC-721 per-token and operator approvals. An approved spender passes the
     /// same check as the token owner, which also gates `reclaim`.
@@ -86,7 +87,7 @@ pub(crate) enum PermissionRequestScope {
     AccountWide,
     /// The root resource of an ENSv2 registry.
     RegistryRoot {
-        migration_registry: bool,
+        manifest_declared: bool,
     },
 }
 
@@ -114,19 +115,22 @@ impl PermissionSupport {
     /// and resolver operators and delegates are not.
     pub(crate) const ENS_V2_REGISTRY_PARTIAL: Self =
         Self::partial(&[EnsV2RegistryOperators, ResolverApprovals]);
-    /// An ENSv2 registry's root resource. Every write to a role bitmap emits `EACRolesChanged`, and
-    /// the registry adds an owner's roles to its operators only for a token resource, so the root's
-    /// role holders are rows.
+    /// A manifest-declared ENSv2 registry's root resource (the root and ETH registries, whose code
+    /// is pinned). Every write to a role bitmap emits `EACRolesChanged`, and the registry adds an
+    /// owner's roles to its operators only for a token resource, so the root's holders are rows.
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
-    pub(crate) const REGISTRY_ROOT: Self = Self::FULL;
-    /// A migration `WrapperRegistry`'s root resource. Its roles are granted to the parent
-    /// registry, and the contract gives exactly those roles to the parent name's owner and that
-    /// owner's operators on the parent registry, which are not rows.
-    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L140-L142 @ ens_v2_sepolia_20261001@07e55a05)
+    pub(crate) const DECLARED_REGISTRY_ROOT: Self = Self::FULL;
+    /// A discovered registry's root resource. Anyone can initialize a `WrapperRegistry`, which
+    /// grants its root roles to a parent registry and gives exactly those roles to the parent
+    /// name's owner and that owner's operators on the parent registry, who are not rows; a
+    /// `UserRegistry` can be upgraded to other code. bigname does not read a discovered contract's
+    /// code, so it cannot rule this out.
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
     /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
-    pub(crate) const MIGRATION_REGISTRY_ROOT_PARTIAL: Self =
+    /// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L28 @ ens_v2_sepolia_20261001@07e55a05)
+    pub(crate) const DISCOVERED_REGISTRY_ROOT_PARTIAL: Self =
         Self::partial(&[EnsV2RegistryOperators]);
     /// An address-only read, which may reach registrations of every kind.
     pub(crate) const ACCOUNT_WIDE_PARTIAL: Self = Self::partial(&ALL_SURFACES);
@@ -231,11 +235,11 @@ pub(crate) fn apply_permissions_collection_support_meta(
     // the address may reach, whatever each visible registration supports.
     let support = match request_scope {
         PermissionRequestScope::ResourceBound => support,
-        PermissionRequestScope::RegistryRoot { migration_registry } => {
-            if migration_registry {
-                PermissionSupport::MIGRATION_REGISTRY_ROOT_PARTIAL
+        PermissionRequestScope::RegistryRoot { manifest_declared } => {
+            if manifest_declared {
+                PermissionSupport::DECLARED_REGISTRY_ROOT
             } else {
-                PermissionSupport::REGISTRY_ROOT
+                PermissionSupport::DISCOVERED_REGISTRY_ROOT_PARTIAL
             }
         }
         PermissionRequestScope::AccountWide => {
@@ -285,7 +289,7 @@ mod tests {
     #[test]
     fn registry_root_support_ignores_the_root_summary() {
         let root = PermissionRequestScope::RegistryRoot {
-            migration_registry: false,
+            manifest_declared: true,
         };
         assert_eq!(
             collection_meta(PermissionSupport::UNKNOWN, root),
@@ -294,7 +298,7 @@ mod tests {
         let migration = collection_meta(
             PermissionSupport::UNKNOWN,
             PermissionRequestScope::RegistryRoot {
-                migration_registry: true,
+                manifest_declared: false,
             },
         );
         assert_eq!(migration.completeness, Some(Completeness::Partial));

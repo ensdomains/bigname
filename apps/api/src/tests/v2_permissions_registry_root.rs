@@ -49,7 +49,22 @@ async fn seed_registry_root_holders(database: &TestDatabase) -> Result<()> {
     events.push(root_role_event(REVOKED_HOLDER, 76, json!([])));
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     insert_registry_permission_roles(database, Uuid::from_u128(0xA100), false, 77, json!(["renew"])).await?;
+    declare_alpha_registry(database).await?;
     rebuild_fixture_families(&database.pool, "ethereum-mainnet", 83, "0xregistry83").await
+}
+
+/// Declares the alpha registry instance in an ENSv2 registry manifest, as the ETH registry is.
+async fn declare_alpha_registry(database: &TestDatabase) -> Result<()> {
+    let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family,
+            chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES (1, 'ens', 'ens_v2_registry_l1', 'ethereum-mainnet', 'fixture', 'active', 'fixture',
+            'fixture/registry.toml', '{}') RETURNING manifest_id")
+        .fetch_one(&database.pool).await?;
+    sqlx::query("INSERT INTO manifest_contract_instances (manifest_id, chain_id, declaration_kind, declaration_name,
+            contract_instance_id, declared_address, role, proxy_kind)
+        VALUES ($1, 'ethereum-mainnet', 'contract', 'alpha', $2, $3, 'registry', 'none')")
+        .bind(manifest).bind(Uuid::from_u128(0xA190)).bind(ALPHA_REGISTRY).execute(&database.pool).await?;
+    Ok(())
 }
 
 fn root_scope() -> Value {
@@ -173,37 +188,18 @@ async fn v2_get_permissions_rejects_malformed_registry_selectors() -> Result<()>
     database.cleanup().await
 }
 
-// A migration WrapperRegistry gives the parent registry's root roles to the parent name's owner
-// and that owner's operators on the parent registry, so its root holders are not all rows.
+// A registry that discovery admitted may be a WrapperRegistry, which gives the parent registry's
+// root roles to the parent name's owner and that owner's operators on the parent registry, so its
+// root holders are not proven to be all rows.
 // (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
 #[tokio::test]
-async fn v2_get_permissions_marks_migration_registry_roots_partial() -> Result<()> {
+async fn v2_get_permissions_marks_discovered_registry_roots_partial() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_root_holders(&database).await?;
-    let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version, namespace, source_family,
-            chain_id, deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
-        VALUES (1, 'ens', 'ens_v2_migration_l1', 'ethereum-mainnet', 'fixture', 'active', 'fixture',
-            'fixture/migration.toml', '{}') RETURNING manifest_id")
-        .fetch_one(&database.pool).await?;
-    sqlx::query("INSERT INTO migration_discovery_associations (logical_edge_identity, migration_correlation_id,
-            correlation_kind, registry_contract_instance_id, registry_address, source_manifest_id, evidence_refs,
-            chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index,
-            canonicality_state, consumer_visibility, interpreter_content_hash)
-        VALUES ('alpha-edge', 'alpha-migration', 'migration_registry_creation', $1, $2, $3, '[{\"kind\":\"raw_log\"}]',
-            'ethereum-mainnet', 60, '0xregistry60', '0xtx60', 0, 0, 'canonical', 'activated', 'fixture')")
-        .bind(Uuid::from_u128(0xA190)).bind(ALPHA_REGISTRY).bind(manifest).execute(&database.pool).await?;
-    let uri = format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}");
-    // A creation record without its canonical announcement edge, such as one retained from a
-    // losing fork, does not make the registry a migration registry.
-    let unannounced = v2_permissions_payload_for_database(&database, &uri).await?;
-    assert!(unannounced["meta"].get("completeness").is_none(), "{unannounced}");
-    sqlx::query("INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
-            discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash,
-            canonicality_state, provenance)
-        VALUES ('ethereum-mainnet', 'registry_announcement', $1, $1, 'RegistryCreated', 'migration_registry_creation',
-            $2, 60, '0xregistry60', 'canonical', '{\"transaction_index\":0,\"log_index\":0}')")
-        .bind(Uuid::from_u128(0xA190)).bind(manifest).execute(&database.pool).await?;
-    let page = v2_permissions_payload_for_database(&database, &uri).await?;
+    sqlx::query("DELETE FROM manifest_contract_instances WHERE contract_instance_id = $1")
+        .bind(Uuid::from_u128(0xA190)).execute(&database.pool).await?;
+    let page = v2_permissions_payload_for_database(&database,
+        &format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}")).await?;
     assert_eq!(page["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{page}");
     assert_eq!(page["meta"]["completeness"], "partial");
     assert_eq!(page["meta"]["unsupported_reason"], "permissions_partially_listed");
