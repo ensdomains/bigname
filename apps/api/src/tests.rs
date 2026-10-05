@@ -33,7 +33,8 @@ async fn healthz_reports_phase_runner_health_from_the_phase_schema() -> Result<(
 }
 
 #[tokio::test]
-async fn health_and_registry_routes_work_with_documented_api_role_privileges() -> Result<()> {
+async fn health_registry_and_address_history_routes_work_with_documented_api_role_privileges()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_expected_phase_chains(&database, &["1"]).await?;
     seed_phase_runner_heartbeat(&database, "1", "now()").await?;
@@ -51,7 +52,10 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         .execute(&database.lookup_pool)
         .await?;
     // Exercise the published allowlist itself: schema-wide grants hide missing dependencies.
-    let deployment = include_str!("../../../docs/deployment.md");
+    let deployment = include_str!("../../../docs/deployment.md")
+        .split_once("## Surviving services")
+        .context("deployment docs must contain the API service grants")?
+        .1;
     let grants = deployment
         .split_once("GRANT SELECT ON TABLE\n")
         .context("deployment docs must contain the API SELECT grant")?
@@ -60,6 +64,16 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         .context("deployment docs must terminate the API SELECT grant")?
         .0;
     sqlx::query(&format!("GRANT SELECT ON TABLE {grants} TO {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    let guard = deployment
+        .split_once("GRANT EXECUTE ON FUNCTION ")
+        .context("deployment docs must contain the API guard grant")?
+        .1
+        .split_once("TO bigname_api;")
+        .context("deployment docs must terminate the API guard grant")?
+        .0;
+    sqlx::query(&format!("GRANT EXECUTE ON FUNCTION {guard} TO {role}"))
         .execute(&database.lookup_pool)
         .await?;
 
@@ -83,6 +97,8 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         })
         .connect_with(options)
         .await?;
+    let preflight =
+        crate::startup_preflight::ensure_verified_lookup_ddl_available(&restricted_pool).await;
     let state = AppState::new_with_rpc_urls(
         restricted_pool.clone(),
         bigname_lookup::ChainRpcUrls::default(),
@@ -118,6 +134,17 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
         .await?;
     registry_results.push((uri, response.status(), read_json::<Value>(response).await?));
+    let mut history_results = Vec::new();
+    for include in ["", "&include=total_count"] {
+        let uri = format!(
+            "/v1/addresses/{V2_ADDRESS}/history?relation=owner&page_size=200&order=asc{include}"
+        );
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty())?)
+            .await?;
+        history_results.push((uri, response.status(), read_json::<Value>(response).await?));
+    }
     restricted_pool.close().await;
     sqlx::query(&format!("DROP OWNED BY {role}"))
         .execute(&database.lookup_pool)
@@ -127,6 +154,7 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
         .await?;
 
     assert_eq!(status, StatusCode::OK);
+    preflight.context("the documented role must pass API startup preflight")?;
     for (uri, status, payload) in &registry_results {
         assert_eq!(*status, StatusCode::OK, "{uri}: {payload}");
     }
@@ -142,6 +170,29 @@ async fn health_and_registry_routes_work_with_documented_api_role_privileges() -
             .is_some_and(|identity| identity.starts_with("keccak256:")),
         "read-only API role must be able to produce the opaque database identity: {payload}"
     );
+    assert!(
+        history_results
+            .iter()
+            .all(|(_, status, _)| *status == StatusCode::OK),
+        "the documented role must serve both history count modes: {history_results:#?}"
+    );
+    let ordinary = &history_results[0].2;
+    let exact = &history_results[1].2;
+    let rows = ordinary["data"]
+        .as_array()
+        .context("address history rows")?;
+    assert!(
+        !rows.is_empty(),
+        "the restricted role must read real history"
+    );
+    assert_eq!(ordinary["data"], exact["data"]);
+    assert_eq!(ordinary["meta"], exact["meta"]);
+    assert_eq!(ordinary["page"]["total_count"], Value::Null);
+    assert_eq!(exact["page"]["total_count"], json!(rows.len()));
+    for body in [ordinary, exact] {
+        assert_eq!(body["page"]["has_more"], json!(false));
+        assert_eq!(body["page"]["next_cursor"], Value::Null);
+    }
     database.cleanup().await
 }
 

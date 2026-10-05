@@ -226,6 +226,9 @@ extra Ingest fetch is part of this change. The per-chain completeness stamp must
 family marker's content hash, version, sequence and block/hash; absent or mismatched state
 remains stale. When another release change already requires replay, one replay under the final
 combined binary covers both changes. A replay under an earlier hash does not cover this one.
+After applying this schema-migration, grant an existing API role SELECT on all four
+[address-history catalogue](glossary.md#address-history-catalogue) tables using the
+[upgrade grants below](#address-history-catalogue-role-upgrade) before starting the new API.
 
 `20260929160000_remove_served_projections.sql` drops the tables the API and
 Project used before the [owned key families](glossary.md#owned-key-family)
@@ -1171,6 +1174,10 @@ GRANT SELECT ON TABLE
     bigname_phase.project_address_name_fold,
     bigname_phase.project_address_controller_candidate,
     bigname_phase.project_address_name_index,
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker,
     bigname_phase.project_address_record_node_index,
     bigname_phase.project_address_record_id_index,
     bigname_phase.project_name_history,
@@ -1179,6 +1186,22 @@ TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state_read_only(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) TO bigname_api;
+```
+
+<a id="address-history-catalogue-role-upgrade"></a>
+For an existing API role, after applying
+`20261005170000_project_address_history_catalogue.sql`, the schema owner must apply these
+additional SELECT grants before serving the new API binary. On a serving standby, wait for
+the schema-migration and grants applied on the primary to replay there. The API startup check
+refuses to start if any of these relations is absent or unreadable.
+
+```sql
+GRANT SELECT ON TABLE
+    bigname_phase.project_address_history_anchor,
+    bigname_phase.project_history_source,
+    bigname_phase.project_history_source_edge,
+    bigname_phase.project_history_catalogue_marker
+TO bigname_api;
 ```
 
 For an existing deployment, apply
