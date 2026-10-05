@@ -167,7 +167,8 @@ pub(super) async fn compose(
                         instance.as_deref().and_then(|value| value.parse().ok()),
                     ),
                 ]
-            }),
+            })
+            .collect(),
     )
     .await?;
     let states: BTreeMap<Uuid, Maxima> = sqlx::query_scalar::<_, Value>(
@@ -348,7 +349,7 @@ async fn load_supported(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     declarations: &registry_support::Declarations,
-    lookups: impl IntoIterator<Item = (String, Option<Uuid>)>,
+    lookups: Vec<(String, Option<Uuid>)>,
 ) -> Result<SupportCache> {
     let mut supported = SupportCache::new();
     for key in lookups {

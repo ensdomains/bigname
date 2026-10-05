@@ -60,7 +60,8 @@ async fn registry_support_cache_keeps_both_instance_inputs_in_either_order() -> 
             let lookups = order
                 .into_iter()
                 .chain(order)
-                .map(|id| (ETH.to_owned(), id));
+                .map(|id| (ETH.to_owned(), id))
+                .collect();
             let supported = load_supported(&mut conn, &publication, &declarations, lookups).await?;
             assert_eq!(supported.len(), 2);
             assert!(supported.get(&(ETH.into(), None)).unwrap().is_none());
