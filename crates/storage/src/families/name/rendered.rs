@@ -155,7 +155,7 @@ pub fn parse(name: &str) -> normalization::Result<RenderedName> {
 /// Give the composed rows of surfaces without raw bytes the name the serving readers show:
 /// placeholder labels become label text wherever a usable preimage exists. Rows of surfaces
 /// with bytes carry no bracketed label, so a batch of them issues no statement.
-pub(super) async fn enrich(
+pub(crate) async fn enrich(
     conn: &mut PgConnection,
     rows: &mut BTreeMap<String, NameCurrentRow>,
 ) -> Result<()> {

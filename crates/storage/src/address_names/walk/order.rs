@@ -52,14 +52,15 @@ fn push_servable_surfaces<'a>(
             .map(|publication| publication.block_number)
             .collect::<Vec<_>>(),
     );
-    builder.push(
+    builder.push(format!(
         "::bigint[]) AS published(chain_id, block_number)
            ON published.chain_id = surface.chain_id
           AND surface.block_number <= published.block_number
-         WHERE surface.visibility_state = 'active' AND surface.raw_name <> ''
+         WHERE {composed}
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    );
+        composed = crate::rendered_name::composed_surface_sql("surface"),
+    ));
 }
 
 /// Orders every candidate by the page's sort key, then its name id.
@@ -88,10 +89,12 @@ pub(super) async fn walk_order(
         builder.push_bind(children);
         builder.push("::text[]) AS child(logical_name_id)) SELECT logical_name_id, ");
     } else {
-        let mut surfaces = QueryBuilder::<Postgres>::new(
+        // A surface without raw bytes sorts by the name it is served under.
+        let mut surfaces = QueryBuilder::<Postgres>::new(format!(
             "/* storage:families.records.address_name_walk_surfaces */
-             SELECT surface.logical_name_id, surface.raw_name",
-        );
+             SELECT surface.logical_name_id, {name} AS raw_name",
+            name = crate::rendered_name::rendered_name_sql("surface"),
+        ));
         push_servable_surfaces(&mut surfaces, ids, &inputs.publications);
         let rows = surfaces
             .build()
@@ -101,7 +104,7 @@ pub(super) async fn walk_order(
         for row in rows {
             let id: String = row.try_get("logical_name_id")?;
             let raw: String = row.try_get("raw_name")?;
-            let Ok(normalized) = bigname_domain::normalization::normalize_name(&raw) else {
+            let Ok(normalized) = crate::rendered_name::parse(&raw) else {
                 // Composition refuses the name; the full read reports it.
                 return Ok(None);
             };

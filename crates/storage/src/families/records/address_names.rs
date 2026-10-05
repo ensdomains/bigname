@@ -258,7 +258,9 @@ pub(super) async fn compose_base_chunk(
     ids: &[String],
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
     super::seams::note_composed_batch(ids.len());
-    load_composed_base(conn, ids, CoverageShape::Plain).await
+    let mut rows = load_composed_base(conn, ids, CoverageShape::Plain).await?;
+    crate::rendered_name::enrich(conn, &mut rows).await?;
+    Ok(rows)
 }
 
 /// The name columns the page's authority and migration filters and timestamp sorts read:
