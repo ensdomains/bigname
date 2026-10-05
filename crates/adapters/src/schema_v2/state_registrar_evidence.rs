@@ -133,6 +133,28 @@ impl State {
         self.v1_registrar_evidence.insert(key, evidence);
     }
 
+    /// Retirement prevents new readability from binding this lease again. It does not
+    /// discard its lifecycle evidence or apply to a later grant with another resource.
+    pub(in crate::schema_v2) fn registrar_surface_is_retired(
+        &self,
+        namespace: &str,
+        node: &str,
+        resource: Uuid,
+    ) -> bool {
+        let Some(evidence) = self.v1_registrar_evidence.get(&v1_key(namespace, node)) else {
+            return false;
+        };
+        evidence["retirement"]["resource_id"] == json!(resource)
+            && evidence["retirement"]["block_number"]
+                .as_i64()
+                .is_some_and(|retired| {
+                    retired
+                        >= evidence["grant"]["block_number"]
+                            .as_i64()
+                            .unwrap_or(i64::MIN)
+                })
+    }
+
     fn registrar_disclosure_candidate(
         &self,
         namespace: &str,
@@ -164,11 +186,7 @@ impl State {
             || registrar.token_lineage_id.is_none()
             || registrar.authority_key.is_none()
             || registrar.expiry.is_none_or(|expiry| expiry <= timestamp)
-            || evidence["retirement"]["block_number"]
-                .as_i64()
-                .is_some_and(|retired| {
-                    retired >= grant["block_number"].as_i64().unwrap_or(i64::MIN)
-                })
+            || self.registrar_surface_is_retired(namespace, node, registrar.resource_id)
             || registrar.labelhash.as_deref() != Some(labelhash)
             || owner.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000")
             || !registry_owner.eq_ignore_ascii_case(owner)

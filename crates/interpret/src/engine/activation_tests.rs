@@ -86,6 +86,12 @@ mod graveyard_burned;
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
 
+#[path = "tests/intermediary_migration.rs"]
+mod intermediary_migration;
+
+#[path = "tests/sunny_seal.rs"]
+mod sunny_seal;
+
 /// Exercises the checked-in Sepolia manifests through the production adapter and transition
 /// writer. Its BaseRegistrar address is pinned upstream here:
 /// (upstream: .refs/ens_v1/deployments/sepolia/BaseRegistrarImplementation.json:L2 @ ens_v1@91c966f)
