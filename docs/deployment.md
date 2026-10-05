@@ -2765,10 +2765,16 @@ Stop the phase runner, apply the schema-migration, then start the new build. On 
 without the columns the schema-migration resets every owned key family with the
 [family marker](glossary.md#family-marker), undo journal and repair records, exactly as
 [the owner column's schema-migration](#registry-label-owner-filters) does and under the same
-`EXCLUSIVE` lock on the marker table, held to commit; the reset empties the summary, so both
-indexes are built on an empty table and the build blocks nothing for long. The next family run
+`EXCLUSIVE` lock on the marker table, held to commit. It is a blocking maintenance
+schema-migration: in one transaction it waits for the locks it needs behind any transaction
+already holding them, deletes every family row, alters the summary table and builds both
+indexes (on the emptied summary), so how long it runs depends on those transactions and on the
+volume of family data. Run it in a maintenance window. The next family run
 rebuilds the families and writes every selector; fenced routes answer `409 stale` until it
 finishes. The reset adds no second rebuild, because the rotated hash rebuilds the families
 anyway. Do not run the previous build against the migrated schema: its family writer inserts
-summary rows by column name and fails on the new `NOT NULL` column. API requests that read the
+summary rows by column name and fails on the new `NOT NULL` column. The reverse order does
+not fail: the new build's writer run against a schema without the columns drops the two values
+it has no column for and publishes summaries with no selector, so apply the schema-migration
+before the new build ever starts. API requests that read the
 name summary or lock the marker wait for the schema-migration, up to their timeouts.

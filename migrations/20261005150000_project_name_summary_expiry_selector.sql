@@ -8,7 +8,9 @@
 --
 -- Stop the family writer and apply this before starting the release that writes the columns.
 -- The writer inserts summary rows by column name, so an older writer fails on the NOT NULL
--- column, and summaries written before the columns existed carry no selector. A database
+-- column, and summaries written before the columns existed carry no selector. The reverse
+-- mistake is silent: the new writer run against a schema without the columns drops the two
+-- values it has no column for and publishes summaries with no selector. A database
 -- without the columns therefore resets every owned key family and its publication marker,
 -- and the next family run rebuilds them. The release rotates the families' input content
 -- hash, so its first family run rebuilds anyway; applying this first costs no extra rebuild.
@@ -76,6 +78,6 @@ CREATE INDEX IF NOT EXISTS project_name_summary_authority_expiry_idx
 COMMENT ON COLUMN bigname_phase.project_name_summary.expiry_listable IS
     'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
 COMMENT ON COLUMN bigname_phase.project_name_summary.public_authority IS
-    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The expiry listing''s authority filter reads it.';
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
 END
 $migration$;

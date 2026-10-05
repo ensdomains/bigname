@@ -2165,7 +2165,7 @@ COMMENT ON COLUMN project_name_summary.owner IS
 COMMENT ON COLUMN project_name_summary.expiry_listable IS
     'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
 COMMENT ON COLUMN project_name_summary.public_authority IS
-    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The expiry listing''s authority filter reads it.';
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
