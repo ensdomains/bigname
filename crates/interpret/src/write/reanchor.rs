@@ -191,10 +191,10 @@ async fn repair_preimage_witnesses(
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
         ),
         repaired AS (
-            SELECT target.logical_name_id, earliest.event_identity
+            SELECT target.logical_name_id, earliest.event_identity, earliest.block_timestamp
             FROM targets target
             LEFT JOIN LATERAL (
-                SELECT witness.event_identity
+                SELECT witness.event_identity, lineage.block_timestamp
                 FROM normalized_events witness
                 JOIN chain_lineage lineage
                   ON lineage.chain_id = witness.chain_id
@@ -237,6 +237,9 @@ async fn repair_preimage_witnesses(
             END,
             deactivated_at = CASE
                 WHEN repaired.event_identity IS NULL THEN NULL
+                WHEN surface.visibility_state = 'shadow'
+                 AND repaired.block_timestamp > surface.deactivated_at
+                    THEN repaired.block_timestamp
                 ELSE surface.deactivated_at
             END,
             observed_at = now()

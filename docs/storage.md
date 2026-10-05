@@ -184,7 +184,8 @@ The normalization-flag recompute (`phase-runner redo --phase recompute-flags`)
 gives a row without raw bytes no verdict: it stays `active` with no errors and
 only takes the current normalizer version. When it newly rejects a row's
 bytes, `deactivated_at` comes from the row's anchor, or from its preimage
-witness when that event lies in a later block than the anchor. A rainbow-table import never fills
+witness when that event lies after the anchor: in a later block, or at a later
+log index in the anchor's block. A rainbow-table import never fills
 the raw bundle; it writes `label_preimages` only.
 
 ### Binding intervals and authority arms
@@ -2030,7 +2031,9 @@ in the range, takes its earliest surviving canonical `PreimageObserved` event as
 witness. A canonical surface left with none loses its raw bundle and its
 normalization verdict, and stays as the identity alone, when a surviving
 label-hash-path observation still establishes it; without such an observation
-the row is left as it was.
+the row is left as it was. When the
+repair moves a shadow surface's witness to an event in a later block than its
+`deactivated_at`, `deactivated_at` moves to that block's timestamp.
 
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event

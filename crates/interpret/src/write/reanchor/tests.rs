@@ -197,6 +197,33 @@ async fn released_witness_moves_to_the_earliest_surviving_preimage() -> TestResu
     Ok(())
 }
 
+/// A shadow cannot have been deactivated before its earliest surviving raw-label observation.
+#[tokio::test]
+async fn moved_shadow_witness_moves_the_deactivation_time() -> TestResult {
+    let database = database("interpret_reanchor_shadow_witness_moves").await?;
+    let pool = database.pool();
+    insert_surface(pool, 1, Some(3), true).await?;
+    insert_hash_path_observation(pool, 1).await?;
+    insert_preimage(pool, 3).await?;
+    insert_preimage(pool, 5).await?;
+
+    redo_without_reobservation(pool, 3, 4).await?;
+
+    assert_eq!(
+        stored(pool).await?,
+        (
+            Some("child.eth".into()),
+            Some("preimage-5".into()),
+            "shadow".into(),
+            1,
+            "canonical".into(),
+            Some(time::OffsetDateTime::from_unix_timestamp(5)?)
+        )
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn preimage_anchored_surface_reanchors_with_its_witness() -> TestResult {
     let database = database("interpret_reanchor_preimage_anchor").await?;

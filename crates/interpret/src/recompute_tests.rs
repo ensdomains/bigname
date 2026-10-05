@@ -44,8 +44,9 @@ fn missing_surface_position_uses_the_conventional_sentinel() {
         block_timestamp: timestamp,
         provenance: json!({}),
         fallback_raw_labels_hex: None,
-        later_witness_block_timestamp: None,
-        later_witness_log_index: None,
+        witness_block_number: None,
+        witness_block_timestamp: None,
+        witness_log_index: None,
     };
     assert_eq!(surface_log_index(&surface.provenance), -1);
     let desired = surface_normalization(&surface).unwrap();
@@ -185,23 +186,25 @@ async fn recompute_keeps_a_surface_without_raw_bytes_visible_and_unknown() -> Te
     Ok(())
 }
 
-/// Bytes first observed after the identity's anchor deactivate the name at their own event.
+/// Bytes first observed after the identity's anchor, in a later block or later in the anchor's
+/// block, deactivate the name at their own event.
 #[tokio::test]
 async fn recompute_deactivates_at_the_later_preimage_witness() -> TestResult {
-    let database = bigname_test_support::TestDatabase::create(
-        bigname_test_support::TestDatabaseConfig::new("recompute_later_witness"),
-    )
-    .await?;
-    for sql in [
-        include_str!("../../storage/schema/baseline/01_chain.sql"),
-        include_str!("../../storage/schema/baseline/03_identity.sql"),
-        include_str!("../../storage/schema/baseline/04_manifests.sql"),
-        include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
-    ] {
-        sqlx::raw_sql(sql).execute(database.pool()).await?;
-    }
-    sqlx::raw_sql(
-        &"INSERT INTO chain_lineage
+    for (witness_block, witness_hash) in [(12, "evidence"), (10, "anchor")] {
+        let database = bigname_test_support::TestDatabase::create(
+            bigname_test_support::TestDatabaseConfig::new("recompute_later_witness"),
+        )
+        .await?;
+        for sql in [
+            include_str!("../../storage/schema/baseline/01_chain.sql"),
+            include_str!("../../storage/schema/baseline/03_identity.sql"),
+            include_str!("../../storage/schema/baseline/04_manifests.sql"),
+            include_str!("../../storage/schema/baseline/05_normalized_events.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(database.pool()).await?;
+        }
+        sqlx::raw_sql(
+            &"INSERT INTO chain_lineage
              (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
          VALUES ('recompute', 'anchor', 10, to_timestamp(10), 'canonical'),
                 ('recompute', 'evidence', 12, to_timestamp(12), 'canonical');
@@ -218,31 +221,34 @@ async fn recompute_deactivates_at_the_later_preimage_witness() -> TestResult {
              transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state,
              after_state
          ) VALUES ('preimage-12', 'ens', 'ens:0xchild', 'PREIMAGE_KIND', 'ens_v1_registry_l1',
-                   1, 'recompute', 12, 'evidence', '0xtx', 0, 4, '{}',
+                   1, 'recompute', WITNESS_BLOCK, 'WITNESS_HASH', '0xtx', 0, 4, '{}',
                    'raw_log_preimage_observation', 'canonical', '{}')"
-            .replace("PREIMAGE_KIND", PREIMAGE_OBSERVATION_EVENT_KIND),
-    )
-    .execute(database.pool())
-    .await?;
-
-    let mut transaction = database.pool().begin().await?;
-    finalize_recompute_flags(&mut transaction, "recompute", 0, 20).await?;
-    transaction.commit().await?;
-
-    let row: (String, Option<OffsetDateTime>) =
-        sqlx::query_as("SELECT visibility_state, deactivated_at FROM name_surfaces")
-            .fetch_one(database.pool())
-            .await?;
-    assert_eq!(
-        row,
-        (
-            "shadow".to_owned(),
-            Some(bigname_adapters::schema_v2::seam::event_time(
-                OffsetDateTime::from_unix_timestamp(12)?,
-                4
-            ))
+                .replace("PREIMAGE_KIND", PREIMAGE_OBSERVATION_EVENT_KIND)
+                .replace("WITNESS_BLOCK", &witness_block.to_string())
+                .replace("WITNESS_HASH", witness_hash),
         )
-    );
-    database.cleanup().await?;
+        .execute(database.pool())
+        .await?;
+
+        let mut transaction = database.pool().begin().await?;
+        finalize_recompute_flags(&mut transaction, "recompute", 0, 20).await?;
+        transaction.commit().await?;
+
+        let row: (String, Option<OffsetDateTime>) =
+            sqlx::query_as("SELECT visibility_state, deactivated_at FROM name_surfaces")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(
+            row,
+            (
+                "shadow".to_owned(),
+                Some(bigname_adapters::schema_v2::seam::event_time(
+                    OffsetDateTime::from_unix_timestamp(witness_block)?,
+                    4
+                ))
+            )
+        );
+        database.cleanup().await?;
+    }
     Ok(())
 }
