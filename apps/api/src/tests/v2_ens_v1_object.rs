@@ -270,6 +270,44 @@ async fn v2_ens_v1_wrapper_expiry_is_served_backed_and_lapsed() -> Result<()> {
     Ok(())
 }
 
+/// An unwrap burns the NameWrapper token, clearing its owner, while the burnt entry keeps its
+/// fuses and expiry (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f).
+/// The composed name does not read the wrapper lifecycle, so it still serves the old
+/// `wrapper_state` (the known gap `crates/project/tests/families_retention.rs` pins), but the
+/// expiry of the entry that was unwrapped is not served beside it. A rewrap serves it again.
+#[tokio::test]
+async fn v2_ens_v1_wrapper_expiry_is_omitted_once_the_wrapper_is_unwrapped() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_wrapped_reserved_after_cutover(&database).await?;
+    append_alice_name_input(&database, "AuthorityEpochChanged", "ens_v1_wrapper_l1",
+        json!({"source_event":"NameUnwrapped", "authority_kind":"wrapper"})).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let retained: (Option<String>, Option<bool>, bool) = sqlx::query_as(
+        "SELECT wrapper_state, lifecycle_unwrapped, expiry_seconds IS NOT NULL
+         FROM project_wrapper_state WHERE logical_name_id = $1",
+    )
+    .bind(bigname_storage::logical_name_id_for_name("ens", "alice.eth"))
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(retained, (Some("emancipated".to_owned()), Some(true), true));
+    for (route, ens_v1) in alice_ens_v1_objects(&database).await? {
+        let context = format!("{route}: {ens_v1:#}");
+        assert_eq!(ens_v1["wrapper_state"], json!("emancipated"), "{context}");
+        assert!(ens_v1.get("wrapper_expires_at").is_none(), "{context}");
+        assert!(ens_v1.get("wrapper_expires_at_reason").is_none(), "{context}");
+    }
+
+    append_alice_name_input(&database, "TokenControlTransferred", "ens_v1_wrapper_l1",
+        json!({"source_event":"NameWrapped",
+               "owner":"0x00000000000000000000000000000000000000aa"})).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    for (route, ens_v1) in alice_ens_v1_objects(&database).await? {
+        assert_eq!(ens_v1["wrapper_expires_at"], json!("1806384633"), "{route}: {ens_v1:#}");
+    }
+    database.cleanup().await
+}
+
 /// The NameWrapper maximum expiry serves null with `no_expiry`
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L68 @ ens_v1@91c966f), and a zero
 /// expiry null with `not_set`, on a backed and on a lapsed wrapper.

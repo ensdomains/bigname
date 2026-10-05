@@ -109,7 +109,8 @@ type PendingExpiry = (WrapperExpiryKey, bool);
 /// The stored NameWrapper expiry the composed read attached (`wrapper_expiry_seconds`), or the
 /// wrapper whose expiry it left for the response to read (`wrapper_expiry_pending`). One of them
 /// is required beside a wrapper state; without a state only a masked (lapsed or unknown) wrapper
-/// may carry either.
+/// may carry either. An attached JSON null is a wrapper that was unwrapped, which serves no
+/// expiry.
 fn stored_wrapper_expiry(
     declared_summary: &Value,
     backed: bool,
@@ -122,6 +123,8 @@ fn stored_wrapper_expiry(
     }
     match (stored, pending) {
         (Some(_), Some(_)) => Err(inconsistent_wrapper_expiry()),
+        // The wrapper was unwrapped: the name has no current entry to serve the expiry of.
+        (Some(Value::Null), None) => Ok((None, None)),
         (Some(word), None) => wrapper_expiry(word)
             .map(|served| (Some(served), None))
             .ok_or_else(inconsistent_wrapper_expiry),
@@ -162,7 +165,7 @@ pub(crate) async fn fill_wrapper_expiries<'a>(
         let Some((key, _)) = object.pending_wrapper_expiry.take() else {
             continue;
         };
-        if let Some(word) = served.get(&key) {
+        if let Some(word) = served.get(&key).filter(|word| !word.is_null()) {
             let (timestamp, reason) =
                 wrapper_expiry(word).ok_or_else(inconsistent_wrapper_expiry)?;
             object.wrapper_expires_at = Some(timestamp);

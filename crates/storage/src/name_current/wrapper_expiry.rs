@@ -58,10 +58,13 @@ pub fn parse_pending_marker(marker: &Value) -> Option<(WrapperExpiryKey, bool)> 
 }
 
 /// The stored expiry word served for each wanted wrapper, keyed as asked; `true` marks a backed
-/// wrapper. A backed wrapper always serves its expiry. A masked one serves it only when it
-/// lapsed: composition masks a wrapper whose stored state, fuses and expiry are all known only
-/// because an emancipated or locked wrapper is past its expiry (`effective_wrapper`). A wanted
-/// wrapper with no stored row, or a backed one with no expiry, is an error. One read per chain.
+/// wrapper. A backed wrapper serves its expiry. A masked one serves it only when it lapsed:
+/// composition masks a wrapper whose stored state, fuses and expiry are all known only because
+/// an emancipated or locked wrapper is past its expiry (`effective_wrapper`). A wrapper whose
+/// latest lifecycle event is an unwrap serves JSON null, backed or not: the stored row keeps the
+/// state and expiry of the entry that was unwrapped, composition does not read the lifecycle, and
+/// that entry is no longer the name's current one. A wanted wrapper with no stored row, or a
+/// backed one with no expiry, is an error. One read per chain.
 pub async fn load_wrapper_expiries(
     db: impl Into<ReadDb<'_>>,
     wanted: &BTreeMap<WrapperExpiryKey, bool>,
@@ -97,6 +100,10 @@ pub async fn load_wrapper_expiries(
         let row = stored
             .get(key)
             .with_context(|| format!("wrapper {} has no stored row", key.resource_id))?;
+        if row.lifecycle_unwrapped == Some(true) {
+            served.insert(key.clone(), Value::Null);
+            continue;
+        }
         if !backed && !lapsed(row) {
             continue;
         }
@@ -104,6 +111,7 @@ pub async fn load_wrapper_expiries(
             .expiry_seconds
             .as_deref()
             .and_then(|text| serde_json::from_str(text).ok())
+            .filter(|word: &Value| !word.is_null())
             .with_context(|| format!("wrapper {} has no stored expiry", key.resource_id))?;
         served.insert(key.clone(), expiry);
     }
@@ -116,7 +124,6 @@ fn lapsed(wrapper: &WrapperRow) -> bool {
         Some("emancipated" | "locked")
     ) && wrapper.fuses.is_some()
         && wrapper.expiry_seconds.is_some()
-        && wrapper.lifecycle_unwrapped != Some(true)
 }
 
 /// Test seam counting [`load_wrapper_expiries`] reads, one per chain read.

@@ -894,6 +894,11 @@ collection route carry neither header.
   `BaseRegistrar.renew` leaves it unchanged while `ens_v1.expires_at` moves on.
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
+  A name whose latest NameWrapper lifecycle event is an unwrap omits it, even
+  where `wrapper_state` is still served: the burnt entry keeps its expiry, but
+  it is no longer the name's current one.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
   Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
   `MAX_EXPIRY` therefore keeps the lifecycle value active at representable
   served block timestamps. Its wrapper expiry is publicly `null` with
