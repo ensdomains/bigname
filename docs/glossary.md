@@ -688,7 +688,8 @@ the [expiry-effective fuse word](#expiry-effective-namewrapper-fuse-word), and
 the entry expiry; for an ENSv2 registration it is `locked_roles`, the
 token-scoped registry roles whose assignment can no longer change because no
 current row on the registration or its registry root holds the matching admin
-role. It is absent for registrations without a resource-level constraint model
+role (for `transfer`, no current row on the registration itself holds
+`can_transfer_admin`; the root does not count). It is absent for registrations without a resource-level constraint model
 (ENSv1 registrar- and registry-held names, Basenames), for an expired
 emancipated or locked NameWrapper position, and once the wrapped token is burnt
 or unwrapped. Field

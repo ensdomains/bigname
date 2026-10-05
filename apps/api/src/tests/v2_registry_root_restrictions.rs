@@ -22,6 +22,7 @@ const TOKEN_RESOURCE: u64 = 7_001;
 const ROLE_RENEW: usize = 16;
 const ROLE_ADMIN_UNREGISTER: usize = 140;
 const ROLE_ADMIN_SET_RESOLVER: usize = 152;
+const ROLE_CAN_TRANSFER_ADMIN: usize = 156;
 
 fn roles(resource: U256, account: &str, bits: &[usize]) -> Result<alloy_primitives::LogData> {
     Ok(EACRolesChanged {
@@ -86,7 +87,11 @@ async fn registration_locked_roles_count_the_real_registry_root_admins() -> Resu
                 roles(
                     U256::ZERO,
                     REGISTRY_OWNER,
-                    &[ROLE_ADMIN_UNREGISTER, ROLE_ADMIN_SET_RESOLVER],
+                    &[
+                        ROLE_ADMIN_UNREGISTER,
+                        ROLE_ADMIN_SET_RESOLVER,
+                        ROLE_CAN_TRANSFER_ADMIN,
+                    ],
                 )?,
             ),
         ],
@@ -123,6 +128,8 @@ async fn registration_locked_roles_count_the_real_registry_root_admins() -> Resu
     .await?;
     assert_eq!(root_rows, 1);
 
+    // The root's admin_unregister and admin_set_resolver unlock their roles; its
+    // can_transfer_admin does not, because a transfer checks only the token's own roles.
     let (status, permissions) = get(
         &database,
         &format!("/v1/permissions?registration_id={registration}"),
