@@ -167,8 +167,9 @@ async fn apply_migrated_at(state: &AppState, results: &mut [Option<LookupResult>
         })
         .filter(|record| record.authority == Some(Authority::EnsV2))
         .map(|record| {
+            // The served name can spell a label as its bracketed hash.
             let logical_name_id =
-                bigname_storage::logical_name_id_for_name(&record.namespace, &record.name);
+                crate::v2::support::route_logical_name_id(&record.namespace, &record.name);
             (logical_name_id, record)
         })
         .collect::<Vec<_>>();

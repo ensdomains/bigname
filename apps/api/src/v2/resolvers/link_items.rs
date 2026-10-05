@@ -30,7 +30,8 @@ pub(super) fn compact_resolver_link_item(item: &Value) -> V2Result<Value> {
         compact.insert("namespace".to_owned(), json!(namespace));
     }
     if let Some(name) = object.get("name").and_then(Value::as_str) {
-        let normalized = bigname_domain::normalization::normalize_name(name)
+        // The name of a surface without raw bytes spells unknown labels as bracketed hashes.
+        let normalized = bigname_storage::rendered_name::parse(name)
             .map_err(|_| V2Error::internal_error("failed to normalize resolver link name"))?;
         compact.insert("name".to_owned(), json!(normalized.normalized_name));
         compact.insert(

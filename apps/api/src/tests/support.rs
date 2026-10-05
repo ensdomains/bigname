@@ -3659,6 +3659,94 @@ async fn seed_family_name_at(
     Ok((logical_name_id, resource_id))
 }
 
+/// The node of a label-hash path, leaf first.
+fn label_path_node(labelhashes: &[String]) -> Result<String> {
+    let mut node = alloy_primitives::B256::ZERO;
+    for labelhash in labelhashes.iter().rev() {
+        let labelhash: alloy_primitives::B256 = labelhash.parse()?;
+        node = alloy_primitives::keccak256([node.as_slice(), labelhash.as_slice()].concat());
+    }
+    Ok(format!("{node:#x}"))
+}
+
+/// An active name surface that stores no raw bytes: only its node and its label-hash path (leaf
+/// first), first observed at `block`. Returns the name id.
+async fn insert_textless_surface(
+    pool: &PgPool,
+    namespace: &str,
+    chain_id: &str,
+    labelhashes: &[String],
+    block: i64,
+) -> Result<String> {
+    let node = label_path_node(labelhashes)?;
+    let logical_name_id = format!("{namespace}:{node}");
+    sqlx::query(
+        "INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, namehash,
+             labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
+             block_number, provenance, canonicality_state)
+         VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, 'canonical')",
+    )
+    .bind(&logical_name_id)
+    .bind(namespace)
+    .bind(node)
+    .bind(labelhashes)
+    .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+    .bind(chain_id)
+    .bind(format!("0xhistory{block}"))
+    .bind(block)
+    .bind(json!({"seed": "family_differential"}))
+    .execute(pool)
+    .await?;
+    Ok(logical_name_id)
+}
+
+/// `seed_family_name_at` for a name whose surface stores no raw bytes and whose resource is the
+/// node's registry record (no token lineage): the surface, the resource and an open binding
+/// under `arm`, all at `block` of the family chain. Returns the name id and the resource.
+async fn seed_textless_family_name(
+    database: &TestDatabase,
+    labelhashes: &[String],
+    seed: u128,
+    arm: &str,
+    block: i64,
+) -> Result<(String, Uuid)> {
+    let logical_name_id =
+        insert_textless_surface(&database.pool, "ens", FAMILY_CHAIN, labelhashes, block).await?;
+    let resource_id = Uuid::from_u128(seed);
+    upsert_test_resources(
+        &database.pool,
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: FAMILY_CHAIN.to_owned(),
+            block_hash: format!("0xhistory{block}"),
+            block_number: block,
+            provenance: json!({"authority_kind": "registry_only"}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    // `upsert_test_surface_bindings` derives the name id from name text, which this name lacks.
+    sqlx::query(
+        "INSERT INTO bigname_phase.surface_bindings (surface_binding_id, logical_name_id,
+             resource_id, binding_kind, authority_arm, active_from, chain_id, block_hash,
+             block_number, provenance, canonicality_state)
+         VALUES ($1, $2, $3, 'declared_registry_path', $4, $5, $6, $7, $8, $9, 'canonical')",
+    )
+    .bind(Uuid::from_u128(seed + 2))
+    .bind(&logical_name_id)
+    .bind(resource_id)
+    .bind(arm)
+    .bind(OffsetDateTime::from_unix_timestamp(1_700_000_000 + block)?)
+    .bind(FAMILY_CHAIN)
+    .bind(format!("0xhistory{block}"))
+    .bind(block)
+    .bind(json!({"seed": "family_differential", "transaction_index": 0, "log_index": 0}))
+    .execute(&database.pool)
+    .await?;
+    Ok((logical_name_id, resource_id))
+}
+
 /// One event of the differential at `block` and `log` in transaction 0.
 #[allow(clippy::too_many_arguments)]
 fn family_event(
