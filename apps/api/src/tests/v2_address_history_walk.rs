@@ -577,47 +577,61 @@ async fn address_history_walk_handoff_winner_precedes_batches_and_public_cursors
         if order == "desc" {
             wanted.reverse();
         }
-        let mut actual = Vec::new();
-        let mut cursor = None;
-        loop {
-            let mut uri = format!(
-                "/v1/addresses/{ADDRESS}/history?relation=owner&kind=ResolverChanged&page_size=1&order={order}"
-            );
-            if let Some(cursor) = &cursor {
-                uri.push_str(&format!("&cursor={cursor}&include=total_count"));
-            }
-            let (body, stats) = measured(&database, &uri, 1).await?;
-            assert_eq!(
-                body["page"]["total_count"],
-                if cursor.is_some() {
-                    json!(21)
-                } else {
-                    Value::Null
-                },
-                "{body}"
-            );
-            if cursor.is_some() {
-                // The explicit count enumerates the later duplicate groups; the default
-                // first page can stop before reaching those groups.
-                assert!(
-                    stats
-                        .counters
-                        .get("handoff_batches")
-                        .copied()
-                        .unwrap_or_default()
-                        > 1
+        for count_continuations in [false, true] {
+            let mut actual = Vec::new();
+            let mut cursor = None;
+            let mut handoff_batches = 0;
+            loop {
+                let mut uri = format!(
+                    "/v1/addresses/{ADDRESS}/history?relation=owner&kind=ResolverChanged&page_size=1&order={order}"
                 );
+                if let Some(cursor) = &cursor {
+                    uri.push_str(&format!("&cursor={cursor}"));
+                    if count_continuations {
+                        uri.push_str("&include=total_count");
+                    }
+                }
+                let counted = count_continuations && cursor.is_some();
+                let (body, stats) = measured(&database, &uri, 1).await?;
+                assert_eq!(
+                    body["page"]["total_count"],
+                    if counted { json!(21) } else { Value::Null },
+                    "{body}"
+                );
+                let batches = stats
+                    .counters
+                    .get("handoff_batches")
+                    .copied()
+                    .unwrap_or_default();
+                handoff_batches += batches;
+                if counted {
+                    // The explicit count traverses every duplicate group on every page.
+                    assert!(batches > 1);
+                } else {
+                    for key in [
+                        "catalogue_direct_count",
+                        "catalogue_proof_batches",
+                        "address_history_exact_cursor_micros",
+                        "address_history_count_walk_micros",
+                    ] {
+                        assert!(!stats.counters.contains_key(key), "{key}: {stats:?}");
+                    }
+                }
+                actual.extend(hk_ids(&body));
+                cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
+                if cursor.is_none() {
+                    break;
+                }
             }
-            actual.extend(hk_ids(&body));
-            cursor = body["page"]["next_cursor"].as_str().map(str::to_owned);
-            if cursor.is_none() {
-                break;
-            }
+            // Even with counting disabled on every page, the walk reaches and validates
+            // both later handoff groups across multiple fixed-size peer batches.
+            assert!(handoff_batches > 1, "{order}/{count_continuations}");
+            assert_eq!(
+                actual,
+                wanted.iter().map(|(_, id)| hkw_id(id)).collect::<Vec<_>>(),
+                "{order}/{count_continuations}"
+            );
         }
-        assert_eq!(
-            actual,
-            wanted.iter().map(|(_, id)| hkw_id(id)).collect::<Vec<_>>()
-        );
     }
     database.cleanup().await
 }
