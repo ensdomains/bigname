@@ -158,7 +158,7 @@ impl Fixture {
         target: i64,
     ) -> bigname_project::Result<FamilyOutcome> {
         let token = families::input_token(&self.pool, chain).await?;
-        families::apply(
+        let outcome = families::apply(
             &self.pool,
             chain,
             &marker(target),
@@ -166,7 +166,18 @@ impl Fixture {
             &token,
             &FamilyOptions::new(CONTENT_HASH),
         )
-        .await
+        .await?;
+        self.check_expiry_selector(&outcome, target).await;
+        Ok(outcome)
+    }
+
+    /// Every publication a family test makes must leave an exact expiry selector.
+    async fn check_expiry_selector(&self, outcome: &FamilyOutcome, target: i64) {
+        if outcome.marker.is_some() {
+            self.assert_expiry_selector()
+                .await
+                .unwrap_or_else(|error| panic!("expiry selector at {target}: {error:#}"));
+        }
     }
 
     pub async fn cleanup(self) -> Result<()> {
@@ -190,7 +201,180 @@ impl Fixture {
     ) -> bigname_project::Result<FamilyOutcome> {
         // The Project phase reads the token right after its batch; the tests read it the same way.
         let token = families::input_token(&self.pool, CHAIN).await?;
-        families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await
+        let outcome =
+            families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await?;
+        self.check_expiry_selector(&outcome, target).await;
+        Ok(outcome)
+    }
+
+    /// Check the stored expiry selector (`project_name_summary.expiry_listable`, `expires_at`
+    /// and `public_authority`) against every composed name row of the published chains, two
+    /// ways. First against the rows themselves: a row is listable when its coverage is not
+    /// unsupported and its registration carries a finite decimal expiry, at exactly that expiry
+    /// and under the public authority its provenance maps to. Then against what the expiry
+    /// listing serves for each namespace, unfiltered and for each authority value. Returns the
+    /// listable names as (name, expiry, authority), in name order; none when no chain is
+    /// published for this build.
+    pub async fn assert_expiry_selector(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        use bigname_storage::{
+            NameCurrentExpiringFilter, NameCurrentListOrder, UnixSeconds,
+            families::name::{
+                is_publication_unavailable, load_family_expiring_page,
+                load_family_names_by_logical_name_ids,
+            },
+            name_current_public_authority,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // A session of its own: tests that measure a statement's plan depend on what the
+        // fixture's one pooled session has already run.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(self.pool.connect_options().as_ref().clone())
+            .await?;
+        let pool = &pool;
+        let surfaces: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT surface.logical_name_id, surface.namespace, surface.chain_id
+             FROM name_surfaces surface
+             JOIN project_family_marker marker ON marker.chain_id = surface.chain_id
+             WHERE marker.current_block_number IS NOT NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        let names: Vec<String> = surfaces.iter().map(|(name, ..)| name.clone()).collect();
+        let composed = match load_family_names_by_logical_name_ids(pool, &names).await {
+            Ok(composed) => composed,
+            Err(error) if is_publication_unavailable(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut expected: BTreeMap<String, (UnixSeconds, Option<String>)> = BTreeMap::new();
+        for (name, row) in &composed {
+            let expiry = match &row.declared_summary["registration"]["expiry"] {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }
+            .filter(|text| {
+                let digits = text.strip_prefix('-').unwrap_or(text);
+                let (whole, fraction) = digits.split_once('.').unwrap_or((digits, "0"));
+                [whole, fraction]
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            });
+            let Some(expiry) = expiry else { continue };
+            if row.coverage["status"] == "unsupported" {
+                continue;
+            }
+            let expiry: UnixSeconds = expiry
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{name}: expiry {expiry} is not exact seconds"))?;
+            expected.insert(
+                name.clone(),
+                (
+                    expiry,
+                    name_current_public_authority(&row.provenance).map(str::to_owned),
+                ),
+            );
+        }
+        let stored: Vec<(String, bool, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT summary.logical_name_id, summary.expiry_listable, summary.expires_at::text,
+                    summary.public_authority
+             FROM project_name_summary summary
+             JOIN project_family_marker marker ON marker.chain_id = summary.chain_id
+             WHERE marker.current_block_number IS NOT NULL
+             ORDER BY summary.logical_name_id",
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut listable = Vec::new();
+        for (name, flag, expiry, authority) in stored {
+            let want = expected.get(&name);
+            anyhow::ensure!(
+                flag == want.is_some(),
+                "{name}: expiry_listable is {flag}, its composed row says {want:?}"
+            );
+            if let Some(row) = composed.get(&name) {
+                anyhow::ensure!(
+                    authority.as_deref() == name_current_public_authority(&row.provenance),
+                    "{name}: public_authority is {authority:?}, its row serves {}",
+                    row.provenance["authority_selection"]
+                );
+            } else {
+                anyhow::ensure!(
+                    authority.is_none(),
+                    "{name}: authority with no composed row"
+                );
+            }
+            let Some((want_expiry, _)) = want else {
+                continue;
+            };
+            let expiry =
+                expiry.ok_or_else(|| anyhow::anyhow!("{name}: listable without expiry"))?;
+            anyhow::ensure!(
+                expiry.parse::<UnixSeconds>().ok() == Some(*want_expiry),
+                "{name}: expires_at is {expiry}, its row serves {want_expiry}"
+            );
+            listable.push((name, expiry, authority));
+        }
+        anyhow::ensure!(
+            listable.len() == expected.len(),
+            "listable rows without a summary: {expected:?} against {listable:?}"
+        );
+
+        let mut namespaces: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (_, namespace, chain) in surfaces {
+            namespaces.entry(namespace).or_default().insert(chain);
+        }
+        let zero = UnixSeconds::from_seconds(0).expect("zero seconds");
+        for (namespace, chains) in namespaces {
+            let chains: Vec<String> = chains.into_iter().collect();
+            let prefix = format!("{namespace}:");
+            for authority in [None, Some("ens_v0"), Some("ens_v1"), Some("ens_v2")] {
+                let mut listed = BTreeMap::new();
+                for (after, before) in [(Some(zero), None), (None, Some(zero))] {
+                    let filter = NameCurrentExpiringFilter {
+                        namespace: namespace.clone(),
+                        expires_after: after,
+                        expires_before: before,
+                        authorities: authority.map(|value| vec![value.to_owned()]),
+                        parent: None,
+                    };
+                    let mut cursor = None;
+                    loop {
+                        let page = load_family_expiring_page(
+                            pool,
+                            &filter,
+                            NameCurrentListOrder::Asc,
+                            cursor.as_ref(),
+                            200,
+                            &chains,
+                        )
+                        .await?;
+                        for row in page.rows {
+                            listed.insert(row.row.logical_name_id.clone(), row.expiry_date);
+                        }
+                        cursor = page.next_cursor;
+                        if cursor.is_none() {
+                            break;
+                        }
+                    }
+                }
+                let selected: BTreeMap<String, Option<UnixSeconds>> = listable
+                    .iter()
+                    .filter(|(name, _, stored)| {
+                        name.starts_with(&prefix)
+                            && authority.is_none_or(|value| stored.as_deref() == Some(value))
+                    })
+                    .map(|(name, expiry, _)| (name.clone(), expiry.parse().ok()))
+                    .collect();
+                anyhow::ensure!(
+                    listed == selected,
+                    "{namespace} authority {authority:?}: the listing serves {listed:?}, the \
+                     selector holds {selected:?}"
+                );
+            }
+        }
+        Ok(listable)
     }
 
     /// The family marker: block, hash and sequence.
@@ -598,6 +782,7 @@ impl Fixture {
         self.apply(last, FamilyMode::Normal).await?;
         let undone = families::undo_to(&self.pool, CHAIN, last - 1).await?;
         anyhow::ensure!(undone == 1, "undid {undone} blocks, not block {last}");
+        self.assert_expiry_selector().await?;
         let after = self.exact().await?;
         for ((table, was), (_, now)) in before.iter().zip(&after) {
             anyhow::ensure!(

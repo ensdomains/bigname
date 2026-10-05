@@ -2745,3 +2745,30 @@ relation (an interrupted concurrent build leaves an invalid index: confirm in
 it), rebuild it with the statement above and apply the schema-migrations again. A runner started
 before the index exists behaves the same, only slower at start. API standbys receive the index
 through replication.
+
+### Expiry selector on the name summary
+
+`20261005120000_project_name_summary_expiry_selector.sql` adds two columns to the
+[name summary](glossary.md#name-summary), `project_name_summary.expiry_listable` and
+`project_name_summary.public_authority`, and two partial indexes over them,
+`project_name_summary_expiry_idx` on `(namespace, expires_at, logical_name_id, chain_id)` and
+`project_name_summary_authority_expiry_idx` on
+`(namespace, public_authority, expires_at, logical_name_id, chain_id)`, both
+`WHERE expiry_listable AND expires_at IS NOT NULL`. The family step fills the columns from the
+same composition as the rest of the summary. No route reads them yet:
+[`GET /v1/names`](api-v1-routes.md#get-v1names) keeps its current behaviour in this build.
+
+The composition that fills the columns lives in hashed storage sources
+(`crates/storage/src/families`), so this build rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) and needs a full re-derivation.
+Stop the phase runner, apply the schema-migration, then start the new build. On a database
+without the columns the schema-migration resets every owned key family with the
+[family marker](glossary.md#family-marker), undo journal and repair records, exactly as
+[the owner column's schema-migration](#registry-label-owner-filters) does and under the same
+`EXCLUSIVE` lock on the marker table, held to commit; the reset empties the summary, so both
+indexes are built on an empty table and the build blocks nothing for long. The next family run
+rebuilds the families and writes every selector; fenced routes answer `409 stale` until it
+finishes. The reset adds no second rebuild, because the rotated hash rebuilds the families
+anyway. Do not run the previous build against the migrated schema: its family writer inserts
+summary rows by column name and fails on the new `NOT NULL` column. API requests that read the
+name summary or lock the marker wait for the schema-migration, up to their timeouts.

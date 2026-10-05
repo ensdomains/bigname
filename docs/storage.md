@@ -261,6 +261,10 @@ Family indexes serve these concrete readers:
   `project_lifecycle_event_inexact_expiry_idx` and `project_wrapper_state_expiry_idx`;
   resolver-bound names use `project_named_resource_pointer_resolver_idx` and
   `project_registry_pointer_resolver_idx`.
+- The name summary's expiry selector is indexed by `project_name_summary_expiry_idx`
+  (a namespace's listable names by expiry) and `project_name_summary_authority_expiry_idx`
+  (the same within one public authority). The family step maintains both; the expiring-names
+  listing does not read them yet.
 - Name-summary recomposition uses `project_name_summary_recompose_idx`,
   `project_binding_candidate_predecessor_idx`, `project_binding_candidate_lease_idx`,
   `project_lifecycle_association_target_idx` and `project_registry_owner_event_resource_idx`;

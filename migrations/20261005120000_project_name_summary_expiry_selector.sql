@@ -20,7 +20,7 @@
 -- columns. The reset empties project_name_summary, so the indexes are built on an empty
 -- table. The reset list is every journalled and derived family table of
 -- crates/project/src/families/tables.rs plus the marker, undo and repair tables; the test
--- crates/project/tests/families_summary_selector_migration.rs checks that it stays so.
+-- crates/project/tests/families_summary_owner_migration.rs checks that it stays so.
 DO $migration$
 DECLARE
     family text;
