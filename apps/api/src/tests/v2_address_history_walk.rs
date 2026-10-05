@@ -153,6 +153,11 @@ async fn address_history_walk_bounds_live_rows_and_preserves_complete_order() ->
                     }
                     let (body, stats) = measured(&database, &uri, size).await?;
                     assert_eq!(
+                        stats.counters.get("names_composed").copied().unwrap_or(0),
+                        0,
+                        "historical name/resource membership already proves these candidates: {stats:?}"
+                    );
+                    assert_eq!(
                         body["page"]["total_count"],
                         json!(expected_ids.len()),
                         "{body}"
@@ -191,6 +196,132 @@ async fn address_history_walk_bounds_live_rows_and_preserves_complete_order() ->
         database.cleanup().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn address_history_walk_historical_name_keeps_a_different_current_resource() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let current = seed_role_holder(&database, json!(["set_resolver"])).await?;
+    let logical = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
+    let node = bigname_lookup::ens_namehash_hex("beta.eth")?;
+    let (block, hash) = address_fixture_head(&database).await?;
+    admit_fixture_resolver(
+        &database.pool,
+        "ens_v2_registry_l1",
+        ROLE_REGISTRY,
+        RESOLVER,
+    )
+    .await?;
+    let (manifest, _) = declare_family_fixture_contract(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v2_resolver_l1",
+        "public_resolver_v2",
+        RESOLVER,
+    )
+    .await?;
+    let pointer = address_fixture_event(
+        "walk-current-resource-pointer",
+        Some(&logical),
+        Some(current),
+        "ResolverChanged",
+        "ens_v2_registry_l1",
+        block,
+        &hash,
+        200_000,
+        json!({"node":node,"resolver":RESOLVER}),
+    );
+    let renewal = address_fixture_event(
+        "walk-current-resource-renewal",
+        None,
+        Some(current),
+        "RegistrationRenewed",
+        "ens_v2_registry_l1",
+        block,
+        &hash,
+        200_001,
+        json!({"expiry":1_900_000_000}),
+    );
+    let mut record = address_fixture_event(
+        "walk-current-resource-record",
+        None,
+        None,
+        "RecordChanged",
+        "ens_v2_resolver_l1",
+        block,
+        &hash,
+        200_002,
+        json!({"node":node,"resolver":RESOLVER,"record_key":"text:description",
+            "record_family":"text","selector_key":"description","value":"current"}),
+    );
+    record.source_manifest_id = Some(manifest);
+    record.manifest_version = 1;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer, renewal, record])
+        .await?;
+    rebuild_address_fixture(&database).await?;
+    let uri = format!(
+        "/v1/addresses/{ROLE_HOLDER}/history?scope=registration&kind=RegistrationRenewed,RecordChanged&page_size=200&include=total_count"
+    );
+    let (before, stats) = measured(&database, &uri, 200).await?;
+    let expected = vec![
+        hkw_id("walk-current-resource-record"),
+        hkw_id("walk-current-resource-renewal"),
+    ];
+    assert_eq!(hk_ids(&before), expected, "{before}");
+    assert_eq!(before["page"]["total_count"], json!(2));
+    assert_eq!(stats.counters.get("names_composed"), Some(&1), "{stats:?}");
+
+    // The same name was held through another resource. Its logical-name proof cannot
+    // suppress the current resource or the resolver records attributed to that resource.
+    let historical = Uuid::from_u128(0xb235);
+    sqlx::query("INSERT INTO resources(resource_id,chain_id,block_number,block_hash,canonicality_state) VALUES($1,'ethereum-mainnet',$2,$3,'canonical')")
+        .bind(historical).bind(block).bind(&hash).execute(&database.pool).await?;
+    let mut grant = address_fixture_event(
+        "walk-prior-resource-grant",
+        Some(&logical),
+        Some(historical),
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        block,
+        &hash,
+        199_999,
+        json!({"registrant":ROLE_HOLDER,"expiry":1_900_000_000}),
+    );
+    grant.derivation_kind = "ens_v2_registry_resource_surface".into();
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    rebuild_address_fixture(&database).await?;
+    let (after, stats) = measured(&database, &uri, 200).await?;
+    assert_eq!(hk_ids(&after), expected, "{after}");
+    assert_eq!(after["page"]["total_count"], before["page"]["total_count"]);
+    assert_eq!(stats.counters.get("names_composed"), Some(&1), "{stats:?}");
+
+    // Event filters must not narrow the historical membership evidence. The surface proof
+    // applies even though this request excludes the grant that establishes it.
+    let (surface, stats) = measured(
+        &database,
+        &format!(
+            "/v1/addresses/{ROLE_HOLDER}/history?scope=name&kind=ResolverChanged&page_size=200"
+        ),
+        200,
+    )
+    .await?;
+    assert!(
+        hk_ids(&surface).contains(&hkw_id("walk-current-resource-pointer")),
+        "{surface}"
+    );
+    assert_eq!(
+        stats.counters.get("names_composed").copied().unwrap_or(0),
+        0,
+        "{stats:?}"
+    );
+    let (owner_only, _) = measured(&database, &format!("{uri}&relation=owner"), 200).await?;
+    assert_eq!(
+        owner_only["data"],
+        json!([]),
+        "the historical resource must not qualify the current one: {owner_only}"
+    );
+    database.cleanup().await
 }
 
 #[tokio::test]

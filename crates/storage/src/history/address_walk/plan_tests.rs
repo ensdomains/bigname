@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
+use sqlx::{Connection, PgConnection, Postgres, QueryBuilder, Row};
 
 use super::{AddressRead, source::push_candidate_query};
 use crate::history::{
@@ -37,6 +37,78 @@ async fn address_history_representative_candidate_plans() -> Result<()> {
     candidate_plans(target, unrelated).await
 }
 
+#[tokio::test]
+#[ignore = "manual nonexecuting plan of the retained 40,821-name profile"]
+async fn address_history_retained_profile_plan() -> Result<()> {
+    let url = std::env::var("BIGNAME_HISTORY_RETAINED_DATABASE_URL")?;
+    let directory = PathBuf::from(std::env::var("BIGNAME_ADDRESS_HISTORY_PLAN_DIR")?);
+    std::fs::create_dir_all(&directory)?;
+    let mut connection = PgConnection::connect(&url).await?;
+    sqlx::raw_sql("SET search_path=bigname_phase,public; SET jit=off; BEGIN READ ONLY")
+        .execute(&mut connection)
+        .await?;
+    let published = BTreeMap::from([("ethereum-mainnet".to_owned(), 40_821)]);
+    let relations = [crate::AddressNameRelation::TokenHolder];
+    let read = AddressRead {
+        address: "0x000000000000000000000000000000000000a235",
+        namespace: Some("ens"),
+        relations: Some(&relations),
+        scope: HistoryScope::Both,
+        canonical_only: true,
+        published: Some(&published),
+    };
+    let filter = EventHistoryReadFilter {
+        order: HistoryOrder::Asc,
+        // The public default's product event kinds, matching history::product_history_event_kinds.
+        event_kinds: [
+            "AuthorityEpochChanged",
+            "AuthorityTransferred",
+            "EACRolesChanged",
+            "ExpiryChanged",
+            "LabelRegistered",
+            "MigrationApplied",
+            "PermissionChanged",
+            "PermissionScopeChanged",
+            "RecordChanged",
+            "RecordVersionChanged",
+            "RegistrationGranted",
+            "RegistrationReleased",
+            "RegistrationRenewed",
+            "ResolverChanged",
+            "ReverseChanged",
+            "RolesChanged",
+            "RootPermissionChanged",
+            "SubregistryChanged",
+            "TokenControlTransferred",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        block_window: Some(HistoryBlockWindow {
+            ranges: vec![ChainBlockRange {
+                chain_id: "ethereum-mainnet".to_owned(),
+                from_block: None,
+                to_block: Some(40_821),
+            }],
+        }),
+        ..Default::default()
+    };
+    let mut query = QueryBuilder::<Postgres>::new(
+        "EXPLAIN (FORMAT JSON) DECLARE address_history_candidates NO SCROLL CURSOR FOR ",
+    );
+    push_candidate_query(&mut query, &read, &filter, None);
+    std::fs::write(directory.join("candidate.sql"), query.sql())?;
+    let plan: Value = query
+        .build_query_scalar()
+        .fetch_one(&mut connection)
+        .await?;
+    std::fs::write(
+        directory.join("candidate.json"),
+        serde_json::to_vec_pretty(&plan)?,
+    )?;
+    sqlx::raw_sql("ROLLBACK").execute(&mut connection).await?;
+    Ok(())
+}
+
 async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
     let database =
         TestDatabase::create(TestDatabaseConfig::new("address_walk_plans").pool_max_connections(1))
@@ -47,10 +119,10 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
         let published = BTreeMap::from([("ethereum-mainnet".to_owned(), (target + unrelated + 1) as i64)]);
         let mut failures = Vec::new();
         for (label, address, record_key, order, continuation, expected) in [
-            ("heavy", ADDRESS, None, HistoryOrder::Desc, false, target*16),
-            ("heavy-asc", ADDRESS, None, HistoryOrder::Asc, false, target*16),
-            ("continuation", ADDRESS, None, HistoryOrder::Desc, true, (target/2-1)*12+target*4),
-            ("record", ADDRESS, Some("text:description"), HistoryOrder::Desc, false, target*6),
+            ("heavy", ADDRESS, None, HistoryOrder::Desc, false, target*7),
+            ("heavy-asc", ADDRESS, None, HistoryOrder::Asc, false, target*7),
+            ("continuation", ADDRESS, None, HistoryOrder::Desc, true, (target/2-1)*5+target*2),
+            ("record", ADDRESS, Some("text:description"), HistoryOrder::Desc, false, target*3),
             ("sparse", ADDRESS, Some("missing-key"), HistoryOrder::Desc, false, 0),
             ("empty", EMPTY_ADDRESS, None, HistoryOrder::Desc, false, 0),
             ("root", ROOT_ADDRESS, None, HistoryOrder::Desc, false, 1),

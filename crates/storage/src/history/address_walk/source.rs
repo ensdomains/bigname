@@ -56,11 +56,15 @@ fn push_address_ctes<'a>(builder: &mut QueryBuilder<'a, Postgres>, read: &'a Add
         false,
         read.published,
     );
-    builder.push(")");
+    // Name and resource membership are independent proofs: a historically held name can
+    // now select another resource whose history still needs current composition.
+    // Keep the exclusions uncorrelated so PostgreSQL can hash each qualified historical
+    // set once rather than repeatedly scan it under a low anchor-cardinality estimate.
+    builder.push("), address_current_surface_names AS (SELECT current_name.* FROM address_current_names current_name WHERE current_name.logical_name_id NOT IN (SELECT historical.logical_name_id FROM address_historical historical WHERE historical.logical_name_id IS NOT NULL))");
     if read.scope == HistoryScope::Surface {
         return;
     }
-    builder.push(", address_resource_witnesses AS (SELECT DISTINCT 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, resource_id FROM address_historical WHERE resource_id IS NOT NULL UNION SELECT 2, current_name.chain_id, current_name.logical_name_id, binding.resource_id FROM address_current_names current_name JOIN bigname_phase.surface_bindings binding ON binding.logical_name_id = current_name.logical_name_id AND binding.chain_id = current_name.chain_id WHERE TRUE");
+    builder.push(", address_resource_witnesses AS (SELECT DISTINCT 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, resource_id FROM address_historical WHERE resource_id IS NOT NULL UNION SELECT 2, current_name.chain_id, current_name.logical_name_id, binding.resource_id FROM address_current_names current_name JOIN bigname_phase.surface_bindings binding ON binding.logical_name_id = current_name.logical_name_id AND binding.chain_id = current_name.chain_id WHERE binding.resource_id NOT IN (SELECT historical.resource_id FROM address_historical historical WHERE historical.resource_id IS NOT NULL)");
     if read.canonical_only {
         builder.push(format!(" AND binding.canonicality_state IN {READABLE}"));
     }
@@ -149,7 +153,7 @@ fn push_event_arms<'a>(
             read,
             filter,
             keyset,
-            "address_current_names current_name",
+            "address_current_surface_names current_name",
             "1, current_name.chain_id, current_name.logical_name_id, NULL::uuid",
             "ne.logical_name_id = current_name.logical_name_id",
         );
@@ -279,7 +283,7 @@ pub(super) fn push_handoff_query<'a>(
     builder.push(" AND ne.event_kind = 'ResolverChanged' AND ne.chain_id = peer.chain AND ne.block_number = peer.block AND ne.block_hash IS NOT DISTINCT FROM peer.hash AND ne.after_state ->> 'node' IS NOT DISTINCT FROM peer.node AND strpos(ne.event_identity, ':ResolverChanged:registry-fallback-handoff:') > 0 AND split_part(ne.event_identity, ':ResolverChanged:registry-fallback-handoff:', 1) = peer.origin OFFSET 0) ne), witnesses AS (");
     let mut has_arm = false;
     if read.scope != HistoryScope::Resource {
-        builder.push(format!("SELECT {EVENT_COLUMNS}, 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM peer_events ne JOIN address_historical historical ON historical.logical_name_id = ne.logical_name_id UNION ALL SELECT {EVENT_COLUMNS}, 1, current_name.chain_id, current_name.logical_name_id, NULL::uuid FROM peer_events ne JOIN address_current_names current_name ON current_name.logical_name_id = ne.logical_name_id"));
+        builder.push(format!("SELECT {EVENT_COLUMNS}, 0 AS witness_kind, NULL::text AS current_chain, NULL::text AS current_name, NULL::uuid AS witness_resource FROM peer_events ne JOIN address_historical historical ON historical.logical_name_id = ne.logical_name_id UNION ALL SELECT {EVENT_COLUMNS}, 1, current_name.chain_id, current_name.logical_name_id, NULL::uuid FROM peer_events ne JOIN address_current_surface_names current_name ON current_name.logical_name_id = ne.logical_name_id"));
         has_arm = true;
     }
     if read.scope != HistoryScope::Surface {
