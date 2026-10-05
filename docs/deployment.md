@@ -2769,8 +2769,10 @@ joins the walk index set's drop list. The index holds one entry per retained roo
 none on a chain without ENSv2 sources, so its size, and the disk the build needs, follow the
 number of root role changes rather than the size of `normalized_events`; check that count first
 (`SELECT count(*) FROM bigname_phase.normalized_events WHERE event_kind = 'RootPermissionChanged'`,
-which itself scans the table). The build's other cost is one scan of `normalized_events`. The schema-migration is a plain `CREATE INDEX` that holds a
-SHARE lock on the table for that scan, which blocks Interpret's writes, so on a large
+which itself scans the table). The plain build in the schema-migration costs one scan of
+`normalized_events` under a SHARE lock, which blocks Interpret's writes for that scan. The
+concurrent build costs two scans plus waits for transactions open at each phase, without
+blocking writes, so on a large
 initialized database rerun [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md)
 first, outside a transaction, while the phase runner and API keep running. It finds the three
 existing address-history indexes and builds only this one, concurrently, then checks all four.

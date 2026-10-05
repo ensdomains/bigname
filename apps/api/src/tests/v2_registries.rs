@@ -1147,9 +1147,9 @@ async fn v2_get_registry_event_count_includes_root_role_changes() -> Result<()> 
     .await?;
     assert_eq!(root_feed["page"]["total_count"], json!(3), "{root_feed}");
     assert!(
-        root_feed["data"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().all(|row| row["type"] == "permission")),
+        root_feed["data"].as_array().is_some_and(|rows| rows
+            .iter()
+            .all(|row| row["type"] == "permission" && row.get("name").is_none())),
         "{root_feed}"
     );
 

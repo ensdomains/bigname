@@ -534,6 +534,9 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
     assert!(rows(&excluded).is_empty(), "{excluded}");
     let unanchored = get("/v1/events?namespace=ens&kind=RootPermissionChanged".to_owned()).await?;
     assert_eq!(rows(&unanchored).len(), 3, "{unanchored}");
+    // Diagnostics share the `type` vocabulary, so `type=permission` now selects them too.
+    let diagnostics = get("/v1/diagnostics/events?namespace=ens&type=permission".to_owned()).await?;
+    assert_eq!(rows(&diagnostics).len(), 3, "{diagnostics}");
 
     // Only the account's own root changes, and only where `role_holder` and the registration
     // side of the read apply.

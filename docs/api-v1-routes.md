@@ -208,8 +208,9 @@ They are [`permission` rows](#permission-change-values) on `GET /v1/events`
 (the default feed, `type=permission`, `kind=RootPermissionChanged` and a
 registry's `contract_address` history), in a registry overview's
 `counts.events`, and in an account's address history with `scope=both` or
-`scope=registration` and the `role_holder` relation. Name history does not
-change. Outstanding position cursors continue; the newly visible rows appear
+`scope=registration` and the `role_holder` relation. `GET /v1/diagnostics/events`
+always listed them, and its `type=permission` and `kind=RootPermissionChanged`
+filters now select them too. Name history does not change. Outstanding position cursors continue; the newly visible rows appear
 wherever they fall after the cursor's position.
 
 If an ended resource retains a resolver pointer to the emitter, its rebuildable
