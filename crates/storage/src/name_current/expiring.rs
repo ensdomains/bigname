@@ -5,7 +5,7 @@
 //! rows. Registration expiry may be a decimal JSON string or number; neither is narrowed to
 //! a calendar timestamp or floating-point value.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use sqlx::{PgExecutor, Postgres, QueryBuilder};
 
 use crate::UnixSeconds;
@@ -19,19 +19,59 @@ use super::list::{
 use super::{escape_like_pattern, push_public_authority_predicate};
 use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
 
-/// Window over current names of one namespace by registration expiry. `expires_after` is
-/// inclusive and `expires_before` exclusive, so consecutive windows tile without overlap. At least
-/// one bound is required: the reader refuses an unbounded namespace scan.
+/// One half-open expiry interval. Scalar requests may omit one endpoint; repeated windows
+/// carry both. Values retain the exact precision of the public expiry filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NameCurrentExpiryWindow {
+    pub expires_after: Option<UnixSeconds>,
+    pub expires_before: Option<UnixSeconds>,
+}
+
+/// A disjoint union of expiry intervals over current names in one namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NameCurrentExpiringFilter {
     pub namespace: String,
-    pub expires_after: Option<UnixSeconds>,
-    pub expires_before: Option<UnixSeconds>,
+    pub windows: Vec<NameCurrentExpiryWindow>,
     /// Public `authority` values (`ens_v0`, `ens_v1`, `ens_v2`); a row matches when the value it
     /// serves is any listed one.
     pub authorities: Option<Vec<String>>,
     /// A normalized name: only names exactly one label below it.
     pub parent: Option<String>,
+}
+
+impl NameCurrentExpiringFilter {
+    /// Keep storage callers within the same bounded, disjoint shape as the API. In particular,
+    /// invalid windows must never spend the per-arm limit on duplicate names.
+    pub(crate) fn validate_windows(&self) -> Result<()> {
+        ensure!(
+            (1..=32).contains(&self.windows.len()),
+            "the expiring page requires 1 to 32 windows"
+        );
+        for window in &self.windows {
+            ensure!(
+                window.expires_after.is_some() || window.expires_before.is_some(),
+                "the expiring page requires an expires_after or expires_before bound"
+            );
+            if self.windows.len() > 1 {
+                ensure!(
+                    window.expires_after.is_some() && window.expires_before.is_some(),
+                    "multiple expiry windows require both bounds"
+                );
+            }
+            if let (Some(after), Some(before)) = (window.expires_after, window.expires_before) {
+                ensure!(after < before, "expiry window after must precede before");
+            }
+        }
+        let mut sorted = self.windows.clone();
+        sorted.sort_unstable_by_key(|window| window.expires_after);
+        ensure!(
+            sorted
+                .windows(2)
+                .all(|pair| pair[0].expires_before <= pair[1].expires_after),
+            "expiry windows must not overlap or repeat"
+        );
+        Ok(())
+    }
 }
 
 /// The `LIKE` patterns of the names exactly one label below `parent`: a name matches the first
@@ -65,9 +105,7 @@ pub(crate) async fn expiring_page_from(
     page_size: u64,
     composed: &serde_json::Value,
 ) -> Result<NameCurrentListPage> {
-    if filter.expires_after.is_none() && filter.expires_before.is_none() {
-        bail!("name_current expiring page requires an expires_after or expires_before bound");
-    }
+    filter.validate_windows()?;
     if let Some(cursor) = cursor
         && !matches!(
             cursor.sort_value,
@@ -109,14 +147,21 @@ pub(crate) async fn expiring_page_from(
     });
     builder.push(NAME_CURRENT_LIST_SELECT);
     builder.push(" WHERE expiry_date IS NOT NULL");
-    if let Some(expires_after) = filter.expires_after {
-        builder.push(" AND expiry_date >= ");
-        builder.push_bind(expires_after);
+    builder.push(" AND (");
+    for (index, window) in filter.windows.iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder.push("(TRUE");
+        if let Some(after) = window.expires_after {
+            builder.push(" AND expiry_date >= ").push_bind(after);
+        }
+        if let Some(before) = window.expires_before {
+            builder.push(" AND expiry_date < ").push_bind(before);
+        }
+        builder.push(")");
     }
-    if let Some(expires_before) = filter.expires_before {
-        builder.push(" AND expiry_date < ");
-        builder.push_bind(expires_before);
-    }
+    builder.push(")");
     if let Some(cursor) = cursor {
         push_name_current_list_cursor_after(
             &mut builder,

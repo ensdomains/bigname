@@ -135,3 +135,6 @@ pub(super) fn note_composed_names(_names: usize) {}
 /// The statements the search and bound-name walks run, for their plan tests.
 #[cfg(test)]
 pub(crate) use super::{bound::bound_candidates_sql, list::search_candidates_sql};
+
+#[cfg(any(test, feature = "test-support"))]
+pub use super::list::explain_expiring_selection;

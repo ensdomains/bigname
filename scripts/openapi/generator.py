@@ -214,6 +214,10 @@ class Generator:
             required = row["Required"] == "yes"
             require(not required or row["Default"] == "none", f"required parameter {name} cannot have a default")
             expr = row["Type"]
+            repeated = expr.startswith("repeated ")
+            if repeated:
+                expr = expr.removeprefix("repeated ")
+                require(location == "query" and re.fullmatch(ARRAY, expr), "repeated is only valid for query arrays")
             schema = self.type_schema(expr)
             note = self.prose(row["Description"], True)
             if location == "body":
@@ -230,7 +234,7 @@ class Generator:
                 schema["default"] = value
             parameter = {"name": name, "in": location, "required": required, "description": note, "schema": schema}
             if schema.get("type") == "array":
-                parameter.update(style="form" if location == "query" else "simple", explode=False)
+                parameter.update(style="form" if location == "query" else "simple", explode=repeated)
             result.append(parameter)
         segments = re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", path)
         require(len(segments) == len(set(segments)), f"duplicate path segment in {path}")

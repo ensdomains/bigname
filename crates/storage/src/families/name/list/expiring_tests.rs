@@ -31,7 +31,7 @@ const AUTHORITY_INDEX: &str = "project_name_summary_authority_expiry_idx";
 /// Two more, ROWS + 8 and ROWS + 9, store no raw bytes and also share [`TIE`]: `tlknown.eth`,
 /// whose labels all have usable preimages, and a label with no preimage one label below
 /// `p.eth`. Each is listed under the name built from its label hashes.
-async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
+pub(super) async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
     raw_sql(include_str!("../../../../schema/baseline/07_labels.sql"))
         .execute(&mut *connection)
         .await?;
@@ -106,7 +106,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
 
 /// What the selection must return, read without its indexes or keyset: every readable,
 /// listable name of the fixture in the public order as (id, expiry, name, namehash).
-async fn listed(
+pub(super) async fn listed(
     connection: &mut PgConnection,
     descending: bool,
 ) -> Result<Vec<(String, String, String, String)>> {

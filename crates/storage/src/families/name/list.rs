@@ -291,3 +291,6 @@ pub async fn load_family_expiring_page_unbounded(
     snapshot.close().await?;
     Ok(page)
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub use expiring::measure::explain_expiring_selection;

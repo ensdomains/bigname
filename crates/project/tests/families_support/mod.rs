@@ -336,8 +336,10 @@ impl Fixture {
                 for (after, before) in [(Some(zero), None), (None, Some(zero))] {
                     let filter = NameCurrentExpiringFilter {
                         namespace: namespace.clone(),
-                        expires_after: after,
-                        expires_before: before,
+                        windows: vec![bigname_storage::NameCurrentExpiryWindow {
+                            expires_after: after,
+                            expires_before: before,
+                        }],
                         authorities: authority.map(|value| vec![value.to_owned()]),
                         parent: None,
                     };

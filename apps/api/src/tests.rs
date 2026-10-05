@@ -486,6 +486,7 @@ include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_names_filters.rs");
 include!("tests/v2_names_expiry_oracle.rs");
+include!("tests/v2_names_windows.rs");
 include!("tests/v2_former_owner_cursors.rs");
 #[path = "tests/v2_former_owner_produced.rs"]
 mod v2_former_owner_produced;
@@ -534,3 +535,5 @@ include!("tests/v2_family_name_display.rs");
 include!("tests/family_fixture_inputs_b.rs");
 
 include!("tests/v2_unix_timestamps.rs");
+
+include!("tests/v2_names_windows_measure.rs");
