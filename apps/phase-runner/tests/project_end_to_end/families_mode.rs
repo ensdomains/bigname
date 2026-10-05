@@ -52,8 +52,10 @@ pub async fn measure_walks(
     .await?;
     let expiring_filter = NameCurrentExpiringFilter {
         namespace: namespace.to_owned(),
-        expires_after: Some(OffsetDateTime::UNIX_EPOCH.into()),
-        expires_before: None,
+        windows: vec![bigname_storage::NameCurrentExpiryWindow {
+            expires_after: Some(OffsetDateTime::UNIX_EPOCH.into()),
+            expires_before: None,
+        }],
         authorities: None,
         parent: None,
     };

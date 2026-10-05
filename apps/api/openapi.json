@@ -1568,6 +1568,22 @@
             }
           },
           {
+            "name": "expires_window",
+            "in": "query",
+            "required": false,
+            "description": "Repeat for 1–32 disjoint finite half-open windows, each `after..before` in decimal Unix seconds or RFC 3339. Adjacent windows are allowed; overlap, duplicates, missing bounds, and combination with either scalar expiry parameter are invalid. Input order defines each row’s expires_window_index.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 32
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
             "name": "authority",
             "in": "query",
             "required": false,
@@ -7085,6 +7101,12 @@
             ],
             "description": "Decimal Unix-second string for a finite deadline, or null for a classified absent expiry; see [timestamp format and absent expiry](https://github.com/ensdomains/bigname/blob/main/docs/api-v1.md#timestamp-format-and-absent-expiry)."
           },
+          "expires_window_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31,
+            "description": "Zero-based index of the matching expires_window in original request order; present on every repeated-window GET /v1/names row and omitted on scalar requests and search. Membership uses exact stored expiry before response formatting."
+          },
           "expires_at_reason": {
             "$ref": "#/components/schemas/ExpiryReason",
             "description": "Reason for a classified null expiry; absent for finite expiry and absent registration context.\n\nPresence condition: The object contains expires_at with JSON null. Absent expires_at and finite strings do not satisfy this condition.",
@@ -7119,7 +7141,7 @@
           "namehash",
           "registration_status"
         ],
-        "description": "Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration; search omits it."
+        "description": "Current name summary used by search and the namespace expiry list. The expiry list may include lapsed_registration and, for repeated-window requests, expires_window_index; search omits both."
       },
       "Subname": {
         "type": "object",

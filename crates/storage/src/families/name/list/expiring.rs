@@ -13,17 +13,18 @@
 //! The work a page composes is bounded by its size, whatever the namespace holds. Selecting can
 //! still read many narrow keys: a sparse `parent`, or a second that many names share.
 //!
-//! The selection is one window, [`ExpiringSelection`]. It is kept apart from the composition so
-//! that a listing over several windows can select from each and compose the merged first
-//! `page_size + 1` names the same way.
+//! Each [`ExpiringSelection`] is one window. A disjoint union merges at most `page_size + 1`
+//! narrow keys from each window in one SQL statement, takes the global first `page_size + 1`,
+//! and composes them once. Disjoint bounds and the surface's logical-name primary key prevent
+//! a name from consuming more than one slot.
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
 use super::{batch, source_row};
 use crate::{
-    NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
-    NameCurrentListOrder, NameCurrentListPage, UnixSeconds,
+    NameCurrentExpiringFilter, NameCurrentExpiryWindow, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListOrder, NameCurrentListPage, UnixSeconds,
     families::name::CoverageShape,
     name_current::{expiring_page_from, push_parent_predicate},
 };
@@ -45,13 +46,14 @@ pub(crate) struct ExpiringSelection<'a> {
 impl<'a> ExpiringSelection<'a> {
     pub(crate) fn of(
         filter: &'a NameCurrentExpiringFilter,
+        window: NameCurrentExpiryWindow,
         order: NameCurrentListOrder,
         cursor: Option<&'a NameCurrentListCursor>,
     ) -> Self {
         Self {
             namespace: &filter.namespace,
-            expires_after: filter.expires_after,
-            expires_before: filter.expires_before,
+            expires_after: window.expires_after,
+            expires_before: window.expires_before,
             authorities: filter.authorities.as_deref(),
             parent: filter.parent.as_deref(),
             order,
@@ -74,10 +76,7 @@ pub async fn load_family_expiring_page(
     page_size: u64,
     chains: &[String],
 ) -> Result<NameCurrentListPage> {
-    ensure!(
-        filter.expires_after.is_some() || filter.expires_before.is_some(),
-        "the composed expiring page requires an expires_after or expires_before bound"
-    );
+    filter.validate_windows()?;
     ensure!(
         page_size > 0,
         "the composed expiring page_size must be positive"
@@ -87,8 +86,16 @@ pub async fn load_family_expiring_page(
         .context("the composed expiring page_size is too large")?;
     let mut snapshot = db.into().snapshot().await?;
     batch::ensure_published(&mut snapshot, chains).await?;
-    let selection = ExpiringSelection::of(filter, order, cursor);
-    let names = select_expiring_names(&mut snapshot, &selection, limit).await?;
+    let names = if let [window] = filter.windows.as_slice() {
+        let selection = ExpiringSelection::of(filter, *window, order, cursor);
+        select_expiring_names(&mut snapshot, &selection, limit).await?
+    } else {
+        expiring_union_query("", filter, order, cursor, limit)?
+            .build_query_scalar()
+            .fetch_all(&mut *snapshot)
+            .await
+            .context("failed to select the disjoint expiring windows")?
+    };
     let page =
         compose_expiring_page(&mut snapshot, &names, filter, order, cursor, page_size).await?;
     snapshot.close().await?;
@@ -121,16 +128,60 @@ fn expiring_names_query<'a>(
     selection: &ExpiringSelection<'a>,
     limit: u64,
 ) -> Result<QueryBuilder<'a, Postgres>> {
+    let mut builder = QueryBuilder::<Postgres>::new(prefix);
+    push_expiring_selection(&mut builder, selection, limit)?;
+    Ok(builder)
+}
+
+/// One statement merges bounded narrow-key arms in the database's exact public order. The
+/// outer limit applies before any full row is composed, even for sparse separated windows.
+fn expiring_union_query<'a>(
+    prefix: &str,
+    filter: &'a NameCurrentExpiringFilter,
+    order: NameCurrentListOrder,
+    cursor: Option<&'a NameCurrentListCursor>,
+    limit: u64,
+) -> Result<QueryBuilder<'a, Postgres>> {
+    let mut builder = QueryBuilder::<Postgres>::new(prefix);
+    builder.push("/* storage:families.name.expiring_union */ SELECT logical_name_id FROM (");
+    for (index, window) in filter.windows.iter().enumerate() {
+        if index > 0 {
+            builder.push(" UNION ALL ");
+        }
+        builder.push("(");
+        push_expiring_selection(
+            &mut builder,
+            &ExpiringSelection::of(filter, *window, order, cursor),
+            limit,
+        )?;
+        builder.push(")");
+    }
+    builder.push(") selected ORDER BY expires_at ");
+    builder.push(if order == NameCurrentListOrder::Asc {
+        "ASC"
+    } else {
+        "DESC"
+    });
+    builder.push(", namespace ASC, raw_name ASC, namehash ASC LIMIT ");
+    builder.push_bind(i64::try_from(limit).context("expiring union limit exceeds i64")?);
+    Ok(builder)
+}
+
+fn push_expiring_selection<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    selection: &ExpiringSelection<'a>,
+    limit: u64,
+) -> Result<()> {
     let after = match selection.cursor.map(|cursor| &cursor.sort_value) {
         None => None,
         Some(NameCurrentListCursorValue::Timestamp(Some(at))) => Some(*at),
         Some(_) => bail!("name_current expiring page cursor must carry an expiry timestamp"),
     };
     let ascending = selection.order == NameCurrentListOrder::Asc;
-    let mut builder = QueryBuilder::<Postgres>::new(prefix);
     builder.push(
         "/* storage:families.name.expiring_names */
-         SELECT summary.logical_name_id
+         SELECT summary.logical_name_id, summary.expires_at, summary.namespace,
+                surface.raw_name, surface.namehash
          FROM bigname_phase.project_name_summary summary
          JOIN bigname_phase.name_surfaces surface
            ON surface.chain_id = summary.chain_id
@@ -160,7 +211,7 @@ fn expiring_names_query<'a>(
         }
     }
     if let Some(parent) = selection.parent {
-        push_parent_predicate(&mut builder, "surface.raw_name", parent);
+        push_parent_predicate(builder, "surface.raw_name", parent);
     }
     if let Some(expires_after) = selection.expires_after {
         builder.push(" AND summary.expires_at >= ");
@@ -197,7 +248,7 @@ fn expiring_names_query<'a>(
     builder.push(if ascending { "ASC" } else { "DESC" });
     builder.push(", summary.namespace ASC, surface.raw_name ASC, surface.namehash ASC LIMIT ");
     builder.push_bind(i64::try_from(limit).context("expiring selection limit exceeds i64")?);
-    Ok(builder)
+    Ok(())
 }
 
 /// The page over `names`, which [`select_expiring_names`] returned for `page_size + 1`: composes
@@ -250,3 +301,11 @@ pub(crate) async fn compose_expiring_page(
 #[cfg(test)]
 #[path = "expiring_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "expiring/union_tests.rs"]
+mod union_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "expiring/measure.rs"]
+pub(crate) mod measure;

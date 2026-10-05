@@ -212,8 +212,10 @@ fn oracle_filter(
 ) -> Result<bigname_storage::NameCurrentExpiringFilter> {
     Ok(bigname_storage::NameCurrentExpiringFilter {
         namespace: "ens".to_owned(),
-        expires_after: after.map(str::parse).transpose()?,
-        expires_before: before.map(str::parse).transpose()?,
+        windows: vec![bigname_storage::NameCurrentExpiryWindow {
+            expires_after: after.map(str::parse).transpose()?,
+            expires_before: before.map(str::parse).transpose()?,
+        }],
         authorities: authorities
             .map(|values| values.iter().map(|value| (*value).to_owned()).collect()),
         parent: parent.map(str::to_owned),
