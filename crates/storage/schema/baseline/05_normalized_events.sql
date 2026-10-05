@@ -1078,6 +1078,15 @@ CREATE INDEX IF NOT EXISTS normalized_events_registry_origin_idx
 COMMENT ON INDEX normalized_events_registry_origin_idx IS
     'This index seeks at most two canonical factory origins for one registry address at the served publication.';
 
+CREATE INDEX IF NOT EXISTS normalized_events_registry_announcement_idx
+ON normalized_events
+    (chain_id, lower(raw_fact_ref ->> 'emitting_address'), block_number, log_index, normalized_event_id)
+WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistryCreated'
+  AND consumer_visibility = 'activated'
+  AND canonicality_state IN ('canonical', 'safe', 'finalized');
+COMMENT ON INDEX normalized_events_registry_announcement_idx IS
+    'This index seeks at most two activated canonical registry announcements for one address at the served publication.';
+
 CREATE INDEX IF NOT EXISTS normalized_events_wrapper_departure_idx
     ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
     WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'

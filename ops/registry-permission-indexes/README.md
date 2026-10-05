@@ -1,7 +1,7 @@
 # Registry permission history indexes
 
-These four read-only indexes serve exact factory-origin, sparse unsupported-upgrade
-and parent root-grant checks for WrapperRegistry permissions. Three index
+These five read-only indexes serve exact factory-origin, ordinary-announcement, sparse
+unsupported-upgrade and parent root-grant checks for WrapperRegistry permissions. Four index
 `bigname_phase.normalized_events`; `project_grant_registry_parent_idx` indexes
 `bigname_phase.project_grant`. They add no Project table or derived holder rows and
 rewrite no event. All use their final names and must be valid, ready, live, on their
@@ -9,7 +9,7 @@ reviewed target relation, and have the reviewed definitions before a populated
 upgrade can apply `20261005200000_registry_permission_history_indexes.sql`.
 
 Before applying that migration on an initialized database, complete preceding migrations,
-reserve disk for the four final indexes plus temporary build space and WAL, and run:
+reserve disk for the five final indexes plus temporary build space and WAL, and run:
 
 ```sh
 psql -X -v ON_ERROR_STOP=1 "$DATABASE_URL" -f ops/registry-permission-indexes/install.sql

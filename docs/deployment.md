@@ -3144,8 +3144,8 @@ GRANT SELECT ON bigname_phase.project_ens_v2_registry_parent TO bigname_api;
 ```
 
 Schema-migration `20261005200000_registry_permission_history_indexes.sql`
-installs three read-only normalized-event indexes for registry origin and
-upgrade-disqualifier probes, plus the parent root-grant lookup index on
+installs four read-only normalized-event indexes for registry origin, ordinary
+announcement and upgrade-disqualifier probes, plus the parent root-grant lookup index on
 `project_grant`. Each populated target table requires its corresponding indexes.
 Before applying the migration on an initialized database, run
 [`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)

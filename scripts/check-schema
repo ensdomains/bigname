@@ -1232,7 +1232,7 @@ emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_histor
 # adoption/rerun, each refusal, and full-set validation before the first build.
 permission_index_migration="$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 permission_index_install="$ROOT/ops/registry-permission-indexes/install.sql"
-permission_indexes=(normalized_events_registry_origin_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx project_grant_registry_parent_idx)
+permission_indexes=(normalized_events_registry_origin_idx normalized_events_registry_announcement_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx project_grant_registry_parent_idx)
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -1240,10 +1240,12 @@ CREATE TABLE expected_permission_indexes AS
 SELECT relation.relname, pg_get_indexdef(indexrelid) AS definition
 FROM pg_index JOIN pg_class relation ON relation.oid = indexrelid
 WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
+    'normalized_events_registry_announcement_idx'::regclass,
     'normalized_events_wrapper_departure_idx'::regclass,
     'normalized_events_user_registry_departure_idx'::regclass,
     'project_grant_registry_parent_idx'::regclass);
 DROP INDEX normalized_events_registry_origin_idx;
+DROP INDEX normalized_events_registry_announcement_idx;
 DROP INDEX normalized_events_wrapper_departure_idx;
 DROP INDEX normalized_events_user_registry_departure_idx;
 DROP INDEX project_grant_registry_parent_idx;
@@ -1264,6 +1266,7 @@ assert_migration_refusal permission-populated-missing-set "$permission_index_mig
     cat <<'SQL'
 CREATE TABLE permission_prebuilt_oids AS SELECT indexrelid
 FROM pg_index WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
+    'normalized_events_registry_announcement_idx'::regclass,
     'normalized_events_wrapper_departure_idx'::regclass,
     'normalized_events_user_registry_departure_idx'::regclass,
     'project_grant_registry_parent_idx'::regclass);
@@ -1275,7 +1278,7 @@ SQL
     cat <<'SQL'
 DO $$ BEGIN
     IF (SELECT count(*) FROM pg_index actual JOIN permission_prebuilt_oids expected
-        ON actual.indexrelid = expected.indexrelid) <> 4 THEN
+        ON actual.indexrelid = expected.indexrelid) <> 5 THEN
         RAISE EXCEPTION 'permission index adoption/rerun rebuilt a prebuilt index';
     END IF;
     IF EXISTS (SELECT 1 FROM expected_permission_indexes expected
@@ -1295,7 +1298,7 @@ for permission_index in "${permission_indexes[@]}"; do
         permission_relation=project_grant
     fi
     permission_invalid="$scratch_schema.$permission_index is invalid or has an unexpected definition; follow ops/registry-permission-indexes/README.md before retrying"
-    # The first missing-index case above covers this name with all four absent.
+    # The first missing-index case above covers this name with all five absent.
     if [ "$permission_index" != normalized_events_registry_origin_idx ]; then
         assert_migration_refusal "permission-missing-$permission_index" "$permission_index_migration" \
             "missing prebuilt index $permission_index on populated $permission_relation; run ops/registry-permission-indexes/install.sql before this schema-migration" <<SQL
@@ -1341,6 +1344,7 @@ assert_migration_refusal permission-populated-grants-empty-events "$permission_i
     'missing prebuilt index project_grant_registry_parent_idx on populated project_grant; run ops/registry-permission-indexes/install.sql before this schema-migration' <<SQL
 DELETE FROM normalized_events;
 DROP INDEX normalized_events_registry_origin_idx;
+DROP INDEX normalized_events_registry_announcement_idx;
 DROP INDEX normalized_events_wrapper_departure_idx;
 DROP INDEX normalized_events_user_registry_departure_idx;
 DROP INDEX project_grant_registry_parent_idx;
@@ -3133,8 +3137,8 @@ JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
 WHERE pg_index.indrelid = 'normalized_events'::regclass;
 DO \$\$
 BEGIN
-    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 40 THEN
-        RAISE EXCEPTION 'drop.sql does not list 40 baseline indexes on normalized_events';
+    IF (SELECT count(*) FROM walk_index_baseline WHERE index_name IN ($walk_index_dropped)) <> 41 THEN
+        RAISE EXCEPTION 'drop.sql does not list 41 baseline indexes on normalized_events';
     END IF;
 END \$\$;
 INSERT INTO chain_phase_state (chain_id, phase_name, current_block_number, current_block_hash)
@@ -6088,6 +6092,9 @@ BEGIN
                 ('normalized_events_registry_origin_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number', 'transaction_index', 'log_index', 'event_identity'],
                     ARRAY['%source_family%ens_v2_migration_l1%', '%event_kind%ContractDiscovered%', '%canonicality_state%canonical%safe%finalized%']),
+                ('normalized_events_registry_announcement_idx', 'normalized_events',
+                    ARRAY['chain_id', '%lower%raw_fact_ref%emitting_address%', 'block_number', 'log_index', 'normalized_event_id'],
+                    ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%RegistryCreated%', '%consumer_visibility%activated%', '%canonicality_state%canonical%safe%finalized%']),
                 ('normalized_events_wrapper_departure_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number'],
                     ARRAY['%source_family%ens_v2_registry_l1%', '%event_kind%Upgraded%', '%canonicality_state%canonical%safe%finalized%', '%implementation%IS DISTINCT FROM%0xbe768b63e5fbbfbb0ae97e9064e0002df8001880%']),

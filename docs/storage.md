@@ -395,12 +395,17 @@ candidates under a parent whose current subregistry is that registry, and evalua
 ENSv1 and Basenames edges only for those children, since another arm can only refuse a child
 that also has an ENSv2 candidate.
 
-The permission reader adds three read-only indexes on Interpret-owned
+The permission reader adds four read-only indexes on Interpret-owned
 `normalized_events`, installed by schema-migration
 `20261005200000_registry_permission_history_indexes.sql` and the phase baseline.
 `registry_support_origins` uses `normalized_events_registry_origin_idx` to
 seek at most two canonical factory origins by chain/proxy and semantic event
-order. `registry_support_departure` uses
+order. `registry_support_announcements` uses
+`normalized_events_registry_announcement_idx` to seek at most two ordinary
+`RegistryCreated` facts by chain/emitter and block/log/identity order. Its literal
+family, event-kind, activated-visibility and readable-canonicality predicate
+avoids scanning unrelated registry history, including when no announcement exists.
+`registry_support_departure` uses
 `normalized_events_wrapper_departure_idx` or
 `normalized_events_user_registry_departure_idx` for a `NOT EXISTS`-equivalent
 probe of canonical upgrades away from the exact supported implementation.
@@ -2427,7 +2432,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 40 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 41 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_registry_token_idx`,
 `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
@@ -2442,6 +2447,7 @@ these: `normalized_events_registry_token_idx`,
 `normalized_events_resolver_alias_history_idx`,
 `normalized_events_resolver_upgrade_history_idx`,
 `normalized_events_registry_origin_idx`,
+`normalized_events_registry_announcement_idx`,
 `normalized_events_wrapper_departure_idx`,
 `normalized_events_user_registry_departure_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,
