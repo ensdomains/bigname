@@ -9,6 +9,14 @@ use bigname_adapters::schema_v2::{
 
 #[path = "v2_registry_token_ids/compatibility.rs"]
 mod compatibility;
+#[path = "v2_registry_token_ids/history.rs"]
+mod history;
+#[path = "v2_registry_token_ids/history_positions.rs"]
+mod history_positions;
+#[path = "v2_registry_token_ids/history_v1_payments.rs"]
+mod history_v1_payments;
+#[path = "v2_registry_token_ids/history_wrapper.rs"]
+mod history_wrapper;
 #[path = "v2_registry_token_ids/races.rs"]
 mod races;
 #[path = "v2_registry_token_ids/routes.rs"]
@@ -24,6 +32,7 @@ sol! {
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+    event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values);
     event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
     event TokenRegenerated(uint256 indexed oldTokenId, uint256 indexed newTokenId);
     event LabelUnregistered(uint256 indexed tokenId, address indexed sender);

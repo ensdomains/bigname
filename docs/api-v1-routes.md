@@ -2152,8 +2152,8 @@ every id, so it is a merge key, not a durable reference to store.
   underlying log. It is `null` for rows derived from interpreter state rather
   than from one on-chain log.
 - `data`: an object derived from the stored normalized event's before/after
-  state, translated into dictionary vocabulary. Only fields the row actually
-  carries are present; absent or null source values are omitted rather than
+  state and the bounded corresponding token/payment evidence described below,
+  translated into dictionary vocabulary. Absent or null source values are omitted rather than
   serialized as `null`, so `data` may be `{}`. The exception is an expiry
   classified from the event’s contract and registration context: it carries
   `expires_at: null` plus `expires_at_reason`. Addresses are lower-cased.
@@ -2181,16 +2181,17 @@ Per friendly `type`, `data` may contain:
 
 | `type` | `data` fields |
 | --- | --- |
-| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
-| `renewal`, `release` | `expires_at`, `expires_at_reason` when null |
-| `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper) |
-| `transfer` | `from`, `to`, `fuses` |
+| `registration` | `registrant`, `owner`, `expires_at`, `expires_at_reason` when null, `resolver: {chain_id, address}`, `subregistry: {chain_id, address}`, `token_id`, `canonical_id`, retained `cost` or `base_cost`/`premium`, `payment_token`, `referrer`, `action_id`, `action_role` (see [registration actions](#registration-actions)) |
+| `renewal` | `expires_at`, `expires_at_reason` when null, retained `cost`, `payment_token`, `referrer`, `canonical_id` |
+| `release` | `expires_at`, `expires_at_reason` when null, `canonical_id` |
+| `expiry` | `expires_at`, `expires_at_reason` when null, `fuses` (uint32 word when the change came through NameWrapper), event-local ENSv2 `canonical_id` |
+| `transfer` | `from`, `to`, `fuses`, recorded ERC-1155 `operator`, ENSv2 `token_id`, `canonical_id` |
 | `authority` | `owner` (the new registry owner), `from` (the previous owner when the row retains it) |
-| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared) |
+| `resolver` | `resolver: {chain_id, address}` (absent when the pointer was cleared), event-local ENSv2 `canonical_id` |
 | `record` | `key`, `value`, `coin_type` (number, for `addr:<coin_type>` keys). `key` is the stored record key; history retains writes outside the public record grammar (for example `name` or `abi:<content_type>`), so `key` may name a family the records route does not serve. `value` is present only when the write's value was retained: ordinary text values are strings and ordinary binary values are hex strings. Retained non-text values can instead use the closed `HexBytes`, `DeletedRecordValue`, `DnsZonehashValue`, or `DataHashValue` forms listed in [HistoryEventData](api-v1.md#historyeventdata); history preserves those stored write forms. A record-version reset (raw kind `RecordVersionChanged`, visible with `include=raw`) carries no `key` or `value`. Every record row also says where the record lives: `resolver: {chain_id, address}`, and `node` (the node a node-keyed resolver wrote, lower-case hex) or `record_id` (the decimal record ID a record-ID resolver wrote), which identifies the write whether or not the row carries a `name`; see [record event names](#record-event-names). The record row a `NameForAddrChanged` (Basenames, or the ENS `default.reverse` registrar) stores beside its `primary_name` row carries the reverse node as `node` and the reverse registrar as `resolver`. |
 | `primary_name` | `address`, `coin_type` (number), `name`, `name_status` (see [primary-name values](#primary-name-values)) |
-| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes); see [permission change values](#permission-change-values) |
-| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared) |
+| `permission` | `address` (the subject), `grant_scope` (as on permission rows, plus the history-only `registrar_controller` scope), `powers`, `added_powers` and `removed_powers` (product power vocabulary), `approved` (registrar-controller changes), `fuses` (uint32 word for NameWrapper fuse changes), proven non-root ENSv2 `token_id` and event-local `canonical_id`; see [permission change values](#permission-change-values) |
+| `subregistry` | `subregistry: {chain_id, address}` (absent when the link was cleared), event-local ENSv2 `canonical_id` |
 | `migration` | `migration_path` (`unwrapped`, `unlocked_wrapped`, `locked_wrapped`, `locked_child`, or `emancipated_child`) |
 
 Example row from `GET /v1/names/alice.eth/history?include=data&type=record`:
@@ -2276,6 +2277,46 @@ carry neither field. To show one entry per registration, group rows by
 `action_id`. The rows of one action can fall on different pages; a client
 merges them across pages. `page.total_count` counts rows, not actions, and
 there is no action count.
+
+The `registered` and `linked` rows can carry copies of the same registrar payment. These are
+one charge, grouped by the existing `action_id`, even across page boundaries. Payment is supplied
+only by a unique later admitted registrar observation in the same transaction and fork, with
+matching name, token, registry resource and registrar sender. Ambiguous or contradictory evidence
+omits it. Reachability grants, migration boundaries and grants reconstructed from renewal do not
+inherit registration payment. The registrar observation remains supporting evidence, not another
+visible registration row; `contract_address` remains the original row's emitter.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/ETHRegistrar.sol:L150-L159 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L501-L506 @ ens_v2_sepolia_20261001@07e55a05)
+
+Payment amounts are unsigned decimal strings with full uint256 precision. ENSv1 amounts are
+native wei; ENSv2 amounts are raw units of the explicitly named `payment_token`. A registration's
+unsplit `cost` does not imply a `base_cost`/`premium` split. Renewal uses its emitted total as
+`cost`, including the historical ENSv2 `base` field. No currency conversion or synthetic zero is
+provided. Explicit zero amounts, bytes32 referrers and payment-token addresses are preserved.
+Sepolia ENSv1 numeric renewals can obtain cost from one corresponding later admitted controller
+observation with the same name, expiry and transaction; intervening renewals prevent an older
+row taking a later renewal's payment. Registry expiry companions do not copy registrar charges.
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L333-L341 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L364-L368 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registrar/interfaces/IETHRenewer.sol:L27 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L28 @ ens_v2_sepolia_dev@554c309b)
+
+Coverage follows retained admitted events: Sepolia ENSv1 controller registrations and
+non-normalizable renewal labels can lack payment evidence; Basenames registration/renewal
+events lack payment/referrer fields. These values remain absent. ERC-721 transfers lack an
+event operator, so they never substitute the transaction sender or approval state. An ERC-1155
+transfer exposes only its actual retained operator.
+(upstream: .refs/basenames/src/L2/RegistrarController.sol:L497-L548 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L577-L633 @ basenames@1809bbc)
+(upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L67 @ basenames@1809bbc)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L212 @ ens_v2_sepolia_20261001@07e55a05)
+
+ENSv2 history `token_id` uses each row's physical event position, not the operation's final token
+or the name's current token. The initiating permission event therefore precedes its own token
+bump. `canonical_id` clears the low 32 bits of valid event-local evidence and remains scoped by
+registry and chain. Missing evidence and the deprecated pre-audit permission inference limit are
+defined under [ENSv2 token identity](api-v1.md#ensv2-token-identity). Enrichment never changes row
+membership, ordering, counts, cursors or registration/action IDs, and runs only with `include=data`.
 
 #### Record event names
 

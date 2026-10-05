@@ -690,3 +690,25 @@ fn plan_nodes(plan: &Value) -> Vec<&Value> {
     collect_plan_nodes(&plan[0]["Plan"], &mut nodes);
     nodes
 }
+
+#[tokio::test]
+async fn v2_child_registration_history_uses_each_childs_event_local_data() -> Result<()> {
+    let database=TestDatabase::new_migrated().await?;
+    seed_child_registration_fixture(&database).await?;
+    // Only the context wiring is under test here; real decoder token lifecycles are covered by
+    // v2_registry_token_ids. The child row's own token must not be replaced by its parent's.
+    let token=alloy_primitives::U256::from_be_bytes(*alloy_primitives::keccak256("a"));
+    let canonical=token & !alloy_primitives::U256::from(u32::MAX);
+    sqlx::query("UPDATE normalized_events SET source_family='ens_v2_registry_l1',after_state=after_state || $1 WHERE event_identity='a-grant'")
+        .bind(json!({"source_event":"LabelRegistered","token_id":token.to_string()})).execute(&database.pool).await?;
+    let route="/v1/names/parent.eth/history?scope=both&include=data,raw,child_registrations&order=asc&page_size=200";
+    let (status,body)=read_family_response(&database,route).await?;
+    assert_eq!(status,StatusCode::OK,"{body:#}");
+    let child=body["data"].as_array().unwrap().iter().find(|r|r["name"]=="a.parent.eth" && r["block_number"]==103).unwrap();
+    assert_eq!(child["subject"],"child");assert_eq!(child["data"]["token_id"],token.to_string());assert_eq!(child["data"]["canonical_id"],canonical.to_string());
+    let (status,own)=read_family_response(&database,"/v1/names/a.parent.eth/history?scope=both&include=data,raw&order=asc&page_size=200").await?;
+    assert_eq!(status,StatusCode::OK,"{own:#}");
+    let own=own["data"].as_array().unwrap().iter().find(|r|r["id"]==child["id"]).unwrap();
+    assert_eq!(child["data"],own["data"]);
+    database.cleanup().await
+}

@@ -251,6 +251,39 @@ installation, adoption and recovery procedure for schema-migration
 `20261005090000_normalized_events_registry_token_index.sql`. This index is rebuilt with the
 [walk index set](#walk-index-set) before serving resumes.
 
+The same index serves `storage:history.token_ids`
+(`crates/storage/src/history/token_ids.rs`). With history `include=data`, registration and
+transfer rows retain their own recorded ENSv2 token word. A non-root registry permission row
+without a token uses one bounded predecessor probe at its exact block/transaction/log position,
+never the current token of its name or resource. The page supplies captured publication bounds;
+the query checks the selected row, its source manifest, matching readable lineage and the
+same block hash for evidence at the row's height. Only the current deployment and the historical
+June post-audit model support this inference. The initiating role event precedes its regeneration
+marker, so its token is the old token.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L280-L287 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L577-L587 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20260629/contracts/src/registry/PermissionedRegistry.sol:L529-L538 @ ens_v2_sepolia_20260629@ccaeb58b)
+Deprecated pre-audit permission rows without direct token evidence omit the token: that model
+calls the mint receiver before emitting its regeneration marker, so a predecessor alone cannot
+prove a callback's token. Direct recorded registration/transfer tokens remain supported.
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/registry/PermissionedRegistry.sol:L451-L462 @ ens_v2_sepolia_dev@554c309b)
+(upstream: .refs/ens_v2_sepolia_dev/contracts/src/erc1155/ERC1155Singleton.sol:L245-L261 @ ens_v2_sepolia_dev@554c309b)
+The caller uses a short read-only repeatable-read context snapshot and revalidates the page's
+Interpret redo fence after enrichment. This changes no row selection, counts, cursors or stored
+data. Missing evidence omits the field; a malformed selected token fails closed. Pages without
+`include=data`, and pages with only direct token evidence, need no predecessor query.
+
+`storage:history.payment_values` (`crates/storage/src/history/payment_values.rs`) supplements
+only the selected page's existing ENSv2 registration grants and Sepolia ENSv1 numeric renewals.
+It probes normalized observations by exact chain/block-hash/transaction position using the
+existing block index. At most two matching candidates are retained to prove uniqueness; a
+contradiction or ambiguity yields no supplement. ENSv2 registration additionally proves the
+same name/token, registrar sender and resource linkage within that transaction. Sepolia renewal
+requires the producing manifest's declared controller, matching name/expiry and no intervening
+numeric renewal. Only small payment objects return to the API. Token and payment reads share
+the page context's read-only snapshot and the surrounding redo fence. No normalized event is
+updated, inserted or newly exposed as a history row.
+
 `project:families.hydrate.text.select` reads changed selector keys and the ordered share from
 `project_text_hydration_work_order_idx`. The reverse selector uses
 `project_reverse_hydration_work_active_idx` and `_stale_idx` before joining tuple state.
