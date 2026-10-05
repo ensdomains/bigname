@@ -318,6 +318,12 @@ Family indexes serve these concrete readers:
   recognises as C (`C` or `POSIX`); under any other collation it filters the ordered scan. The
   reverse lookup candidates (`storage:families.records.reverse_candidates`) keep long names and
   start from `project_address_name_index`.
+- The address-names walk (`storage:families.records.address_name_walk`) orders one address's
+  candidate names, read from `project_address_name_index` by its primary key, by their sort
+  key: the `name_surfaces` and `project_name_summary` primary keys, one probe per candidate,
+  then a sort of that address's candidates only. Its closure read
+  (`storage:families.records.address_name_walk_closure`) finds the names bound to the walked
+  resources through `project_binding_candidate_resource_idx`.
 - Permission pages use `project_grant_subject_idx`, `project_grant_scope_idx`,
   `project_account_approval_subject_idx`, `project_registry_binding_observation_resource_idx`
   and `project_registry_binding_observation_owner_idx`.
