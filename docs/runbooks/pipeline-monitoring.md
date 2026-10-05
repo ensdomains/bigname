@@ -352,9 +352,9 @@ for a block whose publication then fails; row writes are counted only for
 committed blocks. `kind` is `reverse` or `text`.
 
 - `phase_runner_project_hydration_passes_total{chain,result}` counts head
-  blocks whose reads were prepared: `served`, `unserved` (the endpoint answered
-  no aggregate at the block) or `timed_out` (the block's reads spent their 30
-  seconds). No increase while blocks are published means Project is catching
+  blocks whose reads were prepared: `unserved` (the endpoint answered
+  no aggregate at the block), `timed_out` (the block's reads spent their 30
+  seconds) or `served` (neither, a head block with nothing to read included). No increase while blocks are published means Project is catching
   up, replaying or rebuilding, or the chain has no new block.
 - `phase_runner_project_hydration_rpc_calls_total{chain,kind}` and
   `phase_runner_project_hydration_rpc_failures_total{chain,kind}` count
