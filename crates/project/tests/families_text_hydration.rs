@@ -444,6 +444,10 @@ async fn selected(fixture: &Fixture, block: i64) -> Result<Vec<String>> {
 fn text_selection_sql() -> String {
     include_str!("../src/families/hydrate/text.sql")
         .replace(
+            "{eligibility}",
+            include_str!("../src/families/hydrate/text_eligible.sql"),
+        )
+        .replace(
             "{value_emission_ordinal}",
             &bigname_storage::families::position::emission_ordinal_sql(
                 "value.event_identity",

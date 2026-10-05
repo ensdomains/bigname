@@ -215,7 +215,9 @@ hydrating block selects at most 250 text selectors. It reserves 63 slots
 existing work index. The remaining slots prefer changed selectors, then
 never-read selectors, then the oldest attempts. Unused reserved slots are
 available to those other selectors. Cooling failed children remain in the
-work index but are skipped before either bounded selection. Selection is not a
+work index but are skipped before either bounded selection. The reserved scan
+checks current eligibility before taking its slots; inactive overlays remain
+available to ordinary cleanup selection. Selection is not a
 promise that all of them are read in that block: the call and time limits
 above apply. Every selected
 text selector is one whose overlay is missing or no longer matches it, so

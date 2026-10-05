@@ -176,7 +176,7 @@ pub(super) async fn reset_schedule(
     if targets.is_empty() {
         return Ok(());
     }
-    let changed = selected_values(
+    let changed: Vec<_> = selected_values(
         transaction,
         context.chain_id,
         context.block.number,
@@ -185,22 +185,47 @@ pub(super) async fn reset_schedule(
         targets,
         true,
     )
-    .await?;
+    .await?
+    .into_iter()
+    .filter(|value| !value["attempt_failures"].is_null() || !value["attempt_limit"].is_null())
+    .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let key = |value: &Value| {
+        key_of(
+            &tables::REVERSE_TUPLE,
+            tables::REVERSE_TUPLE
+                .key
+                .iter()
+                .map(|column| value[*column].clone()),
+        )
+    };
+    let previous: BTreeMap<_, _> = selected_values(
+        transaction,
+        context.chain_id,
+        context.block.number,
+        &context.block.hash,
+        &RowSet::default(),
+        changed.clone(),
+        true,
+    )
+    .await?
+    .into_iter()
+    .map(|value| {
+        (
+            key_text(&tables::REVERSE_TUPLE, &key(&value)),
+            value["_evidence"].clone(),
+        )
+    })
+    .collect();
     let keys: Vec<_> = changed
-        .into_iter()
+        .iter()
         .filter(|value| {
-            value["_reset"] == true
-                && (!value["attempt_failures"].is_null() || !value["attempt_limit"].is_null())
+            previous.get(&key_text(&tables::REVERSE_TUPLE, &key(value)))
+                != Some(&value["_evidence"])
         })
-        .map(|value| {
-            key_of(
-                &tables::REVERSE_TUPLE,
-                tables::REVERSE_TUPLE
-                    .key
-                    .iter()
-                    .map(|column| value[*column].clone()),
-            )
-        })
+        .map(key)
         .collect();
     rows.load(transaction, &tables::REVERSE_TUPLE, keys.clone())
         .await?;

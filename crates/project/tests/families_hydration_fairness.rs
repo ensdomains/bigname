@@ -303,3 +303,141 @@ async fn failed_reverse_children_cool_until_expiry_or_fresh_selector_evidence() 
     assert!(tuple(&fixture, 2).await?["attempt_failures"].is_null());
     fixture.cleanup().await
 }
+
+async fn fresh_reverse_evidence(fixture: &Fixture, block: i64) -> Result<()> {
+    use serde_json::json;
+    use support::Event;
+
+    for (index, kind, family, after) in [
+        (
+            1,
+            "ReverseChanged",
+            "ens_v1_reverse_l1",
+            json!({
+                "source_event":"ReverseClaimed", "address":reverse::address(1),
+                "coin_type":"60", "namespace":"ens", "reverse_node":node(1)
+            }),
+        ),
+        (
+            2,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            json!({
+                "source_event":"NameChanged", "node":node(2), "resolver":reverse::SILENT,
+                "record_key":"name", "record_family":"name", "raw_name":"fresh.eth"
+            }),
+        ),
+        (
+            3,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            json!({
+                "source_event":"NewResolver", "node":node(3),
+                "resolver":"0x0000000000000000000000000000000000000000"
+            }),
+        ),
+    ] {
+        fixture
+            .event(
+                Event::new(
+                    &format!("fresh:{block}:{index}"),
+                    block,
+                    index,
+                    kind,
+                    family,
+                )
+                .on(CHAIN)
+                .after(after),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_evidence_resets_never_observed_reverse_splits_without_restarting_unchanged_work()
+-> Result<()> {
+    let (fixture, rpc) = fixture("family_hydration_unobserved_reset", 5).await?;
+    run(&fixture, 0, FamilyMode::Normal, &rpc).await?;
+    for index in 1..=4 {
+        seed(&fixture, 1, index).await?;
+        rpc.poison(&node(index));
+    }
+    let first = run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(
+        (
+            first.hydration.reverse.answered,
+            first.hydration.reverse.deferred
+        ),
+        (0, 4)
+    );
+    for block in [1, 2] {
+        if block == 2 {
+            run(&fixture, block, FamilyMode::Normal, &rpc).await?;
+            assert_eq!(
+                sizes(&rpc, block),
+                vec![1, 1, 1, 1],
+                "resume the saved splits"
+            );
+        }
+        for index in 1..=4 {
+            let deferred = tuple(&fixture, index).await?;
+            assert_eq!(deferred["attempt_limit"], 1);
+            assert_eq!(deferred["attempt_failures"], block);
+            for field in ["attempt_block", "attempt_hash", "baseline", "hydrated_name"] {
+                assert!(deferred[field].is_null(), "{field} is still unobserved");
+            }
+        }
+    }
+
+    // Exercise all three producer paths in the actual head preview and publication. Tuple 4
+    // has no new evidence: it keeps its singleton progress while tuples 1 and 2 regroup.
+    fresh_reverse_evidence(&fixture, 3).await?;
+    run(&fixture, 3, FamilyMode::Normal, &rpc).await?;
+    assert_eq!(sizes(&rpc, 3), vec![1, 2, 1, 1]);
+    for index in [1, 2] {
+        assert_eq!(tuple(&fixture, index).await?["attempt_failures"], 1);
+    }
+    let retired = tuple(&fixture, 3).await?;
+    assert!(retired["attempt_limit"].is_null() && retired["attempt_failures"].is_null());
+    assert_eq!(tuple(&fixture, 4).await?["attempt_failures"], 3);
+    let before = fixture.rows("project_reverse_tuple").await?;
+    let before_work = fixture.rows("project_reverse_hydration_work").await?;
+
+    // Fresh evidence below the readable head must clear the schedule before any RPC occurs.
+    fresh_reverse_evidence(&fixture, 4).await?;
+    rpc::head(&fixture.pool, 5).await?;
+    let calls = rpc.calls();
+    let (outcome, error) = apply(&fixture, &marker(4), FamilyMode::Normal, &options(&rpc)).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(outcome.hydration.passes, 0);
+    for index in [1, 2] {
+        let reset = tuple(&fixture, index).await?;
+        assert!(reset["attempt_limit"].is_null() && reset["attempt_failures"].is_null());
+        assert!(reset["attempt_block"].is_null() && reset["baseline"].is_null());
+    }
+    assert_eq!(tuple(&fixture, 4).await?["attempt_failures"], 3);
+    let reset_rows = fixture.rows("project_reverse_tuple").await?;
+    let reset_work = fixture.rows("project_reverse_hydration_work").await?;
+    bigname_project::families::undo_to(&fixture.pool, CHAIN, 3).await?;
+    assert_eq!(fixture.rows("project_reverse_tuple").await?, before);
+    assert_eq!(
+        fixture.rows("project_reverse_hydration_work").await?,
+        before_work
+    );
+    let (_, error) = apply(
+        &fixture,
+        &marker(4),
+        FamilyMode::Redo { from: 4, to: 4 },
+        &options(&rpc),
+    )
+    .await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(rpc.calls(), calls, "catch-up and replay are provider-free");
+    assert_eq!(fixture.rows("project_reverse_tuple").await?, reset_rows);
+    assert_eq!(
+        fixture.rows("project_reverse_hydration_work").await?,
+        reset_work
+    );
+    fixture.cleanup().await
+}

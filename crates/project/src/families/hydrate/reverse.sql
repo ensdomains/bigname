@@ -74,10 +74,12 @@ WITH changed_keys AS (
            COALESCE((t.reverse_position->>'block_number')::bigint = $2
                OR (t.claim_position->>'block_number')::bigint = $2
                OR pointer.block_number = $2 OR node.block_number = $2, false) AS delta,
-           t.attempt_block IS NOT NULL AND (COALESCE(t.block_number > t.attempt_block
-               OR node.block_number > t.attempt_block, false)
-               OR t.reverse_node IS DISTINCT FROM t.baseline ->> 'reverse_node'
-               OR pointer.resolver_address IS DISTINCT FROM t.baseline ->> 'resolver_address') AS _reset,
+           -- Compare selected source evidence across this publication, not to the last RPC.
+           -- Reasserting the same pointer changes its position, but not the selected resolver.
+           jsonb_build_object('chain_id', t.chain_id, 'reverse_node', t.reverse_node,
+               'source_event', t.source_event, 'reverse_position', t.reverse_position,
+               'claim_position', t.claim_position, 'resolver', pointer.resolver_address,
+               'node_claim', to_jsonb(node), 'claim', to_jsonb(claim)) AS _evidence,
            jsonb_build_object(
                'reverse_node', t.reverse_node,
                'resolver_address', pointer.resolver_address,

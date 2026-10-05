@@ -87,6 +87,7 @@ fn changes(rows: &RowSet, table: &'static tables::TableSpec) -> Value {
 
 static SELECT_SQL: LazyLock<String> = LazyLock::new(|| {
     include_str!("text.sql")
+        .replace("{eligibility}", include_str!("text_eligible.sql"))
         .replace(
             "{value_emission_ordinal}",
             &emission_ordinal_sql(
@@ -453,6 +454,6 @@ mod tests {
             .filter(|character| character.is_whitespace())
             .map(|character| format!("\\{:04X}", u32::from(character)))
             .collect();
-        assert!(include_str!("text.sql").contains(&format!("U&'{listed}'")));
+        assert!(include_str!("text_eligible.sql").contains(&format!("U&'{listed}'")));
     }
 }
