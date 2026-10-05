@@ -64,6 +64,10 @@ async fn declare_alpha_registry(database: &TestDatabase) -> Result<()> {
             contract_instance_id, declared_address, role, proxy_kind)
         VALUES ($1, 'ethereum-mainnet', 'contract', 'alpha', $2, $3, 'registry', 'none')")
         .bind(manifest).bind(Uuid::from_u128(0xA190)).bind(ALPHA_REGISTRY).execute(&database.pool).await?;
+    sqlx::query("UPDATE contract_instance_addresses SET source_manifest_id = $1,
+            provenance = jsonb_build_object('source', 'manifest_declaration', 'manifest_id', $1)
+        WHERE contract_instance_id = $2")
+        .bind(manifest).bind(Uuid::from_u128(0xA190)).execute(&database.pool).await?;
     Ok(())
 }
 
@@ -196,14 +200,26 @@ async fn v2_get_permissions_rejects_malformed_registry_selectors() -> Result<()>
 async fn v2_get_permissions_marks_discovered_registry_roots_partial() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_registry_root_holders(&database).await?;
+    let uri = format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}");
+    let assert_partial = |page: &Value| {
+        assert_eq!(page["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{page}");
+        assert_eq!(page["meta"]["completeness"], "partial", "{page}");
+        assert_eq!(page["meta"]["unsupported_reason"], "permissions_partially_listed");
+        assert_eq!(page["meta"]["unlisted_permission_surfaces"], json!(["ens_v2_registry_operators"]));
+    };
+    // A declaration in a manifest that is no longer active does not establish the code.
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE source_family = 'ens_v2_registry_l1'
+        AND file_path = 'fixture/registry.toml'").execute(&database.pool).await?;
+    assert_partial(&v2_permissions_payload_for_database(&database, &uri).await?);
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'active' WHERE file_path = 'fixture/registry.toml'")
+        .execute(&database.pool).await?;
+    // An interval discovery admitted does not match a declaration of the same instance.
+    sqlx::query("UPDATE contract_instance_addresses SET provenance = '{\"source\":\"discovery\"}'
+        WHERE contract_instance_id = $1").bind(Uuid::from_u128(0xA190)).execute(&database.pool).await?;
+    assert_partial(&v2_permissions_payload_for_database(&database, &uri).await?);
     sqlx::query("DELETE FROM manifest_contract_instances WHERE contract_instance_id = $1")
         .bind(Uuid::from_u128(0xA190)).execute(&database.pool).await?;
-    let page = v2_permissions_payload_for_database(&database,
-        &format!("/v1/permissions?registry=1:{ALPHA_REGISTRY}")).await?;
-    assert_eq!(page["data"].as_array().unwrap().len(), ROOT_HOLDERS.len(), "{page}");
-    assert_eq!(page["meta"]["completeness"], "partial");
-    assert_eq!(page["meta"]["unsupported_reason"], "permissions_partially_listed");
-    assert_eq!(page["meta"]["unlisted_permission_surfaces"], json!(["ens_v2_registry_operators"]));
+    assert_partial(&v2_permissions_payload_for_database(&database, &uri).await?);
     database.cleanup().await
 }
 

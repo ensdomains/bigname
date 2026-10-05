@@ -7,8 +7,9 @@ use crate::identity::ens_v2_registry_root_resource_id;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegistryRootResource {
     pub resource_id: Uuid,
-    /// A manifest declares the instance as an ENSv2 root or registry contract. A registry that
-    /// discovery admitted runs code bigname does not read.
+    /// The live interval was admitted by an active manifest's declaration of the instance as an
+    /// ENSv2 root or registry contract. A registry that discovery admitted, or an interval only an
+    /// inactive or retired declaration covers, runs code bigname does not establish.
     pub manifest_declared: bool,
 }
 
@@ -28,7 +29,8 @@ pub async fn load_registry_root_resource(
     let row: Option<(Uuid, bool)> = sqlx::query_as(
         "WITH holder AS (
              SELECT address.chain_id, address.contract_instance_id, address.address,
-                    address.active_from_block_number
+                    address.active_from_block_number, address.deactivated_at,
+                    address.source_manifest_id, address.provenance
              FROM bigname_phase.contract_instance_addresses address
              WHERE address.chain_id = $1 AND lower(address.address) = lower($2)
                AND address.deactivated_at IS NULL
@@ -36,7 +38,8 @@ pub async fn load_registry_root_resource(
                AND (address.active_to_block_number IS NULL OR address.active_to_block_number >= $3)
              UNION ALL
              SELECT address.chain_id, address.contract_instance_id, address.address,
-                    address.active_from_block_number
+                    address.active_from_block_number, address.deactivated_at,
+                    address.source_manifest_id, address.provenance
              FROM bigname_phase.contract_instance_addresses address
              WHERE address.chain_id = $1 AND address.active_to_block_number >= $3
                AND address.deactivated_at IS NOT NULL
@@ -44,16 +47,22 @@ pub async fn load_registry_root_resource(
                AND (address.active_from_block_number IS NULL OR address.active_from_block_number <= $3)
          )
          SELECT holder.contract_instance_id,
-                EXISTS (
+                holder.deactivated_at IS NULL
+                AND holder.provenance ->> 'source' = 'manifest_declaration'
+                AND EXISTS (
                     SELECT 1
                     FROM bigname_phase.manifest_contract_instances declaration
                     JOIN bigname_phase.manifest_versions manifest
                       ON manifest.manifest_id = declaration.manifest_id
                      AND manifest.chain_id = declaration.chain_id
                     WHERE declaration.chain_id = holder.chain_id
+                      AND declaration.manifest_id = COALESCE(
+                          holder.source_manifest_id,
+                          (holder.provenance ->> 'manifest_id')::bigint)
                       AND declaration.contract_instance_id = holder.contract_instance_id
                       AND lower(declaration.declared_address) = lower(holder.address)
                       AND declaration.role IN ('root_registry', 'registry')
+                      AND manifest.rollout_status = 'active'
                       AND manifest.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1')
                 )
          FROM holder

@@ -182,7 +182,7 @@ pub(super) async fn resolve_permissions_filter(
         && inputs.name_filter.is_none()
         && let (Some(resource_id), Some(namespace)) = (resource_id, params.namespace.as_deref())
         && !bigname_storage::permission_resource_matches_namespace(
-            &state.pool,
+            snapshot.conn().await?,
             resource_id,
             namespace,
         )

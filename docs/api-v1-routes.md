@@ -2983,8 +2983,9 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L174-L184 @ ens_v2@a971bd64)
   A `registry` read is classified by the registry, not by a registration
-  summary. For a registry a manifest declares (the root and ETH registries,
-  whose code is pinned) the root holders are listed in full, so the three
+  summary. For a registry whose current address an active manifest declares
+  (the root and ETH registries, whose code is pinned) the root holders are
+  listed in full, so the three
   fields are omitted: every write to an ENSv2 role bitmap emits
   `EACRolesChanged`, and the registry adds a name owner's roles to that owner's
   approved operators only for a name's token resource, never for the root
@@ -2992,7 +2993,8 @@ introduces it rebuilds Project from full history before serving the option; see
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L277-L284 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L311-L318 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
-  A registry that discovery admitted reports `["ens_v2_registry_operators"]`.
+  A registry that discovery admitted, or one only an inactive or retired
+  declaration covers, reports `["ens_v2_registry_operators"]`.
   bigname does not read a discovered contract's code, and anyone can initialize
   a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
   is one): it grants its root roles to a parent registry, and gives exactly
