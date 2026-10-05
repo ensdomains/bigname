@@ -52,7 +52,9 @@ const ROOT_SCOPE: &str = "root";
 const TOKEN_SCOPE: &str = "registry";
 /// The candidate keys of ENSv2 registry operators: each approved operator with every entry its
 /// approver currently owns in the approving registry, where the owner has a grant on the entry's
-/// resource. Composition applies the entry's expiry and the path-expiry drop. `$9` is the chain
+/// resource and the entry has not expired at the chain's family publication, so an operator of
+/// many expired entries does not make a page walk them. Composition applies the expiry again
+/// at the publication it reads, and the path-expiry drop. `$9` is the chain
 /// of the resource a read is bound to, null on an address read.
 pub(super) const OPERATOR_CANDIDATES: &str = "SELECT approval.subject, entry.resource_id,
         concat('account:', approval.chain_id, ':ens_v2_registry:',
@@ -61,10 +63,12 @@ pub(super) const OPERATOR_CANDIDATES: &str = "SELECT approval.subject, entry.res
     JOIN bigname_phase.project_ens_v2_entry_owner entry
       ON entry.chain_id = approval.chain_id AND entry.owner = approval.owner
      AND entry.registry = approval.authority_contract
+    LEFT JOIN bigname_phase.project_family_marker marker ON marker.chain_id = entry.chain_id
     WHERE approval.authority_kind = 'ens_v2_registry'
       AND approval.relation_kind = 'operator' AND approval.approved
       AND approval.subject <> approval.owner
       AND entry.status = 'registered' AND entry.resource_id IS NOT NULL
+      AND (marker.chain_id IS NULL OR entry.expiry > extract(epoch FROM marker.block_timestamp))
       AND ($9::text IS NULL OR entry.chain_id = $9)
       AND EXISTS (SELECT 1 FROM bigname_phase.project_grant owner_grant
           WHERE owner_grant.chain_id = entry.chain_id
