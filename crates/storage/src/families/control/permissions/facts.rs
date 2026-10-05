@@ -73,6 +73,7 @@ pub(super) struct AuthorityFacts {
 /// latest readable event names (`registry_contract_instance_id`), kept only when that root's
 /// identity row is readable at `block_number`. The latest is by block, transaction index, log
 /// index, then generated event id, each descending with nulls last.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2_sepolia_20261001@07e55a05)
 pub(super) async fn authority_facts(
     conn: &mut PgConnection,
     chain_id: &str,
