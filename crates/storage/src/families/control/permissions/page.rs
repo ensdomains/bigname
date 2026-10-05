@@ -8,15 +8,17 @@
 //! - Registry-operator rows are the F9 approvals of the resource's F2c registry binding
 //!   (`operators.rs`).
 //! - ENSv2 registry operator rows and the root-holder rows of a token resource are derived from
-//!   the F16 entry rows and the root grants (`ens_v2.rs`).
+//!   the F16 entry rows and the root grants (`ens_v2.rs`). Supported WrapperRegistry roots
+//!   additionally replace qualifying owner/operator grants through `wrapper_registry.rs`.
 //! - The summary's authority kind, registry root and readability come from the identity and
 //!   event inputs by key (`facts.rs`); the restriction block is the family one.
 //!
 //! Each read runs in one read-only REPEATABLE READ snapshot and describes the family marker's
 //! publication of every chain it touches; a chain whose marker is not servable (a rebuild in
 //! flight, or another build's) fails the read with [`FamilyPublicationUnavailable`], which the
-//! API answers with the stale 409. No per-row canonicality or lineage check is needed: the
-//! family undo removes what a dropped block wrote.
+//! API answers with the stale 409. Family undo restores projected rows after a dropped block;
+//! the WrapperRegistry recognition reader separately checks canonical origin/upgrade history
+//! through that same publication before replacing a root grant.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
@@ -178,7 +180,7 @@ async fn page_rows(
         after = keys
             .last()
             .map(PermissionsCurrentAccountResourceCursor::from);
-        rows.extend(effective_rows(conn, &keys).await?);
+        rows.extend(effective_rows(conn, &keys, root_holders).await?);
         if exhausted {
             break;
         }
@@ -339,6 +341,7 @@ fn canonicality(publication: &FamilyPublication) -> Value {
 async fn effective_rows(
     conn: &mut PgConnection,
     keys: &[super::candidates::Key],
+    root_holders: bool,
 ) -> Result<Vec<EffectivePermissionRow>> {
     let resources: Vec<Uuid> = keys
         .iter()
@@ -368,6 +371,9 @@ async fn effective_rows(
         }
         for row in super::ens_v2::operator_rows(conn, &publication, &clock, keys).await? {
             rows.push(operator_row(&row, &publication)?);
+        }
+        if root_holders {
+            super::wrapper_registry::compose(conn, &publication, &clock, keys, &mut rows).await?;
         }
         let bindings = bindings_for(conn, &publication.chain_id, &resources).await?;
         for (resource, binding) in bindings {
@@ -412,7 +418,7 @@ async fn effective_rows(
 
 /// A family permission row in the served effective row's shape. The provenance, coverage,
 /// positions and recompute time describe the publication; the route reads none of them.
-fn direct_row(
+pub(super) fn direct_row(
     grant: &ServedGrant,
     publication: &FamilyPublication,
 ) -> Result<EffectivePermissionRow> {
@@ -449,7 +455,7 @@ fn direct_row(
     })
 }
 
-fn operator_row(
+pub(super) fn operator_row(
     row: &OperatorRow,
     publication: &FamilyPublication,
 ) -> Result<EffectivePermissionRow> {

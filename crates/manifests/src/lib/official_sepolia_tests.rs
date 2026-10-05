@@ -47,6 +47,7 @@ fn official_sepolia_addresses_receipts_and_abi_match_the_pinned_deployment() -> 
         ("verifiable_factory", "VerifiableFactory"),
         ("migration_helper", "MigrationHelper"),
         ("wrapper_registry_implementation", "WrapperRegistryImpl"),
+        ("user_registry_implementation", "UserRegistryImpl"),
     ];
     let mut seen = BTreeSet::new();
     for loaded in repository

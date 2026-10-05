@@ -6065,7 +6065,8 @@
       "GrantRelation": {
         "type": "string",
         "enum": [
-          "operator"
+          "operator",
+          "holder"
         ]
       },
       "NetworkHeadStatus": {

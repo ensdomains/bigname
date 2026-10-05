@@ -7,6 +7,8 @@ mod grants;
 mod operators;
 pub mod page;
 mod restrictions;
+mod registry_support;
+mod wrapper_registry;
 mod summary;
 
 use std::collections::{BTreeMap, BTreeSet};

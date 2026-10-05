@@ -354,6 +354,7 @@ pub(crate) fn build_permission_row(
         grant: AddressNameGrant {
             grant_relation: row.grant_relation.map(|relation| match relation {
                 PermissionGrantRelation::Operator => GrantRelation::Operator,
+                PermissionGrantRelation::Holder => GrantRelation::Holder,
             }),
             grant_scope: effective_permission_scope_value(&row.scope)?,
             powers: permission_powers_value(&row.effective_powers)?,

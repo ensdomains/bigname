@@ -1034,3 +1034,29 @@ WHERE source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
   AND canonicality_state IN ('canonical', 'safe', 'finalized')
   AND resource_id IS NOT NULL AND block_number IS NOT NULL
   AND transaction_index IS NOT NULL AND log_index IS NOT NULL;
+
+
+-- Read-only permission recognition; owned by the API reader.
+CREATE INDEX IF NOT EXISTS normalized_events_registry_origin_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'),
+        block_number, transaction_index, log_index, event_identity COLLATE "C")
+    WHERE source_family = 'ens_v2_migration_l1' AND event_kind = 'ContractDiscovered'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+COMMENT ON INDEX normalized_events_registry_origin_idx IS
+    'This index seeks at most two canonical factory origins for one registry address at the served publication.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_wrapper_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880';
+COMMENT ON INDEX normalized_events_wrapper_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported WrapperRegistry implementation without visiting benign same-code upgrades.';
+
+CREATE INDEX IF NOT EXISTS normalized_events_user_registry_departure_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a';
+COMMENT ON INDEX normalized_events_user_registry_departure_idx IS
+    'This sparse index checks for a canonical departure from the supported UserRegistry implementation without visiting benign same-code upgrades.';

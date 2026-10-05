@@ -65,6 +65,8 @@ const READER_FILES: &[&str] = &[
     "crates/storage/src/families/control/permissions/operators.rs",
     "crates/storage/src/families/control/permissions/page.rs",
     "crates/storage/src/families/control/permissions/restrictions.rs",
+    "crates/storage/src/families/control/permissions/registry_support.rs",
+    "crates/storage/src/families/control/permissions/wrapper_registry.rs",
     "crates/storage/src/families/control/permissions/summary.rs",
     // The composed-row listings and the API-side topology enrichment (`batch::load`).
     "crates/storage/src/families/name/bound.rs",

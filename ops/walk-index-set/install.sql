@@ -58,6 +58,12 @@ BEGIN
              $def$CREATE INDEX normalized_events_record_id_link_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), lower((after_state ->> 'node'::text))) WHERE ((event_kind = 'ResolverRecordLinked'::text) AND ((after_state ->> 'storage_model'::text) = 'resolver_record_id'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_resolver_alias_history_idx',
              $def$CREATE INDEX normalized_events_resolver_alias_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower(COALESCE((after_state ->> 'resolver'::text), (before_state ->> 'resolver'::text), (raw_fact_ref ->> 'emitting_address'::text))), block_number DESC, normalized_event_id DESC) WHERE ((event_kind = 'AliasChanged'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_registry_origin_idx',
+             $def$CREATE INDEX normalized_events_registry_origin_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number, transaction_index, log_index, event_identity COLLATE "C") WHERE ((source_family = 'ens_v2_migration_l1'::text) AND (event_kind = 'ContractDiscovered'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_wrapper_departure_idx',
+             $def$CREATE INDEX normalized_events_wrapper_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880'::text))$def$),
+            ('normalized_events_user_registry_departure_idx',
+             $def$CREATE INDEX normalized_events_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a'::text))$def$),
             ('normalized_events_resolver_upgrade_history_idx',
              $def$CREATE INDEX normalized_events_resolver_upgrade_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number DESC, normalized_event_id DESC) WHERE ((event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_pointer_after_resolver_history_idx',
@@ -358,6 +364,24 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_alias_history
     WHERE event_kind = 'AliasChanged'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_registry_origin_idx
+    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'proxy_address'),
+        block_number, transaction_index, log_index, event_identity COLLATE "C")
+    WHERE source_family = 'ens_v2_migration_l1' AND event_kind = 'ContractDiscovered'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_wrapper_departure_idx
+    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_user_registry_departure_idx
+    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'proxy_address'), block_number)
+    WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'Upgraded'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND lower(after_state ->> 'implementation') IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a';
+
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_resolver_upgrade_history_idx
     ON bigname_phase.normalized_events (
         chain_id,
@@ -589,6 +613,9 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_record_id_link_idx'),
     to_regclass('bigname_phase.normalized_events_resolver_alias_history_idx'),
     to_regclass('bigname_phase.normalized_events_resolver_upgrade_history_idx'),
+    to_regclass('bigname_phase.normalized_events_registry_origin_idx'),
+    to_regclass('bigname_phase.normalized_events_wrapper_departure_idx'),
+    to_regclass('bigname_phase.normalized_events_user_registry_departure_idx'),
     to_regclass('bigname_phase.normalized_events_pointer_after_resolver_history_idx'),
     to_regclass('bigname_phase.normalized_events_pointer_before_resolver_history_idx'),
     to_regclass('bigname_phase.normalized_events_permission_after_resolver_history_idx'),

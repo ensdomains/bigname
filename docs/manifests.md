@@ -1030,6 +1030,19 @@ does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry
 is implementation metadata, not a root or a registry admission. It remains a declared
 address in the family-wide watch plan. (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05) (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/WrapperRegistryImpl.json:L3936 @ ens_v2_sepolia_20261001@07e55a05)
 
+The same migration source also retains the declared factory's independent
+`ContractDiscovered` origins for the exact Wrapper implementation above and
+UserRegistry implementation `0x9bd8a88719068d09ecee662f36c0e3856708366a`
+(start block `11820439`). Both implementation declarations are metadata,
+neither root nor registry admission. An uncorrelated retained origin has no
+migration correlation and does not change correlated visibility. It may
+precede delayed initialization: ordinary `RegistryCreated` remains required
+to admit the proxy, and no pre-initialization approvals are added. Other
+uncorrelated migration-source observations remain omitted.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L3269 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_sepolia_20261001@07e55a05)
+
 Consumer slice 3A admits the same shape at any depth. The registry created for a
 locked child is deployed by its parent's registry, not by the locked migration
 controller, because `WrapperRegistry` inherits the same wrapper receiver.

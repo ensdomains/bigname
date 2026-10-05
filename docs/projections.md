@@ -1895,7 +1895,11 @@ roles to that entry's owner.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
 A cleared parent stays a row with null `parent`. The table does not say which
 registries are WrapperRegistry instances; that needs implementation evidence
-this family does not keep.
+this family does not keep. The permission reader joins retained declared-factory
+origins and uninterrupted known implementation history at the same publication,
+then derives the parent entry owner and that owner's parent-registry approvals
+from these F16 rows and F9. It adds no Project rows or child fanout; see
+[permission semantics](api-v1.md) and [recognition narrowing](upstream.md#wrapperregistry-permission-history).
 
 Both tables are journalled and undone like every family. Schema-migration
 `20261005140000_project_ens_v2_registry_entries.sql` adds them to an existing

@@ -1152,6 +1152,7 @@ GRANT SELECT ON TABLE
     bigname_phase.project_resource_admin_aggregate,
     bigname_phase.project_account_approval,
     bigname_phase.project_ens_v2_entry_owner,
+    bigname_phase.project_ens_v2_registry_parent,
     bigname_phase.project_child_edge_candidate,
     bigname_phase.project_parent_subregistry,
     bigname_phase.project_reverse_tuple,
@@ -2988,3 +2989,29 @@ After the schema-migrations and until the family rebuild publishes, the listing 
 `409 stale`, as every fenced route does. An API from before this build still answers the
 listing after the indexes are dropped, by scanning the two tables, so it is slower there and
 nowhere else; replace it rather than leave it running.
+
+### WrapperRegistry permission reader upgrade
+
+The reader additionally needs `SELECT` on
+`bigname_phase.project_ens_v2_registry_parent`. Before restarting an existing
+API role, apply the grant below on the primary and allow it to replay on any
+serving standby. Fresh role setup above already includes it. Startup preflight
+refuses an API role without the grant.
+
+```sql
+GRANT SELECT ON bigname_phase.project_ens_v2_registry_parent TO bigname_api;
+```
+
+Schema-migration `20261005200000_registry_permission_history_indexes.sql`
+installs three read-only normalized-event indexes for registry origin and
+upgrade-disqualifier probes. Every populated initialized database must first run
+[`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)
+outside a transaction. It builds missing indexes concurrently and validates the
+whole set; follow its [ordered prebuild, headroom and recovery instructions](../ops/registry-permission-indexes/README.md).
+The schema-migration refuses a populated upgrade with a missing or invalid index,
+then adopts a complete set without rebuilding or changing its OIDs. Empty
+schemas build directly. The independent
+factory-origin retention and UserRegistry implementation metadata ship in the
+held content-hash rotation and require its normal full Interpret/Project
+rebuild. Metadata and retained origins do not replace ordinary registry
+announcement admission or introduce pre-initialization approval capture.

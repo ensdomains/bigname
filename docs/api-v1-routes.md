@@ -3016,7 +3016,7 @@ introduces it rebuilds Project from full history before serving the option; see
   }
   ```
 
-  A registry root holder is:
+  A direct registry root holder is:
 
   ```json
   {
@@ -3033,12 +3033,19 @@ introduces it rebuilds Project from full history before serving the option; see
 
   On a `registry` read, an `address` read and a read of the root resource by
   `registration_id`, a root row's `powers` are the holder's declared root role
-  bits, never empty; `name`, `grant_relation`, `record_resource` and the
-  wrapper fields are absent, `authority_context` is always `resource_audit`,
+  bits, never empty. This direct row omits `name`, `grant_relation`,
+  `record_resource` and wrapper fields. `authority_context` is `resource_audit`,
   and `registration_id` is the root resource's id rather than a name
   registration. The root `detail` is an additive change: root rows served on
   `address` and `registration_id` reads before it carried `detail: {}` and now
   carry the same `registry` object.
+
+  A supported WrapperRegistry's derived parent owner carries
+  `grant_relation=holder` and root scope. That owner's approvals on the parent
+  registry carry `grant_relation=operator` and account scope naming the parent
+  registry and owner. Qualification replaces the subject's own stored root
+  bitmap before pagination, even with an empty replacement. Registry and
+  address filters share this composition; see [permission semantics](api-v1.md).
 
   A read bound to one ENSv2 registration by `name` or `registration_id` lists
   the registry's root holders too, because a role held on the root passes the
@@ -3181,8 +3188,9 @@ introduces it rebuilds Project from full history before serving the option; see
   inactive or retired declaration covers, serves the same rows and reports
   `["ens_v2_registry_operators","resolver_approvals"]`, for the reason given
   for a discovered registry's root below: the accounts a `WrapperRegistry`
-  lets act with its parent's roles act on every token of the registry and are
-  not rows. An ENSv2 registration has no BaseRegistrar token, so it never
+  lets act with its parent's roles act on every token of the registry. The
+  supported factory/history cases produce rows as specified in
+  [permission semantics](api-v1.md); this coverage label remains conservative. An ENSv2 registration has no BaseRegistrar token, so it never
   reports `registrar_approvals`.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L51-L59 @ ens_v2@a971bd64)
@@ -3204,7 +3212,8 @@ introduces it rebuilds Project from full history before serving the option; see
   a `WrapperRegistry` (a [migration registry](glossary.md#migration-registry-wrapperregistry)
   is one): it grants its root roles to a parent registry, and gives exactly
   those roles to the parent name's current owner and to that owner's operators
-  on the parent registry, who are not rows. A `UserRegistry` is upgradeable, so
+  on the parent registry. Supported factory/history cases produce those rows
+  as specified in [permission semantics](api-v1.md). A `UserRegistry` is upgradeable, so
   its code can change too.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L125-L145 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)

@@ -1672,6 +1672,12 @@ ens_v1@91c966f) (upstream: .refs/basenames/src/L2/Registry.sol:L150-L157 @
 basenames@1809bbc) (upstream: .refs/basenames/src/L2/Registry.sol:L202-L207 @
 basenames@1809bbc)
 
+For supported WrapperRegistry histories, `holder` identifies the current owner
+of the registry's parent entry, whose bitmap is derived from the parent
+registry's stored grant on the WrapperRegistry root. The owner's approvals on
+that parent registry produce `operator` rows. See [permission semantics](api-v1.md).
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+
 ## Registry-owner binding
 
 the current, evidence-backed association between an ENSv1 or Basenames permission

@@ -94,9 +94,12 @@ pub(super) async fn page(
     } else {
         ""
     };
+    let wrapper_owners = super::wrapper_registry::owner_candidates();
+    let wrapper_operators = super::wrapper_registry::operator_candidates();
     let arms = [
         DIRECT, WRAPPER, &registry_target, &registry_resource, &registry_name,
         super::ens_v2::OPERATOR_CANDIDATES, super::ens_v2::ROOT_HOLDER_CANDIDATES,
+        &wrapper_owners, &wrapper_operators,
     ]
         .into_iter().map(|source| format!(
             "(SELECT DISTINCT candidate.subject COLLATE \"C\" AS subject,

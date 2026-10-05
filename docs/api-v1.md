@@ -101,7 +101,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
 | `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v1-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
-| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies a registry-wide approval, while direct permission rows omit the field | new in v2 |
+| `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies an account approval and `holder` a derived WrapperRegistry parent owner; direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
 | `status` | one result vocabulary: `ok`, `not_found`, `invalid_name`, `mismatch`, `unsupported`, `stale`, `failed` | `ResultStatus`, `IdentityStatus`, `NameRecordStatus`, `unnormalizable_input` (folds into `invalid_name`); `mismatch` kept for verification results |
 | `unsupported_reason` | reason code or short reason string required with `status=unsupported` | `coverage.unsupported_reason`, route-specific unsupported details |
@@ -306,9 +306,37 @@ or retired declaration covers, serves the same rows and reports
 `["ens_v2_registry_operators","resolver_approvals"]`: bigname does not read a
 discovered contract's code, and a `WrapperRegistry` gives the roles its parent
 registry holds on its root to the parent name's owner and to that owner's
-operators on the parent registry, who act on every token of the registry and
-are not rows.
+operators on the parent registry, who act on every token of the registry.
+The supported factory/history cases described below now produce those rows;
+the discovered-registry coverage classification remains conservative.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+For a supported WrapperRegistry W, the permission reader uses W's current
+parent P and exact raw label. When P's entry has a live owner O at the served
+publication, O receives the stored W-root bitmap of subject P as a root row
+with `grant_relation=holder`; every distinct account O currently approves on
+P receives that same bitmap with `grant_relation=operator` and an account
+scope naming P and O. O needs no role grant on P. A qualifying account's own
+stored W-root bitmap is replaced, even when P's bitmap is empty. Its stored
+grant stays dormant and returns when the account no longer qualifies. All
+root powers, including `can_transfer_admin`, follow this rule; it adds no
+token transfer power. Self-approval produces only the holder row.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L273-L287 @ ens_v2_sepolia_20261001@07e55a05)
+
+Support requires a retained origin from the declared factory in the exact
+pinned Wrapper implementation, ordinary `RegistryCreated` admission, and no
+canonical upgrade away from that implementation through the same Project
+publication. Returning to the implementation does not restore support after
+a departure; undoing the departure does. P must be the pinned declared root
+or ETH registry, or an equivalently proven UserRegistry or WrapperRegistry.
+Unknown W/P histories produce no derived row or speculative replacement.
+This explicit narrowing, including delayed initialization, is documented in
+[upstream divergences](upstream.md#wrapperregistry-permission-history).
+Registry, address, and name/registration permission reads share composition
+before pagination. A name/registration read retains its requested resource
+identity and normal path-expiry filtering. Address `role_summary` continues
+to exclude registry root-holder rows. Missing expiry produces no derived
+holder/operator; declared/discovered coverage labels remain unchanged.
+
 An ENSv2 registration has no BaseRegistrar token, so it never reports
 `registrar_approvals`. It reports `resolver_approvals` because the ENSv2
 `PublicResolverV2` authorizes the owner's operators and per-name delegates, and
@@ -2895,7 +2923,7 @@ Current name summary used by search and the namespace expiry list. The expiry li
 <!-- openapi:object AddressNameGrant -->
 | Field | Type | Presence | Description |
 | --- | --- | --- | --- |
-| `grant_relation` | enum GrantRelation | optional | `operator` for an effective account approval; direct grants omit it. |
+| `grant_relation` | enum GrantRelation | optional | `operator` for an effective account approval or `holder` for a derived WrapperRegistry parent owner; direct grants omit it. |
 | `grant_scope` | object GrantScope | always | Scope in which these powers apply. |
 | `powers` | array of enum PermissionPower | always | Product permission powers; see [permission powers vocabulary](#permission-powers-vocabulary). |
 

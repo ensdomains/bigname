@@ -678,3 +678,36 @@ Per-entry format:
 Use `$upstream-evidence` or `evidence_reader` when a change adds or relies on ENSv1, ENSv2, Basenames, admitted app-metadata, reference-indexer, or execution-client behavior claims. The check produces a claim-to-citation ledger and flags any divergence that belongs in this file.
 
 Pin drift checks are deliberate, not scheduled automation. Run them when manifests, ADRs, or load-bearing citations change. Stale pins are not urgent by default — material upstream behavior change is the trigger, not calendar time.
+
+### WrapperRegistry permission history
+
+The permission reader supports the exact 2026-10-01 Sepolia WrapperRegistry
+implementation `0xbe768b63e5fbbfbb0ae97e9064e0002df8001880`, and the exact
+UserRegistry implementation `0x9bd8a88719068d09ecee662f36c0e3856708366a`
+as a parent. Recognition requires an authenticated declared-factory origin,
+ordinary canonical `RegistryCreated` admission linked to the current address
+instance, and no canonical departure from that implementation through the
+served Project publication. Namespace, chain, source manifest, factory and
+implementation declaration intervals must agree. Duplicate/conflicting
+origins establish no support. The creation block is included because the
+initial `Upgraded` precedes initialization and the factory's final log.
+Delayed initialization can follow the factory origin. Canonical adverse
+upgrades count regardless of consumer visibility; orphaned evidence does not.
+Same-code upgrades preserve support; a later return after a different-code
+upgrade does not establish compatible storage history. An undo removing the
+departure restores the previous proof.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1561 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1564 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/build-info/solc-0_8_25-b30e6dc9a03b37f6a0b89af5d02a73d3993944f7.json:L1171 @ ens_v2_sepolia_20261001@07e55a05)
+
+This intentionally narrows upstream's mutable upgrade allowlist: admission
+of a target by that allowlist does not prove compatible permission behavior.
+The parent may instead be one of the pinned nonproxy root/ETH declarations,
+within its actual admitted declaration interval. A proven Wrapper parent
+needs no recursive ancestor classification to read its entries and approvals.
+The reader uses the latest parent and raw label, never the initializer's stale
+parent. Unknown histories keep ordinary direct rows and conservative coverage.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L297-L305 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/utils/PermissionedAddressSet.sol:L51-L61 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L311-L314 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/erc1155/ERC1155Singleton.sol:L70-L75 @ ens_v2_sepolia_20261001@07e55a05)

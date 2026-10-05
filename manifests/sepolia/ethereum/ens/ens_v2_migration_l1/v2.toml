@@ -89,6 +89,15 @@ address = "0xbe768b63e5fbbfbb0ae97e9064e0002df8001880"
 proxy_kind = "none"
 start_block = 11820449
 
+# Implementation metadata for supported parent ownership reads; not registry admission.
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
+# (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/UserRegistryImpl.json:L3269 @ ens_v2_sepolia_20261001@07e55a05)
+[[contracts]]
+role = "user_registry_implementation"
+address = "0x9bd8a88719068d09ecee662f36c0e3856708366a"
+proxy_kind = "none"
+start_block = 11820439
+
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/BatchRegistrar.json:L2 @ ens_v2_sepolia_20261001@07e55a05)
 # (upstream: .refs/ens_v2_sepolia_20261001/contracts/deployments/sepolia/BatchRegistrar.json:L280 @ ens_v2_sepolia_20261001@07e55a05)
 [[contracts]]

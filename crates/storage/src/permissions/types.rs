@@ -327,6 +327,7 @@ pub struct PermissionsCurrentAccountResourcePage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PermissionGrantRelation {
     Operator,
+    Holder,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
