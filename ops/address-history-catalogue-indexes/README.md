@@ -42,6 +42,12 @@ I/O, CPU and WAL; allow for their effect on normal indexing throughput.
 Use the schema owner/writer connection and a fresh `psql` session, outside any
 transaction. Do not use `--single-transaction`:
 
+Run one schema-maintenance operation at a time throughout prebuild and adoption.
+Do not overlap this procedure with another installer, migration, `REINDEX`, or
+manual index rename, drop or rebuild. The adoption's table lock stabilizes row
+writes; it does not serialize an independent index rename. Ordinary API and
+runner activity may continue during the concurrent prebuild as described above.
+
 ```sh
 psql -X -v ON_ERROR_STOP=1 \
   -f ops/address-history-catalogue-indexes/install.sql "$BIGNAME_DATABASE_URL"

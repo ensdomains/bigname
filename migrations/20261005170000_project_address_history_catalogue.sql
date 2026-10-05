@@ -17,8 +17,8 @@ DECLARE
 BEGIN
     IF to_regclass('bigname_phase.project_family_marker') IS NULL THEN RETURN; END IF;
     LOCK TABLE bigname_phase.project_family_marker IN EXCLUSIVE MODE;
-    -- Freeze writes and concurrent index DDL while checking the population and
-    -- definitions. Planned deployment has already stopped the API and runners.
+    -- Freeze table writes while checking the population and definitions. Index
+    -- names also require the runbook's exclusive schema-maintenance window.
     LOCK TABLE bigname_phase.normalized_events IN SHARE MODE;
     SELECT EXISTS (SELECT 1 FROM bigname_phase.normalized_events) INTO has_events;
     previous_search_path := current_setting('search_path');
