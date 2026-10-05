@@ -376,7 +376,7 @@ enum ReverseFailure {
 }
 
 async fn reverse_failure(failure: ReverseFailure) -> Result<()> {
-    let db = setup("live_family_reverse_failure", 3).await?;
+    let db = setup("live_family_reverse_failure", 4).await?;
     seed_reverse(db.pool(), ADDRESS).await?;
     let second = "0x00000000000000000000000000000000000000a2";
     let shortened = matches!(failure, ReverseFailure::Shortened);
@@ -397,6 +397,7 @@ async fn reverse_failure(failure: ReverseFailure) -> Result<()> {
         (block_hash(1, 1), first),
         (block_hash(1, 2), at_two.into()),
         (block_hash(1, 3), "recovered.eth".into()),
+        (block_hash(1, 4), "recovered.eth".into()),
     ]))
     .await?;
     follow(db.pool(), &rpc.endpoint, 1, 1).await?;
@@ -439,12 +440,21 @@ async fn reverse_failure(failure: ReverseFailure) -> Result<()> {
     }
     if !shortened {
         follow(db.pool(), &rpc.endpoint, 1, 3).await?;
+        let recovered_at = if matches!(failure, ReverseFailure::FailedCall) {
+            assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?;
+            assert_eq!(rpc.calls.lock().unwrap().len(), 2, "failed children wait");
+            event(db.pool(), 4, "ReverseChanged", "ens_v1_reverse_l1", json!({"source_event":"ReverseClaimed","address":ADDRESS,"coin_type":"60","namespace":"ens","reverse_node":reverse_node(ADDRESS)}), None, None).await?;
+            follow(db.pool(), &rpc.endpoint, 1, 4).await?;
+            4
+        } else {
+            3
+        };
         assert_primary(
             db.pool(),
             ADDRESS,
             "success",
             Some("recovered.eth"),
-            Some(&block_hash(1, 3)),
+            Some(&block_hash(1, recovered_at)),
         )
         .await?;
     }
@@ -548,12 +558,13 @@ async fn text_hydration_rejects_unknown_resolvers_and_restores_ineligible_values
 /// batch. Either way nothing is served for the new write: a failed call clears the overlay, and
 /// a failed batch leaves the overlay read for the replaced write, which the reader rejects.
 async fn text_failure(failure: &str) -> Result<()> {
-    let db = setup("live_family_text_failure", 3).await?;
+    let db = setup("live_family_text_failure", 4).await?;
     let resource = seed_text(db.pool()).await?;
     let rpc = HydrationRpc::spawn(BTreeMap::from([
         (block_hash(1, 1), "https://one.test".into()),
         (block_hash(1, 2), failure.into()),
         (block_hash(1, 3), "https://recovered.test".into()),
+        (block_hash(1, 4), "https://recovered.test".into()),
     ]))
     .await?;
     follow(db.pool(), &rpc.endpoint, 1, 1).await?;
@@ -568,6 +579,12 @@ async fn text_failure(failure: &str) -> Result<()> {
     assert!(entry.get("value").is_none());
     assert!(entry.get("canonical_head_multicall_hydration").is_none());
     follow(db.pool(), &rpc.endpoint, 1, 3).await?;
+    if failure == FAILED_MULTICALL {
+        assert_eq!(text_entry(db.pool(), resource).await?, entry);
+        assert_eq!(rpc.calls.lock().unwrap().len(), 2, "failed children wait");
+        text_change(db.pool(), 4).await?;
+        follow(db.pool(), &rpc.endpoint, 1, 4).await?;
+    }
     assert_eq!(
         text_entry(db.pool(), resource).await?["value"],
         "https://recovered.test"
