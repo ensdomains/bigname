@@ -1543,6 +1543,12 @@ CREATE TABLE IF NOT EXISTS project_grant (
 );
 CREATE INDEX IF NOT EXISTS project_grant_subject_idx ON project_grant (subject);
 CREATE INDEX IF NOT EXISTS project_grant_scope_idx ON project_grant (chain_id, scope);
+CREATE INDEX IF NOT EXISTS project_grant_registry_parent_idx
+    ON project_grant (chain_id, subject, (scope_detail ->> 'registry_address'))
+    WHERE scope = 'root';
+COMMENT ON INDEX project_grant_registry_parent_idx IS
+    'This index finds a virtual parent root grant for one registry without joining all of the parent subject’s registry grants.';
+
 COMMENT ON TABLE project_grant IS
     'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read.';
 COMMENT ON COLUMN project_grant.chain_id IS

@@ -47,7 +47,8 @@ const ROOT_RESOURCE: &str = "CASE WHEN $8::uuid = virtual_grant.resource_id
 pub(super) fn owner_candidates() -> String {
     format!(
         "SELECT entry.owner AS subject, {ROOT_RESOURCE} AS resource_id, 'root'::text AS scope
-        FROM bigname_phase.project_ens_v2_entry_owner entry {PARENT_ROOT}"
+        FROM bigname_phase.project_ens_v2_entry_owner entry {PARENT_ROOT}
+          AND ($1::text IS NULL OR entry.owner = $1)"
     )
 }
 
@@ -63,7 +64,8 @@ pub(super) fn operator_candidates() -> String {
         {PARENT_ROOT}
           AND approval.authority_kind = 'ens_v2_registry'
           AND approval.relation_kind = 'operator' AND approval.approved
-          AND approval.subject <> approval.owner"
+          AND approval.subject <> approval.owner
+          AND ($1::text IS NULL OR approval.subject = $1)"
     )
 }
 

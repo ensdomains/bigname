@@ -3094,11 +3094,14 @@ GRANT SELECT ON bigname_phase.project_ens_v2_registry_parent TO bigname_api;
 
 Schema-migration `20261005200000_registry_permission_history_indexes.sql`
 installs three read-only normalized-event indexes for registry origin and
-upgrade-disqualifier probes. Every populated initialized database must first run
+upgrade-disqualifier probes, plus the parent root-grant lookup index on
+`project_grant`. Each populated target table requires its corresponding indexes.
+Before applying the migration on an initialized database, run
 [`ops/registry-permission-indexes/install.sql`](../ops/registry-permission-indexes/install.sql)
 outside a transaction. It builds missing indexes concurrently and validates the
 whole set; follow its [ordered prebuild, headroom and recovery instructions](../ops/registry-permission-indexes/README.md).
-The schema-migration refuses a populated upgrade with a missing or invalid index,
+The schema-migration validates every index against its actual target relation,
+refuses a populated target with a missing index or any invalid definition,
 then adopts a complete set without rebuilding or changing its OIDs. Empty
 schemas build directly. The independent
 factory-origin retention and UserRegistry implementation metadata ship in the

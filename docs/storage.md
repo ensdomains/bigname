@@ -409,8 +409,18 @@ plans, include malformed/null targets, and deliberately do not filter consumer
 visibility. They change no Interpret row. A same-code upgrade contributes to
 the other model's sparse index only; other upgrades contribute to both.
 The F16 reverse parent-entry index finds only registries associated with an
-ownership/approval candidate. No new projected classification or holder rows
-are stored. API startup and its deployment grant list require
+ownership/approval candidate. The same schema-migration adds
+`project_grant_registry_parent_idx` on Project-owned `project_grant`: chain,
+subject and the root grant’s registry address, restricted to root grants.
+Each candidate probes its virtual parent’s grant on that one registry, avoiding
+a join against every child registry for which the parent holds root roles.
+The new candidate arms expose ordinary owner/subject equality alongside the
+public bytewise key order so existing ownership/approval indexes remain usable.
+No new projected classification or holder rows are stored. The concurrent
+prebuild validates each index against its actual relation; a populated
+`project_grant` requires its own prebuilt index even when `normalized_events`
+is empty. API startup already requires `project_grant`; its deployment grant
+list additionally requires
 `project_ens_v2_registry_parent` for this reader.
 
 Family indexes serve these concrete readers:

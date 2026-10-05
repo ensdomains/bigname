@@ -15,11 +15,15 @@ DECLARE
     checked record;
 BEGIN
     FOR checked IN SELECT * FROM (VALUES
-            ('normalized_events_registry_origin_idx', $def$CREATE INDEX normalized_events_registry_origin_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number, transaction_index, log_index, event_identity COLLATE "C") WHERE ((source_family = 'ens_v2_migration_l1'::text) AND (event_kind = 'ContractDiscovered'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
-            ('normalized_events_wrapper_departure_idx', $def$CREATE INDEX normalized_events_wrapper_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880'::text))$def$),
-            ('normalized_events_user_registry_departure_idx', $def$CREATE INDEX normalized_events_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a'::text))$def$)
-        ) definitions(index_name, expected_definition)
+            ('normalized_events_registry_origin_idx', 'normalized_events', $def$CREATE INDEX normalized_events_registry_origin_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number, transaction_index, log_index, event_identity COLLATE "C") WHERE ((source_family = 'ens_v2_migration_l1'::text) AND (event_kind = 'ContractDiscovered'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_wrapper_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_wrapper_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0xbe768b63e5fbbfbb0ae97e9064e0002df8001880'::text))$def$),
+            ('normalized_events_user_registry_departure_idx', 'normalized_events', $def$CREATE INDEX normalized_events_user_registry_departure_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'proxy_address'::text)), block_number) WHERE ((source_family = 'ens_v2_registry_l1'::text) AND (event_kind = 'Upgraded'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND (lower((after_state ->> 'implementation'::text)) IS DISTINCT FROM '0x9bd8a88719068d09ecee662f36c0e3856708366a'::text))$def$),
+            ('project_grant_registry_parent_idx', 'project_grant', $def$CREATE INDEX project_grant_registry_parent_idx ON bigname_phase.project_grant USING btree (chain_id, subject, ((scope_detail ->> 'registry_address'::text))) WHERE (scope = 'root'::text)$def$)
+        ) definitions(index_name, table_name, expected_definition)
     LOOP
+        IF to_regclass('bigname_phase.' || checked.table_name) IS NULL THEN
+            RAISE EXCEPTION 'missing required table bigname_phase.% for permission index prebuild', checked.table_name;
+        END IF;
         IF to_regclass('bigname_phase.' || checked.index_name) IS NULL THEN
             IF require_built THEN
                 RAISE EXCEPTION 'missing prebuilt index %; rerun ops/registry-permission-indexes/install.sql', checked.index_name;
@@ -29,7 +33,7 @@ BEGIN
             RETURN NEXT;
         ELSIF NOT EXISTS (SELECT 1 FROM pg_index
             WHERE indexrelid = to_regclass('bigname_phase.' || checked.index_name)
-              AND indrelid = to_regclass('bigname_phase.normalized_events')
+              AND indrelid = to_regclass('bigname_phase.' || checked.table_name)
               AND indisvalid AND indisready AND indislive
               AND pg_get_indexdef(indexrelid) = checked.expected_definition)
         THEN
@@ -43,6 +47,7 @@ SELECT command FROM pg_temp.registry_permission_index_builds(false)
 \gexec
 SELECT command FROM pg_temp.registry_permission_index_builds(true);
 ANALYZE bigname_phase.normalized_events;
+ANALYZE bigname_phase.project_grant;
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready, indislive,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
        pg_get_indexdef(indexrelid) AS definition
@@ -50,6 +55,7 @@ FROM pg_index
 WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_registry_origin_idx'),
     to_regclass('bigname_phase.normalized_events_wrapper_departure_idx'),
-    to_regclass('bigname_phase.normalized_events_user_registry_departure_idx')
+    to_regclass('bigname_phase.normalized_events_user_registry_departure_idx'),
+    to_regclass('bigname_phase.project_grant_registry_parent_idx')
 )
 ORDER BY indexrelid::regclass::text;

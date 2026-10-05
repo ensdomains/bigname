@@ -529,7 +529,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=425
+expected_refusal_assertions=434
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=70
 refusal_probe_seconds=0
@@ -1226,7 +1226,7 @@ emit_phase_migration "$ROOT/migrations/20261005200000_registry_permission_histor
 # adoption/rerun, each refusal, and full-set validation before the first build.
 permission_index_migration="$ROOT/migrations/20261005200000_registry_permission_history_indexes.sql"
 permission_index_install="$ROOT/ops/registry-permission-indexes/install.sql"
-permission_indexes=(normalized_events_registry_origin_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx)
+permission_indexes=(normalized_events_registry_origin_idx normalized_events_wrapper_departure_idx normalized_events_user_registry_departure_idx project_grant_registry_parent_idx)
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -1235,14 +1235,19 @@ SELECT relation.relname, pg_get_indexdef(indexrelid) AS definition
 FROM pg_index JOIN pg_class relation ON relation.oid = indexrelid
 WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
     'normalized_events_wrapper_departure_idx'::regclass,
-    'normalized_events_user_registry_departure_idx'::regclass);
+    'normalized_events_user_registry_departure_idx'::regclass,
+    'project_grant_registry_parent_idx'::regclass);
 DROP INDEX normalized_events_registry_origin_idx;
 DROP INDEX normalized_events_wrapper_departure_idx;
 DROP INDEX normalized_events_user_registry_departure_idx;
+DROP INDEX project_grant_registry_parent_idx;
 INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
     manifest_version, chain_id, derivation_kind)
 VALUES ('permission-index-prebuild-probe', 'schema-v2-check', 'ContractDiscovered',
     'ens_v2_migration_l1', 1, 'schema-v2-check', 'ens_v2_migration');
+INSERT INTO project_grant (chain_id,resource_id,subject,scope,block_number,event_identity,event_kind,effective_powers,revoked)
+VALUES ('schema-v2-check','12345678-1234-1234-1234-123456789012','permission-prebuild-probe','root',1,
+    'permission-grant-prebuild-probe','RootPermissionChanged','["registrar"]',false);
 SQL
 } | run_psql
 assert_migration_refusal permission-populated-missing-set "$permission_index_migration" \
@@ -1254,7 +1259,8 @@ assert_migration_refusal permission-populated-missing-set "$permission_index_mig
 CREATE TABLE permission_prebuilt_oids AS SELECT indexrelid
 FROM pg_index WHERE indexrelid IN ('normalized_events_registry_origin_idx'::regclass,
     'normalized_events_wrapper_departure_idx'::regclass,
-    'normalized_events_user_registry_departure_idx'::regclass);
+    'normalized_events_user_registry_departure_idx'::regclass,
+    'project_grant_registry_parent_idx'::regclass);
 SQL
     render_phase_migration "$permission_index_install"
     emit_phase_migration "$permission_index_migration" specialized
@@ -1263,7 +1269,7 @@ SQL
     cat <<'SQL'
 DO $$ BEGIN
     IF (SELECT count(*) FROM pg_index actual JOIN permission_prebuilt_oids expected
-        ON actual.indexrelid = expected.indexrelid) <> 3 THEN
+        ON actual.indexrelid = expected.indexrelid) <> 4 THEN
         RAISE EXCEPTION 'permission index adoption/rerun rebuilt a prebuilt index';
     END IF;
     IF EXISTS (SELECT 1 FROM expected_permission_indexes expected
@@ -1278,11 +1284,15 @@ DROP TABLE permission_prebuilt_oids;
 SQL
 } | run_psql
 for permission_index in "${permission_indexes[@]}"; do
+    permission_relation=normalized_events
+    if [ "$permission_index" = project_grant_registry_parent_idx ]; then
+        permission_relation=project_grant
+    fi
     permission_invalid="$scratch_schema.$permission_index is invalid or has an unexpected definition; follow ops/registry-permission-indexes/README.md before retrying"
-    # The first missing-index case above covers this name with all three absent.
+    # The first missing-index case above covers this name with all four absent.
     if [ "$permission_index" != normalized_events_registry_origin_idx ]; then
         assert_migration_refusal "permission-missing-$permission_index" "$permission_index_migration" \
-            "missing prebuilt index $permission_index on populated normalized_events; run ops/registry-permission-indexes/install.sql before this schema-migration" <<SQL
+            "missing prebuilt index $permission_index on populated $permission_relation; run ops/registry-permission-indexes/install.sql before this schema-migration" <<SQL
 DROP INDEX $permission_index;
 SQL
     fi
@@ -1318,6 +1328,17 @@ SQL
         render_phase_migration "$permission_index_install"
     } | run_psql
  done
+# Relation-specific refusal: an empty normalized-events table does not permit a
+# transactional index build on populated Project grants. No earlier missing
+# normalized-event index may build before this later refusal is discovered.
+assert_migration_refusal permission-populated-grants-empty-events "$permission_index_migration" \
+    'missing prebuilt index project_grant_registry_parent_idx on populated project_grant; run ops/registry-permission-indexes/install.sql before this schema-migration' <<SQL
+DELETE FROM normalized_events WHERE event_identity = 'permission-index-prebuild-probe';
+DROP INDEX normalized_events_registry_origin_idx;
+DROP INDEX normalized_events_wrapper_departure_idx;
+DROP INDEX normalized_events_user_registry_departure_idx;
+DROP INDEX project_grant_registry_parent_idx;
+SQL
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     printf '%s\n' \
@@ -1339,6 +1360,7 @@ SQL
     render_phase_migration "$permission_index_install"
     emit_phase_migration "$permission_index_migration" specialized
     printf '%s\n' "DELETE FROM normalized_events WHERE event_identity = 'permission-index-prebuild-probe';" \
+        "DELETE FROM project_grant WHERE event_identity = 'permission-grant-prebuild-probe';" \
         'DROP TABLE expected_permission_indexes;'
 } | run_psql
 # The expiry selector on project_name_summary. From a populated summary without the two
@@ -6029,6 +6051,9 @@ BEGIN
                     ARRAY['chain_id', 'block_number'],
                     NULL::text[]
                 ),
+                ('project_grant_registry_parent_idx', 'project_grant',
+                    ARRAY['chain_id', 'subject', '%scope_detail%registry_address%'],
+                    ARRAY['%scope%root%']),
                 ('normalized_events_registry_origin_idx', 'normalized_events',
                     ARRAY['chain_id', '%lower%after_state%proxy_address%', 'block_number', 'transaction_index', 'log_index', '%event_identity%COLLATE%"C"%'],
                     ARRAY['%source_family%ens_v2_migration_l1%', '%event_kind%ContractDiscovered%', '%canonicality_state%canonical%safe%finalized%']),
