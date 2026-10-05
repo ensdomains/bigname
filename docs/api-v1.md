@@ -205,7 +205,10 @@ served as absence.
 An approved ENSv2 registry `ApprovalForAll` row is effective for every token
 its approver currently owns in the approving registry. The registry adds the
 roles the current token owner holds on the token's own resource to each
-operator that owner approved, so the row is returned with
+operator that owner approved. An approved operator other than the owner itself
+gets a row while the owner has a served grant on the token and the entry has a
+known expiry that has not passed; an owner's approval of itself gets none. The
+row is returned with
 `grant_relation=operator`,
 `grant_scope={"kind":"account","detail":{"chain_id":...,"authority_kind":"ens_v2_registry","authority_contract":...,"owner":...}}`
 and `powers` equal to the owner's own served `registry` row on that
@@ -236,9 +239,14 @@ that registration with `grant_scope.kind` `root` and the holder's root powers.
 `can_transfer_admin` held on the root has three effects. It does not pass the
 transfer gate, which checks that role only among the token owner's own roles
 on the token, and it gives no ERC-1155 approval to move a token. It lets the
-holder revoke that role from an account on a live name. And while any account
-holds it on the root the registry is not emancipated, so `safeTransferFrom`
-of every name of the registry reverts; `unsafeTransfer` skips that check.
+holder revoke that role from an account on a live name. And in a
+`PermissionedRegistry`, or a `UserRegistry`, which inherits the check,
+while any account holds it on the root the registry is not emancipated, so
+`safeTransferFrom` of every name of the registry reverts; `unsafeTransfer`
+skips that check. A `WrapperRegistry` overrides the check to always pass, so
+this third effect does not apply there.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)

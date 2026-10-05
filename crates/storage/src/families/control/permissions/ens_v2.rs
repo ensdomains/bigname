@@ -18,8 +18,12 @@
 //!   the transfer gate, which checks that role only among the token owner's own roles on the
 //!   token, and gives no ERC-1155 approval. It lets the holder revoke that role from an account
 //!   on a live token, since revocable roles are computed from the root and token roles
-//!   together. While any account holds it on the root the registry is not emancipated, so
-//!   `safeTransferFrom` of every token reverts; `unsafeTransfer` skips that check.
+//!   together. In a `PermissionedRegistry`, or a `UserRegistry`, which inherits the check,
+//!   while any account holds it on the root the registry is not emancipated, so
+//!   `safeTransferFrom` of every token reverts; `unsafeTransfer` skips that check. A
+//!   `WrapperRegistry` overrides the check to always pass.
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)

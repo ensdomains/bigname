@@ -2658,9 +2658,11 @@ it fails startup.
 What changes on `GET /v1/permissions` and `include=role_summary`
 ([route contract](api-v1-routes.md#get-v1permissions)):
 
-- An ENSv2 registration gains one `grant_relation=operator` row per account
-  its current token owner approved on the registry, with `authority_kind`
-  `ens_v2_registry`, a value the account scope did not use before.
+- An ENSv2 registration gains one `grant_relation=operator` row per account,
+  other than the owner itself, that its current token owner approved on the
+  registry, while the owner has a served grant on the token and the entry has
+  not expired. The row has `authority_kind` `ens_v2_registry`, a value the
+  account scope did not use before.
 - A `name` or `registration_id` read of an ENSv2 registration gains the
   registry's root holders as `root` rows of that registration, so its row
   count and pages change. `role_summary` does not repeat them.

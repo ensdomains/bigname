@@ -3027,9 +3027,15 @@ introduces it rebuilds Project from full history before serving the option; see
   held on the root has three effects. It does not pass the transfer gate,
   which checks that role only among the token owner's own roles on the token,
   and it gives no ERC-1155 approval to move a token. It lets the holder revoke
-  that role from an account on a live name. And while any account holds it on
+  that role from an account on a live name. And in a `PermissionedRegistry`, or a
+  `UserRegistry`, which inherits the check, while any account holds it on
   the root the registry is not emancipated, so `safeTransferFrom` of every
-  name of the registry reverts; `unsafeTransfer` skips that check. With `address` the read returns that account's
+  name of the registry reverts; `unsafeTransfer` skips that check. A
+  `WrapperRegistry` overrides the check to always pass, so this third effect
+  does not apply there.
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
+  With `address` the read returns that account's
   rows on the registration, its root row included. An `address` read without
   `name` or `registration_id` lists a root holder once, on the root resource,
   and does not repeat it for each name of the registry. A registration whose

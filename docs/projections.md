@@ -792,9 +792,12 @@ root grants as rows of that resource, under the same path-expiry drop. A
 root holder of `can_transfer_admin` does not pass the transfer gate, which
 checks that role only among the token owner's own roles on the token, and has
 no ERC-1155 approval from it. The holder can revoke the role from an account
-on a live token. While any account holds it on the root the registry is not
+on a live token. In a `PermissionedRegistry`, or a `UserRegistry`, which
+inherits the check, while any account holds it on the root the registry is not
 emancipated, so `safeTransferFrom` of every token reverts; `unsafeTransfer`
-skips that check.
+skips that check. A `WrapperRegistry` overrides the check to always pass.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/WrapperRegistry.sol:L220-L227 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/UserRegistry.sol:L25-L31 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
@@ -835,7 +838,8 @@ owner, subject, and relation. It retains both active and revoked latest states;
 for a NameWrapper, while `approved=false` carries no effective powers. An ENSv2
 registry approval (`authority_kind=ens_v2_registry`) carries no effective power
 in either state, because the operator's powers are the token owner's on each
-token; `approved` alone carries the fact, and no reader joins these rows yet. Project
+token; `approved` alone carries the fact, and the permission reader joins these rows
+to the registry's entry owners as described above. Project
 retains account approvals once per account key; readers join registry and
 NameWrapper operators as described below. Name composition carries the latest
 [registry-owner binding](glossary.md#registry-owner-binding) onto the resource
