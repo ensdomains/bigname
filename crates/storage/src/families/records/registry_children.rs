@@ -25,7 +25,7 @@ use sqlx::PgConnection;
 
 use super::address_names::publication_stamps;
 use crate::families::{
-    name::servable_publication,
+    name::{FamilyPublication, servable_publication},
     topology::{RegistryChildRow, load_owned_registry_children, published_surface_exists},
 };
 
@@ -42,6 +42,22 @@ pub(crate) async fn compose_registry_child_rows(
     address: &str,
     namespace: Option<&str>,
 ) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (publication, children) in load_registry_children(conn, address, namespace).await? {
+        for child in &children {
+            rows.extend(registry_child_rows(address, &publication, child));
+        }
+    }
+    Ok(rows)
+}
+
+/// The surface-less registry children `address` lists, by chain with the chain's publication,
+/// before they become rows ([`registry_child_rows`]).
+pub(crate) async fn load_registry_children(
+    conn: &mut PgConnection,
+    address: &str,
+    namespace: Option<&str>,
+) -> Result<Vec<(FamilyPublication, Vec<RegistryChildRow>)>> {
     let chains: Vec<String> = sqlx::query_scalar(
         "/* storage:families.records.address_registry_child_chains */
          SELECT DISTINCT indexed.chain_id
@@ -78,7 +94,7 @@ pub(crate) async fn compose_registry_child_rows(
             by_chain.insert(chain_id, (published.block_number, candidates));
         }
     }
-    let mut rows = Vec::new();
+    let mut out = Vec::new();
     for (chain_id, (published_block, ids)) in by_chain {
         let mut children: Vec<RegistryChildRow> = Vec::new();
         for chunk in ids.chunks(super::seams::compose_chunk()) {
@@ -103,45 +119,55 @@ pub(crate) async fn compose_registry_child_rows(
         if children.is_empty() {
             continue;
         }
-        let publication = servable_publication(conn, &chain_id).await?;
-        let (provenance, chain_positions, canonicality_summary) = publication_stamps(&publication);
-        let last_recomputed_at = crate::time::format_timestamp(publication.block_timestamp);
-        let address = address.to_ascii_lowercase();
-        for child in &children {
-            let served_owner = child.token_holder.as_deref().unwrap_or(&child.owner);
-            let relations = [
-                (served_owner == address).then_some("token_holder"),
-                (child.owner == address).then_some("effective_controller"),
-            ];
-            rows.extend(relations.into_iter().flatten().map(|relation| {
-                json!({
-                    "address": address,
-                    "logical_name_id": child.logical_name_id,
-                    "relation": relation,
-                    "namespace": child.namespace,
-                    "raw_name": child.display_name,
-                    "normalized_name": child.display_name,
-                    "namehash": child.namehash,
-                    "surface_binding_id": null,
-                    "resource_id": child.resource_id,
-                    "token_lineage_id": null,
-                    "binding_kind": null,
-                    "support_status": "supported",
-                    "unsupported_reason": null,
-                    "provenance": provenance,
-                    "chain_positions": chain_positions,
-                    "canonicality_summary": canonicality_summary,
-                    // Composed name rows carry manifest version 1 (families::name::compose).
-                    "manifest_version": 1,
-                    "last_recomputed_at": last_recomputed_at,
-                    "registry_child": true,
-                    "served_owner": served_owner,
-                    "served_manager": child.owner,
-                    "served_authority": child.authority,
-                    "served_lifecycle_shadow": child.lifecycle_shadow,
-                })
-            }));
-        }
+        out.push((servable_publication(conn, &chain_id).await?, children));
     }
-    Ok(rows)
+    Ok(out)
+}
+
+/// A registry child's relation rows for `address`, in the shape of `address_names.rs`.
+pub(crate) fn registry_child_rows(
+    address: &str,
+    publication: &FamilyPublication,
+    child: &RegistryChildRow,
+) -> Vec<Value> {
+    let (provenance, chain_positions, canonicality_summary) = publication_stamps(publication);
+    let last_recomputed_at = crate::time::format_timestamp(publication.block_timestamp);
+    let address = address.to_ascii_lowercase();
+    let served_owner = child.token_holder.as_deref().unwrap_or(&child.owner);
+    let relations = [
+        (served_owner == address).then_some("token_holder"),
+        (child.owner == address).then_some("effective_controller"),
+    ];
+    relations
+        .into_iter()
+        .flatten()
+        .map(|relation| {
+            json!({
+                "address": address,
+                "logical_name_id": child.logical_name_id,
+                "relation": relation,
+                "namespace": child.namespace,
+                "raw_name": child.display_name,
+                "normalized_name": child.display_name,
+                "namehash": child.namehash,
+                "surface_binding_id": null,
+                "resource_id": child.resource_id,
+                "token_lineage_id": null,
+                "binding_kind": null,
+                "support_status": "supported",
+                "unsupported_reason": null,
+                "provenance": provenance,
+                "chain_positions": chain_positions,
+                "canonicality_summary": canonicality_summary,
+                // Composed name rows carry manifest version 1 (families::name::compose).
+                "manifest_version": 1,
+                "last_recomputed_at": last_recomputed_at,
+                "registry_child": true,
+                "served_owner": served_owner,
+                "served_manager": child.owner,
+                "served_authority": child.authority,
+                "served_lifecycle_shadow": child.lifecycle_shadow,
+            })
+        })
+        .collect()
 }

@@ -36,7 +36,10 @@ mod order;
 
 use order::{WalkOrder, timestamps_agree, walk_order};
 
-use super::{RowSource, load_address_names_page_entries_from, load_address_names_page_from};
+use super::{
+    RowSource, load_address_names_filtered_ids_from, load_address_names_page_entries_from,
+    load_address_names_page_from,
+};
 use crate::{
     AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentCappedPage,
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
@@ -45,8 +48,9 @@ use crate::{
         name::{FamilyPublication, servable_publication},
         records::{
             AddressComposer, ComposedName, address_name_candidates, compose_candidate_rows,
-            compose_registry_child_rows, includes_roles, seams,
+            includes_roles, load_registry_children, registry_child_rows, seams,
         },
+        topology::RegistryChildRow,
     },
 };
 
@@ -89,13 +93,15 @@ pub async fn load_family_address_names_capped_page(
     )
     .await?;
     // The surface-less ENSv1 registry children the address owns, which compose no name row.
+    // They are held as keys; the walk builds rows only for those it reaches.
     let children =
-        compose_registry_child_rows(&mut snapshot, request.address, request.namespace).await?;
+        load_registry_children(&mut snapshot, request.address, request.namespace).await?;
     let mut candidates: HashSet<&str> = by_chain.values().flatten().map(String::as_str).collect();
     candidates.extend(
         children
             .iter()
-            .filter_map(|row| row["logical_name_id"].as_str()),
+            .flat_map(|(_, children)| children)
+            .map(|child| child.logical_name_id.as_str()),
     );
     let composer = AddressComposer {
         address: request.address,
@@ -125,7 +131,11 @@ pub async fn load_family_address_names_capped_page(
         Value::Array(rows) => rows,
         _ => unreachable!("composed rows are an array"),
     };
-    rows.extend(children);
+    for (publication, children) in &children {
+        for child in children {
+            rows.extend(registry_child_rows(request.address, publication, child));
+        }
+    }
     let page = load_address_names_page_from(
         &mut snapshot,
         RowSource::Composed {
@@ -179,23 +189,16 @@ struct Step {
 }
 
 impl Gathered {
-    /// Adds a registry child's rows unless they are already gathered; false when a row has no
-    /// resource to group by.
-    fn admit_child(&mut self, step: &mut Step, id: &str, rows: &[&Value]) -> Result<bool> {
-        if !self.ids.insert(id.to_owned()) {
-            return Ok(true);
+    /// Adds a registry child's rows unless they are already gathered.
+    fn admit_child(&mut self, step: &mut Step, address: &str, child: &WalkChild<'_>) {
+        if !self.ids.insert(child.row.logical_name_id.clone()) {
+            return;
         }
-        for row in rows {
-            let Some(resource) = row["resource_id"].as_str() else {
-                return Ok(false);
-            };
-            let resource: Uuid = resource.parse()?;
-            if self.resources.insert(resource) {
-                step.opened.push(resource);
-            }
-            step.rows.push((*row).clone());
+        if self.resources.insert(child.row.resource_id) {
+            step.opened.push(child.row.resource_id);
         }
-        Ok(true)
+        step.rows
+            .extend(registry_child_rows(address, child.publication, child.row));
     }
 
     /// Adds a walked name's rows unless they are already gathered.
@@ -217,12 +220,18 @@ impl Gathered {
     }
 }
 
+/// A surface-less registry child the walk can reach, with its chain's publication.
+struct WalkChild<'a> {
+    publication: &'a FamilyPublication,
+    row: &'a RegistryChildRow,
+}
+
 /// What the walk reads its candidates from.
 struct WalkInputs<'a> {
     composer: &'a AddressComposer<'a>,
     publications: BTreeMap<String, FamilyPublication>,
     by_chain: &'a BTreeMap<String, BTreeSet<String>>,
-    child_rows: HashMap<&'a str, Vec<&'a Value>>,
+    children: HashMap<&'a str, WalkChild<'a>>,
 }
 
 /// The walk's page, or `None` when it must give way to the full read.
@@ -231,7 +240,7 @@ async fn walk_page(
     request: &AddressNamesPageRequest<'_>,
     composer: &AddressComposer<'_>,
     by_chain: &BTreeMap<String, BTreeSet<String>>,
-    children: &[Value],
+    children: &[(FamilyPublication, Vec<RegistryChildRow>)],
 ) -> Result<Option<PageEntries>> {
     // Every chain is checked as the full read checks it, so the same chain answers stale.
     let mut publications = BTreeMap::new();
@@ -241,18 +250,20 @@ async fn walk_page(
             servable_publication(conn, chain_id).await?,
         );
     }
-    let mut child_rows: HashMap<&str, Vec<&Value>> = HashMap::new();
-    for row in children {
-        let id = row["logical_name_id"]
-            .as_str()
-            .context("registry child has no id")?;
-        child_rows.entry(id).or_default().push(row);
+    let mut walk_children: HashMap<&str, WalkChild<'_>> = HashMap::new();
+    for (publication, rows) in children {
+        for row in rows {
+            let child = WalkChild { publication, row };
+            if walk_children.insert(&row.logical_name_id, child).is_some() {
+                return Ok(None);
+            }
+        }
     }
     let inputs = WalkInputs {
         composer,
         publications,
         by_chain,
-        child_rows,
+        children: walk_children,
     };
     let mut kinds: HashMap<&str, Candidate> = HashMap::new();
     for (chain_id, ids) in by_chain {
@@ -270,7 +281,7 @@ async fn walk_page(
     };
     // A surface-less child the index also lists composes nothing as a name. A name with a
     // published surface is never such a child; if one were, the order would list it twice.
-    for id in inputs.child_rows.keys() {
+    for id in inputs.children.keys() {
         kinds.insert(id, Candidate::Child);
     }
     let rank: HashMap<&str, usize> = order
@@ -296,13 +307,7 @@ async fn walk_page(
                     names.entry(chain_id).or_default().push(id.clone())
                 }
                 Some(Candidate::Child) => {
-                    let rows = inputs
-                        .child_rows
-                        .get(id.as_str())
-                        .map_or(&[][..], Vec::as_slice);
-                    if !gathered.admit_child(&mut step, id, rows)? {
-                        return Ok(None);
-                    }
+                    gathered.admit_child(&mut step, request.address, &inputs.children[id.as_str()]);
                 }
                 None => return Ok(None),
             }
@@ -336,6 +341,7 @@ async fn walk_page(
         {
             return Ok(None);
         }
+        keep_filtered(conn, request, &mut step).await?;
         gathered.rows.append(&mut step.rows);
         gathered.names.append(&mut step.names);
         position = end;
@@ -433,20 +439,57 @@ async fn close_groups(
             }
         }
     }
-    for (id, rows) in &inputs.child_rows {
-        if gathered.ids.contains(*id) {
-            continue;
-        }
-        let bound = rows.iter().any(|row| {
-            row["resource_id"]
-                .as_str()
-                .and_then(|resource| resource.parse::<Uuid>().ok())
-                .is_some_and(|resource| step.opened.contains(&resource))
-        });
-        if bound {
+    for (id, child) in &inputs.children {
+        if !gathered.ids.contains(*id) && step.opened.contains(&child.row.resource_id) {
             gathered.ids.insert((*id).to_owned());
-            step.rows.extend(rows.iter().map(|row| (*row).clone()));
+            step.rows.extend(registry_child_rows(
+                inputs.composer.address,
+                child.publication,
+                child.row,
+            ));
         }
     }
     Ok(true)
+}
+
+/// Drops the step's rows of names the page's filters keep no row of: they add nothing to any
+/// group, so the gathered rows stay about as large as the rows the page can serve.
+async fn keep_filtered(
+    conn: &mut PgConnection,
+    request: &AddressNamesPageRequest<'_>,
+    step: &mut Step,
+) -> Result<()> {
+    if step.rows.is_empty() {
+        return Ok(());
+    }
+    let rows = Value::Array(std::mem::take(&mut step.rows));
+    let names = Value::Array(std::mem::take(&mut step.names));
+    let kept = load_address_names_filtered_ids_from(
+        conn,
+        RowSource::Composed {
+            rows: &rows,
+            names: &names,
+            parent: request.parent,
+        },
+        request.address,
+        request.namespace,
+        request.relations,
+        request.dedupe_by,
+        request.q,
+        request.authority,
+        request.is_migrated,
+    )
+    .await;
+    let (Value::Array(rows), Value::Array(names)) = (rows, names) else {
+        unreachable!("the step's rows are arrays")
+    };
+    let kept: HashSet<String> = kept?.into_iter().collect();
+    let kept_row = |row: &Value| {
+        row["logical_name_id"]
+            .as_str()
+            .is_some_and(|id| kept.contains(id))
+    };
+    step.rows = rows.into_iter().filter(|row| kept_row(row)).collect();
+    step.names = names.into_iter().filter(|row| kept_row(row)).collect();
+    Ok(())
 }

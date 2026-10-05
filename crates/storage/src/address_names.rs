@@ -13,7 +13,10 @@ pub use page::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations,
 };
-pub(crate) use page::{load_address_names_page_entries_from, load_address_names_page_from};
+pub(crate) use page::{
+    load_address_names_filtered_ids_from, load_address_names_page_entries_from,
+    load_address_names_page_from,
+};
 pub(crate) use query::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 pub(crate) use read::load_address_names_current_at_bound;
 #[cfg(test)]

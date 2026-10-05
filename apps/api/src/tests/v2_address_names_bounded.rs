@@ -313,6 +313,17 @@ async fn v2_address_names_walk_and_chunks_serve_identical_pages() -> Result<()> 
             }
         }
     }
+    // Selective filters walk past most candidates without keeping their rows.
+    for query in ["q=bulk0001", "q=zzz", "q=bulk00&match=contains&sort=created_at&dedupe=registration"] {
+        let uri = format!("/v1/addresses/{BULK_ADDRESS}/names?page_size=3&{query}");
+        let exact = walk_all_pages(&database, &uri).await?;
+        let walked = with_exact_total_cap(0, walk_all_pages(&database, &uri)).await?;
+        assert_eq!(
+            exact.iter().map(page_body).collect::<Vec<_>>(),
+            walked.iter().map(page_body).collect::<Vec<_>>(),
+            "{uri}"
+        );
+    }
     // Served names, not stored spellings, decide name order: the emoji names sort as served.
     let first = bulk_payload(
         &database,

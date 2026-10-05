@@ -71,11 +71,7 @@ pub(super) async fn walk_order(
     inputs: &WalkInputs<'_>,
 ) -> Result<Option<WalkOrder>> {
     let ids: Vec<String> = inputs.by_chain.values().flatten().cloned().collect();
-    let children: Vec<String> = inputs
-        .child_rows
-        .keys()
-        .map(|id| (*id).to_owned())
-        .collect();
+    let children: Vec<String> = inputs.children.keys().map(|id| (*id).to_owned()).collect();
     let mut display = HashMap::new();
     let mut builder =
         QueryBuilder::<Postgres>::new("/* storage:families.records.address_name_walk */ ");
@@ -118,10 +114,9 @@ pub(super) async fn walk_order(
         }
         let mut keyed_ids: Vec<String> = display.keys().cloned().collect();
         let mut keys: Vec<String> = display.values().cloned().collect();
-        for (id, rows) in &inputs.child_rows {
+        for (id, child) in &inputs.children {
             keyed_ids.push((*id).to_owned());
-            let name = rows[0]["raw_name"].as_str();
-            keys.push(name.context("registry child has no name")?.to_owned());
+            keys.push(child.row.display_name.clone());
         }
         builder.push("WITH keyed AS (SELECT * FROM UNNEST(");
         builder.push_bind(keyed_ids);

@@ -58,6 +58,7 @@ async fn v2_address_names_large_address_memory() -> Result<()> {
             "page_size=50&sort=expires_at",
             "page_size=50&dedupe=registration&order=desc",
             "page_size=200&sort=created_at",
+            "page_size=50&q=zzz",
             "page_size=1&relation=former_owner",
             "page_size=50&include=total_count",
         ]

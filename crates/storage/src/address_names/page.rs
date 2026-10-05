@@ -300,6 +300,40 @@ pub(crate) async fn load_address_names_page_entries_from(
     Ok((entries, next_cursor))
 }
 
+/// The names among `source`'s rows with a row the page's filters keep. A name with none adds
+/// nothing to any page group, so a walk can drop its rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn load_address_names_filtered_ids_from(
+    conn: &mut PgConnection,
+    source: RowSource<'_>,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<NameQuery<'_>>,
+    authority: Option<&[&str]>,
+    is_migrated: Option<bool>,
+) -> Result<Vec<String>> {
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_address_names_current_grouped_entries_cte(
+        &mut builder,
+        source,
+        address,
+        namespace,
+        relations,
+        dedupe_by,
+        q,
+        authority,
+        is_migrated,
+    );
+    builder.push(" SELECT DISTINCT logical_name_id FROM filtered");
+    builder
+        .build_query_scalar()
+        .fetch_all(conn)
+        .await
+        .context("failed to filter the walked address-name rows")
+}
+
 /// A surface-less registry child's `served_manager` from its composed relation rows, all of which
 /// carry the same one, its registry owner (`families::records::registry_children`). It rides
 /// beside the page query rather than through it: query.rs is an input of the interpreter content
