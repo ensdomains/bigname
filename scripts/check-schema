@@ -5299,6 +5299,10 @@ SQL
     do
         emit_phase_migration "$migration_file" preceding-shape
     done
+    # Reconstructing the historical column shape drops the current announcement
+    # index because its predicate depends on consumer_visibility. Restore that
+    # current reader index before checking today's definitions below.
+    render_phase_migration "$permission_index_install"
 } | run_psql
 
 # The preceding vocabulary reconstruction ends with the exact 20260902 constraint.
