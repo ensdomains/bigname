@@ -60,11 +60,16 @@ pub fn parse_pending_marker(marker: &Value) -> Option<(WrapperExpiryKey, bool)> 
 /// The stored expiry word served for each wanted wrapper, keyed as asked; `true` marks a backed
 /// wrapper. A backed wrapper serves its expiry. A masked one serves it only when it lapsed:
 /// composition masks a wrapper whose stored state, fuses and expiry are all known only because
-/// an emancipated or locked wrapper is past its expiry (`effective_wrapper`). A wrapper whose
-/// latest lifecycle event is an unwrap serves JSON null, backed or not: the stored row keeps the
-/// state and expiry of the entry that was unwrapped, composition does not read the lifecycle, and
-/// that entry is no longer the name's current one. A wanted wrapper with no stored row, or a
-/// backed one with no expiry, is an error. One read per chain.
+/// an emancipated or locked wrapper is past its expiry (`effective_wrapper`), when NameWrapper
+/// reports no owner and no fuses for it
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f).
+/// A wrapper whose latest lifecycle event is an unwrap serves JSON null, backed or not. The
+/// unwrap burns the token, and the burnt entry keeps its fuses and expiry
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f);
+/// the stored row keeps them too, composition does not read the lifecycle, and that entry is no
+/// longer the name's current one. A wanted wrapper with no stored row, or a backed one with no
+/// expiry, is an error. One read per chain.
 pub async fn load_wrapper_expiries(
     db: impl Into<ReadDb<'_>>,
     wanted: &BTreeMap<WrapperExpiryKey, bool>,
