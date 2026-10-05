@@ -6,7 +6,15 @@
 //! addresses a registration as a resource: registrations appear only as `registration_id` on
 //! history and permissions. The reader is index-backed and refuses an unbounded scan.
 
+mod query;
+mod windows;
+
+#[cfg(test)]
+mod windows_tests;
+
 use std::collections::BTreeMap;
+
+use windows::{ExpiryWindows, WINDOW_KEY};
 
 use axum::{Json, extract::State};
 use bigname_storage::UnixSeconds;
@@ -24,8 +32,8 @@ use super::search::{SearchName, build_search_name};
 use super::support::{ensure_public_namespace, normalize_inferred_route_name};
 use super::vocab::AuthoritySet;
 use super::{
-    Envelope, Page, QueryParamAllowlist, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, validate_latest_collection_selectors,
+    Envelope, Page, QueryParamAllowlist, SortOrder, V2Error, V2Result, api_error_to_v2,
+    validate_latest_collection_selectors,
 };
 
 const NAMES_SORT: &str = "expires_at";
@@ -64,7 +72,8 @@ impl QueryParamAllowlist for NamesQueryParams {
     ];
 }
 
-pub(crate) type NamesQuery = StrictQueryParams<NamesQueryParams>;
+// Keep expires_window out of NamesQueryParams until the bounded family reader is integrated.
+pub(crate) type NamesQuery = query::NamesQuery<NamesQueryParams>;
 
 /// Everything a names-listing cursor binds besides its keyset position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +81,7 @@ pub(crate) struct NamesCursorBinding<'a> {
     pub(crate) namespace: &'a str,
     pub(crate) expires_after: Option<UnixSeconds>,
     pub(crate) expires_before: Option<UnixSeconds>,
+    windows: Option<&'a ExpiryWindows>,
     pub(crate) authority: Option<&'a AuthoritySet>,
     pub(crate) parent: Option<&'a str>,
     pub(crate) order: SortOrder,
@@ -81,7 +91,9 @@ pub(crate) async fn get_names(
     params: NamesQuery,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
-    let params = params.into_inner();
+    // This must stay absent while the production allowlist excludes expires_window.
+    debug_assert!(params.windows.is_none());
+    let params = params.params;
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = params.namespace.clone().ok_or_else(|| {
         V2Error::invalid_input("namespace is required because this listing is namespace-scoped")
@@ -115,6 +127,7 @@ pub(crate) async fn get_names(
         namespace: &namespace,
         expires_after: params.expires_after,
         expires_before: params.expires_before,
+        windows: None,
         authority: params.authority.as_ref(),
         parent: parent.as_deref(),
         order,
@@ -232,6 +245,11 @@ fn cursor_filters(binding: &NamesCursorBinding<'_>) -> BTreeMap<String, String> 
             binding.order.as_str().to_owned(),
         ),
     ]);
+    if let Some(windows) = binding.windows {
+        filters.remove(EXPIRES_AFTER_FILTER_KEY);
+        filters.remove(EXPIRES_BEFORE_FILTER_KEY);
+        filters.insert(WINDOW_KEY.to_owned(), windows.canonical());
+    }
     if let Some(authority) = binding.authority {
         filters.insert(AUTHORITY_FILTER_KEY.to_owned(), authority.canonical_value());
     }
@@ -291,6 +309,7 @@ mod tests {
             namespace: "ens",
             expires_after: Some(timestamp("2026-09-01T00:00:00Z")),
             expires_before: None,
+            windows: None,
             authority: None,
             parent: None,
             order: SortOrder::Asc,

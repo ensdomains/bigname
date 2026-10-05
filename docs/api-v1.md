@@ -2346,8 +2346,15 @@ with `400 invalid_input`, as [Parameters](#parameters) states.
 A query parameter of type `array of X` or `array [min, max] of X` is one
 comma-separated value, such as
 `include=counts,role_summary`; the generator emits `style: form` and
-`explode: false`. Sending the key twice is not part of the contract. Every
-`{segment}` in the path has one `path` row with the same name, and every
+`explode: false`. Sending the key twice is not part of that encoding. A query
+parameter table may instead declare `repeated array of X` or
+`repeated array [min, max] of X`: each item uses another occurrence of the same
+key, and the generator emits `style: form` and `explode: true`, retaining any
+item-count bounds. The `repeated` modifier is valid only on a query parameter's
+outer array type, never on a response field, header, path or body. The item
+must be a scalar parameter type. This grammar does not make a parameter
+available on a route unless its parameter table declares it.
+Every `{segment}` in the path has one `path` row with the same name, and every
 `path` row has a segment. At most one row is `body`, and only on a `POST`
 operation; it becomes the operation's JSON request body.
 

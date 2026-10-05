@@ -123,6 +123,27 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("The `status` is `unsupported`", prop["reason"]["description"])
         self.assertIn("`|`", prop["labels"]["description"])
 
+    def test_repeated_query_array_uses_form_explode_and_bounds(self):
+        row = "| `window` | query | repeated array [1, 32] of string | no | none | Windows. |\n"
+        routes = ROUTES.replace("<!-- openapi:responses", row + "<!-- openapi:responses")
+        generator = Generator(API, routes)
+        parameters = generator.generate()["paths"]["/v1/names/{name}"]["get"]["parameters"]
+        parameter = next(p for p in parameters if p["name"] == "window")
+        self.assertEqual(parameter["style"], "form")
+        self.assertTrue(parameter["explode"])
+        self.assertEqual(parameter["schema"], {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32})
+        self.assertFalse(next(p for p in parameters if p["name"] == "include")["explode"])
+        for length in (1, 32):
+            generator.validate(["1..2"] * length, parameter["schema"], "window")
+        for length in (0, 33):
+            with self.assertRaisesRegex(ContractError, "window.*(minItems|maxItems)"):
+                generator.validate(["1..2"] * length, parameter["schema"], "window")
+        for replacement in ("repeated string", "repeated array [32, 1] of string", "repeated array of array of string"):
+            self.reject(routes=routes.replace("repeated array [1, 32] of string", replacement))
+        for location in ("header", "path", "body"):
+            self.reject(routes=routes.replace("`window` | query", f"`window` | {location}"), match="repeated is only valid for query arrays")
+        self.reject(api=API.replace("array of string | optional", "repeated array of string | optional"))
+
     def test_link_resolution(self):
         doc = Generator(API, ROUTES, "https://docs.example.test/reference/").generate()
         self.assertIn("https://docs.example.test/reference/api-v1.md#objects", doc["components"]["schemas"]["Envelope"]["description"])
