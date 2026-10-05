@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
 
 pub const PREIMAGE_OBSERVATION_EVENT_KIND: &str = "PreimageObserved";
+/// `after_state` flag, `true` on an event that establishes the name identity it names from the
+/// node's label-hash path alone. State restore and redo re-anchoring accept such an event, like a
+/// `PreimageObserved` row, as an observation of that identity; neither reads raw labels from it.
+pub const NAME_IDENTITY_OBSERVED_KEY: &str = "name_identity_observed";
 pub const SURFACE_BOUND_EVENT_KIND: &str = "SurfaceBound";
 pub const MIGRATION_APPLIED_EVENT_KIND: &str = "MigrationApplied";
 pub const SURFACE_UNBOUND_EVENT_KIND: &str = "SurfaceUnbound";

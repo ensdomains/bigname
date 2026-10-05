@@ -33,8 +33,8 @@ fn missing_surface_position_uses_the_conventional_sentinel() {
     let timestamp = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
     let surface = SurfaceRow {
         logical_name_id: "ens:test".to_owned(),
-        raw_labels: vec!["Alice".to_owned()],
-        dns_encoded_name: Vec::new(),
+        raw_labels: Some(vec!["Alice".to_owned()]),
+        dns_encoded_name: Some(Vec::new()),
         normalizer_version: "old".to_owned(),
         visibility_state: "active".to_owned(),
         normalization_errors: json!([]),

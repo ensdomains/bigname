@@ -45,8 +45,8 @@ struct LabelRow {
 #[derive(Debug, FromRow)]
 struct SurfaceRow {
     logical_name_id: String,
-    raw_labels: Vec<String>,
-    dns_encoded_name: Vec<u8>,
+    raw_labels: Option<Vec<String>>,
+    dns_encoded_name: Option<Vec<u8>>,
     normalizer_version: String,
     visibility_state: String,
     normalization_errors: Value,
@@ -311,6 +311,15 @@ async fn update_surface(
 }
 
 fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
+    // Unknown bytes have no normalization verdict; the identity stays visible.
+    if surface.raw_labels.is_none() {
+        return Ok(SurfaceNormalization {
+            visibility_state: "active",
+            normalization_errors: Value::Array(Vec::new()),
+            deactivation_reason: None,
+            deactivated_at: None,
+        });
+    }
     let raw_labels = raw_surface_labels(surface)?;
     let byte_oriented = surface.fallback_raw_labels_hex.is_some();
     let errors = raw_labels
@@ -362,15 +371,21 @@ fn surface_log_index(provenance: &Value) -> i64 {
 }
 
 fn raw_surface_labels(surface: &SurfaceRow) -> Result<Vec<Vec<u8>>> {
-    if !surface.raw_labels.is_empty() {
-        return Ok(surface
-            .raw_labels
+    if let Some(raw_labels) = surface
+        .raw_labels
+        .as_ref()
+        .filter(|labels| !labels.is_empty())
+    {
+        return Ok(raw_labels
             .iter()
             .map(|label| label.as_bytes().to_vec())
             .collect());
     }
-    if !surface.dns_encoded_name.is_empty()
-        && let Ok(labels) = decode_dns_labels(&surface.dns_encoded_name)
+    if let Some(dns_encoded_name) = surface
+        .dns_encoded_name
+        .as_ref()
+        .filter(|name| !name.is_empty())
+        && let Ok(labels) = decode_dns_labels(dns_encoded_name)
     {
         return Ok(labels);
     }

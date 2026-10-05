@@ -1,4 +1,4 @@
-use bigname_adapters::schema_v2::{BatchOutput, LabelPreimage, NameSurface};
+use bigname_adapters::schema_v2::{BatchOutput, LabelPreimage, NameSurface, RawNameEvidence};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::json;
 
@@ -58,9 +58,12 @@ fn surface(logical_name_id: &str, raw_name: &str) -> NameSurface {
     NameSurface {
         logical_name_id: logical_name_id.to_owned(),
         namespace: "ens".to_owned(),
-        raw_name: raw_name.to_owned(),
-        raw_labels: vec![raw_name.to_owned()],
-        dns_encoded_name: raw_name.as_bytes().to_vec(),
+        raw: Some(RawNameEvidence {
+            raw_name: raw_name.to_owned(),
+            raw_labels: vec![raw_name.to_owned()],
+            dns_encoded_name: raw_name.as_bytes().to_vec(),
+            preimage_event_identity: format!("preimage:{raw_name}"),
+        }),
         namehash: namehash.to_owned(),
         labelhashes: vec![format!("label:{raw_name}")],
         normalizer_version: "test".to_owned(),

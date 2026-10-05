@@ -1603,7 +1603,7 @@ fn assert_name_surfaces(
         let expected_logical =
             canonical_logical_id(text_field(row, "logical_name_id")?, logical_ids);
         if surface.logical_name_id != expected_logical
-            || surface.raw_name != text_field(row, "input_name")?
+            || surface.raw_name() != Some(text_field(row, "input_name")?)
             || surface.chain_id != text_field(row, "chain_id")?
             || surface.block_hash != text_field(row, "block_hash")?
             || surface.normalizer_version != text_field(row, "normalizer_version")?
@@ -1615,7 +1615,7 @@ fn assert_name_surfaces(
         }
         let actual_dns = format!(
             "\\x{}",
-            alloy_primitives::hex::encode(&surface.dns_encoded_name)
+            alloy_primitives::hex::encode(surface.dns_encoded_name().unwrap_or_default())
         );
         let actual_labelhashes = Value::Array(
             surface

@@ -6,14 +6,15 @@ mod identity;
 mod identity_names;
 mod migration;
 mod normalized;
+mod reanchor;
 
 use crate::Result;
 use bigname_adapters::schema_v2::BatchOutput;
 use bigname_adapters::schema_v2::seam::{
-    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND,
-    PREIMAGE_OBSERVATION_EVENT_KIND, REDO_ARM_WIDE_CLOSE_SQL, REDO_BINDING_CLOSE_CLAMP_SQL,
-    REDO_CLOSED_ARM_SQL, SURFACE_BINDING_ID_KEY, SURFACE_BOUND_EVENT_KIND,
-    SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY, TRANSACTION_INDEX_KEY,
+    EVENT_CLOSE_TIME_SQL, LOG_INDEX_KEY, MIGRATION_APPLIED_EVENT_KIND, REDO_ARM_WIDE_CLOSE_SQL,
+    REDO_BINDING_CLOSE_CLAMP_SQL, REDO_CLOSED_ARM_SQL, SURFACE_BINDING_ID_KEY,
+    SURFACE_BOUND_EVENT_KIND, SURFACE_UNBOUND_EVENT_KIND, TOKEN_LINEAGE_ID_KEY,
+    TRANSACTION_INDEX_KEY,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 #[allow(clippy::too_many_arguments)]
@@ -48,7 +49,7 @@ pub(crate) async fn batch(
     identity::write_transitions(&mut transaction, output).await?;
     migration::write(&mut transaction, output).await?;
     if let Some((from_block, to_block)) = redo_range.filter(|_| complete) {
-        reanchor_stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
+        reanchor::stable_identities(&mut transaction, chain_id, from_block, to_block).await?;
     }
     if complete {
         discovery_admission::finalize(&mut transaction, chain_id).await?;
@@ -128,6 +129,7 @@ async fn prepare_redo_range(
     stage_referenced_stable_identities(transaction, chain_id, from_block, to_block).await?;
     orphan_bindings_started_in_range(transaction, chain_id, from_block, to_block).await?;
     reopen_bindings_closed_in_range(transaction, chain_id, from_block, to_block).await?;
+    reanchor::release_preimage_witnesses(transaction, chain_id, from_block, to_block).await?;
     sqlx::query(
         "
         DELETE FROM normalized_events
@@ -476,105 +478,6 @@ async fn reopen_bindings_closed_in_range(
         .map_err(|error| {
             crate::InterpretError::database("failed to reopen identity bindings before redo", error)
         })?;
-    Ok(())
-}
-
-async fn reanchor_stable_identities(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: &str,
-    from_block: i64,
-    to_block: i64,
-) -> Result<()> {
-    let token_lineage_join =
-        format!("event.after_state ->> '{TOKEN_LINEAGE_ID_KEY}' = identity.token_lineage_id::text");
-    for (table, identity_join) in [
-        (
-            "name_surfaces",
-            "event.logical_name_id = identity.logical_name_id",
-        ),
-        ("resources", "event.resource_id = identity.resource_id"),
-        ("token_lineages", token_lineage_join.as_str()),
-    ] {
-        let identity_column = match table {
-            "name_surfaces" => "logical_name_id",
-            "resources" => "resource_id",
-            "token_lineages" => TOKEN_LINEAGE_ID_KEY,
-            _ => unreachable!("fixed stable identity table"),
-        };
-        let candidate_filter = if table == "name_surfaces" {
-            // Only an observation that re-states the surface body can anchor the surface; a
-            // surviving reference of any other kind must not move the anchor or deactivated_at.
-            format!("AND event.event_kind = '{PREIMAGE_OBSERVATION_EVENT_KIND}'")
-        } else {
-            String::new()
-        };
-        let deactivation_assignment = if table == "name_surfaces" {
-            ",
-                deactivated_at = CASE
-                    WHEN identity.visibility_state = 'shadow'
-                        THEN candidate.block_timestamp
-                    ELSE NULL
-                END"
-        } else {
-            ""
-        };
-        let statement = format!(
-            "
-            WITH candidates AS (
-                SELECT identity.{identity_column} AS identity_id,
-                       event.block_hash,
-                       event.block_number,
-                       event.raw_fact_ref AS provenance,
-                       lineage.canonicality_state,
-                       lineage.block_timestamp,
-                       row_number() OVER (
-                           PARTITION BY identity.{identity_column}
-                           ORDER BY event.block_number,
-                                    event.transaction_index NULLS FIRST,
-                                    event.log_index NULLS FIRST,
-                                    event.normalized_event_id
-                       ) AS candidate_rank
-                FROM {table} identity
-                JOIN normalized_events event
-                  ON event.chain_id = identity.chain_id
-                 AND {identity_join}
-                JOIN chain_lineage lineage
-                  ON lineage.chain_id = event.chain_id
-                 AND lineage.block_hash = event.block_hash
-                 AND lineage.block_number = event.block_number
-                WHERE identity.chain_id = $1
-                  AND identity.block_number BETWEEN $2 AND $3
-                  AND identity.canonicality_state = 'orphaned'
-                  AND event.block_number IS NOT NULL
-                  AND event.block_number NOT BETWEEN $2 AND $3
-                  {candidate_filter}
-                  AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-                  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-            )
-            UPDATE {table} identity
-            SET block_hash = candidate.block_hash,
-                block_number = candidate.block_number,
-                provenance = candidate.provenance,
-                canonicality_state = candidate.canonicality_state{deactivation_assignment},
-                observed_at = now()
-            FROM candidates candidate
-            WHERE candidate.candidate_rank = 1
-              AND identity.{identity_column} = candidate.identity_id
-            "
-        );
-        sqlx::query(&statement)
-            .bind(chain_id)
-            .bind(from_block)
-            .bind(to_block)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| {
-                crate::InterpretError::database(
-                    format!("failed to reanchor {table} before redo"),
-                    error,
-                )
-            })?;
-    }
     Ok(())
 }
 
