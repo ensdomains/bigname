@@ -389,9 +389,9 @@ async fn oracle_counted_page(
     ))
 }
 
-// The work counters see every name a listing composes and the largest source it binds. Stale
-// expiries (a name renewed out of the window many times) leave the page equal to the oracle;
-// the counts are printed, not bounded.
+// A page composes at most `page_size + 1` names and binds them to one page statement, whatever
+// the filter leaves out and however many names share a second. Stale expiries (a name renewed
+// out of the window many times) leave the page equal to the oracle and add no composition.
 #[tokio::test]
 async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
     use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -401,9 +401,24 @@ async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
     let filter = oracle_filter(Some("0"), None, Some(&["ens_v0"]), None)?;
     let (page, composed, peak, submitted) = oracle_counted_page(&database, &filter, 2).await?;
     eprintln!("expiring page_size=2 ens_v0: composed={composed} peak={peak} submitted={submitted}");
-    // A reader may or may not bind composed rows to a statement; it must compose what it serves.
     assert_eq!(page.rows.len(), 2);
-    assert!(composed >= 2 && peak <= submitted, "composed {composed} peak {peak} of {submitted}");
+    assert_eq!((composed, peak, submitted), (3, 3, 3));
+    // Sparse filters, a window inside the shared second and a window that holds one name: the
+    // names the filter rejects are never composed.
+    for (filter, page_size, listed) in [
+        (oracle_filter(Some("0"), None, None, Some("late.eth"))?, 5, 1),
+        (oracle_filter(Some("0"), None, Some(&["ens_v1"]), Some("eth"))?, 4, 4),
+        (oracle_filter(Some("1850000000"), Some("1850000001"), None, None)?, 3, 3),
+        (oracle_filter(Some("1850000000.5"), Some("1850000001"), None, None)?, 200, 1),
+        (oracle_filter(Some("9223372036854775808"), None, None, None)?, 200, 2),
+    ] {
+        let (page, composed, peak, submitted) =
+            oracle_counted_page(&database, &filter, page_size).await?;
+        assert_eq!(page.rows.len() as u64, listed, "{filter:?}");
+        let selected = listed + u64::from(page.next_cursor.is_some());
+        assert_eq!((composed, peak, submitted), (selected, selected, selected), "{filter:?}");
+        assert!(composed <= page_size + 1, "{filter:?} composed {composed}");
+    }
 
     // The search listing binds its composed rows to its page statement: the peak is the largest
     // such source and the submitted count their sum.
@@ -462,8 +477,8 @@ async fn v2_names_expiry_listing_counts_its_composition_work() -> Result<()> {
     publish_test_families(&database, 241).await?;
     let stale = oracle_filter(Some("1810000000"), Some("1810000100"), None, None)?;
     let (page, composed, peak, submitted) = oracle_counted_page(&database, &stale, 2).await?;
-    eprintln!("expiring stale window: composed={composed} peak={peak} submitted={submitted}");
     assert!(page.rows.is_empty() && page.next_cursor.is_none(), "{page:?}");
+    assert_eq!((composed, peak, submitted), (0, 0, 0), "a stale expiry composed a name");
     let asc = bigname_storage::NameCurrentListOrder::Asc;
     assert!(oracle_walk(&database, &stale, asc, 2).await?.is_empty());
     let all = oracle_walk(&database, &oracle_filter(Some("1800000000"), None, None, None)?, asc, 7)
