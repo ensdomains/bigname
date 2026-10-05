@@ -2,10 +2,7 @@ use alloy_sol_types::sol;
 use anyhow::bail;
 use serde_json::{Value, json};
 
-use super::super::{
-    EventDraft, Interpreted, ResourceDraft, ensure_declared,
-    permissions::{v1_grant_states, v1_revoke_states},
-};
+use super::super::{EventDraft, Interpreted, ResourceDraft, ensure_declared};
 use super::authority_transition::{
     RegistryOwnerView, append_registry_fallback_handoff, classify_registry_owner,
     registry_fallback_handoff_kind,
@@ -30,7 +27,10 @@ use crate::schema_v2::{
 };
 pub(in crate::schema_v2) mod graveyard;
 pub(super) mod node;
+mod permissions;
 pub(super) mod surface;
+use permissions::append_authority_permissions;
+pub(super) use permissions::push_permission_change;
 pub(in crate::schema_v2) mod wrapper_custody;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 sol! {
@@ -124,6 +124,7 @@ pub(super) fn interpret(
             .expect("registry state is an object")
             .insert("emitter_role".to_owned(), Value::String(role.to_owned()));
     }
+    let identity = node::observe_identity(selected, state, &after)?;
     let previous = state.v1_name(&selected.source.namespace, &affected_node);
     let owner = matches!(selected.event.name.as_str(), "NewOwner" | "Transfer")
         .then(|| after.get("owner").and_then(Value::as_str))
@@ -520,112 +521,6 @@ pub(super) fn interpret(
             raw,
         );
     }
+    node::retain_identity(&mut output, selected, raw, state, identity);
     Ok(output)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn push_permission_change(
-    output: &mut Interpreted,
-    authority: &V1NameState,
-    subject: &str,
-    scope: Value,
-    power: &str,
-    grant: bool,
-    source_event_kind: &str,
-    suffix: &str,
-) {
-    let Some(authority_key) = authority.authority_key.as_deref() else {
-        return;
-    };
-    let (before, after) = if grant {
-        v1_grant_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
-    } else {
-        v1_revoke_states(
-            subject,
-            scope,
-            power,
-            authority_kind(authority),
-            authority_key,
-            source_event_kind,
-        )
-    };
-    output.events.push(EventDraft {
-        event_kind: "PermissionChanged".to_owned(),
-        logical_name_id: authority
-            .surface_known
-            .then(|| authority.logical_name_id.clone()),
-        resource_id: Some(authority.resource_id),
-        identity_suffix: format!("PermissionChanged:{suffix}:{subject}"),
-        explicit_before: Some(before),
-        after_state: after,
-        state_scope: String::new(),
-    });
-}
-
-fn append_authority_permissions(
-    output: &mut Interpreted,
-    previous: Option<&V1NameState>,
-    current: Option<&V1NameState>,
-    resolver: Option<String>,
-    raw: &RawLogInput,
-) {
-    if let Some(previous) = previous
-        && let Some(subject) = previous.owner.as_deref()
-    {
-        push_permission_change(
-            output,
-            previous,
-            subject,
-            json!({"kind":"resource"}),
-            "resource_control",
-            false,
-            "AuthorityTransferred",
-            "resource-revoke",
-        );
-        if let Some(resolver) = resolver.as_deref() {
-            push_permission_change(
-                output,
-                previous,
-                subject,
-                json!({"kind":"resolver","chain_id":raw.chain_id,"resolver_address":resolver}),
-                "resolver_control",
-                false,
-                "AuthorityTransferred",
-                "resolver-revoke",
-            );
-        }
-    }
-    if let Some(current) = current
-        && let Some(subject) = current.owner.as_deref()
-    {
-        push_permission_change(
-            output,
-            current,
-            subject,
-            json!({"kind":"resource"}),
-            "resource_control",
-            true,
-            "AuthorityTransferred",
-            "resource-grant",
-        );
-        if let Some(resolver) = resolver {
-            push_permission_change(
-                output,
-                current,
-                subject,
-                json!({"kind":"resolver","chain_id":raw.chain_id,"resolver_address":resolver}),
-                "resolver_control",
-                true,
-                "AuthorityTransferred",
-                "resolver-grant",
-            );
-        }
-    }
 }

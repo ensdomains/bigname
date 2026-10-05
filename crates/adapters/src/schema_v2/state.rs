@@ -23,6 +23,8 @@ mod registrar;
 #[path = "state_registrar_evidence.rs"]
 mod registrar_evidence;
 pub(super) use registrar::v1_key;
+#[path = "state_identity.rs"]
+mod identity;
 #[path = "state_resolver_links.rs"]
 mod resolver_links;
 #[path = "state_surfaces.rs"]
@@ -133,6 +135,10 @@ pub(super) struct State {
     restore_error: Option<String>,
     v1_migrated_nodes: OrdSet<String>,
     v1_materialized_surfaces: OrdSet<String>,
+    v1_node_paths: OrdMap<String, Vec<String>>,
+    v1_shadow_surfaces: OrdSet<String>,
+    v1_shadow_sources: OrdMap<String, OrdSet<String>>,
+    v1_shadow_counts: OrdMap<String, usize>,
     known_surfaces: OrdSet<String>,
     restored_surface_sources: OrdMap<String, OrdSet<String>>,
     restored_surface_counts: OrdMap<String, usize>,
@@ -185,6 +191,7 @@ impl State {
         authority_key: Option<String>,
     ) {
         let key = v1_key(namespace, namehash);
+        let surface_known = surface_known && !self.v1_surface_is_shadow(namespace, namehash);
         if surface_known {
             self.remember_known_surface(logical_name_id.clone());
             self.activate_v1_resource(&logical_name_id, resource_id);
@@ -226,6 +233,7 @@ impl State {
         wrapper_fallback: bool,
         make_current: bool,
     ) {
+        let surface_known = surface_known && !self.v1_surface_is_shadow(namespace, namehash);
         if surface_known {
             self.remember_known_surface(logical_name_id.clone());
         }
@@ -509,7 +517,7 @@ impl State {
         owner: &str,
         at_unix_timestamp: i64,
     ) -> Option<V1NameState> {
-        let registrar = self.v1_registrar(namespace, namehash)?;
+        let mut registrar = self.v1_registrar(namespace, namehash)?;
         if registrar
             .owner
             .as_deref()
@@ -518,6 +526,7 @@ impl State {
         {
             return None;
         }
+        self.promote_known_v1_authority(&v1_key(namespace, namehash), &mut registrar);
         self.v1_names
             .insert(v1_key(namespace, namehash), registrar.clone());
         if registrar.surface_known {

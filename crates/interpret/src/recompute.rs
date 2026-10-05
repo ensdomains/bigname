@@ -1,6 +1,6 @@
 use std::str;
 
-use bigname_adapters::schema_v2::seam::{LOG_INDEX_KEY, PREIMAGE_OBSERVATION_EVENT_KIND};
+use bigname_adapters::schema_v2::seam::PREIMAGE_OBSERVATION_EVENT_KIND;
 use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalized_label_verdict};
 use serde_json::{Value, json};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -54,11 +54,11 @@ struct SurfaceRow {
     deactivated_at: Option<OffsetDateTime>,
     block_number: i64,
     block_timestamp: OffsetDateTime,
-    provenance: Value,
+    preimage_event_identity: Option<String>,
     fallback_raw_labels_hex: Option<Value>,
-    witness_block_number: Option<i64>,
+    fallback_block_timestamp: Option<OffsetDateTime>,
+    witness_event_identity: Option<String>,
     witness_block_timestamp: Option<OffsetDateTime>,
-    witness_log_index: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -226,18 +226,18 @@ async fn load_surfaces(
                 surface.visibility_state, surface.normalization_errors,
                 surface.deactivation_reason, surface.deactivated_at,
                 surface.block_number, lineage.block_timestamp,
-                surface.provenance,
+                surface.preimage_event_identity,
                 fallback.after_state -> 'raw_labels_hex' AS fallback_raw_labels_hex,
-                witness.block_number AS witness_block_number,
-                witness.block_timestamp AS witness_block_timestamp,
-                witness.log_index AS witness_log_index
+                fallback.block_timestamp AS fallback_block_timestamp,
+                witness.event_identity AS witness_event_identity,
+                witness.block_timestamp AS witness_block_timestamp
          FROM name_surfaces surface
          JOIN chain_lineage lineage
            ON lineage.chain_id = surface.chain_id
           AND lineage.block_hash = surface.block_hash
           AND lineage.block_number = surface.block_number
          LEFT JOIN LATERAL (
-             SELECT event.after_state
+             SELECT event.after_state, event_lineage.block_timestamp
              FROM normalized_events event
              JOIN chain_lineage event_lineage
                ON event_lineage.chain_id = event.chain_id
@@ -246,27 +246,29 @@ async fn load_surfaces(
              WHERE event.chain_id = surface.chain_id
                AND event.logical_name_id = surface.logical_name_id
                AND event.after_state ? 'raw_labels_hex'
-               AND event.block_number <= surface.block_number
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND event_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             ORDER BY event.block_number DESC NULLS LAST,
-                      event.transaction_index DESC NULLS LAST,
-                      event.log_index DESC NULLS LAST,
-                      event.normalized_event_id DESC
+             ORDER BY event.block_number,
+                      event.transaction_index NULLS FIRST,
+                      event.log_index NULLS FIRST,
+                      event.event_identity
              LIMIT 1
          ) fallback ON true
          LEFT JOIN LATERAL (
-             SELECT witness.block_number, witness_lineage.block_timestamp, witness.log_index
+             SELECT witness.event_identity, witness_lineage.block_timestamp
              FROM normalized_events witness
              JOIN chain_lineage witness_lineage
                ON witness_lineage.chain_id = witness.chain_id
               AND witness_lineage.block_hash = witness.block_hash
               AND witness_lineage.block_number = witness.block_number
-             WHERE witness.event_identity = surface.preimage_event_identity
-               AND witness.chain_id = surface.chain_id
-               AND witness.block_number >= surface.block_number
+             WHERE witness.chain_id = surface.chain_id
+               AND witness.logical_name_id = surface.logical_name_id
+               AND witness.event_kind = $4
                AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND witness_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY witness.block_number, witness.transaction_index NULLS FIRST,
+                      witness.log_index NULLS FIRST, witness.event_identity
+             LIMIT 1
          ) witness ON true
          WHERE surface.chain_id = $1
            AND surface.block_number BETWEEN $2 AND $3
@@ -278,6 +280,7 @@ async fn load_surfaces(
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)
+    .bind(PREIMAGE_OBSERVATION_EVENT_KIND)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| {
@@ -296,13 +299,15 @@ async fn update_surface(
              visibility_state = $3,
              normalization_errors = $4,
              deactivation_reason = $5,
-             deactivated_at = $6
+             deactivated_at = $6,
+             preimage_event_identity = $12
          WHERE logical_name_id = $1
            AND normalizer_version = $7
            AND visibility_state = $8
            AND normalization_errors = $9
            AND deactivation_reason IS NOT DISTINCT FROM $10
-           AND deactivated_at IS NOT DISTINCT FROM $11",
+           AND deactivated_at IS NOT DISTINCT FROM $11
+           AND preimage_event_identity IS NOT DISTINCT FROM $13",
     )
     .bind(&surface.logical_name_id)
     .bind(ENS_NORMALIZER_VERSION)
@@ -315,6 +320,15 @@ async fn update_surface(
     .bind(&surface.normalization_errors)
     .bind(&surface.deactivation_reason)
     .bind(surface.deactivated_at)
+    .bind(if surface.raw_labels.is_some() {
+        surface
+            .witness_event_identity
+            .as_ref()
+            .or(surface.preimage_event_identity.as_ref())
+    } else {
+        None
+    })
+    .bind(&surface.preimage_event_identity)
     .execute(&mut **transaction)
     .await
     .map_err(|error| {
@@ -366,16 +380,12 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
     let deactivated_at = if active {
         None
     } else {
-        // Bytes first observed after the identity's anchor deactivate it at their own event.
-        surface.deactivated_at.or_else(|| {
-            let anchor = (surface.block_number, surface_log_index(&surface.provenance));
-            let (block_timestamp, log_index) =
-                later_witness(surface, anchor).unwrap_or((surface.block_timestamp, anchor.1));
-            Some(bigname_adapters::schema_v2::seam::event_time(
-                block_timestamp,
-                log_index,
-            ))
-        })
+        Some(
+            surface
+                .witness_block_timestamp
+                .or(surface.fallback_block_timestamp)
+                .unwrap_or(surface.block_timestamp),
+        )
     };
     Ok(SurfaceNormalization {
         visibility_state: if active { "active" } else { "shadow" },
@@ -383,22 +393,6 @@ fn surface_normalization(surface: &SurfaceRow) -> Result<SurfaceNormalization> {
         deactivation_reason: (!active).then_some("normalization_gate"),
         deactivated_at,
     })
-}
-
-/// The witness's block time and log index when it lies after the anchor: in a later block, or
-/// later in the anchor's block when the anchor records its own log index.
-fn later_witness(surface: &SurfaceRow, anchor: (i64, i64)) -> Option<(OffsetDateTime, i64)> {
-    let block_number = surface.witness_block_number?;
-    let log_index = surface.witness_log_index.unwrap_or(-1);
-    let later = block_number > anchor.0 || (anchor.1 >= 0 && log_index > anchor.1);
-    later.then_some((surface.witness_block_timestamp?, log_index))
-}
-
-fn surface_log_index(provenance: &Value) -> i64 {
-    provenance
-        .get(LOG_INDEX_KEY)
-        .and_then(Value::as_i64)
-        .unwrap_or(-1)
 }
 
 fn raw_surface_labels(surface: &SurfaceRow) -> Result<Vec<Vec<u8>>> {

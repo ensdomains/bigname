@@ -51,7 +51,7 @@ pub(super) async fn stable_identities(
                                     event.block_number,
                                     event.transaction_index NULLS FIRST,
                                     event.log_index NULLS FIRST,
-                                    event.normalized_event_id
+                                    event.event_identity
                        ) AS evidence_block_timestamp"
             )
         } else {
@@ -147,6 +147,7 @@ pub(super) async fn release_preimage_witnesses(
           AND surface.chain_id = event.chain_id
           AND surface.logical_name_id = event.logical_name_id
           AND surface.preimage_event_identity = event.event_identity
+          AND cardinality(surface.raw_labels) = cardinality(surface.labelhashes)
         "
     ))
     .bind(chain_id)
@@ -180,7 +181,20 @@ async fn repair_preimage_witnesses(
             FROM name_surfaces surface
             WHERE surface.chain_id = $1
               AND surface.raw_name IS NOT NULL
-              AND surface.preimage_event_identity IS NULL
+              AND (
+                  surface.preimage_event_identity IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM normalized_events witness
+                      JOIN chain_lineage lineage
+                        ON lineage.chain_id = witness.chain_id
+                       AND lineage.block_hash = witness.block_hash
+                       AND lineage.block_number = witness.block_number
+                      WHERE witness.chain_id = surface.chain_id
+                        AND witness.event_identity = surface.preimage_event_identity
+                        AND witness.canonicality_state IN ('canonical', 'safe', 'finalized')
+                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                  )
+              )
             UNION
             SELECT event.logical_name_id
             FROM normalized_events event
@@ -208,7 +222,7 @@ async fn repair_preimage_witnesses(
                 ORDER BY witness.block_number,
                          witness.transaction_index NULLS FIRST,
                          witness.log_index NULLS FIRST,
-                         witness.normalized_event_id
+                         witness.event_identity
                 LIMIT 1
             ) earliest ON true
         )
@@ -237,9 +251,7 @@ async fn repair_preimage_witnesses(
             END,
             deactivated_at = CASE
                 WHEN repaired.event_identity IS NULL THEN NULL
-                WHEN surface.visibility_state = 'shadow'
-                 AND repaired.block_timestamp > surface.deactivated_at
-                    THEN repaired.block_timestamp
+                WHEN surface.visibility_state = 'shadow' THEN repaired.block_timestamp
                 ELSE surface.deactivated_at
             END,
             observed_at = now()
@@ -250,7 +262,11 @@ async fn repair_preimage_witnesses(
           AND (
               (
                   repaired.event_identity IS NOT NULL
-                  AND surface.preimage_event_identity IS DISTINCT FROM repaired.event_identity
+                  AND (
+                      surface.preimage_event_identity IS DISTINCT FROM repaired.event_identity
+                      OR (surface.visibility_state = 'shadow'
+                          AND surface.deactivated_at IS DISTINCT FROM repaired.block_timestamp)
+                  )
               )
               OR (
                   repaired.event_identity IS NULL

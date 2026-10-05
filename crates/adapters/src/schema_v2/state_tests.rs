@@ -84,11 +84,13 @@ fn restore_keys_authority_derived_resolver_links_by_child() {
 
 #[test]
 fn restore_knows_a_name_identity_observed_from_its_hash_path() {
+    let node = crate::schema_v2::common::namehash_raw([b"child".as_slice()].into_iter());
+    let id = format!("test:{node}");
     let event = |after_state| PriorEventInput {
         retained_state_key: "registry-child".to_owned(),
         chain_id: "test-chain".to_owned(),
         namespace: NAMESPACE.to_owned(),
-        logical_name_id: Some("test:child".to_owned()),
+        logical_name_id: Some(id.clone()),
         resource_id: Some(Uuid::from_u128(1)),
         event_kind: "SubregistryChanged".to_owned(),
         source_family: "ens_v1_registry_l1".to_owned(),
@@ -100,28 +102,30 @@ fn restore_knows_a_name_identity_observed_from_its_hash_path() {
         write_position: None,
         after_state,
     };
-    let body = json!({"source_event": "NewOwner", "node": "parent", "child_node": "child"});
+    let body = json!({"source_event": "NewOwner", "node": "parent", "child_node": node});
 
     let mut unmarked = State::new(Vec::new(), Vec::new());
     crate::schema_v2::state_restore::v1(&mut unmarked, &event(body.clone()));
-    assert!(!unmarked.v1_active_surface_materialized(NAMESPACE, "child"));
+    assert!(!unmarked.v1_active_surface_materialized(NAMESPACE, &node));
 
     let mut marked_body = body;
     marked_body[crate::schema_v2::seam::NAME_IDENTITY_OBSERVED_KEY] = json!(true);
+    marked_body["labelhashes"] = json!([crate::schema_v2::common::hash_hex(b"child")]);
     let mut restored = State::new(Vec::new(), Vec::new());
     crate::schema_v2::state_restore::v1(&mut restored, &event(marked_body));
-    assert!(restored.v1_active_surface_materialized(NAMESPACE, "child"));
-    assert!(restored.v1_surface_materialized(NAMESPACE, "child"));
+    assert!(restored.v1_active_surface_materialized(NAMESPACE, &node));
+    assert!(restored.v1_surface_materialized(NAMESPACE, &node));
 }
 
 #[test]
 fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
-    const NODE: &str = "node";
+    let node = crate::schema_v2::common::namehash_raw([b"pointer".as_slice(), b"eth"].into_iter());
+    let id = format!("test:{node}");
     const OWNER: &str = "0x0000000000000000000000000000000000000001";
     let mut state = State::new(Vec::new(), Vec::new());
     state.remember_v1_registry_authority(
         NAMESPACE,
-        NODE,
+        &node,
         V1NameState {
             logical_name_id: "test:unknown".to_owned(),
             surface_known: false,
@@ -139,7 +143,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
     );
     state.remember_v1_registry_read_anchor(
         NAMESPACE,
-        NODE,
+        &node,
         V1RegistryReadAnchor {
             logical_name_id: "test:unknown".to_owned(),
             resource_id: Uuid::from_u128(1),
@@ -149,12 +153,12 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
             registry_contract: None,
         },
     );
-    state.set_v1_registry_owner_views(NAMESPACE, NODE, OWNER.to_owned(), OWNER.to_owned(), None);
+    state.set_v1_registry_owner_views(NAMESPACE, &node, OWNER.to_owned(), OWNER.to_owned(), None);
     state.activate_v1_authority(
         NAMESPACE,
-        NODE,
+        &node,
         Some(V1NameState {
-            logical_name_id: "test:node".to_owned(),
+            logical_name_id: id.clone(),
             surface_known: true,
             resource_id: Uuid::from_u128(2),
             token_lineage_id: Some(Uuid::from_u128(3)),
@@ -172,7 +176,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
         retained_state_key: "wrapper-preimage".to_owned(),
         chain_id: "test-chain".to_owned(),
         namespace: NAMESPACE.to_owned(),
-        logical_name_id: Some("test:node".to_owned()),
+        logical_name_id: Some(id.clone()),
         resource_id: None,
         event_kind: "PreimageObserved".to_owned(),
         source_family: "ens_v1_wrapper_l1".to_owned(),
@@ -183,7 +187,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
         block_timestamp: None,
         write_position: None,
         after_state: json!({
-            "namehash": NODE,
+            "namehash": node,
             "raw_name": "pointer.eth",
             "raw_labels": ["pointer", "eth"],
         }),
@@ -195,7 +199,7 @@ fn wrapper_preimage_restore_derives_registry_labelhash_from_raw_label() {
     assert_eq!(
         state
             .v1_registry_authorities
-            .get(&v1_key(NAMESPACE, NODE))
+            .get(&v1_key(NAMESPACE, &node))
             .and_then(|authority| authority.labelhash.as_deref()),
         Some(expected_labelhash.as_str())
     );

@@ -286,7 +286,7 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     let resource_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT \
            count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'registrar'), \
-           count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'registry_only'), \
+           count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'registry_only' AND event_kind <> 'SurfaceUnbound'), \
            count(DISTINCT resource_id) FILTER (WHERE after_state->>'authority_kind' = 'wrapper') \
          FROM normalized_events \
          WHERE transaction_hash = $1 \
@@ -300,6 +300,32 @@ async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
         resource_shape,
         (1, 0, 1),
         "same-transaction registry setup must remain on the registrar epoch instead of minting a spurious registry-only epoch"
+    );
+    // NewOwner now names the provisional registry resource before NameWrapped.
+    // The wrap retains its closure for diagnostics, while registration reconciliation
+    // removes the provisional binding. A closure is not a registry authority grant.
+    let registry_closures: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT resource_id, event_kind, after_state->>'source_event' \
+         FROM normalized_events WHERE transaction_hash = $1 \
+           AND after_state->>'authority_kind' = 'registry_only' \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(tx_hash)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(registry_closures.len(), 1, "{registry_closures:?}");
+    assert_eq!(registry_closures[0].1, "SurfaceUnbound");
+    assert_eq!(registry_closures[0].2, "NameWrapped");
+    let provisional_bindings: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings WHERE resource_id = $1 \
+         AND canonicality_state = 'canonical'",
+    )
+    .bind(registry_closures[0].0)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        provisional_bindings, 0,
+        "registration setup must not retain a registry-only binding"
     );
     let setup_and_registration_resources: (Uuid, Uuid) = sqlx::query_as(
         "SELECT \
@@ -881,9 +907,8 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     .await?;
     assert_eq!(child_kind, "wrapper");
     assert!(child_lineage.is_some());
-    // The pre-wrap placeholder interval minted a registry-only resource but
-    // never a surface binding (placeholder children have no surfaces); the
-    // wrap is the child's first and only binding.
+    // The proven pre-wrap registry path has its own binding. Wrapping closes
+    // that binding and leaves only the wrapper binding active.
     let (registry_resource, registry_lineage): (Uuid, Option<Uuid>) = sqlx::query_as(
         "SELECT DISTINCT event.resource_id, resource.token_lineage_id \
          FROM normalized_events event \
@@ -898,14 +923,23 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
     .await?;
     assert_ne!(registry_resource, child_resource);
     assert_eq!(registry_lineage, None);
-    let child_bindings: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM surface_bindings \
+    let child_bindings: (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), \
+           count(*) FILTER (WHERE resource_id = $1 AND active_to IS NOT NULL), \
+           count(*) FILTER (WHERE resource_id = $2 AND active_to IS NULL) \
+         FROM surface_bindings \
          WHERE logical_name_id = 'ens:0xe6cd46d3f5db891144f288bc594dad25f1ab8c1febd784b53000b461d0dc290f' \
            AND canonicality_state = 'canonical'",
     )
+    .bind(registry_resource)
+    .bind(child_resource)
     .fetch_one(&run.db.pool)
     .await?;
-    assert_eq!(child_bindings, 1, "the wrap is the child's only binding");
+    assert_eq!(
+        child_bindings,
+        (2, 1, 1),
+        "the wrap must close only the prior child binding"
+    );
 
     let child_row = families::required_name(
         &run.db.pool,

@@ -183,9 +183,10 @@ pub(super) fn rebuild_v2_indexes(state: &mut State) {
 #[rustfmt::skip]
 pub(super) fn v1(state: &mut State, event: &PriorEventInput) {
     let v1_family = event.source_family.starts_with("ens_v1_") || event.source_family.starts_with("basenames_");
-    let explicit_surface = event.after_state.get("surface_known").and_then(Value::as_bool) == Some(true); let active_preimage = event.event_kind == "PreimageObserved" && event.after_state.get("visibility_state").and_then(Value::as_str) != Some("shadow");
+    let explicit_surface = event.after_state.get("surface_known").and_then(Value::as_bool) == Some(true); let preimage = event.event_kind == "PreimageObserved";
     let identity_observed = v1_surface::observes_name_identity(event);
-    let restoring_state_key = (v1_family && !explicit_surface && !active_preimage && !identity_observed).then(|| state.restoring_state_key.take()).flatten();
+    if preimage && let Err(error) = state.restore_shared_name_evidence(event) { state.record_restore_error(error); return; }
+    let restoring_state_key = (v1_family && !explicit_surface && !preimage && !identity_observed).then(|| state.restoring_state_key.take()).flatten();
     v1_inner(state, event); if restoring_state_key.is_some() { state.restoring_state_key = restoring_state_key; }
 }
 #[rustfmt::skip]

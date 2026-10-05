@@ -134,8 +134,7 @@ state; it is never identity.
 
 A `name_surfaces` row is a node's [name surface](glossary.md#surface-name-surface).
 Its identity columns are always present: `logical_name_id`, `namehash`, and
-`labelhashes`, the complete label-hash path, leaf first, with the one legacy
-exception described below. `block_hash`,
+`labelhashes`, the complete verified label-hash path, leaf first. `block_hash`,
 `block_number` and `provenance` anchor the first canonical observation that
 established the node.
 
@@ -152,15 +151,16 @@ the bundle is. It is the deterministic event identity, not the sequence-assigned
 rewrites its range's events. The `name_surfaces_raw_evidence_check` constraint
 holds these rules.
 
-The exception is a shadow surface whose observed bytes have no PostgreSQL-safe
-text decoding. It keeps the row it has always stored: an empty-string
-`raw_name`, an empty `raw_labels` array and an empty `labelhashes` array, with
-the bytes in its `PreimageObserved` event. Its stored path is therefore not
-the node's label-hash path. The writer rejects a later observation of the same
-node that carries the complete path, as a conflicting path, and the row cannot
-become one without raw bytes, because that shape requires a non-empty path.
-No adapter emits such a complete-path observation of an existing surface yet;
-these rows need a repair before one does.
+A byte-oriented shadow whose observed bytes have no PostgreSQL-safe text
+decoding stores an empty `raw_name` and empty `raw_labels`, its complete verified
+`labelhashes` path, a nonempty `preimage_event_identity`, and DNS wire bytes where
+those bytes can be encoded. Its `PreimageObserved.raw_labels_hex` remains the
+recoverable evidence even when DNS encoding is unavailable. This narrow shadow
+shape is separate from active raw-backed rows, whose raw-label and hash-path
+cardinalities must agree, and from identities whose bytes are unknown. Hashes
+are computed from the raw bytes before decoding. Legacy empty paths are repaired
+with their byte evidence by full Interpret re-derivation, never a path-only SQL
+backfill. A structural observation cannot reactivate a known byte shadow.
 
 Interpret's surface writer accepts a second observation of a stored surface
 when the namespace, namehash, label-hash path and chain match and, where both
@@ -176,9 +176,22 @@ a data-integrity error.
 
 An event establishes a surface without raw bytes by carrying
 `name_identity_observed: true` in its `after_state` and naming the surface.
-State restore and redo re-anchoring accept that event as an observation of the
-identity, as they accept `PreimageObserved`. No adapter emits it yet, so every
-surface written today carries its raw bundle and a witness.
+The ENSv1 registry adapter emits it on `SubregistryChanged` for admitted
+`NewOwner` observations whose complete path is proven from the root or a known
+full path; the event also retains `labelhashes`. The identity is known before
+ownership and resolver attribution for the log. That event uses a dedicated
+retained state scope, so later authority changes cannot replace its evidence.
+State restore and redo re-anchoring accept it as an identity observation, as
+they accept `PreimageObserved`. Neither a transfer, a resolver log, a query nor
+an imported preimage establishes missing ancestry. Cold and incremental restore
+retain structural and byte evidence separately: surviving invalid-byte evidence
+wins regardless of observation order, while removal of the final byte witness
+can recover a surviving identity without bytes. This evidence belongs to the
+same namespace and node across admitted source families: an ENSv2 named
+`PreimageObserved` shadow also suppresses later ENSv1 structural control claims.
+Only the explicitly witnessed node's complete path is retained as an ancestor
+anchor; no suffix ancestor is inferred from a descendant's path. This leaves
+node-local restoration independent of descendant enumeration.
 
 The readers serve a row without raw bytes. The name compositor reads every
 `active` surface whose `raw_name` is not the empty string, so it composes a
@@ -615,7 +628,9 @@ row:
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
-have no `logical_name_id`, and the numeric event creates no name surface. A previously admitted,
+have no `logical_name_id` unless a proven registry path already establishes the name
+identity or does so in the same registration transaction. The numeric event alone creates
+no name surface. A previously admitted,
 non-shadow preimage in the same namespace can make the name known before numeric registration;
 with matching current-registry ownership setup, that registration binds the registrar resource.
 A later admitted controller preimage binds the current retained ENSv1 authority, while a preimage
@@ -2281,26 +2296,26 @@ observation that establishes it, a `PreimageObserved` row or a
 [label-hash-path observation](#name-identity-and-raw-evidence), staying
 orphaned when none survives. A shadow surface's `deactivated_at` follows its
 earliest surviving `PreimageObserved` row.
-Outside that orphan replacement, the ordinary surface upsert moves a name
-surface's `deactivated_at` only for a strictly lower incoming block, so the
-stored value does not depend on the order emissions arrive in. Its one other
-case is enrichment: a row without raw bytes that first receives bytes failing
-the normalization gate takes the incoming `deactivated_at`, at whatever block
-those bytes arrive. Witness repair, below, is a separate operation that can
-also move it.
+Fresh writes, normalization recompute, re-anchoring and witness repair use the
+plain block timestamp of the earliest surviving relevant byte witness for
+`deactivated_at`; transaction/log position and event identity order the witnesses
+separately. No log-index microseconds are added to this public timestamp.
 
 A surface's [preimage witness](glossary.md#preimage-witness) is repaired
 separately from its anchor, so raw bytes learned after the node was established
 are handled even when the node's first observation lies before the redo range.
-Redo preparation releases every witness whose event is in the range. At
-completion each surface with a released witness, or with a preimage observation
+Redo preparation releases every witness whose event is in the range. An ordinary
+raw-backed row clears its pointer. A byte-oriented shadow retains the pointer
+through the unpublished redo interval to preserve its nonempty-witness shape;
+a missing or noncanonical referenced event makes that witness replaceable.
+At completion each surface with a released witness, or with a preimage observation
 in the range, takes its earliest surviving canonical `PreimageObserved` event as
 witness. A canonical surface left with none loses its raw bundle and its
 normalization verdict, and stays as the identity alone, when a surviving
 label-hash-path observation still establishes it; without such an observation
-the row is left as it was. When the repair moves a shadow surface's witness
-and the replacement witness's block timestamp is later than the stored
-`deactivated_at`, `deactivated_at` moves to that block timestamp.
+the row is left as it was. Witness identity is repaired even when a replacement
+has the same block timestamp. This change rotates the content hash and requires
+full Interpret plus Project re-derivation before publication.
 
 The interpreter content hash covers the current interpretation inputs: the
 adapter, manifest-authority, and project sources, the manifest ABI event
