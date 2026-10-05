@@ -230,12 +230,22 @@ A read bound to one ENSv2 registration by `name` or `registration_id` also
 lists the holders of the registry's
 [root resource](glossary.md#registry-root-resource), because a role held there
 passes the same role check on every token of the registry. Each is a row of
-that registration with `grant_scope.kind` `root` and the holder's root powers
-without `can_transfer_admin`: a transfer checks that role only among the token
-owner's roles on the token, so holding it on the root authorizes nothing on a
-name. A holder with no other root power has no row there.
+that registration with `grant_scope.kind` `root` and the holder's root powers.
+`can_transfer_admin` held on the root does not let the holder transfer a name
+or make one transferable, because a transfer checks that role only among the
+token owner's own roles on the token. It does let the holder revoke that role
+from an account on a live name.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+An expired registration serves no rows, root rows included. A holder of root
+`renew` can still revive the expired entry; such holders are listed on the
+registry's own read (`registry=<chain_id>:<address>`).
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 
 Permission-backed v2 reads also classify the served resources from the typed
 projection-owned per-resource permission summary, and report the permission

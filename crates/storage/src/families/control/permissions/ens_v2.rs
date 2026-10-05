@@ -14,10 +14,19 @@
 //! - Root-holder rows. A role check on a token reads the caller's roles on the registry root
 //!   together with its roles on the token, so every root holder acts on every token of the
 //!   registry. A read bound to one token resource lists the registry's root grants as rows of
-//!   that resource, without `can_transfer_admin`: a transfer checks that role on the token owner's
-//!   own token roles, so holding it on the root authorizes nothing on a token.
+//!   that resource, with every root power. `can_transfer_admin` held on the root does not let
+//!   its holder transfer a token or make one transferable, because a transfer checks that role
+//!   only among the token owner's own roles on the token; it does let the holder revoke that
+//!   role from an account on a live token, since revocable roles are computed from the root and
+//!   token roles together.
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 //!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+//!   A registration whose rows the path-expiry drop removes lists no root holders either. A
+//!   root `renew` holder can still revive an expired entry; that holder is a row of the root.
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+//!   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -41,9 +50,6 @@ use crate::families::{
 const ROOT_SCOPE: &str = "root";
 /// The scope key of a token owner's own roles on the token's resource.
 const TOKEN_SCOPE: &str = "registry";
-/// The root role that authorizes nothing on a token.
-const ROOT_ONLY_POWER: &str = "can_transfer_admin";
-
 /// The candidate keys of ENSv2 registry operators: each approved operator with every entry its
 /// approver currently owns in the approving registry, where the owner has a grant on the entry's
 /// resource. Composition applies the entry's expiry and the path-expiry drop. `$9` is the chain
@@ -126,9 +132,8 @@ async fn key_states(
 }
 
 /// The root-holder rows of the selected `root` keys whose resource is a token resource: each
-/// root grant of the token's registry, served as a row of the token resource without
-/// [`ROOT_ONLY_POWER`]. A holder left with no power, and every holder of a resource whose
-/// registration lapsed by path expiry, has no row.
+/// root grant of the token's registry, served as a row of the token resource. Every holder of a
+/// resource whose registration lapsed by path expiry has no row.
 pub(super) async fn root_holder_rows(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
@@ -175,30 +180,11 @@ pub(super) async fn root_holder_rows(
         // The token's key state decides: a lapsed registration serves no rows at all.
         for mut grant in masked_grants(&of_root, None, states.get(&token), clock.timestamp_seconds)
         {
-            grant.effective_powers = without_root_only(&grant.effective_powers);
-            if grant
-                .effective_powers
-                .as_array()
-                .is_some_and(|powers| !powers.is_empty())
-            {
-                grant.resource_id.clone_from(&token);
-                rows.push(grant);
-            }
+            grant.resource_id.clone_from(&token);
+            rows.push(grant);
         }
     }
     Ok(rows)
-}
-
-fn without_root_only(powers: &Value) -> Value {
-    Value::Array(
-        powers
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|power| power.as_str() != Some(ROOT_ONLY_POWER))
-            .cloned()
-            .collect(),
-    )
 }
 
 /// The operator rows of the selected `account:<chain>:ens_v2_registry:…` keys.

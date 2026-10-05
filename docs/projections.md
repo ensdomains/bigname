@@ -788,10 +788,18 @@ live in the registry.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L622-L636 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L350-L352 @ ens_v2_sepolia_20261001@07e55a05)
 A read bound to one ENSv2 registry token resource also serves the registry's
-root grants as rows of that resource without `can_transfer_admin`, which
-counts only among the token owner's roles on the token.
+root grants as rows of that resource, under the same path-expiry drop. A
+root holder of `can_transfer_admin` cannot transfer a token, since a transfer
+checks that role only among the token owner's own roles on the token, but can
+revoke it from an account on a live token.
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+An expired registration lists no root holder, although a root `renew` holder
+can still revive the entry; that holder is a row of the root resource.
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+(upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 The summary of an ENSv2 registry resource records whether an active manifest
 declares its registry, by the rule a registry root read uses; a discovered
 registry keeps the ENSv2 operator surface unlisted because its code may add

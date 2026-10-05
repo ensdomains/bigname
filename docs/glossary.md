@@ -719,8 +719,7 @@ role check on every name in that registry.
 bigname stores its role changes as `RootPermissionChanged` events and serves
 its current holders as permission rows with `grant_scope.kind` `root`, through
 `GET /v1/permissions?registry=<chain_id>:<address>`, and lists them on a
-permissions read of one registration of that registry, without
-`can_transfer_admin`. Its `resource_id` is
+permissions read of one registration of that registry. Its `resource_id` is
 derived from the registry's contract instance, so it changes when the address
 moves to a new contract instance.
 

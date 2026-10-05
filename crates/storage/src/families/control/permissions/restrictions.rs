@@ -76,8 +76,8 @@ pub(super) async fn load(
         .unzip();
     // ENSv2 registry grants have no wrapper mask. Account approval expansion cannot create a
     // row unless a holder grant already survives, so its fan-out never affects this existence.
-    // A read bound to the resource also serves its registry's root grants without
-    // `can_transfer_admin` (`ens_v2.rs`), so a root grant with another power is a served row.
+    // A read bound to the resource also serves its registry's root grants (`ens_v2.rs`), so a
+    // root grant is a served row.
     let has_grants: BTreeSet<String> = sqlx::query_scalar(
         "/* storage:families.control.permissions.summary_has_grants */
          SELECT pair.resource FROM unnest($2::text[], $3::text[]) pair(resource, root)
@@ -89,7 +89,7 @@ pub(super) async fn load(
              WHERE root_grant.chain_id = $1 AND root_grant.resource_id = pair.root::uuid
                AND root_grant.scope = 'root'
                AND jsonb_typeof(root_grant.effective_powers) = 'array'
-               AND root_grant.effective_powers - 'can_transfer_admin' <> '[]'::jsonb)",
+               AND root_grant.effective_powers <> '[]'::jsonb)",
     )
     .bind(chain_id)
     .bind(&registry_ids)

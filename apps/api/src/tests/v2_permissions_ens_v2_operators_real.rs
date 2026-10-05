@@ -15,6 +15,7 @@ use bigname_adapters::schema_v2::{
 };
 
 sol! {
+    event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
     event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
     event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
     event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
@@ -139,13 +140,18 @@ impl Logs {
 
     /// `_register` of the label to Alice, expiring at `expiry`.
     fn register(&mut self, block: i64, expiry: u64) -> &mut Self {
-        let (resource, token) = (versioned(0), versioned(0));
+        self.register_as(block, expiry, (0, 0), ALICE)
+    }
+
+    /// `_register` of the label to `owner` at token and role version `versions`.
+    fn register_as(&mut self, block: i64, expiry: u64, versions: (u32, u32), owner: &str) -> &mut Self {
+        let (token, resource) = (versioned(versions.0), versioned(versions.1));
         self.push(block, LabelRegistered { tokenId: token, labelHash: keccak256(LABEL.as_bytes()),
-            label: LABEL.into(), owner: account(ALICE), expiry,
+            label: LABEL.into(), owner: account(owner), expiry,
             sender: account(ROOT_HOLDER) }.encode_log_data())
-            .transfer(block, token, ZERO, ALICE)
+            .transfer(block, token, ZERO, owner)
             .push(block, TokenResource { tokenId: token, resource }.encode_log_data())
-            .roles(block, resource, ALICE, U256::ZERO, owner_roles())
+            .roles(block, resource, owner, U256::ZERO, owner_roles())
     }
 }
 
@@ -174,7 +180,58 @@ fn registry_logs() -> Logs {
     logs
 }
 
-async fn publish(database: &TestDatabase, block: i64) -> Result<()> {
+type Output = bigname_adapters::schema_v2::BatchOutput;
+
+/// Publishes the families at `block`, after storing the name bindings Interpret holds by then:
+/// each binding the adapter opened, closed where a later closure of the name covers it.
+async fn publish(database: &TestDatabase, output: &Output, block: i64) -> Result<()> {
+    let bindings = output
+        .surface_bindings
+        .iter()
+        .filter(|opened| opened.block_number <= block)
+        .map(|opened| SurfaceBinding {
+            surface_binding_id: opened.surface_binding_id,
+            logical_name_id: "ens:alice.eth".to_owned(),
+            resource_id: opened.resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            authority_arm: opened.authority_arm.clone(),
+            active_from: opened.active_from,
+            active_to: output
+                .binding_closures
+                .iter()
+                .filter(|closure| {
+                    closure.block_number <= block
+                        && closure.active_to >= opened.active_from
+                        && closure.except_surface_binding_id != Some(opened.surface_binding_id)
+                })
+                .map(|closure| closure.active_to)
+                .min(),
+            chain_id: CHAIN.to_owned(),
+            block_hash: opened.block_hash.clone(),
+            block_number: opened.block_number,
+            provenance: opened.provenance.clone(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_test_surface_bindings(&database.pool, &bindings).await?;
+    // Collections also require an Interpret phase that is not redoing history.
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number,
+             current_block_hash, target_block_number, target_block_hash, input_content_hash,
+             started_at, finished_at)
+         VALUES ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash",
+    )
+    .bind(CHAIN)
+    .bind(block)
+    .bind(format!("0xhistory{block}"))
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.pool)
+    .await?;
     publish_test_families_on(&database.pool, CHAIN, block).await?;
     database.seed_snapshot_selector_chain_positions(&json!({CHAIN: {
         "chain_id": CHAIN, "block_number": block, "block_hash": format!("0xhistory{block}"),
@@ -210,37 +267,13 @@ async fn declare(database: &TestDatabase, declared: bool) -> Result<()> {
     Ok(())
 }
 
-/// The adapter's binding of alice.eth opened at `block`, as Interpret stores it.
-fn binding(output: &bigname_adapters::schema_v2::BatchOutput, block: i64) -> Result<SurfaceBinding> {
-    let opened = output
-        .surface_bindings
-        .iter()
-        .find(|binding| binding.block_number == block)
-        .with_context(|| format!("a binding opened at block {block}"))?;
-    Ok(SurfaceBinding {
-        surface_binding_id: opened.surface_binding_id,
-        logical_name_id: "ens:alice.eth".to_owned(),
-        resource_id: opened.resource_id,
-        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-        authority_arm: opened.authority_arm.clone(),
-        active_from: opened.active_from,
-        active_to: None,
-        chain_id: CHAIN.to_owned(),
-        block_hash: opened.block_hash.clone(),
-        block_number: opened.block_number,
-        provenance: opened.provenance.clone(),
-        canonicality_state: CanonicalityState::Canonical,
-    })
-}
-
-/// Interprets the registry's logs and stores what Interpret would, with the binding the
-/// registration opens. `declared` puts the registry in an active manifest; without it the
+/// Interprets the registry's logs and stores what Interpret would. `declared` puts the registry in an active manifest; without it the
 /// registry is one discovery admitted. Returns the token resource and the adapter's output.
 async fn seed(
     database: &TestDatabase,
     logs: Logs,
     declared: bool,
-) -> Result<(Uuid, bigname_adapters::schema_v2::BatchOutput)> {
+) -> Result<(Uuid, Output)> {
     let (manifest, admission) = registry_family();
     let (output, _) = prepare_schema_v2_batch_incremental(
         BatchInput {
@@ -309,7 +342,6 @@ async fn seed(
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    upsert_test_surface_bindings(&database.pool, &[binding(&output, 121)?]).await?;
     Ok((token, output))
 }
 
@@ -346,11 +378,12 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     let operator_own = row(OPERATOR, "registry", None, json!(["set_subregistry"]));
     let root_rows = [
         row(ROOT_HOLDER, "root", None, json!(["registrar", "renew", "admin_registrar"])),
-        row(ROOT_MIXED, "root", None, json!(["renew"])),
+        row(ROOT_MIXED, "root", None, json!(["renew", "can_transfer_admin"])),
+        row(ROOT_TRANSFER_ONLY, "root", None, json!(["can_transfer_admin"])),
     ];
 
     // Alice owns the token and approved the operator, who also holds a role of its own.
-    publish(&database, 123).await?;
+    publish(&database, &output, 123).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![
         row(ALICE, "registry", None, owner_powers.clone()),
@@ -358,6 +391,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
         operator_own.clone(),
         root_rows[0].clone(),
         root_rows[1].clone(),
+        root_rows[2].clone(),
     ], "{page:#}");
     assert_eq!(operator_rows(&page), vec![&json!({
         "address": OPERATOR,
@@ -395,17 +429,26 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     }
     assert_eq!(by_name["meta"]["unlisted_permission_surfaces"], json!(["resolver_approvals"]));
 
-    // The bounded read behind `role_summary` carries the operator and leaves the root holders
-    // to the registry read.
-    let summary = bigname_storage::load_bounded_effective_permissions_by_resource_ids(&database.pool, &[token], None, 1_000).await?;
+    // `role_summary` carries the operator and leaves the root holders to the registry read.
+    let (status, names) = read_family_response(&database,
+        &format!("/v1/addresses/{ALICE}/names?namespace=ens&include=role_summary")).await?;
+    assert_eq!(status, StatusCode::OK, "{names:#}");
+    let summary = names["data"][0]["role_summary"].as_array().context("role_summary")?;
+    assert_eq!(names["data"][0]["name"], "alice.eth", "{names:#}");
     assert_eq!(
-        summary.iter().map(|row| (row.subject.as_str(), row.scope.storage_key())).collect::<Vec<_>>(),
+        summary.iter().map(|holder| (
+            holder["address"].clone(),
+            holder["grants"].as_array().unwrap().iter()
+                .map(|grant| grant["grant_scope"]["kind"].clone()).collect::<Vec<_>>(),
+        )).collect::<Vec<_>>(),
         vec![
-            (ALICE, "registry".to_owned()),
-            (OPERATOR, format!("account:{CHAIN}:ens_v2_registry:{REGISTRY}:{ALICE}")),
-            (OPERATOR, "registry".to_owned()),
+            (json!(ALICE), vec![json!("registry")]),
+            (json!(OPERATOR), vec![json!("account"), json!("registry")]),
         ],
+        "{names:#}"
     );
+    assert_eq!(summary[1]["grants"][0]["powers"], owner_powers, "{names:#}");
+    assert_eq!(names["meta"]["unlisted_permission_surfaces"], json!(["resolver_approvals"]), "{names:#}");
 
     // The operator's own address read carries both of its rows.
     let by_operator = v2_permissions_payload_for_database(&database,
@@ -414,27 +457,25 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
         row(OPERATOR, "account", Some(ALICE), owner_powers.clone()), operator_own.clone(),
     ], "{by_operator:#}");
     assert_eq!(by_operator["data"][0]["lineage"]["grant"], json!({"kind": "event"}));
-    // `can_transfer_admin` on the root is nothing on a token; the root's own read keeps it.
+    // The registration lists every root holder with every root power, as the root's own read
+    // does under the root's id.
     let filtered = v2_permissions_payload_for_database(&database,
         &format!("{uri}&address={ROOT_TRANSFER_ONLY}")).await?;
-    assert_eq!(filtered["data"], json!([]), "{filtered:#}");
+    assert_eq!(rows(&filtered), vec![root_rows[2].clone()], "{filtered:#}");
     let root = v2_permissions_payload_for_database(&database,
         &format!("/v1/permissions?registry=1:{REGISTRY}")).await?;
-    assert_eq!(rows(&root), vec![
-        root_rows[0].clone(),
-        row(ROOT_MIXED, "root", None, json!(["renew", "can_transfer_admin"])),
-        row(ROOT_TRANSFER_ONLY, "root", None, json!(["can_transfer_admin"])),
-    ], "{root:#}");
+    assert_eq!(rows(&root), root_rows.to_vec(), "{root:#}");
     assert!(root["data"].as_array().unwrap().iter().all(|row| row["registration_id"] != token.to_string()));
 
     // The token moved to Bob, who approved nobody: Alice's approval no longer reaches it.
-    publish(&database, 124).await?;
+    publish(&database, &output, 124).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![
         row(BOB, "registry", None, owner_powers.clone()),
         operator_own.clone(),
         root_rows[0].clone(),
         root_rows[1].clone(),
+        root_rows[2].clone(),
     ], "{page:#}");
     let by_operator = v2_permissions_payload_for_database(&database,
         &format!("/v1/permissions?address={OPERATOR}")).await?;
@@ -442,7 +483,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
 
     // Bob approves, revokes and approves again.
     for (block, approved) in [(125, true), (126, false), (129, true)] {
-        publish(&database, block).await?;
+        publish(&database, &output, block).await?;
         let page = v2_permissions_payload_for_database(&database, &uri).await?;
         let owners = operator_rows(&page).iter()
             .map(|row| row["grant_scope"]["detail"]["owner"].clone()).collect::<Vec<_>>();
@@ -450,15 +491,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     }
 
     // The entry expires in block 130: the registry reports no owner, so nobody's operators.
-    // The path expiry closes the binding the registration opened.
-    let closure = output
-        .binding_closures
-        .iter()
-        .find(|closure| closure.block_number == 130)
-        .context("a binding closure at block 130")?;
-    let expired = SurfaceBinding { active_to: Some(closure.active_to), ..binding(&output, 121)? };
-    upsert_test_surface_bindings(&database.pool, &[expired]).await?;
-    publish(&database, 130).await?;
+    publish(&database, &output, 130).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(page["data"], json!([]), "the expired registration serves no row: {page:#}");
     let by_operator = v2_permissions_payload_for_database(&database,
@@ -466,8 +499,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
     assert!(operator_rows(&by_operator).is_empty(), "{by_operator:#}");
 
     // A root renewer revives the entry; Bob still holds the token and his approval stands.
-    upsert_test_surface_bindings(&database.pool, &[binding(&output, 131)?]).await?;
-    publish(&database, 131).await?;
+    publish(&database, &output, 131).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![
         row(BOB, "registry", None, owner_powers.clone()),
@@ -475,6 +507,7 @@ async fn registration_read_lists_operators_and_root_holders_through_the_token_li
         operator_own,
         root_rows[0].clone(),
         root_rows[1].clone(),
+        root_rows[2].clone(),
     ], "{page:#}");
     database.cleanup().await
 }
@@ -497,12 +530,12 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
         .transfer(124, versioned(0), ALICE, ZERO)
         .push(124, TokenRegenerated { oldTokenId: versioned(0), newTokenId: versioned(1) }.encode_log_data())
         .transfer(124, versioned(1), ZERO, ALICE);
-    let (token, _) = seed(&database, logs, false).await?;
+    let (token, output) = seed(&database, logs, false).await?;
     let uri = format!("/v1/permissions?registration_id={token}");
     let owner_powers = json!(["renew", "set_resolver", "admin_set_resolver", "can_transfer_admin"]);
     let alice_root = row(ALICE, "root", None, json!(["registrar", "admin_registrar"]));
 
-    publish(&database, 123).await?;
+    publish(&database, &output, 123).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![
         row(ALICE, "registry", None, owner_powers.clone()),
@@ -516,7 +549,7 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
         &format!("/v1/permissions?address={BOB}")).await?;
     assert_eq!(by_bob["data"], json!([]), "an operator's operator has nothing: {by_bob:#}");
 
-    publish(&database, 124).await?;
+    publish(&database, &output, 124).await?;
     let page = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(rows(&page), vec![alice_root], "{page:#}");
     // A registration whose only rows are root holders still has its restriction block: no
@@ -529,5 +562,130 @@ async fn operator_rows_carry_only_the_owners_token_roles() -> Result<()> {
     let by_operator = v2_permissions_payload_for_database(&database,
         &format!("/v1/permissions?address={OPERATOR}")).await?;
     assert_eq!(by_operator["data"], json!([]), "{by_operator:#}");
+    database.cleanup().await
+}
+
+/// An operator follows the entry, not the label: `unregister` ends the owner's operators, a
+/// root renewal of the unregistered entry leaves a reservation nobody owns, and a new
+/// registration is a new resource that only its own owner's approvals reach.
+/// (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L238 @ ens_v2_sepolia_20261001@07e55a05)
+#[tokio::test]
+async fn operator_rows_follow_the_entry_through_unregister_and_a_new_registration() -> Result<()> {
+    const FAR: u64 = 1_800_000_000;
+    let database = TestDatabase::new_migrated().await?;
+    let mut logs = Logs::default();
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(16) | bit(128))
+        .register(121, FAR)
+        .approve(122, ALICE, OPERATOR, true)
+        .push(124, LabelUnregistered { tokenId: versioned(0), sender: account(ALICE) }.encode_log_data())
+        .transfer(124, versioned(0), ALICE, ZERO)
+        // The root renewer revives the unregistered entry: it is held again, with no token.
+        .push(125, ExpiryUpdated { tokenId: versioned(1), newExpiry: FAR,
+            sender: account(ROOT_HOLDER) }.encode_log_data())
+        // Unregister advanced both versions, so the next registration has token 1 and resource 1.
+        .register_as(126, FAR, (1, 1), BOB)
+        .approve(128, BOB, OPERATOR, true);
+    let (first, output) = seed(&database, logs, true).await?;
+    let second = output
+        .normalized_events
+        .iter()
+        .find(|event| event.event_kind == "PermissionChanged" && event.block_number == Some(126))
+        .and_then(|event| event.resource_id)
+        .context("the second registration's grant names its resource")?;
+    assert_ne!(first, second);
+    let operators = |resource: Uuid| {
+        let database = &database;
+        async move {
+            let page = v2_permissions_payload_for_database(database,
+                &format!("/v1/permissions?registration_id={resource}&address={OPERATOR}")).await?;
+            anyhow::Ok(rows(&page).into_iter().map(|row| row.2).collect::<Vec<_>>())
+        }
+    };
+    let by_operator = || async {
+        let page = v2_permissions_payload_for_database(&database,
+            &format!("/v1/permissions?address={OPERATOR}")).await?;
+        anyhow::Ok(page["data"].as_array().unwrap().iter()
+            .map(|row| (row["registration_id"].clone(), row["grant_scope"]["detail"]["owner"].clone()))
+            .collect::<Vec<_>>())
+    };
+
+    publish(&database, &output, 123).await?;
+    assert_eq!(operators(first).await?, vec![json!(ALICE)]);
+
+    // Unregistered, then reserved by the renewal: the entry has no owner, so no operator.
+    for block in [124, 125] {
+        publish(&database, &output, block).await?;
+        assert_eq!(operators(first).await?, Vec::<Value>::new(), "block {block}");
+        assert_eq!(by_operator().await?, vec![], "block {block}");
+    }
+
+    // Bob's registration is a new resource. Alice's standing approval reaches neither.
+    publish(&database, &output, 127).await?;
+    assert_eq!(operators(first).await?, Vec::<Value>::new());
+    assert_eq!(operators(second).await?, Vec::<Value>::new());
+
+    publish(&database, &output, 128).await?;
+    assert_eq!(operators(first).await?, Vec::<Value>::new());
+    assert_eq!(operators(second).await?, vec![json!(BOB)]);
+    assert_eq!(by_operator().await?, vec![(json!(second.to_string()), json!(BOB))]);
+    database.cleanup().await
+}
+
+/// Seventy operators of one token page exactly across candidate batches, and an entry whose
+/// expiry no log states serves none of them while the rows on either side stay.
+#[tokio::test]
+async fn operator_rows_page_across_candidate_batches_and_need_a_stated_expiry() -> Result<()> {
+    const FAR: u64 = 1_800_000_000;
+    let database = TestDatabase::new_migrated().await?;
+    let operator = |index: usize| format!("0x00000000000000000000000000000000000c{index:04x}");
+    let mut logs = Logs::default();
+    // One root holder sorts before the operators and one after them.
+    const LAST_ROOT_HOLDER: &str = "0xf000000000000000000000000000000000000001";
+    logs.roles(120, U256::ZERO, ROOT_HOLDER, U256::ZERO, bit(0) | bit(128))
+        .roles(120, U256::ZERO, LAST_ROOT_HOLDER, U256::ZERO, bit(16))
+        .register(121, FAR);
+    for index in 0..70 {
+        logs.approve(122, ALICE, &operator(index), true);
+    }
+    let (token, output) = seed(&database, logs, true).await?;
+    publish(&database, &output, 123).await?;
+
+    let uri = format!("/v1/permissions?registration_id={token}");
+    let walk = |page_size: usize| {
+        let (database, uri) = (&database, &uri);
+        async move {
+            let mut addresses = Vec::new();
+            let mut next = format!("{uri}&page_size={page_size}");
+            loop {
+                let page = v2_permissions_payload_for_database(database, &next).await?;
+                let data = page["data"].as_array().unwrap();
+                anyhow::ensure!(data.len() <= page_size, "{page:#}");
+                addresses.extend(data.iter().map(|row| row["address"].as_str().unwrap().to_owned()));
+                let Some(cursor) = page["page"]["next_cursor"].as_str() else { break };
+                next = format!("{uri}&page_size={page_size}&cursor={cursor}");
+            }
+            anyhow::Ok(addresses)
+        }
+    };
+    let mut expected = vec![ALICE.to_owned(), ROOT_HOLDER.to_owned()];
+    expected.extend((0..70).map(operator));
+    expected.push(LAST_ROOT_HOLDER.to_owned());
+    for page_size in [50, 7, 64, 65] {
+        assert_eq!(walk(page_size).await?, expected, "page_size {page_size}");
+    }
+
+    // The same entry as a registry leaves it when only a transfer was retained: owner known,
+    // expiry never stated. It cannot be shown live, so its operators are not served, and a
+    // small page still reaches the row after seventy dropped candidates.
+    sqlx::query("UPDATE bigname_phase.project_ens_v2_entry_owner SET expiry = NULL
+                 WHERE chain_id = $1 AND registry = $2")
+        .bind(CHAIN).bind(REGISTRY).execute(&database.pool).await?;
+    for page_size in [1, 50] {
+        assert_eq!(
+            walk(page_size).await?,
+            vec![ALICE.to_owned(), ROOT_HOLDER.to_owned(), LAST_ROOT_HOLDER.to_owned()],
+            "page_size {page_size}"
+        );
+    }
     database.cleanup().await
 }

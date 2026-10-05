@@ -2998,16 +2998,25 @@ introduces it rebuilds Project from full history before serving the option; see
   same check on every token of the registry. There a root row belongs to the
   registration: `registration_id`, `name` and `authority_context` are the
   values the registration's other rows carry, `grant_scope` is the same `root`
-  object, and `powers` are the holder's root powers without
-  `can_transfer_admin`, which a transfer checks only among the token owner's
-  roles on the token. A holder whose only root power is `can_transfer_admin`
-  has no row on a registration. With `address` the read returns that account's
+  object, and `powers` are the holder's root powers. `can_transfer_admin`
+  held on the root does not let the holder transfer a name or make one
+  transferable, because a transfer checks that role only among the token
+  owner's own roles on the token; it does let the holder revoke that role from
+  an account on a live name. With `address` the read returns that account's
   rows on the registration, its root row included. An `address` read without
   `name` or `registration_id` lists a root holder once, on the root resource,
   and does not repeat it for each name of the registry. A registration whose
-  rows are dropped because its name's path expired lists no root holders.
+  rows are dropped because its name's path was released, by its own expiry or
+  an ancestor's, lists no root holders. A holder of root `renew` can still
+  revive an expired entry; such holders are rows of the `registry` read.
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L454-L465 @ ens_v2_sepolia_20261001@07e55a05)
   (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L528-L543 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L270-L277 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L408-L417 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L444-L451 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/libraries/EACBaseRolesLib.sol:L30-L34 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L243-L258 @ ens_v2_sepolia_20261001@07e55a05)
+  (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L643-L654 @ ens_v2_sepolia_20261001@07e55a05)
 
 - Pagination behavior: standard collection pagination with fixed sort
   `address_registration_scope_asc` and keyset
