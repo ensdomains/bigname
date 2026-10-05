@@ -327,7 +327,7 @@ pub(super) async fn get_address_resolves_to(
         .as_ref()
         .map(|cursor| encode(&resolves_to_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
-    let data = rows
+    let mut data = rows
         .iter()
         .zip(primary_flags)
         .map(|(resolves_to_row, is_primary)| {
@@ -396,6 +396,11 @@ pub(super) async fn get_address_resolves_to(
             Ok(row)
         })
         .collect::<V2Result<Vec<_>>>()?;
+    crate::v2::name_record::fill_wrapper_expiries(
+        snapshot.conn().await?,
+        data.iter_mut().filter_map(|row| row.ens_v1.as_mut()),
+    )
+    .await?;
     let mut meta = snapshot.finish(state).await?;
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =

@@ -380,7 +380,8 @@ collection route carry neither header.
   records, on `status=unsupported` records, and, for `authority`, on ownerless
   registry rows. `profile=detail` records whose `authority` is `ens_v1` or
   `ens_v0` also carry the `ens_v1` object (`{expires_at, wrapper_state?,
-  wrapper_fuses?}`, the ENSv1 lease date and NameWrapper position) exactly as
+  wrapper_fuses?, wrapper_expires_at?, wrapper_expires_at_reason?}`, the ENSv1
+  lease date and NameWrapper position) exactly as
   name detail does, and so do feed records, which omit `authority` itself.
   Reverse inputs accept no
   `authority` filter yet; filter client-side or use
@@ -866,7 +867,8 @@ collection route carry neither header.
   [lapsed registration](api-v1.md#lapsed-registration) for the supported causes,
   pinned contract evidence, and expiry/grace field rules. It serves no current
   `owner`. The block is omitted for names that are not released and for other
-  release causes. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?}`:
+  release causes. `ens_v1` is `{expires_at, wrapper_state?, wrapper_fuses?,
+  wrapper_expires_at?, wrapper_expires_at_reason?}`:
   `expires_at` is the BaseRegistrar lease's own expiry, `null` without a
   lease, which after the Universal Resolver cutover can differ from the
   top-level ENSv2 `expires_at` (see [Expiry and grace](api-v1.md#expiry-and-grace)).
@@ -889,10 +891,35 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L848 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L849 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L852 @ ens_v1@91c966f)
+  `ens_v1.wrapper_expires_at` is the NameWrapper entry's own stored expiry,
+  with `wrapper_expires_at_reason` when it is `null`, as in wrapper
+  `restrictions`. It is present whenever the name has a current NameWrapper
+  entry: beside `wrapper_state` while the wrapper is backed, and still present,
+  in the past, after an emancipated or locked position lapses and the two
+  fields above are omitted. A plain wrapped position past expiry keeps
+  `wrapper_state: wrapped` and serves the past expiry beside it. A name with no
+  NameWrapper entry omits it, and so does a registry child listed without a
+  name row, whose `ens_v1` carries no wrapper fields, so absence alone does
+  not prove the name is unwrapped. It is not the lease plus 90 days: a renewal
+  through an ENSv1 `ETHRegistrarController` that calls only
+  `BaseRegistrar.renew` leaves it unchanged while `ens_v1.expires_at` moves on.
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352-L368 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L312-L337 @ ens_v1@91c966f)
+  A name whose latest NameWrapper lifecycle event is an unwrap omits it, even
+  where `wrapper_state` is still served: the burnt entry keeps its expiry, but
+  it is no longer the name's current one.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1032 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L269-L279 @ ens_v1@91c966f)
+  Known gap: a receiver contract that unwraps inside the mint callback of the
+  wrap produces mint, burn, `NameUnwrapped`, `NameWrapped`; bigname records
+  that as wrapped, so the wrapper fields, this expiry and the `restrictions`
+  expiry included, are served although the token is burnt.
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L257-L266 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f)
   Fuse-effect gating accepts the full upstream `uint64` expiry domain. A valid
   `MAX_EXPIRY` therefore keeps the lifecycle value active at representable
   served block timestamps. Its wrapper expiry is publicly `null` with
-  `wrapper_expires_at_reason: "no_expiry"` inside restrictions; when that
+  `wrapper_expires_at_reason: "no_expiry"` inside restrictions and `ens_v1`; when that
   wrapper entry also supplies the registration expiry, `expires_at` is `null`
   with `expires_at_reason: "no_expiry"`. This is sentinel classification,
   independent of the representability of a finite timestamp.

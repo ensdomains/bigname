@@ -562,6 +562,9 @@ async fn wrapped_name_lookup_uses_the_registrar_lease_handle() -> Result<()> {
     let ens_v1 = &subname["data"][0]["record"]["ens_v1"];
     assert_eq!(ens_v1.get("expires_at"), Some(&Value::Null), "{subname:#}");
     assert_eq!(ens_v1["wrapper_state"], json!("wrapped"), "{subname:#}");
+    // Its NameWrapper expiry is also its top-level expiry.
+    assert_eq!(ens_v1["wrapper_expires_at"], json!("1800000000"), "{subname:#}");
+    assert_eq!(subname["data"][0]["record"]["expires_at"], json!("1800000000"), "{subname:#}");
 
     database.cleanup().await
 }

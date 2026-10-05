@@ -143,10 +143,14 @@ pub(crate) async fn get_lookup(
     apply_record_abis(&state, &mut results).await?;
     #[cfg(test)]
     head::served_head_revalidation_test_hooks::run(&state.pool).await?;
+    // The expiries are a later read than the rows: when the served data moved in between, the
+    // revalidation's stale answer takes precedence over whatever this read then found.
+    let wrapper_expiries = apply_wrapper_expiries(&state, &mut results).await;
     revalidate_lookup_public_namespaces(&state, public_namespaces.as_ref()).await?;
     if let Some(served_head) = served_head.as_ref() {
         revalidate_served_head(&state.pool, served_head).await?;
     }
+    wrapper_expiries?;
     let data = results
         .into_iter()
         .map(|result| result.expect("every parsed lookup input must render a result"))
@@ -216,6 +220,27 @@ async fn apply_record_abis(state: &AppState, results: &mut [Option<LookupResult>
         return Ok(());
     }
     crate::v2::record_groups::fill_abi_content_types(&state.pool, targets).await
+}
+
+/// Reads the wrapper expiry of every rendered `ens_v1` once per chain across name results and
+/// reverse rows.
+async fn apply_wrapper_expiries(
+    state: &AppState,
+    results: &mut [Option<LookupResult>],
+) -> V2Result<()> {
+    let mut objects = Vec::new();
+    for result in results.iter_mut().flatten() {
+        for record in result
+            .record
+            .iter_mut()
+            .chain(result.records.iter_mut().flatten())
+        {
+            if let Some(ens_v1) = record.ens_v1.as_mut() {
+                objects.push(ens_v1);
+            }
+        }
+    }
+    crate::v2::name_record::fill_wrapper_expiries(&state.pool, objects).await
 }
 
 async fn render_reverse_lookup_results(

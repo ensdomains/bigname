@@ -324,6 +324,7 @@ async fn v2_get_name_exposes_projected_wrapper_state_and_fuses() -> Result<()> {
     assert_eq!(ens_v1["wrapper_fuses"]["cannot_unwrap"], json!(true));
     assert_eq!(ens_v1["wrapper_fuses"]["parent_cannot_control"], json!(true));
     assert_eq!(ens_v1["expires_at"], json!("1798859045"), "the lease, not the wrapper expiry");
+    assert_eq!(ens_v1["wrapper_expires_at"], json!("4000000000"), "{payload}");
     assert!(payload["data"].get("wrapper_state").is_none(), "{payload}");
     assert!(payload["data"].get("wrapper_fuses").is_none(), "{payload}");
     Ok(())

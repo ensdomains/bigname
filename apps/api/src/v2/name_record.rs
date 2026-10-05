@@ -47,7 +47,9 @@ use declared::{
     chain_positions_created_at, declared_created_at, declared_expires_at, declared_grace_ends_at,
     declared_owner, declared_registered_at, declared_registration, declared_registry_owner,
 };
-pub(crate) use ens_v1::{EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row};
+pub(crate) use ens_v1::{
+    EnsV1, ens_v1, ens_v1_of_registry_child, ens_v1_of_row, fill_wrapper_expiries,
+};
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
@@ -58,7 +60,9 @@ pub(super) use values::{
 use values::{
     has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,
 };
-pub(crate) use wrapper::{served_manager, wrapper_lifecycle_matches_fuses, wrapper_metadata};
+pub(crate) use wrapper::{
+    served_manager, wrapper_expiry, wrapper_lifecycle_matches_fuses, wrapper_metadata,
+};
 pub(crate) struct NameRecordQueryParams;
 impl QueryParamAllowlist for NameRecordQueryParams {
     const ALLOWED: &'static [&'static str] = &["namespace", "at", "finality", "source", "include"];
