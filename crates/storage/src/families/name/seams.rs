@@ -103,3 +103,7 @@ pub(super) fn batch_size(production: usize) -> usize {
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn note_submitted_rows(_rows: usize) {}
+
+/// The statements the search and bound-name walks run, for their plan tests.
+#[cfg(test)]
+pub(crate) use super::{bound::bound_candidates_sql, list::search_candidates_sql};

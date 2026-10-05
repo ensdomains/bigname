@@ -5,8 +5,10 @@
 //! and keyset ordering. Their candidate walks differ because no composed row is stored:
 //!
 //! - search walks the readable name surfaces (an input table) in the page order, which is the
-//!   surface's raw name then namespace and namehash, so the first `page_size + 1` composed rows
-//!   that pass the filters are final;
+//!   surface's served name then namespace and namehash, so the first `page_size + 1` composed
+//!   rows that pass the filters are final. A surface with raw bytes is served under its raw name
+//!   and one without under the name built from its label hashes (`rendered`), and each kind has
+//!   its own arm of the walk;
 //! - the expiring listing walks the retained lifecycle events (F2a) and the NameWrapper states
 //!   (F2b) by expiry. A name's registration expiry is always one of those expiries
 //!   (control::lifecycle::served, the registration expiry), so a name first seen at expiry `x`
@@ -23,7 +25,13 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
 
-use super::{CoverageShape, batch};
+use super::{
+    CoverageShape, batch,
+    rendered::{composed_surface_sql, rendered_name_sql},
+};
+use crate::families::topology::{
+    rendered_lateral_sql, textless_surface_sql, textless_surfaces_exist_sql,
+};
 use crate::{
     NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
@@ -169,8 +177,42 @@ pub(crate) const SEARCH_CANDIDATES_SQL: &str = r"/* storage:families.name.search
      ORDER BY surface.raw_name ASC, surface.namespace ASC, surface.namehash ASC
      LIMIT $7";
 
+/// The statement `search_candidates` runs: [`SEARCH_CANDIDATES_SQL`], unchanged, for the surfaces
+/// with raw bytes, then the same walk over the surfaces without them under their served name,
+/// merged in page order. The second arm has no length bound, which only the first arm's index
+/// needs.
+pub(crate) fn search_candidates_sql() -> String {
+    format!(
+        r"({SEARCH_CANDIDATES_SQL})
+     UNION ALL
+     (SELECT surface.logical_name_id, rendered.name, surface.namespace, surface.namehash
+      FROM bigname_phase.name_surfaces surface
+      JOIN bigname_phase.chain_lineage lineage
+        ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
+      JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+      {rendered}
+      WHERE {exist} AND {textless} AND {composed}
+        AND surface.block_number <= marker.current_block_number
+        AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        AND ($1::text[] IS NULL OR surface.namespace = ANY($1))
+        AND ($2::text IS NULL OR rendered.name = $2)
+        AND ($3::text IS NULL OR rendered.name LIKE $3 ESCAPE '\')
+        AND (rendered.name, surface.namespace, surface.namehash)
+            > (COALESCE($4, ''), COALESCE($5, ''), COALESCE($6, ''))
+      ORDER BY rendered.name ASC, surface.namespace ASC, surface.namehash ASC
+      LIMIT $7)
+     ORDER BY raw_name ASC, namespace ASC, namehash ASC
+     LIMIT $7",
+        rendered = rendered_lateral_sql(),
+        exist = textless_surfaces_exist_sql(),
+        textless = textless_surface_sql("surface"),
+        composed = composed_surface_sql("surface"),
+    )
+}
+
 /// The next readable surfaces after `after` in the search page's order that the filter's name
-/// predicates admit: (logical_name_id, raw_name, namespace, namehash).
+/// predicates admit: (logical_name_id, served name, namespace, namehash).
 async fn search_candidates(
     conn: &mut PgConnection,
     filter: &NameCurrentListFilter,
@@ -197,7 +239,7 @@ async fn search_candidates(
                 format!("%{}%", escape_like_pattern(&contains.to_ascii_lowercase()))
             })
         });
-    let rows = sqlx::query(SEARCH_CANDIDATES_SQL)
+    let rows = sqlx::query(&search_candidates_sql())
         .bind(namespaces)
         .bind(filter.name.as_deref())
         .bind(like)
@@ -385,19 +427,27 @@ async fn inexact_expiry_names(conn: &mut PgConnection, namespace: &str) -> Resul
 /// Keeps the walk's names that `filter` can list: with `authorities`, a name whose stored
 /// summary selects an arm that can serve one of them (the composed row decides, at the same
 /// publication); with `parent`, a name one label below it. The stored spelling is exact for
-/// `parent`: Interpret activates a surface only when every label is already normalized.
-const EXPIRY_PAIRS_PRUNE: &str = "
+/// `parent`: Interpret activates a surface only when every label is already normalized. A
+/// surface without raw bytes is matched on its served name, the same text the page filters.
+fn expiry_pairs_prune() -> String {
+    format!(
+        "
                      AND ($7::text[] IS NULL OR EXISTS (
                          SELECT 1 FROM bigname_phase.project_name_summary summary
                          WHERE summary.chain_id = surface.chain_id
                            AND summary.logical_name_id = surface.logical_name_id
                            AND summary.authority_arm = ANY($7::text[])))
                      AND ($8::text IS NULL OR (surface.raw_name LIKE $8 ESCAPE '\\'
-                         AND surface.raw_name NOT LIKE $9 ESCAPE '\\'))";
+                         AND surface.raw_name NOT LIKE $9 ESCAPE '\\')
+                         OR (surface.raw_name IS NULL AND {name} LIKE $8 ESCAPE '\\'
+                             AND {name} NOT LIKE $9 ESCAPE '\\'))",
+        name = rendered_name_sql("surface")
+    )
+}
 
 /// The next (expiry second, name) pairs of the walk after `after`: every retained lifecycle
 /// event and NameWrapper state whose expiry is in `[low, high)`, paired with each name of
-/// `filter.namespace` it can load ([`EXPIRY_HIT_NAMES`]) that [`EXPIRY_PAIRS_PRUNE`] keeps.
+/// `filter.namespace` it can load ([`EXPIRY_HIT_NAMES`]) that [`expiry_pairs_prune`] keeps.
 async fn expiry_pairs(
     conn: &mut PgConnection,
     filter: &NameCurrentExpiringFilter,
@@ -440,7 +490,7 @@ async fn expiry_pairs(
          LIMIT $5",
         names = EXPIRY_HIT_NAMES
             .replace("$NAMESPACE", "$6")
-            .replace("$PRUNE", EXPIRY_PAIRS_PRUNE)
+            .replace("$PRUNE", &expiry_pairs_prune())
     );
     let arms = filter.authorities.as_deref().map(public_authority_arms);
     let parent = filter.parent.as_deref().map(parent_like_patterns);
@@ -470,3 +520,7 @@ async fn expiry_pairs(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "list_tests.rs"]
+mod tests;

@@ -3,6 +3,8 @@
 //! and its lease's holder, each a scalar the planner drops when a statement reads no column of
 //! it (the child counts).
 
+use crate::families::name::rendered::composed_surface_sql;
+
 /// Whether the child has no name surface at the clock (the joined surface fails
 /// `registry_children::published_surface_exists`, whose canonicality tests
 /// [`CHILD_SURFACE_FILTER`] already applies) and the newest retained ENSv1 or Basenames
@@ -12,8 +14,9 @@
 /// every transaction of that block, so a re-registration there is newer. A child with a name
 /// surface serves its name row's own registration. The probe reads
 /// `project_lifecycle_event_namehash_idx`.
-pub(super) const RELEASED_LEASE: &str = "CASE WHEN child_surface.visibility_state = 'active'
-              AND child_surface.raw_name <> ''
+pub(super) fn released_lease() -> String {
+    format!(
+        "CASE WHEN {composed}
               AND child_surface.block_number <= clock.block_number THEN FALSE
          ELSE COALESCE((
              SELECT lease.event_kind = 'RegistrationReleased'
@@ -26,10 +29,13 @@ pub(super) const RELEASED_LEASE: &str = "CASE WHEN child_surface.visibility_stat
              ORDER BY lease.block_number DESC, lease.transaction_index DESC NULLS LAST,
                       lease.log_index DESC NULLS LAST, lease.event_identity COLLATE \"C\" DESC
              LIMIT 1), FALSE)
-    END";
+    END",
+        composed = composed_surface_sql("child_surface")
+    )
+}
 
 /// The holder of the child's registrar lease when it has no name surface at the clock (as in
-/// [`RELEASED_LEASE`]): of the newest retained ENSv1 or Basenames registrar lifecycle event of its
+/// [`released_lease`]): of the newest retained ENSv1 or Basenames registrar lifecycle event of its
 /// node at or below the clock among the rows that name a holder, a `TokenControlTransferred`'s
 /// recipient or a `RegistrationGranted`'s registrant, and none after a `RegistrationReleased`
 /// or for a zero registrant (a grant synthesised from a bare renewal). These are the rows the
@@ -37,8 +43,9 @@ pub(super) const RELEASED_LEASE: &str = "CASE WHEN child_surface.visibility_stat
 /// token moves without the registry record until `reclaim`
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L174 @ ens_v1@91c966f).
 /// The probe reads `project_lifecycle_event_namehash_idx`.
-pub(super) const TOKEN_HOLDER: &str = "CASE WHEN child_surface.visibility_state = 'active'
-              AND child_surface.raw_name <> ''
+pub(super) fn token_holder() -> String {
+    format!(
+        "CASE WHEN {composed}
               AND child_surface.block_number <= clock.block_number THEN NULL
          ELSE (
              SELECT NULLIF(CASE lease.event_kind
@@ -56,7 +63,10 @@ pub(super) const TOKEN_HOLDER: &str = "CASE WHEN child_surface.visibility_state 
              ORDER BY lease.block_number DESC, lease.transaction_index DESC NULLS LAST,
                       lease.log_index DESC NULLS LAST, lease.event_identity COLLATE \"C\" DESC
              LIMIT 1)
-    END";
+    END",
+        composed = composed_surface_sql("child_surface")
+    )
+}
 
 /// Whether the child's only surface is a shadow one at or below the clock that a lifecycle
 /// observer named: the NameWrapper (`ens_v1_wrapper_l1`, `NameWrapped`) or the ENSv1 registrar

@@ -1562,7 +1562,7 @@ async fn seed_schema_v2_claimed_name(
             input_name: name.into(),
             canonical_display_name: normalized.canonical_display_name,
             normalized_name: normalized.normalized_name,
-            dns_encoded_name: normalized.dns_encoded_name,
+            dns_encoded_name: Some(normalized.dns_encoded_name),
             namehash: node,
             labelhashes: vec![],
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.into(),

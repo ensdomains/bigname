@@ -26,8 +26,11 @@ use super::{
     selectors::{HistorySelector, name_history_selector},
     source::push_history_source_for_filter,
 };
-use crate::projection_helpers::{
-    checked_page_limit_i64_from_usize, checked_page_size_usize, split_keyset_page,
+use crate::{
+    families::name::rendered::rendered_name_sql,
+    projection_helpers::{
+        checked_page_limit_i64_from_usize, checked_page_size_usize, split_keyset_page,
+    },
 };
 
 /// How a row of name history relates to the requested name.
@@ -262,7 +265,11 @@ fn push_page_query<'a>(
         }
         builder.push("(");
         push_history_columns(builder, true, false);
-        builder.push(", 'child'::text AS history_subject, child_surface.raw_name AS child_name");
+        // A child whose surface stores no raw bytes is named as its own name row names it.
+        builder.push(format!(
+            ", 'child'::text AS history_subject, {} AS child_name",
+            rendered_name_sql("child_surface")
+        ));
         push_child_arm_source(builder, arm, Some(&filter.event_kinds), true);
         bound.push(builder);
         push_child_arm_order(builder, filter.order);

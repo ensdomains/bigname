@@ -1296,7 +1296,7 @@ async fn seed_record_lookup_inputs(
             input_name: name.into(),
             canonical_display_name: normalized.canonical_display_name,
             normalized_name: normalized.normalized_name,
-            dns_encoded_name: normalized.dns_encoded_name,
+            dns_encoded_name: Some(normalized.dns_encoded_name),
             namehash: namehash.clone(),
             labelhashes: normalized
                 .normalized_labels
@@ -2052,7 +2052,7 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
         input_name: normalized_name.to_owned(),
         canonical_display_name: "Alice.eth".to_owned(),
         normalized_name: normalized_name.to_owned(),
-        dns_encoded_name: vec![5, b'a', b'l', b'i', b'c', b'e'],
+        dns_encoded_name: Some(vec![5, b'a', b'l', b'i', b'c', b'e']),
         namehash: format!("namehash:{normalized_name}"),
         labelhashes: vec!["labelhash:alice".to_owned()],
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
@@ -2563,7 +2563,7 @@ fn collection_name_surface(
         input_name: display_name.to_owned(),
         canonical_display_name: display_name.to_owned(),
         normalized_name: display_name.to_owned(),
-        dns_encoded_name: display_name.as_bytes().to_vec(),
+        dns_encoded_name: Some(display_name.as_bytes().to_vec()),
         namehash: namehash.to_owned(),
         labelhashes: labelhash_for_display_name(display_name)
             .into_iter()
@@ -3014,7 +3014,7 @@ async fn seed_family_identity_inputs(
             input_name: name.into(),
             canonical_display_name: normalized.canonical_display_name,
             normalized_name: normalized.normalized_name,
-            dns_encoded_name: normalized.dns_encoded_name,
+            dns_encoded_name: Some(normalized.dns_encoded_name),
             namehash,
             labelhashes: vec![],
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.into(),
@@ -3597,7 +3597,7 @@ async fn seed_family_name_at(
             input_name: name.to_owned(),
             canonical_display_name: name.to_owned(),
             normalized_name: name.to_owned(),
-            dns_encoded_name: name.as_bytes().to_vec(),
+            dns_encoded_name: Some(name.as_bytes().to_vec()),
             namehash: namehash.clone(),
             labelhashes: Vec::new(),
             normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.to_owned(),
