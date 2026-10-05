@@ -640,8 +640,8 @@ adapter holds no state for, which `renew` emits when a root renewer revives an
 entry that `unregister` left without a token
 (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/registry/PermissionedRegistry.sol:L227-L258 @ ens_v2_sepolia_20261001@07e55a05).
 It becomes an `ExpiryChanged` with no name and no resource and
-`token_state_absent = true`, changes no name state, is listed by unanchored
-and contract-filtered event reads, and exists so that the
+`token_state_absent = true`, changes no name state, is omitted from product
+event reads, and exists so that the
 [registry entry](projections.md#ensv2-registry-entries) row keeps the entry's
 expiry. The Mainnet profile declares no
 ENSv2 family and is unchanged.

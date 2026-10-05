@@ -2589,10 +2589,11 @@ and `token_state_absent = true` for an `ExpiryUpdated` whose token the adapter
 holds no state for, such as a renewal that revives an unregistered entry or a
 renewal of an entry registered before the registry's retained history. It
 updates the registry entry row and creates no named lifecycle or ownership
-state. `/v1/diagnostics/events` shows it, and so does `GET /v1/events` when the
-request is unanchored or filtered by the registry's `contract_address`, as an
-`expiry` event with no name, counted in `total_count`; name, registration and
-address history do not list it. The Mainnet and Base
+state. `/v1/diagnostics/events` shows it. `GET /v1/events` and the other
+product history reads neither list nor count it: the shared history query
+omits it before pagination (see
+[`GET /v1/events`](api-v1-routes.md#get-v1events)). That reader change is
+outside the interpreter content hash. The Mainnet and Base
 manifests are unchanged, so those chains get the hash rotation and its
 Interpret and Project redo pair and no Ingest redo.
 

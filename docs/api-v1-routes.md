@@ -4101,7 +4101,7 @@ introduces it rebuilds Project from full history before serving the option; see
 | 500 | object ErrorEnvelope | `internal_error` | none | Unexpected serving failure; verified provider transport failures also use this error. |
 | 503 | object ErrorEnvelope | `overloaded` | none | The process-wide in-flight ceiling, or the verified-execution ceiling when applicable, is exhausted. |
 
-For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
+For a registrar lease first identified by a later readable observation, registration time remains the original numeric grant time. Compact product history omits only snapshots with both `state_derived=true` and `registrar_surface_snapshot=true`, before pagination and cursor validation. It also omits, before pagination and counting, an ENSv2 registry `ExpiryChanged` that has no name and no resource and carries `token_state_absent=true`: a registry `ExpiryUpdated` for a token with no interpreted state, kept only for the registry entry projection. Unanchored and `contract_address` reads neither list it nor include it in `total_count`; diagnostics retains it. Diagnostics retains the marked snapshot at its later readable trigger; original resource-only history and all unmarked events remain unchanged. See [storage semantics](storage.md).
 
 - Method/path: `GET /v1/events`
 - Tier: product read.
