@@ -69,6 +69,8 @@ impl Run<'_> {
             last = planned[applied - 1],
             blocks = applied,
             elapsed_ms = stats.elapsed_ms,
+            rows = ?stats.rows,
+            undo_rows = stats.undo_rows,
             "applied a family rebuild range"
         );
         self.budget

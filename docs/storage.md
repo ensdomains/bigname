@@ -352,6 +352,45 @@ indexes on `normalized_events`, installed by the normalized-events baseline and
 | `normalized_events_record_id_write_idx` | `push_record_link_arm` in `history/attribution/sql.rs`: a selected record's `RecordChanged` writes by chain, resolver and record id |
 | `normalized_events_record_id_link_idx` | the `links` CTE of `push_record_link_ctes` in `history/attribution/sql.rs`: the `ResolverRecordLinked` rows on a pointer's chain and resolver at its node or the zero node |
 
+The Project address-history catalogue adds no event payload copies. Its chain-owned
+`project_address_history_anchor` rows pack independent current and historical address/name
+or address/resource relations; current name rows retain their selected resource after
+Project validates the cited relation position. `project_history_source` holds shared source bounds and conservative
+event-kind/record-key summaries. `project_history_source_edge` records resource-to-resolver
+source reachability and pointer/link provenance. Project journals these facts and writes
+`project_history_catalogue_marker` in the same transaction as its family publication.
+The reader requires the catalogue version, content hash, publication sequence and block/hash
+to match the captured family publication. Missing or incomplete catalogue state is stale.
+An ordinary publication between API admission and the read snapshot retains the original
+bound through the authoritative history reader in that same transaction.
+
+The catalogue migration replaces four existing normalized-event index definitions, preserving
+their equality prefixes and readable-row predicates. Their order suffix is the full public
+history comparator, so a bounded source prefix needs no complete source-history sort:
+
+| Index | Additional statement served |
+| --- | --- |
+| `normalized_events_name_history_idx` | `history/address_walk/catalogue_source.rs`: direct events for one logical name |
+| `normalized_events_resource_history_idx` | the same reader: direct events for one resource |
+| `normalized_events_project_node_history_idx` | the same reader and `project:history.source_envelopes`: chain/node record events |
+| `normalized_events_record_id_write_idx` | the same reader and `project:history.source_envelopes`: chain/resolver/record-ID writes |
+
+The new suffix keeps block, chain where not fixed, block hash, transaction, log and event
+identity order, including null placement. Existing Project and Interpret consumers retain
+their leading name/resource/node/record-ID probes. The replaced indexes are not kept as
+duplicates. Catalogue masks and 256-block ranges only reject impossible candidates; exact
+relation, duplicate and record attribution checks still decide returned events and counts.
+
+Conservative catalogue work discovery also visits noncanonical events: a retired or no longer
+readable fact can still identify a key whose old membership needs removal. Two complementary
+indexes, `normalized_events_history_discovery_name_idx` and
+`normalized_events_history_discovery_resource_idx`, contain only named/resource events outside
+canonical, safe and finalized states, keyed by chain, name/resource and block. Discovery keeps
+the two state branches keyed before applying its publication/NULL bound, avoiding repeated
+reads of unrelated unpositioned manifest history. This reads all retained history of each
+touched key, including future events rejected by that bound; repeated early rebuild ranges
+can revisit a deep key's future suffix. The indexes add no canonical entries or stored facts.
+
 Address history (`crates/storage/src/history/filters.rs`) adds one read-only index on
 `normalized_events` for its registry root role branch, installed by the normalized-events
 baseline and `20261005120000_normalized_events_address_root_permission_idx.sql` and changing no
@@ -2152,7 +2191,7 @@ The 17 kept indexes and the statements that read them:
 | `normalized_events_manifest_idx` | the manifest sync's latest `SourceManifestUpdated` per manifest at runner start (`lock_phase_writers` in `crates/manifests/src/schema_v2_sync_state.rs`, `load_manifest_states` in `schema_v2_event_history.rs`), one index probe per manifest |
 | `normalized_events_v1_direct_node_probe_idx`, `normalized_events_v1_due_probe_idx`, `normalized_events_basenames_direct_node_probe_idx`, `normalized_events_basenames_due_probe_idx`, `normalized_events_v2_direct_node_probe_idx`, `normalized_events_v2_key_probe_idx`, `normalized_events_v2_due_probe_idx`, `normalized_events_v2_lookahead_probe_idx` | the lookahead loader (`ops/v1-lookahead-indexes/README.md`); every lookahead chain runs every arm, so all eight stay even where some hold no rows |
 
-The other 34 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
+The other 36 serve only Project, the API and `phase-runner inspect`, and `ops/walk-index-set/drop.sql` drops exactly
 these: `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_v1_subregistry_after_child_scope_idx`,
 `normalized_events_v1_subregistry_before_node_scope_idx`,
@@ -2162,6 +2201,7 @@ these: `normalized_events_v1_subregistry_after_node_scope_idx`,
 `normalized_events_ens_v1_record_node_resolver_idx`,
 `normalized_events_basenames_record_node_resolver_idx`,
 `normalized_events_record_id_write_idx`, `normalized_events_record_id_link_idx`,
+`normalized_events_history_discovery_name_idx`, `normalized_events_history_discovery_resource_idx`,
 `normalized_events_resolver_alias_history_idx`,
 `normalized_events_resolver_upgrade_history_idx`,
 `normalized_events_pointer_after_resolver_history_idx`,

@@ -17,6 +17,8 @@ mod evm_primitives;
 mod expiry;
 pub mod families;
 mod history;
+pub use history::catalogue_contract as history_catalogue_contract;
+pub use history::{HistoricalHistoryRelation, historical_history_relations};
 mod identity;
 mod identity_facade;
 mod label_preimages;
@@ -76,11 +78,12 @@ pub use history::{
 };
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
-    HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
-    HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
-    HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, count_contract_events,
-    load_address_history, load_address_history_for_relations, load_address_history_page,
+    HistoryBlockWindow, HistoryCataloguePublication, HistoryCataloguePublicationFence,
+    HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
+    HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary, HistorySummaryMode,
+    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor, NameHistoryPage,
+    NameHistoryRow, capture_interpret_redo_fence, count_contract_events, load_address_history,
+    load_address_history_for_relations, load_address_history_page,
     load_address_history_page_for_relations, load_bounded_record_attribution,
     load_bounded_registration_resource_ids, load_candidate_logical_name_ids_for_registration_id,
     load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,

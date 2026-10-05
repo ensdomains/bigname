@@ -312,10 +312,12 @@ CREATE INDEX IF NOT EXISTS migration_candidate_discovery_effects_position_idx
 CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
     ON normalized_events (
         logical_name_id,
-        block_number DESC,
-        transaction_index DESC,
-        log_index DESC,
-        normalized_event_id DESC
+        block_number DESC NULLS LAST,
+        chain_id ASC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE logical_name_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
@@ -323,13 +325,32 @@ CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
 CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     ON normalized_events (
         resource_id,
-        block_number DESC,
-        transaction_index DESC,
-        log_index DESC,
-        normalized_event_id DESC
+        block_number DESC NULLS LAST,
+        chain_id ASC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE resource_id IS NOT NULL
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+-- Conservative Project discovery also revisits noncanonical named resource events.
+CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_name_idx
+    ON normalized_events (chain_id, logical_name_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state);
+
+CREATE INDEX IF NOT EXISTS normalized_events_history_discovery_resource_idx
+    ON normalized_events (chain_id, resource_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::canonicality_state,
+          'safe'::canonicality_state,
+          'finalized'::canonicality_state);
 
 CREATE INDEX IF NOT EXISTS normalized_events_v1_subregistry_after_node_scope_idx
     ON normalized_events (
@@ -514,7 +535,12 @@ CREATE INDEX IF NOT EXISTS normalized_events_record_id_write_idx
     ON normalized_events (
         chain_id,
         lower(after_state ->> 'resolver'),
-        (after_state ->> 'resolver_record_id')
+        (after_state ->> 'resolver_record_id'),
+        block_number DESC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
     )
     WHERE event_kind = 'RecordChanged'
       AND after_state ->> 'storage_model' = 'resolver_record_id'
@@ -990,7 +1016,14 @@ $$;
 
 -- Keyed incremental Project history retrieval.
 CREATE INDEX IF NOT EXISTS normalized_events_project_node_history_idx
-    ON normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
+    ON normalized_events (
+        chain_id, lower(after_state ->> 'node'),
+        block_number DESC NULLS LAST,
+        block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST,
+        log_index DESC NULLS LAST,
+        event_identity DESC
+    )
     WHERE logical_name_id IS NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')

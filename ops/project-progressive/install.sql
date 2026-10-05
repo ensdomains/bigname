@@ -152,7 +152,11 @@ END
 $install$;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_idx
-    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
+    ON bigname_phase.normalized_events (
+        chain_id, lower(after_state ->> 'node'),
+        block_number DESC NULLS LAST, block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC
+    )
     WHERE logical_name_id IS NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')

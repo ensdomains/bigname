@@ -56,6 +56,7 @@ async fn address_history_retained_profile_plan() -> Result<()> {
         scope: HistoryScope::Both,
         canonical_only: true,
         published: Some(&published),
+        catalogue: false,
     };
     let filter = EventHistoryReadFilter {
         order: HistoryOrder::Asc,
@@ -127,7 +128,7 @@ async fn candidate_plans(target: usize, unrelated: usize) -> Result<()> {
             ("empty", EMPTY_ADDRESS, None, HistoryOrder::Desc, false, 0),
             ("root", ROOT_ADDRESS, None, HistoryOrder::Desc, false, 1),
         ] {
-            let read = AddressRead { address, namespace: Some("ens"), relations: None, scope: HistoryScope::Both, canonical_only: true, published: Some(&published) };
+            let read = AddressRead { address, namespace: Some("ens"), relations: None, scope: HistoryScope::Both, canonical_only: true, published: Some(&published), catalogue: false };
             let filter = EventHistoryReadFilter {
                 block_window: Some(HistoryBlockWindow { ranges: vec![ChainBlockRange { chain_id: "ethereum-mainnet".to_owned(), from_block: None, to_block: Some((target + unrelated + 1) as i64) }] }),
                 record_key: record_key.map(str::to_owned), order,
@@ -223,7 +224,11 @@ fn event_scans(node: &Value) -> Vec<Value> {
     scans
 }
 
-async fn install(connection: &mut PgConnection, target: usize, unrelated: usize) -> Result<()> {
+pub(super) async fn install(
+    connection: &mut PgConnection,
+    target: usize,
+    unrelated: usize,
+) -> Result<()> {
     sqlx::raw_sql("CREATE SCHEMA bigname_phase; SET search_path TO bigname_phase, public")
         .execute(&mut *connection)
         .await?;

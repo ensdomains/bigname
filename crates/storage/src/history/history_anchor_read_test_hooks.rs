@@ -44,6 +44,7 @@ impl HistoryAnchorReadControl {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum HistoryReadHookPoint {
     AfterAnchors,
+    AfterPublicationCheck,
     AfterPage,
 }
 
@@ -90,6 +91,22 @@ pub async fn install(
 
 pub async fn run(pool: &PgPool, point: HistoryReadHookPoint) -> Result<()> {
     let database = current_database(pool).await?;
+    run_for_database(database, point).await
+}
+
+/// Snapshot hooks must use the connection they already hold. Acquiring another pool
+/// connection deadlocks a one-connection fixture even when no hook is registered.
+pub async fn run_on(
+    connection: &mut sqlx::PgConnection,
+    point: HistoryReadHookPoint,
+) -> Result<()> {
+    let database = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(connection)
+        .await?;
+    run_for_database(database, point).await
+}
+
+async fn run_for_database(database: String, point: HistoryReadHookPoint) -> Result<()> {
     let hook = hooks()
         .lock()
         .expect("history anchor-read test-hook registry must not be poisoned")

@@ -215,6 +215,18 @@ table exists. It opens the same `409 stale` window until the rebuild finishes,
 and, as above, a family run in flight when it applies fails once and the next
 run rebuilds.
 
+`20261005140000_project_address_history_catalogue.sql` installs the compact Project
+address-history tables, replaces four source-event indexes with the full public history
+order, and adds two complementary noncanonical name/resource indexes for conservative work
+discovery. Installing it alone publishes no catalogue. This producer changes the interpreter
+content hash: use matching runner/API binaries and complete the full-history Interpret redo
+and the Project redo it installs before serving with the new binary. Existing interpreted
+inputs are replayed through the normal lifecycle; no request backfill, manual marker edit or
+extra Ingest fetch is part of this change. The per-chain completeness stamp must match the
+family marker's content hash, version, sequence and block/hash; absent or mismatched state
+remains stale. When another release change already requires replay, one replay under the final
+combined binary covers both changes. A replay under an earlier hash does not cover this one.
+
 `20260929160000_remove_served_projections.sql` drops the tables the API and
 Project used before the [owned key families](glossary.md#owned-key-family)
 became the only serving path: `name_current`, `children_current`,
@@ -2360,6 +2372,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_link_idx
 ANALYZE bigname_phase.normalized_events;
 ```
 
+These statements are the historical definition required by that target version. The later
+`20261005140000_project_address_history_catalogue.sql` replaces the write index with the full
+history order. Apply migrations in order; do not prebuild the later definition before this
+historical migration has been recorded. The current walk-index installer uses the later
+catalogue definition and belongs after that upgrade.
+
 Then apply the schema-migrations with `--target-version 20261003120000` and the same
 `lock_timeout`, `statement_timeout` and retry procedure; it finds both indexes and skips the
 build. `CREATE INDEX IF NOT EXISTS` matches the name only, so the schema-migration then checks
@@ -2637,8 +2655,8 @@ runner behavior, so it needs no redo and no historical ingest fetch. Deploying i
 nothing until an operator runs the scripts.
 
 The scripts are an optional step for a from-zero walk or a full-history Interpret redo:
-`drop.sql` drops the 34 `normalized_events` indexes Interpret does not read, so Interpret
-maintains 17 indexes on the table instead of 51, and `install.sql` rebuilds them concurrently with their
+`drop.sql` drops the 36 `normalized_events` indexes Interpret does not read, so Interpret
+maintains 17 indexes on the table instead of 53, and `install.sql` rebuilds them concurrently with their
 reviewed definitions and analyzes the table before Project runs. `drop.sql` refuses while any
 chain on the database may be served. Rebuilding takes a pass over the table per index; on a
 large database, schedule it before Project starts, as the

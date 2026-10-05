@@ -9,6 +9,7 @@ pub use child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
 mod decode;
 mod derived;
 mod driver;
+mod history_catalogue;
 mod hydrate;
 mod identity;
 mod input;

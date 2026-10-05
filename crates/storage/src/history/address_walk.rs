@@ -1,6 +1,15 @@
 //! Bounded address-history reads. Candidate keys and witnesses stay in a SQL cursor; current
 //! membership and record attribution are validated in fixed batches on the same snapshot.
 
+mod catalogue;
+mod catalogue_count;
+#[cfg(test)]
+mod catalogue_layout_tests;
+#[cfg(test)]
+mod catalogue_plans;
+mod catalogue_source;
+#[cfg(test)]
+mod catalogue_tests;
 mod duplicates;
 mod entry;
 pub use entry::load_address_history_page_for_relations;
@@ -26,6 +35,7 @@ struct AddressRead<'a> {
     scope: HistoryScope,
     canonical_only: bool,
     published: Option<&'a BTreeMap<String, i64>>,
+    catalogue: bool,
 }
 
 /// A single possible reason an event belongs to an address. This carries no event payload,
@@ -37,11 +47,30 @@ struct Witness {
     chain_id: Option<String>,
     block_number: Option<i64>,
     block_hash: Option<String>,
+    transaction_index: Option<i64>,
+    log_index: Option<i64>,
     node: Option<String>,
     witness_kind: i32,
     current_chain: Option<String>,
     current_name: Option<String>,
     witness_resource: Option<Uuid>,
+}
+
+impl Witness {
+    fn cursor(&self) -> HistoryCursor {
+        HistoryCursor {
+            normalized_event_id: Some(self.normalized_event_id),
+            event_identity: self.event_identity.clone(),
+            position: Some(super::HistoryPosition {
+                chain_id: self.chain_id.clone(),
+                block_number: self.block_number,
+                block_hash: self.block_hash.clone(),
+                transaction_index: self.transaction_index,
+                log_index: self.log_index,
+                transaction_hash: None,
+            }),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,10 +90,18 @@ pub(super) async fn load_page(
     use crate::projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize};
     use anyhow::Context;
 
+    let _timer = seams::Timer::new("address_history_read_micros");
     let mut transaction = super::paging::begin_history_snapshot(pool, "address page").await?;
     if let Some(fence) = fence {
         super::redo::ensure_interpret_redo_fence(&mut transaction, fence).await?;
     }
+    let catalogue = catalogue::select_source(&mut transaction, options).await?;
+    #[cfg(any(test, feature = "test-support"))]
+    super::history_anchor_read_test_hooks::run_on(
+        &mut transaction,
+        super::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPublicationCheck,
+    )
+    .await?;
     let read = AddressRead {
         address,
         namespace,
@@ -72,6 +109,7 @@ pub(super) async fn load_page(
         scope,
         canonical_only: true,
         published: options.publication_block_bounds.as_ref(),
+        catalogue,
     };
     let filter = EventHistoryReadFilter::default().with_page_options(options);
     let mut membership = matches::Membership::new();
@@ -132,14 +170,24 @@ pub(super) async fn load_page(
             anyhow::bail!("bounded address history requires count-only summary")
         }
     };
+    let proved_count = if catalogue {
+        if let HistorySummaryMode::CappedCount(cap) = summary_mode {
+            catalogue_count::prove_over_cap(&mut transaction, &read, &filter, cap).await?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut output = walk::Accumulator::new(
         page_limit,
-        if keyset.is_some() {
+        if keyset.is_some() || proved_count.is_some() {
             Some(0)
         } else {
             count_limit
         },
     );
+    let page_timer = seams::Timer::new("address_history_page_walk_micros");
     walk::collect(
         &mut transaction,
         &read,
@@ -150,7 +198,11 @@ pub(super) async fn load_page(
         &mut output,
     )
     .await?;
-    let total = if keyset.is_some() && summary_mode != HistorySummaryMode::None {
+    drop(page_timer);
+    let total = if let Some(count) = proved_count {
+        count
+    } else if keyset.is_some() && summary_mode != HistorySummaryMode::None {
+        let _timer = seams::Timer::new("address_history_count_walk_micros");
         let mut count = walk::Accumulator::new(0, count_limit);
         walk::collect(
             &mut transaction,

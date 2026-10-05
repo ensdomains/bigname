@@ -62,4 +62,27 @@ pub struct HistoryPageOptions {
     pub block_window: Option<HistoryBlockWindow>,
     /// Publication upper bounds for expanding bindings and historical ownership anchors.
     pub publication_block_bounds: Option<std::collections::BTreeMap<String, i64>>,
+    /// Admission's exact publication, for the Project catalogue. Legacy callers supplying
+    /// only block bounds retain the authoritative bounded source.
+    pub catalogue_publication: Option<HistoryCataloguePublicationFence>,
+}
+
+/// Internal transport of an already captured publication; never part of an HTTP cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryCataloguePublication {
+    pub chain_id: String,
+    pub block_number: i64,
+    pub block_hash: String,
+    pub project_generation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HistoryCataloguePublicationFence {
+    Captured {
+        publications: Vec<HistoryCataloguePublication>,
+        lag_tolerance_blocks: i64,
+        captured_at: std::time::Instant,
+    },
+    /// Overlapping namespace admissions disagreed. Preserve their original bounded read.
+    InconsistentCapture,
 }

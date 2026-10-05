@@ -2,6 +2,8 @@
 //! Project; expected public identities are specified independently of the reader's candidates.
 
 use super::*;
+#[path = "v2_address_history_catalogue.rs"]
+mod catalogue;
 use std::sync::{Arc, Mutex};
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
@@ -270,7 +272,11 @@ async fn address_history_walk_historical_name_keeps_a_different_current_resource
     ];
     assert_eq!(hk_ids(&before), expected, "{before}");
     assert_eq!(before["page"]["total_count"], json!(2));
-    assert_eq!(stats.counters.get("names_composed"), Some(&1), "{stats:?}");
+    assert_eq!(
+        stats.counters.get("names_composed").copied().unwrap_or(0),
+        0,
+        "{stats:?}"
+    );
 
     // The same name was held through another resource. Its logical-name proof cannot
     // suppress the current resource or the resolver records attributed to that resource.
@@ -294,7 +300,11 @@ async fn address_history_walk_historical_name_keeps_a_different_current_resource
     let (after, stats) = measured(&database, &uri, 200).await?;
     assert_eq!(hk_ids(&after), expected, "{after}");
     assert_eq!(after["page"]["total_count"], before["page"]["total_count"]);
-    assert_eq!(stats.counters.get("names_composed"), Some(&1), "{stats:?}");
+    assert_eq!(
+        stats.counters.get("names_composed").copied().unwrap_or(0),
+        0,
+        "{stats:?}"
+    );
 
     // Event filters must not narrow the historical membership evidence. The surface proof
     // applies even though this request excludes the grant that establishes it.
@@ -402,12 +412,12 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
         "{first}; {stats:?}"
     );
     assert_eq!(
-        stats.counters.get("names_composed"),
-        Some(&1),
-        "one role name must not be recomposed per event: {stats:?}"
+        stats.counters.get("names_composed").copied().unwrap_or(0),
+        0,
+        "published role membership must not be recomposed: {stats:?}"
     );
     eprintln!(
-        "single-name stress: {retained_candidates} retained binding candidates, 1201 record events, one composition; {stats:?}"
+        "single-name stress: {retained_candidates} retained binding candidates, 1201 record events, no request composition; {stats:?}"
     );
     assert!(
         stats
@@ -432,9 +442,9 @@ async fn address_history_walk_current_roles_cache_membership_and_bound_record_pa
     .await?;
     assert_eq!(next["page"]["total_count"], json!(1_201));
     assert_eq!(
-        stats.counters.get("names_composed"),
-        Some(&1),
-        "page and count share compact cache: {stats:?}"
+        stats.counters.get("names_composed").copied().unwrap_or(0),
+        0,
+        "page and count use the published membership: {stats:?}"
     );
     assert_eq!(
         hk_ids(&next),
@@ -490,6 +500,7 @@ async fn address_history_walk_keeps_the_real_ten_thousand_count_threshold() -> R
             );
             bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
         }
+        rebuild_address_fixture(&database).await?;
         let (body, stats) = measured(&database, &base, 1).await?;
         assert_eq!(
             body["page"]["total_count"],
@@ -657,7 +668,7 @@ async fn address_history_walk_interleaved_current_names_exceed_cache_capacity() 
         "{body}; {stats:?}"
     );
     assert!(stats.live.values().all(|n| *n == 0));
-    assert_eq!(stats.peak.get("cached_memberships"), Some(&1_024));
+    assert_eq!(stats.peak.get("cached_memberships"), Some(&0));
     assert!(
         stats
             .peak

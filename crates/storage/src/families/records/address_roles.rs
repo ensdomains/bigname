@@ -16,9 +16,9 @@
 //! Roles held on the registry root reach every name of the registry and add no name; ENSv2
 //! registry operators are not permission rows and add none either.
 //!
-//! The grants are read at request time, so the relation follows the published grant rows with
-//! no Project index of its own. Only the requested address's grants are read
-//! ([`RoleHolderLoad`]), without processing other holders' grants on the same registration.
+//! Address-list reads load only the requested subject's grants. The history catalogue also
+//! uses this fold at publication, loading all holders of the touched resources once; both paths
+//! use the same permission masks ([`RoleHolderLoad`]).
 //! The candidate names come from the grant's resource through the
 //! F1 binding candidates; the composed name keeps a holder only while that resource is its
 //! selected resource.
@@ -80,6 +80,8 @@ pub(crate) enum RoleHolderLoad<'a> {
     /// No grants. Used when an explicit relation set excludes `role_holder`, and by identity
     /// composition for reverse lookup, which does not serve that relation.
     Skip,
+    /// Project stores all exact relations for the touched names, once per publication.
+    All,
 }
 
 /// The registry-scope grants of one subject on a batch of resources. The primary key
@@ -101,20 +103,30 @@ pub(super) async fn role_holders(
     clock_seconds: i64,
     load: RoleHolderLoad<'_>,
 ) -> Result<BTreeMap<String, Vec<RoleHolder>>> {
-    let RoleHolderLoad::Subject(subject) = load else {
+    if matches!(load, RoleHolderLoad::Skip) {
         return Ok(BTreeMap::new());
-    };
+    }
     if resources.is_empty() {
         return Ok(BTreeMap::new());
     }
     super::seams::note_role_read("grants");
-    let grants: Vec<Value> = sqlx::query_scalar(ROLE_GRANTS_SQL)
-        .bind(chain_id)
-        .bind(resources)
-        .bind(subject)
+    let all = "/* storage:families.records.publication_role_grants */
+        SELECT to_jsonb(grant_row) FROM bigname_phase.project_grant grant_row
+        WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])
+          AND grant_row.scope_kind = 'registry' AND NOT grant_row.revoked";
+    let mut query = sqlx::query_scalar(match load {
+        RoleHolderLoad::Subject(_) => ROLE_GRANTS_SQL,
+        _ => all,
+    })
+    .bind(chain_id)
+    .bind(resources);
+    if let RoleHolderLoad::Subject(subject) = load {
+        query = query.bind(subject);
+    }
+    let grants: Vec<Value> = query
         .fetch_all(&mut *conn)
         .await
-        .with_context(|| format!("failed to load the registry role grants of {subject}"))?;
+        .context("failed to load the registry role grants")?;
     let mut by_resource: BTreeMap<String, Vec<GrantRow>> = BTreeMap::new();
     for grant in grants.iter().filter_map(GrantRow::from_row) {
         by_resource

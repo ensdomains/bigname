@@ -252,6 +252,7 @@ pub(crate) async fn publish(
         admission_manifests: Some(manifests.key),
         bootstrap: plan.bootstrap,
     };
+    super::history_catalogue::stamp(&mut transaction, chain_id, &block, &next, &mut stats).await?;
     marker::advance(&mut transaction, chain_id, &next).await?;
     let floor = retention_floor(
         &mut transaction,
@@ -353,6 +354,16 @@ async fn refresh_derived(
         stats.rows.insert(NAME_SUMMARY.name, summary.rows);
     }
     stats.undo_rows += summary.undo_rows;
+    super::history_catalogue::refresh(
+        transaction,
+        chain_id,
+        block,
+        after,
+        &summary.names,
+        &summary.current_relations,
+        stats,
+    )
+    .await?;
     Ok(())
 }
 

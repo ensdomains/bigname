@@ -51,7 +51,7 @@ BEGIN
             ('normalized_events_basenames_record_node_resolver_idx',
              $def$CREATE INDEX normalized_events_basenames_record_node_resolver_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), lower(COALESCE(NULLIF((after_state ->> 'resolver'::text), ''::text), NULLIF((raw_fact_ref ->> 'emitting_address'::text), ''::text))), block_number, transaction_index, log_index, normalized_event_id) WHERE ((logical_name_id IS NULL) AND (source_family = 'basenames_base_resolver'::text) AND (event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_record_id_write_idx',
-             $def$CREATE INDEX normalized_events_record_id_write_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), ((after_state ->> 'resolver_record_id'::text))) WHERE ((event_kind = 'RecordChanged'::text) AND ((after_state ->> 'storage_model'::text) = 'resolver_record_id'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+             $def$CREATE INDEX normalized_events_record_id_write_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), ((after_state ->> 'resolver_record_id'::text)), block_number DESC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((event_kind = 'RecordChanged'::text) AND ((after_state ->> 'storage_model'::text) = 'resolver_record_id'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_record_id_link_idx',
              $def$CREATE INDEX normalized_events_record_id_link_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'resolver'::text)), lower((after_state ->> 'node'::text))) WHERE ((event_kind = 'ResolverRecordLinked'::text) AND ((after_state ->> 'storage_model'::text) = 'resolver_record_id'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_resolver_alias_history_idx',
@@ -93,11 +93,13 @@ BEGIN
             ('normalized_events_address_root_permission_idx',
              $def$CREATE INDEX normalized_events_address_root_permission_idx ON bigname_phase.normalized_events USING btree (lower((after_state ->> 'subject'::text)), block_number DESC NULLS LAST, log_index DESC NULLS LAST, normalized_event_id DESC) WHERE ((event_kind = 'RootPermissionChanged'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_project_node_history_idx',
-             $def$CREATE INDEX normalized_events_project_node_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), block_number) WHERE ((logical_name_id IS NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (((event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (source_family = ANY (ARRAY['ens_v1_resolver_l1'::text, 'ens_v2_resolver_l1'::text, 'basenames_base_resolver'::text]))) OR ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])))))$def$),
+             $def$CREATE INDEX normalized_events_project_node_history_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), block_number DESC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC) WHERE ((logical_name_id IS NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (((event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (source_family = ANY (ARRAY['ens_v1_resolver_l1'::text, 'ens_v2_resolver_l1'::text, 'basenames_base_resolver'::text]))) OR ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])))))$def$),
             ('normalized_events_project_v1_pointer_node_idx',
              $def$CREATE INDEX normalized_events_project_v1_pointer_node_idx ON bigname_phase.normalized_events USING btree (chain_id, namespace, lower((after_state ->> 'node'::text)), block_number) WHERE ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])) AND ((after_state ->> 'node'::text) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
             ('normalized_events_project_v1_pointer_addressed_node_idx',
-             $def$CREATE INDEX normalized_events_project_v1_pointer_addressed_node_idx ON bigname_phase.normalized_events USING btree (chain_id, namespace, lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text))), block_number) WHERE ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])) AND (COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text)) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
+             $def$CREATE INDEX normalized_events_project_v1_pointer_addressed_node_idx ON bigname_phase.normalized_events USING btree (chain_id, namespace, lower(COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text))), block_number) WHERE ((event_kind = 'ResolverChanged'::text) AND (source_family = ANY (ARRAY['ens_v1_registry_l1'::text, 'ens_v1_registrar_l1'::text, 'ens_v1_wrapper_l1'::text])) AND (COALESCE((after_state ->> 'child_node'::text), (after_state ->> 'namehash'::text), (after_state ->> 'node'::text)) IS NOT NULL) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_history_discovery_name_idx', $def$CREATE INDEX normalized_events_history_discovery_name_idx ON bigname_phase.normalized_events USING btree (chain_id, logical_name_id, block_number) WHERE ((logical_name_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (canonicality_state <> ALL (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$),
+            ('normalized_events_history_discovery_resource_idx', $def$CREATE INDEX normalized_events_history_discovery_resource_idx ON bigname_phase.normalized_events USING btree (chain_id, resource_id, block_number) WHERE ((logical_name_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (canonicality_state <> ALL (ARRAY['canonical'::bigname_phase.canonicality_state, 'safe'::bigname_phase.canonicality_state, 'finalized'::bigname_phase.canonicality_state])))$def$)
         ) AS reviewed(index_name, definition)
     LOOP
         SELECT CASE relkind
@@ -314,7 +316,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_record_id_write_idx
     ON bigname_phase.normalized_events (
         chain_id,
         lower(after_state ->> 'resolver'),
-        (after_state ->> 'resolver_record_id')
+        (after_state ->> 'resolver_record_id'),
+        block_number DESC NULLS LAST, block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC
     )
     WHERE event_kind = 'RecordChanged'
       AND after_state ->> 'storage_model' = 'resolver_record_id'
@@ -527,7 +531,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_address_root_permissio
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_idx
-    ON bigname_phase.normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
+    ON bigname_phase.normalized_events (
+        chain_id, lower(after_state ->> 'node'),
+        block_number DESC NULLS LAST, block_hash DESC NULLS LAST,
+        transaction_index DESC NULLS LAST, log_index DESC NULLS LAST, event_identity DESC
+    )
     WHERE logical_name_id IS NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -558,6 +566,22 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_v1_pointer_add
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_discovery_name_idx
+    ON bigname_phase.normalized_events (chain_id, logical_name_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::bigname_phase.canonicality_state,
+          'safe'::bigname_phase.canonicality_state,
+          'finalized'::bigname_phase.canonicality_state);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_history_discovery_resource_idx
+    ON bigname_phase.normalized_events (chain_id, resource_id, block_number)
+    WHERE logical_name_id IS NOT NULL AND resource_id IS NOT NULL
+      AND canonicality_state NOT IN (
+          'canonical'::bigname_phase.canonicality_state,
+          'safe'::bigname_phase.canonicality_state,
+          'finalized'::bigname_phase.canonicality_state);
+
 -- Printed first so the receipt shows the flags even when the check below fails.
 SELECT indexrelid::regclass AS index_name, indisvalid, indisready,
        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
@@ -573,6 +597,8 @@ WHERE indexrelid IN (
     to_regclass('bigname_phase.normalized_events_v2_expiry_scope_idx'),
     to_regclass('bigname_phase.normalized_events_ens_v1_record_node_resolver_idx'),
     to_regclass('bigname_phase.normalized_events_basenames_record_node_resolver_idx'),
+    to_regclass('bigname_phase.normalized_events_history_discovery_name_idx'),
+    to_regclass('bigname_phase.normalized_events_history_discovery_resource_idx'),
     to_regclass('bigname_phase.normalized_events_record_id_write_idx'),
     to_regclass('bigname_phase.normalized_events_record_id_link_idx'),
     to_regclass('bigname_phase.normalized_events_resolver_alias_history_idx'),

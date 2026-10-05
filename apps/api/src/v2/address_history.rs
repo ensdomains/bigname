@@ -117,6 +117,7 @@ pub(crate) async fn get_address_history(
     ));
     let mut options = history_page_options(&params, block_window);
     options.publication_block_bounds = Some(snapshot.block_bounds());
+    options.catalogue_publication = Some(snapshot.history_catalogue_publication());
 
     let storage_page = bigname_storage::load_address_history_page_for_relations(
         &state.pool,

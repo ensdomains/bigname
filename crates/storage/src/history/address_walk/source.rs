@@ -6,7 +6,7 @@ use sqlx::{Postgres, QueryBuilder};
 use super::AddressRead;
 use crate::history::{
     EventHistoryReadFilter, HistoryScope,
-    address_matches::push_historical_address_matches_query,
+    address_evidence::push_historical_address_matches_query,
     attribution::{push_readable_event, push_readable_surface},
     duplicates::push_fixed_product_history_duplicate_filter,
     filters::push_publication_bound,
@@ -18,7 +18,7 @@ use crate::history::{
     source::push_history_lineage_join,
 };
 
-const EVENT_COLUMNS: &str = "ne.normalized_event_id, ne.event_identity, ne.chain_id,
+pub(super) const EVENT_COLUMNS: &str = "ne.normalized_event_id, ne.event_identity, ne.chain_id,
     ne.block_number, ne.block_hash, ne.transaction_index, ne.log_index,
     CASE WHEN strpos(ne.event_identity, ':ResolverChanged:registry-fallback-handoff:') > 0
          THEN ne.after_state ->> 'node' END AS node";
@@ -224,7 +224,7 @@ fn push_probe<'a>(
     builder.push(" OFFSET 0) ne");
 }
 
-fn push_arm_filters<'a>(
+pub(super) fn push_arm_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     read: &AddressRead<'a>,
     filter: &'a EventHistoryReadFilter,
@@ -274,6 +274,10 @@ pub(super) fn push_handoff_query<'a>(
     filter: &'a EventHistoryReadFilter,
     groups: &'a serde_json::Value,
 ) {
+    if read.catalogue {
+        super::catalogue_source::push_handoff_query(builder, read, filter, groups);
+        return;
+    }
     builder.push("WITH ");
     push_address_ctes(builder, read);
     builder.push(", peer_events AS MATERIALIZED (SELECT ne.* FROM jsonb_to_recordset(");

@@ -1,3 +1,5 @@
+mod address_evidence;
+pub use address_evidence::{HistoricalHistoryRelation, historical_history_relations};
 mod address_matches;
 mod address_walk;
 pub use address_walk::load_address_history_page_for_relations;
@@ -6,6 +8,7 @@ pub use address_walk::seams::{AddressHistoryWorkingSet, with_address_history_wor
 mod attribution;
 mod binding_anchors;
 mod block_window;
+pub mod catalogue_contract;
 mod child_arm;
 mod child_registrations;
 mod columns;
@@ -60,7 +63,8 @@ pub use contract_count::count_contract_events;
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub use options::{
-    ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
+    ChainBlockRange, HistoryBlockWindow, HistoryCataloguePublication,
+    HistoryCataloguePublicationFence, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
 pub use primary_values::load_recorded_primary_names;
 pub use redo::{

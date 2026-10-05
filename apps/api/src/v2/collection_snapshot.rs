@@ -18,6 +18,7 @@ pub(crate) struct CollectionSnapshot {
     pool: PgPool,
     reads: Option<Transaction<'static, Postgres>>,
     served: bool,
+    captured_at: std::time::Instant,
 }
 
 impl CollectionSnapshot {
@@ -57,6 +58,7 @@ impl CollectionSnapshot {
         cursor: Option<&str>,
         namespace: Option<&str>,
     ) -> V2Result<(Self, Option<CursorPayload>)> {
+        let captured_at = std::time::Instant::now();
         if let Some(namespace) = namespace {
             ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
         }
@@ -84,12 +86,20 @@ impl CollectionSnapshot {
             pool: state.pool.clone(),
             reads: None,
             served: false,
+            captured_at,
         };
         Ok((snapshot, cursor))
     }
 
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
         self.evaluated_at
+    }
+
+    pub(crate) fn history_catalogue_publication(
+        &self,
+    ) -> bigname_storage::HistoryCataloguePublicationFence {
+        self.namespaces
+            .history_catalogue_publication(self.captured_at)
     }
 
     pub(crate) fn block_bounds(&self) -> std::collections::BTreeMap<String, i64> {

@@ -351,6 +351,7 @@ pub(crate) fn history_page_options(
     let event_kinds = super::history_filters::event_kinds(params);
     HistoryPageOptions {
         publication_block_bounds: None,
+        catalogue_publication: None,
         order: history_storage_order(params.order),
         match_no_events: event_kinds.is_empty(),
         event_kinds,

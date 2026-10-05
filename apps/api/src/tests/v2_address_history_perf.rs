@@ -156,3 +156,186 @@ async fn address_history_create_performance_fixture() -> Result<()> {
     // recorded above and the harness drops this task-owned database after measurement.
     Ok(())
 }
+
+/// Runs identically in the pre-catalogue and catalogue trees against separate clones of the
+/// retained performance fixture. It measures the production reset/range publication path;
+/// only the caller-owned disposable fixture URL is accepted, and no API backfill is involved.
+#[tokio::test]
+#[ignore = "manual isolated retained-fixture Project rebuild cost measurement"]
+async fn address_history_rebuild_retained_performance_fixture() -> Result<()> {
+    let url = std::env::var("BIGNAME_HISTORY_REBUILD_URL")?;
+    let output = PathBuf::from(std::env::var("BIGNAME_HISTORY_REBUILD_RECEIPT")?);
+    let options =
+        PgConnectOptions::from_str(&url)?.options([("search_path", "bigname_phase".to_owned())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await?;
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await?;
+    anyhow::ensure!(
+        database.starts_with("bigname_api_test_"),
+        "requires disposable API fixture"
+    );
+    let (number, hash): (i64, String) = sqlx::query_as(
+        "SELECT current_block_number,current_block_hash FROM project_family_marker WHERE chain_id=$1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&pool)
+    .await?;
+    let start_wal: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(&pool)
+        .await?;
+    let token = bigname_project::families::input_token(&pool, CHAIN).await?;
+    let initial = json!({"database":database,"content_hash":bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        "target_block":number,"start_wal_lsn":start_wal,"rows_written":{},"undo_rows_written":0,
+        "initial_database_state":rebuild_progress(&pool, &start_wal).await?});
+    durable_profile_receipt(&output.with_extension("start.json"), &initial)?;
+    let progress_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output.with_extension("progress.jsonl"))?;
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter("bigname_project::families=debug")
+        .with_ansi(false)
+        .with_writer(move || {
+            DurableProfileWriter(progress_file.try_clone().expect("clone profile log"))
+        })
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("install profile tracing: {error}"))?;
+    let (stop_progress, mut stopped) = tokio::sync::watch::channel(false);
+    let monitor_pool = pool.clone();
+    let monitor_wal = start_wal.clone();
+    let monitor_output = output.with_extension("database-progress.jsonl");
+    let monitor = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                    let value = rebuild_progress(&monitor_pool, &monitor_wal).await?;
+                    let mut writer = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(&monitor_output)?;
+                    serde_json::to_writer(&mut writer, &value)?;
+                    std::io::Write::write_all(&mut writer, b"\n")?;
+                    writer.sync_data()?;
+                }
+                _ = stopped.changed() => break,
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let started = std::time::Instant::now();
+    let (outcome, error) = bigname_project::families::run(
+        &pool,
+        CHAIN,
+        &bigname_project::Marker { number, hash },
+        bigname_project::families::FamilyMode::Rebuild,
+        &token,
+        &bigname_project::families::FamilyOptions::new(
+            bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        )
+        .with_max_blocks_per_run(number as u64 + 1)
+        .with_rebuild_ranges(bigname_project::families::RebuildRanges::Through(number)),
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.;
+    let _ = stop_progress.send(true);
+    let monitor_error = match monitor.await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(error) => Some(error.to_string()),
+    };
+    let wal_bytes: String =
+        sqlx::query_scalar("SELECT pg_wal_lsn_diff(pg_current_wal_lsn(),$1::pg_lsn)::text")
+            .bind(&start_wal)
+            .fetch_one(&pool)
+            .await?;
+    sqlx::raw_sql("ANALYZE").execute(&pool).await?;
+    let relations: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('name',relname,'rows',reltuples::bigint,
+          'heap_bytes',pg_relation_size(oid),'index_bytes',pg_indexes_size(oid),
+          'total_bytes',pg_total_relation_size(oid))
+         FROM pg_class WHERE relnamespace='bigname_phase'::regnamespace
+          AND (relname LIKE 'project_history_%' OR relname='project_address_history_anchor'
+            OR relname='project_family_undo' OR relname='normalized_events') AND relkind='r'
+         ORDER BY relname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let indexes: Vec<Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object('name',relname,'bytes',pg_relation_size(oid)) FROM pg_class
+         WHERE relnamespace='bigname_phase'::regnamespace AND relname=ANY($1)",
+    )
+    .bind(vec![
+        "normalized_events_name_history_idx",
+        "normalized_events_resource_history_idx",
+        "normalized_events_project_node_history_idx",
+        "normalized_events_record_id_write_idx",
+        "normalized_events_history_discovery_name_idx",
+        "normalized_events_history_discovery_resource_idx",
+    ])
+    .fetch_all(&pool)
+    .await?;
+    let max_undo: Value = sqlx::query_scalar(
+        "SELECT COALESCE(to_jsonb(generation),'{}'::jsonb) FROM (
+         SELECT block_number,count(*) AS rows FROM project_family_undo WHERE chain_id=$1
+         GROUP BY block_number ORDER BY count(*) DESC LIMIT 1) generation",
+    )
+    .bind(CHAIN)
+    .fetch_one(&pool)
+    .await?;
+    let receipt = json!({"database":database,"content_hash":bigname_content_hash::INTERPRETER_CONTENT_HASH,
+        "target_block":number,"elapsed_ms":elapsed_ms,"start_wal_lsn":start_wal,"wal_bytes":wal_bytes,
+        "error":error.as_ref().map(ToString::to_string),"monitor_error":monitor_error,
+        "marker_block":outcome.marker.as_ref().map(|marker|marker.number),
+        "rows_written":outcome.rows,"undo_rows_written":outcome.undo_rows,"blocks":outcome.blocks,
+        "ranges":outcome.ranges,"statistics_refreshes":outcome.statistics_refreshes,
+        "max_retained_journal_generation":max_undo,"relations":relations,"source_indexes":indexes});
+    durable_profile_receipt(&output, &receipt)?;
+    println!("retained fixture rebuild: {receipt}");
+    pool.close().await;
+    anyhow::ensure!(error.is_none(), "rebuild failed: {error:?}");
+    anyhow::ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(number),
+        "incomplete rebuild: {outcome:?}"
+    );
+    Ok(())
+}
+
+fn durable_profile_receipt(path: &std::path::Path, value: &Value) -> Result<()> {
+    let mut output = std::fs::File::create(path)?;
+    serde_json::to_writer_pretty(&mut output, value)?;
+    output.sync_all()?;
+    Ok(())
+}
+
+struct DurableProfileWriter(std::fs::File);
+impl std::io::Write for DurableProfileWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut self.0, bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.sync_data()
+    }
+}
+impl Drop for DurableProfileWriter {
+    fn drop(&mut self) {
+        let _ = self.0.sync_data();
+    }
+}
+
+async fn rebuild_progress(pool: &PgPool, start_wal: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object('at',clock_timestamp(),'wal_lsn',pg_current_wal_lsn()::text,
+         'wal_bytes',pg_wal_lsn_diff(pg_current_wal_lsn(),$1::pg_lsn),
+         'marker',(SELECT to_jsonb(marker) FROM project_family_marker marker WHERE chain_id=$2),
+         'physical_row_counters',(SELECT jsonb_object_agg(relname,jsonb_build_object(
+             'inserted',n_tup_ins,'updated',n_tup_upd,'deleted',n_tup_del))
+             FROM pg_stat_user_tables WHERE schemaname='bigname_phase'))",
+    )
+    .bind(start_wal)
+    .bind(CHAIN)
+    .fetch_one(pool)
+    .await?)
+}

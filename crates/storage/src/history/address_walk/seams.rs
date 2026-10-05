@@ -16,6 +16,7 @@ mod scoped {
         pub peak: BTreeMap<&'static str, usize>,
         pub counters: BTreeMap<&'static str, usize>,
         pub combined_peak: usize,
+        pub catalogue_receipt: Option<serde_json::Value>,
     }
 
     impl Default for AddressHistoryWorkingSet {
@@ -27,6 +28,7 @@ mod scoped {
                 peak: BTreeMap::new(),
                 counters: BTreeMap::new(),
                 combined_peak: 0,
+                catalogue_receipt: None,
             }
         }
     }
@@ -72,6 +74,15 @@ mod scoped {
                 .counters
                 .entry(kind)
                 .or_default() += amount;
+        });
+    }
+
+    pub(super) fn receipt(value: serde_json::Value) {
+        let _ = WORKING_SET.try_with(|stats| {
+            stats
+                .lock()
+                .expect("address-history metrics lock")
+                .catalogue_receipt = Some(value);
         });
     }
 }
@@ -141,4 +152,36 @@ pub(in crate::history) fn count(kind: &'static str, amount: usize) {
     scoped::count(kind, amount);
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = (kind, amount);
+}
+
+pub(super) fn catalogue_receipt(value: serde_json::Value) {
+    tracing::debug!(target: "bigname::address_history", receipt = %value, "address-history source selection");
+    #[cfg(any(test, feature = "test-support"))]
+    scoped::receipt(value);
+}
+
+pub(super) struct Timer {
+    phase: &'static str,
+    started: std::time::Instant,
+}
+
+impl Timer {
+    pub(super) fn new(phase: &'static str) -> Self {
+        Self {
+            phase,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        count(
+            self.phase,
+            usize::try_from(elapsed.as_micros()).unwrap_or(usize::MAX),
+        );
+        tracing::debug!(target: "bigname::address_history", phase = self.phase,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0, "address-history phase finished");
+    }
 }
