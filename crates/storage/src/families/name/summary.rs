@@ -25,6 +25,11 @@
 //!   the admitted Graveyard holds), lower-cased, null when blank or when the name composes no row
 //!   (apps/api/src/v2/name_record/declared.rs, `declared_owner`); the registry labels' `owner` and
 //!   `exclude_owner` filters read it;
+//! - `expiry_listable`: whether the expiry listing of `/v1/names` lists the name: it composes a
+//!   row whose coverage is not unsupported and whose registration carries a finite expiry
+//!   (`list_keys.rs`); for such a row `expires_at` is the expiry the listing serves and orders by;
+//! - `public_authority`: the public `authority` the row serves (`ens_v0`, `ens_v1` or `ens_v2`),
+//!   null when it serves none or the name composes no row (`list_keys.rs`);
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
 //!   expiry or grace boundary), in Unix seconds, since a NameWrapper expiry can lie past the last
@@ -36,7 +41,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{CoverageShape, FamilyPublication, batch::load_chain, loaders::surfaces};
+use super::{CoverageShape, FamilyPublication, batch::load_chain, list_keys, loaders::surfaces};
 use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_timestamp_expr};
 
 /// The summary rows of `logical_name_ids` at `publication`, as `to_jsonb` of a
@@ -118,6 +123,14 @@ pub async fn compose_name_summary_publication(
                     "declared_summary": composed.row.as_ref().map(|row| &row.declared_summary),
                     "provenance": composed.row.as_ref().map(|row| &row.provenance),
                     "recompose_at": composed.recompose_at,
+                    "listing_supported": composed
+                        .row
+                        .as_ref()
+                        .is_some_and(|row| !list_keys::unsupported(&row.coverage)),
+                    "public_authority": composed
+                        .row
+                        .as_ref()
+                        .and_then(|row| list_keys::public_authority(&row.provenance)),
                 })
             })
             .collect(),
@@ -144,7 +157,7 @@ pub async fn compose_name_summary_publication(
     builder.push_bind(&source);
     builder.push(
         ") AS nc(logical_name_id text, authority_arm text, declared_summary jsonb, provenance jsonb,
-                 recompose_at bigint)
+                 recompose_at bigint, listing_supported boolean, public_authority text)
            ON nc.logical_name_id = named.logical_name_id
          CROSS JOIN LATERAL (
              SELECT params.chain_id, named.logical_name_id, named.namespace,
@@ -158,8 +171,11 @@ pub async fn compose_name_summary_publication(
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
         " AS registered_at, {} AS zero_owner,
-                nc.recompose_at, {SERVED_OWNER} AS owner) summary",
-        zero_owner()
+                nc.recompose_at, {SERVED_OWNER} AS owner,
+                COALESCE(nc.listing_supported AND {}, FALSE) AS expiry_listable,
+                nc.public_authority) summary",
+        zero_owner(),
+        list_keys::FINITE_REGISTRATION_EXPIRY_SQL
     ));
     let rows: Vec<(String, Value)> = builder
         .build_query_as()
