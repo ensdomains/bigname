@@ -2748,7 +2748,7 @@ through replication.
 
 ### Expiry selector on the name summary
 
-`20261005120000_project_name_summary_expiry_selector.sql` adds two columns to the
+`20261005150000_project_name_summary_expiry_selector.sql` adds two columns to the
 [name summary](glossary.md#name-summary), `project_name_summary.expiry_listable` and
 `project_name_summary.public_authority`, and two partial indexes over them,
 `project_name_summary_expiry_idx` on `(namespace, expires_at, logical_name_id, chain_id)` and

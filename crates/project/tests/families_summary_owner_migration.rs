@@ -1,7 +1,7 @@
 //! The schema-migrations that add `project_name_summary.owner`
 //! (migrations/20260929170000_project_name_summary_owner.sql) and the expiry selector columns
 //! `expiry_listable` and `public_authority` with their indexes
-//! (migrations/20261005120000_project_name_summary_expiry_selector.sql). On a database without
+//! (migrations/20261005150000_project_name_summary_expiry_selector.sql). On a database without
 //! its columns each resets every owned key family, so the next family run rebuilds them and
 //! writes every summary whole.
 //! Each takes the marker table before touching anything and holds it to commit. So a family run
@@ -28,7 +28,7 @@ use tokio::sync::oneshot;
 const MIGRATION: &str =
     include_str!("../../../migrations/20260929170000_project_name_summary_owner.sql");
 const SELECTOR_MIGRATION: &str =
-    include_str!("../../../migrations/20261005120000_project_name_summary_expiry_selector.sql");
+    include_str!("../../../migrations/20261005150000_project_name_summary_expiry_selector.sql");
 const V2_REGISTRY: &str = "ens_v2_registry_l1";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";

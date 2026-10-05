@@ -677,9 +677,9 @@ check_served_projection_removal() {
             fi
             # The expiry selector columns and indexes: added to the pre-7c shape, already in the baseline.
             if [ "$suffix" = removal ]; then
-                emit_phase_migration "$ROOT/migrations/20261005120000_project_name_summary_expiry_selector.sql" preceding-shape
+                emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" preceding-shape
             fi
-            emit_phase_migration "$ROOT/migrations/20261005120000_project_name_summary_expiry_selector.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql" baseline-first
         done
         printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
         cat "$ROOT/crates/storage/schema/fixtures/removal-parity.sql"
@@ -811,7 +811,7 @@ for migration_file in \
     "$ROOT/migrations/20261003120000_normalized_events_record_id_attribution_indexes.sql" \
     "$ROOT/migrations/20261003130000_project_lifecycle_event_namehash_index.sql" \
     "$ROOT/migrations/20261004120000_normalized_events_manifest_idx.sql" \
-    "$ROOT/migrations/20261005120000_project_name_summary_expiry_selector.sql"
+    "$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1167,7 +1167,7 @@ emit_phase_migration "$ROOT/migrations/20261004120000_normalized_events_manifest
 # columns, the schema-migration must clear the summaries, add both columns and build both
 # partial indexes with the reviewed definitions and the baseline's comments, then accept
 # that shape on a rerun without clearing anything.
-summary_selector_migration="$ROOT/migrations/20261005120000_project_name_summary_expiry_selector.sql"
+summary_selector_migration="$ROOT/migrations/20261005150000_project_name_summary_expiry_selector.sql"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
