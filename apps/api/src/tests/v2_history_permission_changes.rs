@@ -504,8 +504,13 @@ async fn v2_registry_root_role_changes_are_permission_history() -> Result<()> {
         assert!(row.get("name").is_none(), "{row}");
         assert_eq!(row["registration_id"], Value::Null, "{row}");
         assert_eq!(row["data"]["grant_scope"]["kind"], "root", "{row}");
+        // The same `registry` detail that root permission rows carry.
+        assert_eq!(
+            row["data"]["grant_scope"]["detail"]["registry"]["address"],
+            json!(registry),
+            "{row}"
+        );
     }
-    // The root `grant_scope` detail is the shape permission rows give it.
     let change = |row: &Value| {
         let mut data = row["data"].clone();
         data.as_object_mut().map(|data| data.remove("grant_scope"));

@@ -2371,7 +2371,9 @@ revocation. A NameWrapper fuse change carries `fuses` only.
 
 A role change on an ENSv2 registry's root resource (`ROOT_RESOURCE`, resource
 `0`, whose roles apply to every resource of the registry) is a `permission` row with
-raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`. Its subject
+raw `kind` `RootPermissionChanged` and `grant_scope.kind` `root`, whose
+`detail.registry` is the registry, as on a
+[root resource](glossary.md#registry-root-resource) permission row. Its subject
 `address` is the account whose root roles changed, `powers` is that account's
 named root roles right after the change in the permission powers vocabulary
 (`[]` when none remain; role bits with no name are omitted, as on every
