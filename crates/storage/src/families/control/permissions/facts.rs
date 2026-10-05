@@ -4,6 +4,7 @@
 //! history, its ENSv2 registry root (resource 0 of the registry contract instance the resource's
 //! own events name, checked readable by `registry_roots`), namespace membership and the evidence
 //! events of a resolver-scoped grant. Every read is by key.
+//! (upstream: .refs/ens_v2_sepolia_20261001/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2_sepolia_20261001@07e55a05)
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
