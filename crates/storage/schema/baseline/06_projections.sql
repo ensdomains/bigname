@@ -2246,6 +2246,8 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     zero_owner boolean NOT NULL,
     recompose_at bigint,
     owner text,
+    expiry_listable boolean NOT NULL,
+    public_authority text,
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
@@ -2272,9 +2274,21 @@ COMMENT ON COLUMN project_name_summary.recompose_at IS
     'This value is the first second, in Unix seconds, after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary, kept whether or not the name composes a row. The family step composes the name again at the first block whose time reaches it; null when no such second exists. It is a count of seconds, not a timestamp, because a NameWrapper expiry can be any 64-bit word, past the last instant a timestamp holds.';
 COMMENT ON COLUMN project_name_summary.owner IS
     'This value is the owner the composed name row serves: declared_summary.control.owner, else control.registry_owner, lower-cased; null when the first present one is blank or the name composes no row. The registry labels'' owner and exclude_owner filters read it.';
+COMMENT ON COLUMN project_name_summary.expiry_listable IS
+    'This value is whether the expiry listing of GET /v1/names lists the name: it composes a row whose coverage is not unsupported and whose registration carries a finite expiry. For such a row expires_at is the expiry the listing serves and orders by.';
+COMMENT ON COLUMN project_name_summary.public_authority IS
+    'This value is the public authority the composed name row serves (ens_v0, ens_v1 or ens_v2); null when the row serves none (Basenames, an unresolved selection, an ownerless registry row) or the name composes no row. The stored selector the expiry listing''s authority filter will read; no reader uses it yet.';
 CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
     ON project_name_summary (chain_id, recompose_at)
     WHERE recompose_at IS NOT NULL;
+-- The expiry listing's selectors: a namespace's listable names by expiry, and the same within
+-- one public authority.
+CREATE INDEX IF NOT EXISTS project_name_summary_expiry_idx
+    ON project_name_summary (namespace, expires_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_name_summary_authority_expiry_idx
+    ON project_name_summary (namespace, public_authority, expires_at, logical_name_id, chain_id)
+    WHERE expiry_listable AND expires_at IS NOT NULL;
 
 -- The composed expiring listing's candidate indexes.
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_expiry_idx

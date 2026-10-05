@@ -2663,8 +2663,13 @@ child counts and the registry labels filter, sort and count by inside one
 statement, which a list cannot compose at read for every child: the selected
 authority arm, whether the name has a serving resource, its registration
 status, expiry and registration times, the owner it serves, and whether the
-latest registry Transfer attributed to it names the zero owner. Each but the
-last is the value
+latest registry Transfer attributed to it names the zero owner. It also stores
+the expiry selector of [`GET /v1/names`](api-v1-routes.md#get-v1names): whether
+the name's row is listed by expiry (`expiry_listable`: the name composes a row,
+its coverage is not unsupported and its registration carries a finite expiry)
+and the public `authority` the row serves (`public_authority`: `ens_v0`,
+`ens_v1`, `ens_v2`, or none). Each but the zero-owner flag
+is the value
 the [composed name row](#composed-name-row) carries, from the same selection
 code; the zero-owner flag attributes a Transfer by the name it carries, else the
 latest named registry event of any kind of its resource, else an active surface

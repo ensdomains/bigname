@@ -1733,7 +1733,11 @@ any kind of its resource and family, read from the readable interpreted events,
 else an active surface at its node), and the owner the name row serves
 (`control.owner`, the token holder, else the registry owner, and none on a
 released name; lower-cased), which the
-registry labels' `owner` and `exclude_owner` filters read. Every name with a
+registry labels' `owner` and `exclude_owner` filters read. It also holds the
+expiry selector of the names-by-expiry listing: `expiry_listable`, whether the
+name composes a supported row whose registration carries a finite expiry, and
+`public_authority`, the public `authority` that row serves; for a listable name
+the stored expiry is the expiry the listing serves. Every name with a
 surface has a row. The selected arm remains available when an unreadable token
 lineage withholds the composed name row: child relations still use that selection,
 while optional name fields remain absent. A list cannot compose those at read for every child of a parent, so
